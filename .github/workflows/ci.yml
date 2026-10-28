@@ -1,0 +1,76 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+# GitHub-hosted runners only, and every action pinned by full commit SHA
+# (tools/guards/workflow_lint.py fails the build otherwise).
+
+jobs:
+  test:
+    name: test (${{ matrix.os }}, Python ${{ matrix.python }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        python: ["3.11", "3.13"]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          version: "0.11.32"
+          python-version: ${{ matrix.python }}
+          enable-cache: false
+      - name: Install from the lock, with the conformance extra
+        run: uv sync --locked --extra conformance
+      - name: Show the interpreter
+        run: uv run --no-sync python -VV
+      - name: Test
+        run: uv run --no-sync pytest -q
+
+  guards:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          version: "0.11.32"
+          python-version: "3.13"
+          enable-cache: false
+      - name: Install the dev tools from the lock
+        run: uv sync --locked --only-group dev
+      - name: AST lint
+        if: ${{ !cancelled() }}
+        run: uv run --no-sync python tools/guards/ast_lint.py .
+      - name: Switchboard-surface lint
+        if: ${{ !cancelled() }}
+        run: uv run --no-sync python tools/guards/switchboard_lint.py .
+      - name: Workflow lint
+        if: ${{ !cancelled() }}
+        run: uv run --no-sync python tools/guards/workflow_lint.py .
+      - name: Private-string check
+        if: ${{ !cancelled() }}
+        env:
+          # Newline-separated literal strings that must never appear in this repository.
+          # Only this step sees the secret. GitHub gives fork pull requests no secrets; the check
+          # says it is skipped there, and fails closed anywhere else the list is empty.
+          LUCILLE_HOST_PRIVATE_STRINGS: ${{ secrets.LUCILLE_HOST_PRIVATE_STRINGS }}
+          IS_FORK_PR: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository }}
+        run: uv run --no-sync python tools/guards/private_strings.py .
+      - name: Ruff
+        if: ${{ !cancelled() }}
+        run: |
+          uv run --no-sync ruff check .
+          uv run --no-sync ruff format --check .
