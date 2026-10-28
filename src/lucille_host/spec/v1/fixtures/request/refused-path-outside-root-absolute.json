@@ -1,0 +1,22 @@
+{
+  "description": "An absolute path is refused path_outside_root before anything runs.",
+  "valid": true,
+  "schema_valid": true,
+  "expect": {
+    "reply": {
+      "status": "refused",
+      "code": "path_outside_root"
+    }
+  },
+  "body": {
+    "v": "lucille.exec/1",
+    "dir": "request",
+    "job_id": "00000000-0000-4000-8000-000000000013",
+    "op": "files.sha256",
+    "args": {
+      "root": "docs",
+      "path": "/etc/passwd"
+    },
+    "not_after": 1767229200
+  }
+}

@@ -1,0 +1,331 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/gald33/lucille-host/blob/main/src/lucille_host/spec/v1/request.schema.json",
+  "title": "lucille.exec/1 request",
+  "description": "A request from Lucille to the host: the sealed body of one Switchboard message of type note, with no thread, on the channel lucille.exec of a work room. One branch per operation; each is a closed object. spec/PROTOCOL.md holds the rules this schema cannot express.",
+  "oneOf": [
+    {
+      "$ref": "#/$defs/request.host.describe"
+    },
+    {
+      "$ref": "#/$defs/request.host.sleep"
+    },
+    {
+      "$ref": "#/$defs/request.files.sha256"
+    },
+    {
+      "$ref": "#/$defs/request.files.search"
+    }
+  ],
+  "$defs": {
+    "v": {
+      "description": "The protocol and its major version.",
+      "const": "lucille.exec/1"
+    },
+    "dir": {
+      "description": "Which way the message travels.",
+      "type": "string",
+      "enum": [
+        "request",
+        "reply"
+      ]
+    },
+    "job_id": {
+      "description": "Lucille's id for the job: a lowercase UUID in 8-4-4-4-12 form.",
+      "type": "string",
+      "minLength": 36,
+      "maxLength": 36,
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    },
+    "op_name": {
+      "description": "An operation name: namespaced, lowercase, at most 64 characters.",
+      "type": "string",
+      "minLength": 3,
+      "maxLength": 64,
+      "pattern": "^[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*)+$"
+    },
+    "root": {
+      "description": "A folder alias from the host's local policy. Never a path.",
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 32,
+      "pattern": "^[a-z][a-z0-9_-]{0,31}$"
+    },
+    "not_after": {
+      "description": "When Lucille stops waiting: whole seconds since the Unix epoch, UTC. The host also refuses a value more than 86400 s after it received the request (PROTOCOL.md, rule not-after-range).",
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 4294967295
+    },
+    "cap": {
+      "description": "A cap on one output stream, in bytes of its JSON-encoded string, quotes included (PROTOCOL.md, 'How size is measured'). At least 2: the empty stream measures 2 bytes.",
+      "type": "integer",
+      "minimum": 2,
+      "maximum": 2147483647
+    },
+    "caps": {
+      "description": "Caps Lucille asks for. For each stream of a child's output the host applies the lower of this and its own cap; a request's caps do not apply to the document host.describe returns (PROTOCOL.md section 11).",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "stdout_bytes",
+        "stderr_bytes"
+      ],
+      "properties": {
+        "stdout_bytes": {
+          "$ref": "#/$defs/cap"
+        },
+        "stderr_bytes": {
+          "$ref": "#/$defs/cap"
+        }
+      }
+    },
+    "min_host_version": {
+      "description": "The oldest host release that may run this request: MAJOR.MINOR.PATCH, digits only, no suffix.",
+      "type": "string",
+      "minLength": 5,
+      "maxLength": 32,
+      "pattern": "^(0|[1-9][0-9]{0,8})\\.(0|[1-9][0-9]{0,8})\\.(0|[1-9][0-9]{0,8})$"
+    },
+    "relative_path": {
+      "description": "A path inside the root. Containment (no absolute path, no '..', realpath inside the root) is checked by the host, not by this schema, and refused path_outside_root.",
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 1024,
+      "pattern": "^[^\\u0000]*$"
+    },
+    "args.host.describe": {
+      "description": "host.describe takes no arguments.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [],
+      "properties": {}
+    },
+    "args.host.sleep": {
+      "description": "host.sleep: sleep n seconds. Diagnostic.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "n"
+      ],
+      "properties": {
+        "n": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 240
+        }
+      }
+    },
+    "args.files.sha256": {
+      "description": "files.sha256: the SHA-256 digest of one file under a root.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "root",
+        "path"
+      ],
+      "properties": {
+        "root": {
+          "$ref": "#/$defs/root"
+        },
+        "path": {
+          "$ref": "#/$defs/relative_path"
+        }
+      }
+    },
+    "args.files.search": {
+      "description": "files.search: search the files under a root for a pattern.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "root",
+        "pattern",
+        "fixed_strings",
+        "max_count"
+      ],
+      "properties": {
+        "root": {
+          "$ref": "#/$defs/root"
+        },
+        "pattern": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "pattern": "^[^\\u0000]*$"
+        },
+        "fixed_strings": {
+          "type": "boolean"
+        },
+        "max_count": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 200
+        }
+      }
+    },
+    "request.host.describe": {
+      "description": "A request for host.describe.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "v",
+        "dir",
+        "job_id",
+        "op",
+        "args",
+        "not_after"
+      ],
+      "properties": {
+        "v": {
+          "$ref": "#/$defs/v"
+        },
+        "dir": {
+          "$ref": "#/$defs/dir",
+          "const": "request"
+        },
+        "job_id": {
+          "$ref": "#/$defs/job_id"
+        },
+        "op": {
+          "$ref": "#/$defs/op_name",
+          "const": "host.describe"
+        },
+        "args": {
+          "$ref": "#/$defs/args.host.describe"
+        },
+        "not_after": {
+          "$ref": "#/$defs/not_after"
+        },
+        "caps": {
+          "$ref": "#/$defs/caps"
+        },
+        "min_host_version": {
+          "$ref": "#/$defs/min_host_version"
+        }
+      }
+    },
+    "request.host.sleep": {
+      "description": "A request for host.sleep.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "v",
+        "dir",
+        "job_id",
+        "op",
+        "args",
+        "not_after"
+      ],
+      "properties": {
+        "v": {
+          "$ref": "#/$defs/v"
+        },
+        "dir": {
+          "$ref": "#/$defs/dir",
+          "const": "request"
+        },
+        "job_id": {
+          "$ref": "#/$defs/job_id"
+        },
+        "op": {
+          "$ref": "#/$defs/op_name",
+          "const": "host.sleep"
+        },
+        "args": {
+          "$ref": "#/$defs/args.host.sleep"
+        },
+        "not_after": {
+          "$ref": "#/$defs/not_after"
+        },
+        "caps": {
+          "$ref": "#/$defs/caps"
+        },
+        "min_host_version": {
+          "$ref": "#/$defs/min_host_version"
+        }
+      }
+    },
+    "request.files.sha256": {
+      "description": "A request for files.sha256.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "v",
+        "dir",
+        "job_id",
+        "op",
+        "args",
+        "not_after"
+      ],
+      "properties": {
+        "v": {
+          "$ref": "#/$defs/v"
+        },
+        "dir": {
+          "$ref": "#/$defs/dir",
+          "const": "request"
+        },
+        "job_id": {
+          "$ref": "#/$defs/job_id"
+        },
+        "op": {
+          "$ref": "#/$defs/op_name",
+          "const": "files.sha256"
+        },
+        "args": {
+          "$ref": "#/$defs/args.files.sha256"
+        },
+        "not_after": {
+          "$ref": "#/$defs/not_after"
+        },
+        "caps": {
+          "$ref": "#/$defs/caps"
+        },
+        "min_host_version": {
+          "$ref": "#/$defs/min_host_version"
+        }
+      }
+    },
+    "request.files.search": {
+      "description": "A request for files.search.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "v",
+        "dir",
+        "job_id",
+        "op",
+        "args",
+        "not_after"
+      ],
+      "properties": {
+        "v": {
+          "$ref": "#/$defs/v"
+        },
+        "dir": {
+          "$ref": "#/$defs/dir",
+          "const": "request"
+        },
+        "job_id": {
+          "$ref": "#/$defs/job_id"
+        },
+        "op": {
+          "$ref": "#/$defs/op_name",
+          "const": "files.search"
+        },
+        "args": {
+          "$ref": "#/$defs/args.files.search"
+        },
+        "not_after": {
+          "$ref": "#/$defs/not_after"
+        },
+        "caps": {
+          "$ref": "#/$defs/caps"
+        },
+        "min_host_version": {
+          "$ref": "#/$defs/min_host_version"
+        }
+      }
+    }
+  }
+}

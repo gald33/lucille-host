@@ -1,0 +1,14 @@
+{
+  "description": "refused path_outside_root: a code only, no output.",
+  "valid": true,
+  "schema_valid": true,
+  "body": {
+    "v": "lucille.exec/1",
+    "dir": "reply",
+    "job_id": "00000000-0000-4000-8000-000000000095",
+    "status": "refused",
+    "code": "path_outside_root",
+    "policy_digest": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    "host_version": "0.1.0"
+  }
+}

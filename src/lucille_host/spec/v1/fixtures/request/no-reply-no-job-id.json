@@ -1,0 +1,15 @@
+{
+  "description": "A request with no job_id cannot be answered.",
+  "valid": false,
+  "schema_valid": false,
+  "expect": {
+    "reply": null
+  },
+  "body": {
+    "v": "lucille.exec/1",
+    "dir": "request",
+    "op": "host.describe",
+    "args": {},
+    "not_after": 1767229200
+  }
+}

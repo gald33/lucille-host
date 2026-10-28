@@ -1,0 +1,21 @@
+{
+  "description": "The host has already decided this job_id: a duplicate gets no second reply.",
+  "valid": true,
+  "schema_valid": true,
+  "host_state": {
+    "seen_job_ids": [
+      "00000000-0000-4000-8000-000000000021"
+    ]
+  },
+  "expect": {
+    "reply": null
+  },
+  "body": {
+    "v": "lucille.exec/1",
+    "dir": "request",
+    "job_id": "00000000-0000-4000-8000-000000000021",
+    "op": "host.describe",
+    "args": {},
+    "not_after": 1767229200
+  }
+}

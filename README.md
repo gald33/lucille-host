@@ -3,8 +3,8 @@
 ## Status: no release yet
 
 There is no release. This repository holds a skeleton, version `0.1.0.dev0`: the package layout, the
-guards and CI. The skeleton prints its version and does nothing else. None of the behaviour described
-on this page is built yet.
+guards, CI, and the draft protocol spec ([spec/PROTOCOL.md](spec/PROTOCOL.md)). The skeleton prints its
+version and does nothing else. None of the behaviour described on this page is built yet.
 
 ## What it will be
 
@@ -96,6 +96,8 @@ This repository proves only the host's side. The full design is
 | `src/lucille_host/_exec.py` | The only place in the runtime (the program without its conformance suite) allowed to start a process. It starts none yet. |
 | `src/lucille_host/_switchboard.py` | The only module in the runtime allowed to import or use `switchboard`. |
 | `src/lucille_host/conformance/` | A test suite that plays a hostile Lucille against the installed program. No scenarios yet. |
+| [spec/](spec/) | The protocol between Lucille and the host, `lucille.exec/1`: [PROTOCOL.md](spec/PROTOCOL.md) and its changelog. A draft; no release implements it yet. |
+| `src/lucille_host/spec/` | The protocol's JSON Schemas and golden fixtures, which ship in the wheel. |
 | `tools/guards/` | Checks CI runs on every change. They catch accidental and casual violations; they are not a sandbox or a defence against a determined author, and maintainer review of every pull request is the backstop. [VERIFYING.md](VERIFYING.md) describes each one and what it cannot see. |
 | [PRIVACY.md](PRIVACY.md) | The claim, and what this project must never claim. |
 | [CLAIMS.md](CLAIMS.md) | Each sentence of the claim, mapped to its code and test. |

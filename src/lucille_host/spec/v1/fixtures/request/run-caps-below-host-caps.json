@@ -1,0 +1,29 @@
+{
+  "description": "Request caps below the host's own apply, stream by stream. A cap of 2 is the smallest: it lets only the empty stream through.",
+  "valid": true,
+  "schema_valid": true,
+  "expect": {
+    "reply": {
+      "status": "done"
+    },
+    "effective_caps": {
+      "stdout_bytes": 1024,
+      "stderr_bytes": 2
+    }
+  },
+  "body": {
+    "v": "lucille.exec/1",
+    "dir": "request",
+    "job_id": "00000000-0000-4000-8000-000000000006",
+    "op": "files.sha256",
+    "args": {
+      "root": "docs",
+      "path": "notes/todo.txt"
+    },
+    "not_after": 1767229200,
+    "caps": {
+      "stdout_bytes": 1024,
+      "stderr_bytes": 2
+    }
+  }
+}

@@ -1,0 +1,14 @@
+{
+  "description": "refused host_too_old: a code only, no output.",
+  "valid": true,
+  "schema_valid": true,
+  "body": {
+    "v": "lucille.exec/1",
+    "dir": "reply",
+    "job_id": "00000000-0000-4000-8000-000000000098",
+    "status": "refused",
+    "code": "host_too_old",
+    "policy_digest": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    "host_version": "0.1.0"
+  }
+}

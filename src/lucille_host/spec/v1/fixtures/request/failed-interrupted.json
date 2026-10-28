@@ -1,0 +1,25 @@
+{
+  "description": "The host restarted after its decision line and before its sent line.",
+  "valid": true,
+  "schema_valid": true,
+  "host_state": {
+    "event": "restarted_after_decision"
+  },
+  "expect": {
+    "reply": {
+      "status": "failed",
+      "code": "interrupted"
+    }
+  },
+  "body": {
+    "v": "lucille.exec/1",
+    "dir": "request",
+    "job_id": "00000000-0000-4000-8000-000000000024",
+    "op": "files.sha256",
+    "args": {
+      "root": "docs",
+      "path": "notes/todo.txt"
+    },
+    "not_after": 1767229200
+  }
+}

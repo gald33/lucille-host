@@ -1,0 +1,19 @@
+{
+  "description": "files.sha256 ran and printed a digest.",
+  "valid": true,
+  "schema_valid": true,
+  "body": {
+    "v": "lucille.exec/1",
+    "dir": "reply",
+    "job_id": "00000000-0000-4000-8000-000000000085",
+    "status": "done",
+    "exit_code": 0,
+    "stdout": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  notes/todo.txt\n",
+    "stderr": "",
+    "stdout_truncated": false,
+    "stderr_truncated": false,
+    "duration_ms": 12,
+    "policy_digest": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    "host_version": "0.1.0"
+  }
+}

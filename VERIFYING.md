@@ -11,6 +11,9 @@ release follows it once, on a clean machine, and reports each step they could no
   `0.1.0.dev0` it is empty.
 - [CLAIMS.md](CLAIMS.md) maps each sentence of the privacy claim to the code and test behind it.
 - [decisions/0001-host-design.md](decisions/0001-host-design.md) is the design.
+- [spec/PROTOCOL.md](spec/PROTOCOL.md) is the protocol between Lucille and the host, `lucille.exec/1`:
+  every message Lucille can send, every reply the host can give, and the rules each side follows. Its
+  JSON Schemas and golden fixtures are in `src/lucille_host/spec/v1/`, and ship in the wheel.
 
 **What CI runs.** The workflow `ci` (`.github/workflows/ci.yml`) runs on every push to `main` and on every
 pull request.
@@ -251,6 +254,20 @@ Python process, with the `[conformance]` extra installed so that `fastapi` and `
 imported, and fails if either was. It also checks that its list of modules covers every module file in
 the runtime package, and that the package holds no symbolic link, which its walk would not follow.
 The hub server lives only in the `[conformance]` extra.
+
+**The spec's tests.** `tests/spec/` tests the protocol spec, not the host, which does not check messages
+against it yet.
+- `test_schemas.py` walks every subschema of every schema, and fails on an object without
+  `additionalProperties: false`, a value without a bound, or a pattern that reads differently in
+  ECMA-262 (the regular expressions JSON Schema uses) and in Python.
+- `test_fixtures.py` checks that each golden fixture validates, or fails, as labelled, both against the
+  schema and against the rules the spec states that a schema cannot express, and that each request
+  fixture expects the reply the spec's refusal order gives.
+- `test_packaged.py` builds the sdist and the wheel with `uv build`, installs the wheel into a fresh
+  virtual environment, loads the schemas and fixtures from there, and checks them against the source
+  tree. It needs `uv` on `PATH` and the build backend, which uv fetches or takes from its cache. It
+  builds from the working tree, so every file there that `.gitignore` does not exclude goes into the
+  sdist: keep any other virtual environment outside the checkout, or name it `.venv*` or `venv`.
 
 **Run it yourself.**
 

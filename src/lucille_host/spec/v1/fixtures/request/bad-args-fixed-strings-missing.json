@@ -1,0 +1,23 @@
+{
+  "description": "files.search without fixed_strings.",
+  "valid": false,
+  "schema_valid": false,
+  "expect": {
+    "reply": {
+      "status": "refused",
+      "code": "bad_args"
+    }
+  },
+  "body": {
+    "v": "lucille.exec/1",
+    "dir": "request",
+    "job_id": "00000000-0000-4000-8000-000000000077",
+    "op": "files.search",
+    "args": {
+      "root": "docs",
+      "pattern": "x",
+      "max_count": 1
+    },
+    "not_after": 1767229200
+  }
+}

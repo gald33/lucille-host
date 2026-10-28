@@ -5,8 +5,11 @@ __pycache__/
 build/
 dist/
 
-# Environments and tool caches
+# Environments and tool caches (the sdist is built from the working tree, so a virtual
+# environment that is not ignored here would be packed into it)
 .venv/
+.venv*/
+venv/
 .pytest_cache/
 .ruff_cache/
 .mypy_cache/

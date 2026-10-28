@@ -1,8 +1,9 @@
 # 0001: lucille-host design record (draft)
 
 Author: lucille-host maintainers. First written 2026-10-15; revised 2026-10-19 and 2026-10-20; rewritten
-for this public repository 2026-10-27. Status: **draft.** Only the package skeleton, the guards and CI
-are built.
+for this public repository 2026-10-27; the protocol it describes was written out as
+[spec/PROTOCOL.md](../spec/PROTOCOL.md) on 2026-10-28. Status: **draft.** Only the package skeleton, the
+guards, CI and the protocol spec (its prose, schemas and fixtures) are built.
 
 This record describes the program in this repository, and it governs the host's code. A pull request that
 changes the design updates this record in the same pull request.
@@ -37,8 +38,9 @@ The host:
 - holds one long-lived credential toward Lucille, its side of the pair. It also keeps a local HMAC key for
   the policy digest, which never leaves the computer, and generates a throwaway signing key per client.
   It also keeps, in a share store of its own, the keys of the rooms it accepted. They can be recovered
-  from the pair (sb `sharing.py:30-33`). Whether they are a second long-lived credential turns on how
-  long a room lives, which is not decided yet.
+  from the pair (sb `sharing.py:30-33`). Each computer has one standing work room, replaced only on
+  re-pair or a suspected leak ([spec/PROTOCOL.md](../spec/PROTOCOL.md) §9), so those keys can live as
+  long as the pair: they are a second long-lived secret (§18 there).
 
 ## Transport: work rooms offered over one pair
 
@@ -50,9 +52,9 @@ The host:
     to step past a message it cannot open;
   - the part of `switchboard.sharing` that takes and uses a room Lucille offers: `sharing.touch` reads the
     offers, `sharing.accept` keeps one (sb `sharing.py:1541-1626`), and `sharing.resolve_room` opens a
-    held room with no hub call (`:1842-1873`), plus `sharing.leave` if the room lifetime, which is not
-    decided yet, needs the host to leave. Every call takes the host's own share store. Which calls are
-    needed is this design's reading of agent-switchboard 2.6.0.
+    held room with no hub call (`:1842-1873`), and `sharing.leave` leaves a room the host abandons, or
+    refuses right after accepting it (spec/PROTOCOL.md §6 and §9). Every call takes the host's own share
+    store. Which calls are needed is this design's reading of agent-switchboard 2.6.0.
 
   Never the CLI, the MCP bridge, `sharing.share_new`, `register()`, an invite, or a hosted bridge. The
   host follows a heal the other side makes. It never starts one, and v0.1 has no heal verb.
@@ -153,8 +155,9 @@ The host:
   (sb `sharing.py:263-281`), so the host passes a store of its own to every sharing call. It holds room
   keys. 2.6.0 asks for encryption at rest where the store is the only copy of a room's keys, for a room
   the machine created (`:237-240`); its own `ShareStore` keeps them in the clear, owner-only
-  (sb `docs/sharing.md:533-536`). Where it lives (the keyring, beside the pair, or a 0600 file) is not
-  decided yet.
+  (sb `docs/sharing.md:533-536`). The host keeps room keys as it keeps the pair: in its OS-keyring Store,
+  beside the pair, or in a 0600 file only under `--store-file`, with the same warning
+  (spec/PROTOCOL.md §18).
 - The host refuses insecure keyring backends it can recognise, and refuses to run as uid 0.
 
 **Hazards neutralized,** each with a conformance test:
@@ -188,18 +191,30 @@ The host:
     stay held (sb `sharing.py:449-457`, `:499-508`), so the host skips it (this design's reading of the
     invariant "offered over the host's pair", under "Host invariants and their tests").
 
-  How the host waits on several rooms at once (a long-poll per room, or a round of short peeks) is not
-  decided yet. It turns on how long a room lives, which is not decided yet either.
-- **Taking an offer.** At start, on a `swbp1/shared` note, and whenever it resolves, the host runs
-  `sharing.touch(pairs=[name])` with its own stores. The wake is best effort and not retried (sb
-  `sharing.py:1175-1186`), so a lost one leaves an offer unread until the next resolve, up to 24 h. How
-  often the host touches without a note is not decided yet. With no pairs named, a touch reads every
-  pair in the store (sb `sharing.py:1250-1266`), so the host always names its pair. It keeps an offer
-  with `sharing.accept`, by its own policy, which 2.6.0 does not ship (sb `docs/sharing.md:594-595`).
-  What the policy checks is not decided yet. The proposed list: the offer came over the Lucille pair;
-  the local SAS gate is open, since the library checks only the pair's `confirmed` flag
-  (sb `sharing.py:1316`); the room's hub is the one the pairing code named, since the library checks
-  only for an http(s) URL with a host (`:671-678`); the offer carries no token; a cap on rooms held.
+  It keeps one long-poll per held room that passed the hub and token checks (below), and one on
+  `pair:<name>`'s `pair` channel, running at the same time (spec/PROTOCOL.md §7).
+- **Taking an offer.** Once its local SAS gate is open, and never before, the host runs
+  `sharing.touch(pairs=[name])` with its own stores when the gate opens, at start, on a `swbp1/shared`
+  note, whenever it resolves (except after a failed touch), on waking from sleep, and every 5 minutes,
+  whether or not it holds a room (spec/PROTOCOL.md §7). The wake is best effort and not retried (sb
+  `sharing.py:1175-1186`), a heal's `swbp1/moved` note is best effort too, and the next resolve can be
+  24 h away; a touch resolves the pair itself (sb `sharing.py:1082`), so the 5-minute touch also finds a
+  move or an end within 5 minutes. With no pairs named, a touch reads every pair in the store (sb
+  `sharing.py:1250-1266`), so the host always names its pair. It keeps an offer with `sharing.accept`, by
+  its own policy, which 2.6.0 does not ship (sb `docs/sharing.md:594-595`). The policy is in
+  spec/PROTOCOL.md §6: the offer came over the Lucille pair; the local SAS gate is open, since the library
+  checks only the pair's `confirmed` flag (sb `sharing.py:1316`); the room's hub is the one the pairing
+  code named, since the library checks only for an http(s) URL with a host (`:671-678`); the offer carries
+  no token; and the host holds fewer than two rooms. The hub and token checks can run only right after
+  `sharing.accept`, so a failure there leaves the room at once; they are run again for every held room at
+  start and before each read or post in it. A refusal by the other three checks is not final: the offer
+  stays pending and is considered again at start, when the SAS gate opens, whenever the host leaves a
+  room, and whenever a touch reports a pending offer `left` or `withdrawn`. A newly accepted room replaces
+  the old one only once it has passed the hub and token checks, and the host records that replacement
+  before it accepts, so a restart completes it. While more than one offer over the pair is pending the
+  host accepts none of them, since nothing it may read orders them; it first drops from its record any
+  offer its share store no longer holds (spec/PROTOCOL.md §6). The host never accepts again a room it has
+  left.
 - **Read with a since-cursor peek:** `Client.inbox(channels=[...], since=cursor, wait=25, limit=200)`,
   with a client timeout of 40 s, and one cursor per room (this design's reading: hub sequence numbers
   are global across rooms, below, so one shared cursor could skip a room's messages).
@@ -228,27 +243,35 @@ The host:
   least every 24 hours. That keeps the side record (7-day TTL) fresh.
   - **Pair ended by Lucille** (`ended_by_peer`): the host calls `pairing.forget` to delete its own copy,
     says so, and stops. Resolve alone leaves the record in place (sb `pairing.py:2321-2325`).
-  - **`pair:<name>` moved** (a heal the other side made): the host follows it and reads the new room from
-    0. A heal moves `pair:<name>`, not a room offered over the pair (sb `sharing.py:30-33`,
-    `docs/sharing.md:526-528`), so the host follows the move for the library's notes. Whether the host
-    should also abandon requests in the rooms it holds, and whether Lucille then fails those jobs, is not
-    decided yet.
+  - **`pair:<name>` moved** (a heal the other side made, or a lapse): the host follows it and reads the
+    new room from 0. A heal moves `pair:<name>`, not a room offered over the pair (sb `sharing.py:30-33`,
+    `docs/sharing.md:526-528`), so the host follows the move for the library's notes. A move also counts
+    as a suspected leak: the host abandons its work room (records that it does, then kills the request in
+    flight, posts no reply, and leaves the room; after a restart it posts nothing there), and Lucille
+    replaces the room (spec/PROTOCOL.md §9).
 - **One request at a time.** Requests are handled in sequence order.
 
 ## The protocol: `lucille.exec/1` (spec in `spec/`)
 
+[spec/PROTOCOL.md](../spec/PROTOCOL.md) states the protocol, with its JSON Schemas and golden fixtures
+in `src/lucille_host/spec/v1/`. This section summarizes it. Where the two differ, the spec governs.
+
 **Request** (Lucille → host), a JSON object in the sealed body:
 - `{v: "lucille.exec/1", dir: "request", job_id, op, args, not_after, caps?, min_host_version?}`.
 - `not_after` is when Lucille stops waiting.
-- `caps`, when present, is `{stdout_bytes, stderr_bytes}`. The host applies the lower of each request cap
-  and its own, and never refuses because a request cap exceeds its own. Lucille sends none in v1 (Lucille
+- `caps`, when present, is `{stdout_bytes, stderr_bytes}`. For a child's output the host applies the lower
+  of each request cap and its own, and never refuses because a request cap exceeds its own; a request's
+  caps do not apply to `host.describe`'s document (spec/PROTOCOL.md §11). Lucille sends none in v1 (Lucille
   policy as of 2026-10-27; not proven by this repository).
 - `min_host_version`, when present, makes an older host refuse with `host_too_old`.
-- Anything else is refused with `bad_request` and never interpreted.
-- The spec says whether per-op `args` schemas are part of `spec/`, and so binding on Lucille, or only of
-  the host catalog.
+- Anything else is refused with `bad_request` and never interpreted (inside `args`, `bad_args`).
+- Each operation's `args` schema is part of the spec, and so binds Lucille as well as the host. The
+  catalog's parameter schema for each operation must equal the spec's (spec/PROTOCOL.md §10).
 
-**Reply** (host → Lucille), exactly one per job id:
+**Reply** (host → Lucille), one per job id, except that a restart between posting a reply and recording it
+as sent, or a retried post whose earlier attempt reached the hub unseen, can post more than one (after a
+restart, a `failed interrupted` can follow a `done` already posted); the first counting reply for a job
+decides it (spec/PROTOCOL.md §11, and its section 17):
 - `{v, dir: "reply", job_id, status, code?, exit_code?, stdout?, stderr?, stdout_truncated?,
   stderr_truncated?, duration_ms?, policy_digest, host_version}`.
 - `status` is `done` when the operation ran. A non-zero exit is data.
@@ -263,11 +286,13 @@ The host:
   repository).
 
 **Agent ids.**
-- The host's agent id is fixed by the spec. Lucille's may differ per Lucille instance.
+- The host's agent id is the literal `lucille-host`, fixed by the spec. Lucille's may differ per Lucille
+  instance.
 - The host ignores posts under its own id, and treats any `dir: request` in a room Lucille offered it
-  over its pair that is not under its own id as Lucille's. That rests on Lucille being the room's only
-  other holder (Lucille policy as of 2026-10-27; not proven by this repository). Whether a work room may
-  later admit other agents is not decided yet.
+  over its pair that is not under its own id as Lucille's. That rests on a rule both sides are bound by:
+  Lucille never shares a computer's work room with any other agent, and the host invites nobody. This
+  repository can test only the host's half. It does not rest on the keys excluding anyone else, which
+  they do not. Agent ids authenticate nothing (spec/PROTOCOL.md §8).
 - Lucille applies a reply only if it is under the host's id, never applies its own post as a reply, and
   reads its own requests only to adopt one a crash left unrecorded (Lucille policy as of 2026-10-27; not
   proven by this repository).
@@ -275,8 +300,9 @@ The host:
 **Rules both sides follow.** This repository can test only the host's half of each rule. Lucille's half
 is Lucille policy as of 2026-10-27; not proven by this repository.
 - **Dedupe.** The host acts on the first request per `job_id` it sees, and never again.
-  - Its dedupe state is a separate file of `(job_id, not_after)`, written before the decision line. It is
-    pruned after `not_after + 15 min`, since an expired request is refused anyway.
+  - Its dedupe state is a separate file of job ids, each with when to prune it, written before the decision
+    line. An entry is pruned 15 min after the later of `not_after` and the time the request was received,
+    since an expired request is refused anyway.
   - It never depends on the rotating audit log.
   - The hub can deliver a genuine row twice, and a crashed Lucille can re-post.
 - **Expiry.** A request past `not_after` is refused with `expired`, and never started.
@@ -284,7 +310,8 @@ is Lucille policy as of 2026-10-27; not proven by this repository.
   - Lucille's request TTL ends at `not_after`.
   - The host's reply TTL is `(not_after − now) + 15 min`, at most 86400 s, and never the 1 h default.
   - Lucille caps the wait at 85,500 s, so the full 15 minutes always fits under the hub's ceiling.
-- **Size.** Caps are measured on the serialized JSON, not on raw bytes.
+- **Size.** Caps are measured on the serialized JSON, not on raw bytes, with every non-ASCII character
+  escaped and no insignificant whitespace (spec/PROTOCOL.md §13).
   - Measured locally: 64 KiB of ASCII on each stream seals to 176 KiB, and the same raw bytes as 2-byte
     UTF-8 text to 518 KiB.
   - The host's 64 KiB-per-stream cap on the JSON-encoded string keeps a reply under the 256 KiB cap
@@ -394,20 +421,23 @@ policy changed. A plain hash would let anyone holding it confirm a guessed folde
 - **No leases, no heartbeats.** A request waits on the hub until its `not_after`. The host is the only
   reader that matters.
 - **When the computer wakes,** the host reads each room it accepted over its current pair from that
-  room's own cursor ("The read loop") and runs each request still inside its `not_after`. Whether a wake
-  from sleep also touches the pair, for offers that arrived meanwhile, is not decided yet. This design
-  proposes that it should, as at start.
+  room's own cursor ("The read loop") and runs each request still inside its `not_after`. A wake from
+  sleep also touches the pair, for offers that arrived meanwhile (spec/PROTOCOL.md §7).
   - The hub drops a request at its `not_after`, so a request that expired while the computer slept is
     simply gone.
-  - The `expired` refusal is reached only when the host's clock runs ahead of the hub's.
+  - The host can still refuse `expired`: when its clock runs ahead of the hub's; inside the up to 1 s of
+    slack that rounding the request's TTL up adds; or when a request it read in time waited past its
+    `not_after` behind an earlier request, or across a sleep that began after the read
+    (spec/PROTOCOL.md §14).
 - **A lid closed mid-operation** suspends the child with the machine. The reply goes out when it finishes.
   If that is after Lucille's grace, Lucille drops it, and the job has already failed with "no reply"
   (Lucille policy as of 2026-10-27; not proven by this repository). That window is the cost of keeping
   no lease. It has not been measured yet; the first end-to-end run is to measure it.
-- **A host restart mid-operation.** A request with a decision line but no sent line gets
-  `failed interrupted`, and never a second run.
-- **A transport failure is never a `failed` reply.** The host keeps the child running and retries the
-  post until the reply's TTL would already have run out.
+- **A host restart mid-operation.** A request with a decision to run but no sent line gets
+  `failed interrupted`, and never a second run. A refusal with no sent line is posted again, unchanged.
+- **A transport failure is never a `failed` reply.** A hub error does not stop a running child, and a
+  failed post of a reply is retried until the reply's TTL would already have run out. 2.6.0's posts carry
+  no idempotency key, so a retry after a post that reached the hub unseen posts another copy.
 
 ## CLI verbs (v0.1)
 
@@ -506,12 +536,17 @@ That nobody else pairs until then is Lucille policy as of 2026-10-27; not proven
 **`spec/`**
 - `PROTOCOL.md` for `lucille.exec/1`: channel, envelopes, agent ids, TTLs, dedupe, expiry, decoding,
   refusal codes, and what each side does on heal, end and expiry.
-- JSON Schemas with `additionalProperties: false` at every level.
-- One golden fixture per message and per refusal, with obviously fake UUIDs.
 - `PROTOCOL-CHANGELOG.md`. A minor change must be additive. A major ships only after Lucille supports both
   majors.
 
-The spec ships in the wheel.
+**`src/lucille_host/spec/`**
+- JSON Schemas (draft 2020-12) with `additionalProperties: false` at every level, in `v1/`.
+- Golden fixtures in `v1/fixtures/`: one per message shape and per code, invalid ones for each refusal
+  reason, and decoding fixtures, with obviously fake UUIDs.
+- `lucille_host.spec`, which reads them from wherever the package is installed.
+
+The schemas and fixtures ship in the wheel as package data; `tests/spec/test_packaged.py` loads them from
+an installed wheel. The prose stays in `spec/` at the root and is not in the wheel.
 
 **`src/lucille_host/conformance/`** is a hostile fake Lucille. It drives a real local hub: `switchboard
 serve` on 127.0.0.1 for the scenarios, and the in-process `switchboard.testing` hub for the vendored Store
@@ -558,9 +593,9 @@ template test, which needs that hub's injected clock. It may spawn only the loca
 | Nothing Lucille sends can widen what the host permits | Conformance tries each of these: an unknown op, a not-enabled op, extra keys (`exe`, `argv`, `env`, `cwd`, `timeout`), policy- and update-shaped fields, traversal, an absolute path, a symlink escape, a file named `--version`, and oversize args. Each is refused with the right code, the policy digest is unchanged, and the spawn count is 0. `caps` above the host's own are not refused, but the effective cap never exceeds the host's own |
 | No shell; one spawn site; children get a built environment and no key | The AST lint. A fixture that dumps its environment shows only allowlisted keys |
 | Nothing runs before the local SAS confirmation | A fake Lucille posts a request before the user confirms: no spawn, no reply. `pair confirm` after the code has expired then opens the gate |
-| One run per job id, never after `not_after` | A duplicated request runs once. An expired request is refused with no spawn. A restart between decision and sent gives `failed interrupted`, with no second run |
+| One run per job id, never after `not_after` | A duplicated request runs once. An expired request is refused with no spawn. A restart between a decision to run and sent gives `failed interrupted`, with no second run; a refusal not yet sent is re-posted unchanged |
 | Only `lucille.exec`, in a room Lucille offered over the host's pair and the host accepted, is acted on | A request on `pair`, in `pair:<name>` on any channel, or in a room not offered over the host's pair or not accepted, is ignored. A `swbp1/paired`, `moved` or `ended` note only triggers a resolve, and a `swbp1/shared` note only a share read |
-| No request is skipped | A test fills `lucille.exec` past one page: none skipped. A heal mid-stream: a heal does not move an offered room, and the expected outcome is not decided yet |
+| No request is skipped | A test fills `lucille.exec` past one page: none skipped. A heal mid-stream does not move the work room, but counts as a suspected leak (spec/PROTOCOL.md §9): the request in flight in the old room is killed with no reply, the host leaves that room, and a request Lucille posts in the replacement room before the host accepts it still runs |
 | The host never invites anyone into its pair's rooms, and offers no room of its own | No invite or `share_new` call exists, and no verb makes one (lint plus test). It only accepts Lucille's offers. 2.6.0's accept writes the host's record back to Lucille carrying that same room's offer, the sharer's "accepted" (sb `sharing.py:1546-1550`), so no test asserts that the host writes no offer record |
 | Failures cross the wire as codes only | A sentinel in stderr from a refused op never appears in a sent body |
 | Output is bounded, decodable and path-free | A 1 MiB output comes back truncated and flagged, and the serialized reply stays under 256 KiB. Non-UTF-8 and NUL output decode without U+0000 or surrogates. No reply contains a root's realpath or `$HOME` |
@@ -576,7 +611,7 @@ template test, which needs that hub's injected clock. It may spawn only the loca
 | Compromised or prompt-injected Lucille backend | the release catalog, enabled ops and roots; v0.1 is read-only; only `host.describe` is on after pairing; `pause` and `kill` work offline | anything enabled ops can read under enabled roots, while the host runs |
 | Intercepted or phished pairing code | the code must name Lucille's hub and carry no token; nothing else is accepted except a loopback hub the local config names (for conformance); the SAS is compared and confirmed on both screens (Lucille's screen: Lucille policy as of 2026-10-27; not proven by this repository) | a user who confirms without comparing |
 | Someone else's pairing code (an attacker pairing the computer to themselves) | the hub check; the local SAS gate; only `host.describe` enabled after pairing | a user who confirms a mismatched SAS, then enables ops |
-| Leaked `pair:<name>` key, offered work-room key, or pair secret | Only two places hold the pair, and both hold it with the `pair:<name>` key: the host's store (local, owner-only, same-user malware is out of scope) and Lucille's database (encrypted with Lucille's master key: Lucille policy as of 2026-10-27; not proven by this repository). Signing requests with a key pinned at pairing would not help, because every leak path found exposes that key with the pair. The response is to remove the computer, or `forget`, and pair again. v0.1 has no heal verb. This analysis was written for `pair:<name>`'s derived key. That key opens nothing shared (sb `docs/sharing.md:526-528`). The offered work rooms' keys sit in each side's share store as well as in the pair room's offer records, and of a share store, "A copy of it opens every room in it" (`:533-536`). That every leak path exposes those keys with the pair was not re-checked for the offered rooms | the holder can read and forge traffic, and ask for enabled ops until then |
+| Leaked `pair:<name>` key, offered work-room key, or pair secret | Only two places hold the pair, and both hold it with the `pair:<name>` key: the host's store (local, owner-only, same-user malware is out of scope) and Lucille's database (encrypted with Lucille's master key: Lucille policy as of 2026-10-27; not proven by this repository). Signing requests with a key pinned at pairing would not help, because every leak path found exposes that key with the pair. The response is to remove the computer, or `forget`, and pair again. v0.1 has no heal verb. This analysis was written for `pair:<name>`'s derived key. That key opens nothing shared (sb `docs/sharing.md:526-528`). The offered work rooms' keys sit in each side's share store as well as in the pair room's offer records, and of a share store, "A copy of it opens every room in it" (`:533-536`). That every leak path exposes those keys with the pair was not re-checked for the offered rooms. spec/PROTOCOL.md §18 states what a room's key opens (every message still on the hub in that room; epoch rotation does not bound it), and §19 that nothing in v1 detects a leak of a room's key alone | the holder can read and forge traffic, and ask for enabled ops until then |
 | Malicious payload (metacharacters, traversal, flag or env injection) | schemas, argv only, `--`, realpath, the built environment, conformance | none known |
 | Malicious release, or compromised maintainer account | protected tags, the `pypi` environment, which needs the repository owner's approval, attestations (they prove where a release was built, not what it does), a public diff of the catalog and `CLAIMS.md`, exact pins in the lock CI uses (see "Packaging"), no auto-update | a validly attested malicious release from an account that holds both tag and environment rights |
 | Compromised dependency, including `agent-switchboard` | minimal dependencies, exactly pinned in the lock CI uses (an install with `pipx` or `uv tool` resolves the declared ranges; see "Packaging"); Switchboard's own provenance checked | dependency code runs with the host's privileges |
@@ -586,20 +621,19 @@ template test, which needs that hub's injected clock. It may spawn only the loca
 
 ## Not decided yet
 
-Each of these is open.
-- How long a work room lives: one room per job, or one per session, rotated. The read loop's waiting
-  strategy, whether room keys are a second long-lived credential, and whether the host ever calls
-  `sharing.leave` follow from it.
-- Who leaves a work room, and when.
-- What the host's accept policy checks. The proposed list is under "The read loop".
-- How often the host touches the pair without a wake, and whether a wake from sleep touches it.
-- What a heal of `pair:<name>` means for requests in the rooms the host holds.
-- Whether a work room may later admit agents other than Lucille and the host.
-- Where the share store lives: the keyring, beside the pair, or a 0600 file.
-- How the host finds again an offer it did not accept at once (while its local SAS gate is closed, or
-  across a restart). In 2.6.0 a touch reports an offer once, as an `offered` note written only when the
-  offer is first seen (sb `sharing.py:842-844`), and a touch returns only notes newer than its start
-  (`:1246`). `sharing.status`, which lists the offers waiting, is not among the calls "Transport" lists.
+Each of these is open. The questions this list held about work rooms (how long a room lives, who leaves
+it and when, what the accept policy checks, how often the host touches the pair, what a heal means for
+the rooms the host holds, whether a room may admit other agents, and where the share store lives) are
+answered in [spec/PROTOCOL.md](../spec/PROTOCOL.md) §6 to §9 and §18.
+- The points the spec leaves open in v1 (spec/PROTOCOL.md §19): detecting a leak of a room's key alone,
+  re-finding an offer a crash hid, and how a receiver treats a body with a duplicate key.
+- How the host keeps its record of the offers it was told of and has not decided (spec/PROTOCOL.md §6).
+  The spec settles when it looks at them again: the host touches nothing before its local SAS gate opens,
+  so the first touch after reports each offer as new, and a refusal before the accept is not final. In
+  2.6.0 a touch reports an offer once, as an `offered` note written only when the offer is first seen (sb
+  `sharing.py:842-846`), and a touch returns only notes newer than its start (`:1246`).
+  `sharing.status`, which lists the offers waiting, is not among the calls "Transport" lists, so the
+  record is the host's own.
 - How a release carries exact dependency pins to a user's install. The wheel declares
   `agent-switchboard==2.6.*` and `keyring>=25`, and `pipx` and `uv tool` resolve those on the day they
   run, without reading the lock.

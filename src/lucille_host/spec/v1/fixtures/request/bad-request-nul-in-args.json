@@ -1,0 +1,22 @@
+{
+  "description": "A string holding U+0000, in args: the request-wide string check runs before any op check.",
+  "valid": false,
+  "schema_valid": false,
+  "expect": {
+    "reply": {
+      "status": "refused",
+      "code": "bad_request"
+    }
+  },
+  "body": {
+    "v": "lucille.exec/1",
+    "dir": "request",
+    "job_id": "00000000-0000-4000-8000-000000000063",
+    "op": "files.sha256",
+    "args": {
+      "root": "docs",
+      "path": "notes/todo.txt\u0000.sh"
+    },
+    "not_after": 1767229200
+  }
+}

@@ -1,0 +1,23 @@
+{
+  "description": "Too old and expired: host_too_old is checked first.",
+  "valid": true,
+  "schema_valid": true,
+  "host_state": {
+    "received_at": 1767229260
+  },
+  "expect": {
+    "reply": {
+      "status": "refused",
+      "code": "host_too_old"
+    }
+  },
+  "body": {
+    "v": "lucille.exec/1",
+    "dir": "request",
+    "job_id": "00000000-0000-4000-8000-000000000027",
+    "op": "host.describe",
+    "args": {},
+    "not_after": 1767229200,
+    "min_host_version": "9.0.0"
+  }
+}

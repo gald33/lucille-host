@@ -1,0 +1,15 @@
+{
+  "description": "failed killed_locally, with no output.",
+  "valid": true,
+  "schema_valid": true,
+  "body": {
+    "v": "lucille.exec/1",
+    "dir": "reply",
+    "job_id": "00000000-0000-4000-8000-000000000100",
+    "status": "failed",
+    "code": "killed_locally",
+    "duration_ms": 4100,
+    "policy_digest": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    "host_version": "0.1.0"
+  }
+}

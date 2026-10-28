@@ -1,0 +1,21 @@
+{
+  "description": "A path that looks like a flag is a valid path; the host passes it after '--'.",
+  "valid": true,
+  "schema_valid": true,
+  "expect": {
+    "reply": {
+      "status": "done"
+    }
+  },
+  "body": {
+    "v": "lucille.exec/1",
+    "dir": "request",
+    "job_id": "00000000-0000-4000-8000-000000000010",
+    "op": "files.sha256",
+    "args": {
+      "root": "docs",
+      "path": "--version"
+    },
+    "not_after": 1767229200
+  }
+}

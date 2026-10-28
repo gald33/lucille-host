@@ -1,0 +1,23 @@
+{
+  "description": "A host whose version has a suffix counts as older than the same triple.",
+  "valid": true,
+  "schema_valid": true,
+  "host_state": {
+    "host_version": "0.1.0.dev3"
+  },
+  "expect": {
+    "reply": {
+      "status": "refused",
+      "code": "host_too_old"
+    }
+  },
+  "body": {
+    "v": "lucille.exec/1",
+    "dir": "request",
+    "job_id": "00000000-0000-4000-8000-000000000020",
+    "op": "host.describe",
+    "args": {},
+    "not_after": 1767229200,
+    "min_host_version": "0.1.0"
+  }
+}
