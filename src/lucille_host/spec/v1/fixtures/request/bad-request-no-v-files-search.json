@@ -1,0 +1,23 @@
+{
+  "description": "A files.search request without v.",
+  "valid": false,
+  "schema_valid": false,
+  "expect": {
+    "reply": {
+      "status": "refused",
+      "code": "bad_request"
+    }
+  },
+  "body": {
+    "dir": "request",
+    "job_id": "00000000-0000-4000-8000-000000000199",
+    "op": "files.search",
+    "args": {
+      "root": "docs",
+      "pattern": "TODO",
+      "fixed_strings": true,
+      "max_count": 20
+    },
+    "not_after": 1767229200
+  }
+}

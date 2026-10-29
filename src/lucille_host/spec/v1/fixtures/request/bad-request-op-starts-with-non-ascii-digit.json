@@ -1,0 +1,19 @@
+{
+  "description": "An op, '\u0661host.describe', that starts with a non-ASCII digit (U+0661). The host refuses it bad_request.",
+  "valid": false,
+  "schema_valid": false,
+  "expect": {
+    "reply": {
+      "status": "refused",
+      "code": "bad_request"
+    }
+  },
+  "body": {
+    "v": "lucille.exec/1",
+    "dir": "request",
+    "job_id": "00000000-0000-4000-8000-000000001189",
+    "op": "\u0661host.describe",
+    "args": {},
+    "not_after": 1767229200
+  }
+}

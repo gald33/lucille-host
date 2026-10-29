@@ -1,0 +1,25 @@
+{
+  "description": "A path outside its root, on a host where the operation would run past its timeout: path_outside_root is checked first, and nothing starts.",
+  "valid": true,
+  "schema_valid": true,
+  "host_state": {
+    "event": "runs_past_timeout"
+  },
+  "expect": {
+    "reply": {
+      "status": "refused",
+      "code": "path_outside_root"
+    }
+  },
+  "body": {
+    "v": "lucille.exec/1",
+    "dir": "request",
+    "job_id": "00000000-0000-4000-8000-000000000132",
+    "op": "files.sha256",
+    "args": {
+      "root": "docs",
+      "path": "/etc/passwd"
+    },
+    "not_after": 1767229200
+  }
+}

@@ -1,0 +1,22 @@
+{
+  "description": "A job id the host has already decided, with a min_host_version newer than the host: dedupe is checked first, and the duplicate gets nothing.",
+  "valid": true,
+  "schema_valid": true,
+  "host_state": {
+    "seen_job_ids": [
+      "00000000-0000-4000-8000-000000000129"
+    ]
+  },
+  "expect": {
+    "reply": null
+  },
+  "body": {
+    "v": "lucille.exec/1",
+    "dir": "request",
+    "job_id": "00000000-0000-4000-8000-000000000129",
+    "op": "host.describe",
+    "args": {},
+    "not_after": 1767229200,
+    "min_host_version": "9.0.0"
+  }
+}

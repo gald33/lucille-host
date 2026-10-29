@@ -134,10 +134,11 @@ pair. In this spec, "work room" never means `pair:<name>`.
 
 **`pair:<name>` carries only the library's own notes.**
 - Neither side's own code posts anything in `pair:<name>`. The library's own notes are allowed: `swbp1/paired`,
-  `swbp1/moved`, `swbp1/ended` and the share wake `swbp1/shared` (sb `pairing.py:202-210`; `sharing.py:914-956`,
-  `:1166-1186`). Either side's library posts the share wake, on `share_new`, on `accept`, on `leave` and on its
-  daily refresh of its records, from a throwaway agent id, and its body is only the tag. A test that checks
-  that nothing lands in `pair:<name>` excludes these notes by name.
+  `swbp1/moved`, `swbp1/ended` and the share wake `swbp1/shared` (sb `pairing.py:202-210`;
+  `sharing.py:1175-1186`). Either side's library posts the share wake after a touch that wrote one of its
+  share records (sb `sharing.py:1141`, `:1166-1173`): on `share_new`, on `accept`, on `leave` and on its daily
+  refresh of its records (`:914-956`), from a throwaway agent id, and its body is only the tag. A test that
+  checks that nothing lands in `pair:<name>` excludes these notes by name.
 - The host reads `pair:<name>` on its `pair` channel only, and reads the notes there as wakes, never as
   instructions: `swbp1/paired`, `swbp1/moved` and `swbp1/ended` only make it resolve the pair, and
   `swbp1/shared` only makes it read the pair's offers (a touch).
@@ -154,6 +155,11 @@ pair. In this spec, "work room" never means `pair:<name>`.
 
 **The offer.**
 - Lucille mints each work room with `sharing.share_new`, and offers it over that computer's pair only.
+- Lucille mints each work room with the same hub URL as the pairing code it gave that computer, every
+  trailing `/` aside, so that the room passes check 3 below. 2.6.0 writes the code's URL and the room's from
+  the config each call is given, with every trailing `/` removed (sb `pairing.py:1430`, `sharing.py:1433`),
+  so the two match when Lucille gives both calls the same hub URL. A room whose URL differs from the code's
+  in anything else, such as case or a port, fails check 3, and the host leaves it for good.
 - Lucille offers nothing before its own SAS confirmation for that pair. `share_new` checks only the pair's
   `confirmed` flag, which is set before anyone compares the SAS (sb `docs/sharing.md:517-524`).
 - An offer is a sealed record in the pair room (sb `sharing.py:35-48`). The host reads offers with
@@ -170,7 +176,9 @@ pair. In this spec, "work room" never means `pair:<name>`.
 **The host's accept policy.** The host accepts a room only if all five hold:
 1. the offer came over its Lucille pair;
 2. its own local SAS check for that pair passed ([§16](#16-local-controls));
-3. the room's hub is the hub its pairing code named (compared as URLs, after removing one trailing `/`);
+3. the room's hub is the hub its pairing code named: the two URLs are the same string once every trailing `/`
+   is removed from each, as 2.6.0 removes them when it decodes a pairing code and when it keeps an offered
+   room (Python's `str.rstrip("/")`; sb `pairing.py:599`, `sharing.py:1613`);
 4. the offer carries no hub token;
 5. it holds fewer rooms than the cap below.
 
@@ -179,9 +187,9 @@ Anything else is refused and logged locally. What a refusal does depends on when
 **When each check runs.**
 - Checks 1, 2 and 5 run before `sharing.accept`.
 - Checks 3 and 4 run right after it, before any read or post in the room, against
-  `sharing.resolve_room(<name>).config`: its `url` must equal the hub the pairing code named, and its
-  `token_source` must not be `"shared"`. If either fails, the host calls `sharing.leave` on the room at once,
-  logs the refusal locally, and never reads or posts in that room.
+  `sharing.resolve_room(<name>).config`: its `url` must equal the hub the pairing code named, compared as
+  check 3 says, and its `token_source` must not be `"shared"`. If either fails, the host calls
+  `sharing.leave` on the room at once, logs the refusal locally, and never reads or posts in that room.
 - Why: through the sharing calls the host uses (`touch`, `accept`, `resolve_room`, `leave`), a pending offer
   shows no hub URL and no token. 2.6.0 stores a pending offer without them (sb `sharing.py:853-855`), and
   `accept` itself re-reads the live offer and writes the offer-back above (`:1546-1550`, `:1612-1615`). So
@@ -455,11 +463,12 @@ A request goes from Lucille to the host. Its body is exactly:
 - `min_host_version`: a host older than it refuses `host_too_old`. The host compares its own release's
   version as a tuple of three numbers: the numeric triple its version starts with. A host version with
   anything after that triple (a pre-release, dev, post-release or local suffix) counts as older than the
-  same triple, and one that does not start with a numeric triple counts as older than every
-  `min_host_version`. Erring older is the safe direction for a cut-off meant to stop a bad release. A
-  well-formed `min_host_version` is checked before the rest of the envelope
-  ([§12](#12-which-refusal-wins)), so that an older host refuses `host_too_old` even a request that uses a
-  field added after its release. A `min_host_version` that is not in the form above is `bad_request`.
+  same triple, and one that does not start with a numeric triple, such as `1.2` or `1.2-beta` (both allowed,
+  [§11](#11-replies)), counts as older than every `min_host_version`. Erring older is the safe direction for
+  a cut-off meant to stop a bad release. A well-formed `min_host_version` is checked before the rest of the
+  envelope ([§12](#12-which-refusal-wins)), so that an older host refuses `host_too_old` even a request
+  that uses a field added after its release. A `min_host_version` that is not in the form above is
+  `bad_request`.
 
 **Operations and their arguments.** Each operation's `args` schema is part of this spec, and so binds Lucille
 as well as the host. Each is a closed object (`additionalProperties: false`), and the request schema picks it
@@ -534,7 +543,9 @@ These lists are closed. A receiver refuses a reply with any other status or code
 - `policy_digest`: 64 lowercase hex digits, the HMAC-SHA256 of the host's canonical local policy under a
   random key that never leaves the computer. The user can match a result to a policy, and Lucille can tell
   when the policy changed. A plain hash would let anyone holding it confirm a guessed folder path.
-- `host_version`: the host release's version string, at most 32 characters.
+- `host_version`: the host release's version string: 1 to 32 characters, a digit first, then ASCII letters,
+  digits, `.`, `+`, `_` or `-` (the pattern `^[0-9][0-9A-Za-z.+_-]{0,31}$`). It need not start with a numeric
+  triple; [§10](#10-requests) says how such a version compares with `min_host_version`.
 - `exit_code`: the integer the OS reported, from -255 to 255; negative when the child was killed by that
   signal. A child that died of a signal the host did not send is still `done`.
 - `duration_ms`: an integer from 0 to 2147483647, the milliseconds from when the host started the operation
@@ -565,14 +576,18 @@ closed v1 schema allows none.
 | `host_version` | as in the reply |
 | `protocol` | `"lucille.exec/1"` |
 | `os_family` | `"linux"` or `"macos"` |
-| `catalog_version` | identifies the release's catalog; it changes whenever any catalog entry changes. At most 64 characters. |
-| `enabled_ops` | the names of the operations the local policy enables, at most 64 |
-| `root_aliases` | the folder aliases the local policy holds, at most 64; never paths |
+| `catalog_version` | identifies the release's catalog; it changes whenever any catalog entry changes. 1 to 64 characters: an ASCII letter or digit first, then letters, digits, `.`, `+`, `_` or `-` (the pattern `^[0-9A-Za-z][0-9A-Za-z.+_-]{0,63}$`). |
+| `enabled_ops` | the names of the operations the local policy enables, at most 64, none twice |
+| `root_aliases` | the folder aliases the local policy holds, at most 64, none twice; never paths |
 | `policy_digest` | as in the reply |
 
 ## 12. Which refusal wins
 
-Each reply carries one code, so the checks run in a fixed order, and the first that fails decides the reply:
+Each reply carries one code, so the checks run in a fixed order, and the first that fails decides the reply.
+Before any of them, the host sets aside a body that is not a JSON object, has no `dir: "request"`, or has
+no well-formed `job_id` ([§10](#10-requests)): it posts nothing for it, whatever else the body holds, a
+`min_host_version` the host is older than included. The checks run on every other body, and the first of
+them, dedupe, can also end in no reply.
 
 1. **Dedupe.** A request whose `job_id` the host has already decided gets nothing at all
    ([§15](#15-dedupe-restarts-and-transport-failures)).
@@ -805,9 +820,10 @@ Lucille's side, is tallied and dropped. If no reply for the job was read in time
 - **The host's share store.** Room keys get the same protection as the pair secret: the host keeps them in
   its OS-keyring store, beside the pair. A file of mode 0600 is used only under `--store-file`, with the
   same warning that it is weaker. Never under `~/.switchboard`. 2.6.0's own `ShareStore` keeps room keys in
-  the clear, owner-only, and asks an embedder to keep its store encrypted at rest (sb `sharing.py:229-249`;
-  `docs/sharing.md:533-536`). Why: the pair secret already opens every room offered over the pair, so keeping
-  room keys more weakly than the pair would make them the weak link.
+  the clear, owner-only (sb `sharing.py:263-273`; `docs/sharing.md:533-536`), and its `Store` interface asks
+  an embedder to keep the store encrypted at rest (sb `sharing.py:237-240`). Why: the pair secret already
+  opens every room offered over the pair, so keeping room keys more weakly than the pair would make them the
+  weak link.
 - **A room key is not a credential Lucille mints.** A room key opens one room's messages and grants nothing
   in Lucille: authority stays with the job row Lucille wrote *(Lucille policy as of 2026-10-28; not proven by
   this repository)*.
@@ -843,8 +859,11 @@ Each point below is open in this version. Each says what an implementation does 
 ## 20. Fixtures
 
 The golden fixtures are in `src/lucille_host/spec/v1/fixtures/`, one JSON file each, all ASCII, with every
-non-ASCII character escaped. Their job ids are obviously fake: `00000000-0000-4000-8000-NNNNNNNNNNNN`,
-where `NNNNNNNNNNNN` is the fixture's number in 12 decimal digits.
+non-ASCII character escaped. Every well-formed job id in them is obviously fake:
+`00000000-0000-4000-8000-NNNNNNNNNNNN`, where `NNNNNNNNNNNN` is the fixture's number in 12 decimal digits,
+except in one valid request and one valid reply, which use `abcdefab-cdef-4abc-8def-abcdefabcdef` and
+`fedcbafe-dcba-4fed-8cba-fedcbafedcba`, so that the fixtures hold a job id with a letter in every group. A
+fixture about a job id holds a malformed one, or none, on purpose.
 
 **`request/*.json` and `reply/*.json`.** Each holds one message body and labels it:
 
@@ -874,19 +893,85 @@ It is a test state, not a host's defaults:
 | `caps` | The host's own cap on each stream: 65536 bytes. |
 | `event` | What happens once the operation starts: `runs_past_timeout`, `killed_locally`, `restarted_after_decision`, or null. |
 
+**`host.describe/*.json`.** Each holds one document `host.describe` returns ([§11](#11-replies)), in `body`,
+labelled with `description`, `valid` and `schema_valid` as above. Every rule a document can break on its
+own is in its schema, so the two labels always agree.
+
 **`decode/*.json`.** Each holds a child's raw output, base64-encoded in `raw_base64`, and the `text` the host
 decodes from it ([§13](#13-strings-numbers-sizes-and-output)).
 
-**What the fixtures cover.** A valid request for each operation; a request that draws each refused and each
-failed code; a duplicate that draws no reply; the order of [§12](#12-which-refusal-wins), by fixtures with
-two faults; the messages the host does not answer; invalid requests with extra keys (`argv`, `exe`, `env`,
-`cwd`, `timeout`, policy-shaped keys), a wrong `v`, oversize fields, a string holding U+0000 and one holding
-an unpaired surrogate; a valid reply of each shape and with each code; invalid replies for each way a reply
-can break the schema or a named rule; and decoding.
+**What the fixtures hold.** The lists below say what the fixtures pin. They are not every case the spec
+decides. Among the fixtures are:
+- **requests:** a valid request for each operation; a request that draws each refused and each failed
+  code; a duplicate, which draws no reply; bodies the host does not answer; extra keys (`argv`, `exe`,
+  `env`, `cwd`, `timeout`, a policy-shaped key); a wrong `v`; a string holding U+0000 and one holding an
+  unpaired surrogate; requests of 16384 and 16385 bytes; a `not_after` and a cap of `true`, which is not
+  an integer; and a path with `..` inside a name, which is not a `..` segment, and runs;
+- **the order of [§12](#12-which-refusal-wins)**, by requests with two faults: one for each two neighbouring
+  checks that a request can fail together, one for the last check and the start of the operation, and
+  one for `unknown_op` and `path_outside_root` (no request fails both `unknown_op` and `not_enabled`, since
+  [§10](#10-requests) gives `not_enabled` only to an op in the catalog); and a body with `dir: "reply"`,
+  one with no `dir`, one with a malformed `job_id` and a duplicate, each also carrying a
+  `min_host_version` the host is older than (a body that is not a JSON object cannot carry one);
+- **replies:** a valid reply of each shape and with each code, and an invalid one for each named rule a
+  reply can break (`strings`, `integers`, `stream-size`);
+- **`host.describe` documents**, valid and invalid, among them the largest and the shortest the schema
+  allows;
+- **decoding.**
+
+In each message and document that holds what is named (a request, a reply, the `host.describe`
+document), the fixtures hold:
+- for each numeric or length bound that no pattern implies, a body at it and a body one past it (in a
+  request, a body whose `op` is at its bound names an op outside the catalog, and expects `unknown_op`);
+- for each list, one entry over its most, and one that names an entry twice;
+- for each closed list and constant, a body with another value;
+- for each closed object, a body with a key it does not list;
+- for each required key, a body without it, in each operation's and each status's branch, the keys of
+  `caps` included; and for each key that requires another, a body with one and not the other;
+- for each pattern, the bodies below.
+
+**The bodies for each pattern.** `tools/spec/gen_fixtures.py` writes them, and
+`tests/spec/test_generated_fixtures.py` checks that running it writes exactly the committed files. For each
+pattern other than the one that refuses only U+0000, in each message and document that holds it, there is
+one invalid body for each of these, with no other fault:
+- the empty string;
+- for each character class and each kind of character it refuses, one character of that kind in that
+  class's place. The kinds, by the names the fixtures use, are `digit`, `letter-a-to-f`, `letter-past-f`
+  (a lowercase letter past `f`), `uppercase`, `underscore`, `hyphen`, `dot`, `plus`, `slash`, `space`,
+  `non-ascii-letter` and `non-ascii-digit`. One character stands for each kind: `0`, `a`, `g`, `A`, `_`,
+  `-`, `.`, `+`, `/`, a space, U+00E9 and U+0661. A class refuses a kind when it refuses that character,
+  and allows it otherwise. The fixtures for a `0` at the start of a part of `min_host_version` are named
+  `leading-zero`;
+- for each separator (a `.` or `-` between parts): the separator left out, doubled, and replaced by each of
+  `_`, `/`, `+`, a space and whichever of `.` and `-` it is not;
+- for each counted repetition, one over its most, and for an exact count (`{8}`), also one under it;
+- for each part of `min_host_version`, the part empty, and the part `00`.
+
+Each of them but the empty string pins its place: the pattern refuses it, the change at that place (the
+class given that character; the separator given it, left out or doubled; the repetition one wider; the part
+allowed to be empty or `00`) makes the pattern accept it, and the same change at any other place does not.
+The test checks that on each committed file, and that the body has no other fault: with a value the pattern
+accepts in that place, the schema accepts it and it breaks no named rule. It also checks, for each of those patterns
+in each message and document, that for each class and each kind it allows, some fixture holds a value the
+pattern accepts only because that class admits a character of that kind; and, for each counted range
+(`{0,31}`), values at its least and at its most.
+
+**What the bodies for each pattern do not cover.** The lists above are what the fixtures are written to
+pin. A change to a pattern that none of them names may pass every test. Among such changes: a character
+of a refused kind other than the one that stands for it (`b` to `f`, `1` to `9`, and so on); a character
+of none of the twelve kinds (`:`, `~` and so on), in a class's place or a separator's; a separator
+replaced by a letter or a digit; a class without a character other than the one that stands for its kind
+(`[a-y]` for `[a-z]`, `[2-9]` for `[1-9]`); a bound put on a repetition that has none (`*` or `+`); and
+changes to more than one place at once. Some of these fail a test anyway, because a fixture happens to
+hold that character or that length.
+
+In a request only an op in the catalog is valid, so a request fixture whose `op` sits at a bound, or holds
+a kind of character no catalog op holds, names an op outside the catalog, and expects `unknown_op`.
 
 **Who is held to them.**
 - `tests/spec/test_fixtures.py` checks that each fixture validates, or fails, as labelled, and that each
   request fixture's expected reply is the one the order of [§12](#12-which-refusal-wins) gives.
+- `tests/spec/test_generated_fixtures.py` checks the bodies for each pattern, as above.
 - The host's own message checks, when they are written, are held to every fixture. The runtime imports no
   JSON Schema library; its runtime dependencies are agent-switchboard and keyring only.
 - Lucille's contract test holds Lucille's own request and reply models to the fixtures shipped in a released

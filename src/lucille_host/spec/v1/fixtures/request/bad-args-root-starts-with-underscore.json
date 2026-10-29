@@ -1,0 +1,22 @@
+{
+  "description": "A root alias, _docs, that starts with '_', not a lowercase letter. The host refuses it bad_args.",
+  "valid": false,
+  "schema_valid": false,
+  "expect": {
+    "reply": {
+      "status": "refused",
+      "code": "bad_args"
+    }
+  },
+  "body": {
+    "v": "lucille.exec/1",
+    "dir": "request",
+    "job_id": "00000000-0000-4000-8000-000000001270",
+    "op": "files.sha256",
+    "args": {
+      "root": "_docs",
+      "path": "notes/todo.txt"
+    },
+    "not_after": 1767229200
+  }
+}

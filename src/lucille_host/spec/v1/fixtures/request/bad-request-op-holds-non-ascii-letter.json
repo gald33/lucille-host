@@ -1,0 +1,19 @@
+{
+  "description": "An op, 'h\u00e9ost.describe', with a non-ASCII letter (U+00E9) in its first part, after its first letter. The host refuses it bad_request.",
+  "valid": false,
+  "schema_valid": false,
+  "expect": {
+    "reply": {
+      "status": "refused",
+      "code": "bad_request"
+    }
+  },
+  "body": {
+    "v": "lucille.exec/1",
+    "dir": "request",
+    "job_id": "00000000-0000-4000-8000-000000001196",
+    "op": "h\u00e9ost.describe",
+    "args": {},
+    "not_after": 1767229200
+  }
+}

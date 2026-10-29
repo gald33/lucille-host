@@ -1,0 +1,20 @@
+{
+  "description": "Values that hold every kind of character their patterns allow: a host_version and a catalog_version with letters of both cases, digits, '.', '-', '_' and '+'; operation names of two and four parts with '_' and digits; a folder alias with '_', '-' and a digit.",
+  "valid": true,
+  "schema_valid": true,
+  "body": {
+    "host_version": "1.2.3-Beta_1+local",
+    "protocol": "lucille.exec/1",
+    "os_family": "macos",
+    "catalog_version": "Cat-1.0+X_y",
+    "enabled_ops": [
+      "files.read_text",
+      "ns_1.op_2.x_3.y_4"
+    ],
+    "root_aliases": [
+      "docs",
+      "my_docs-2"
+    ],
+    "policy_digest": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+  }
+}

@@ -1,0 +1,13 @@
+{
+  "description": "A refused reply without v.",
+  "valid": false,
+  "schema_valid": false,
+  "body": {
+    "dir": "reply",
+    "job_id": "00000000-0000-4000-8000-000000000166",
+    "status": "refused",
+    "code": "paused",
+    "policy_digest": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    "host_version": "0.1.0"
+  }
+}

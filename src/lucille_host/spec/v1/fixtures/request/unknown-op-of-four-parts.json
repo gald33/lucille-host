@@ -1,0 +1,19 @@
+{
+  "description": "A well-formed op of four parts, each holding '_' and a digit, that is not in the catalog.",
+  "valid": false,
+  "schema_valid": false,
+  "expect": {
+    "reply": {
+      "status": "refused",
+      "code": "unknown_op"
+    }
+  },
+  "body": {
+    "v": "lucille.exec/1",
+    "dir": "request",
+    "job_id": "00000000-0000-4000-8000-000000000692",
+    "op": "ns_1.op_2.x_3.y_4",
+    "args": {},
+    "not_after": 1767229200
+  }
+}

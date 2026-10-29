@@ -1,0 +1,16 @@
+{
+  "description": "A body with no dir and a min_host_version this host is older than: the host posts nothing, since it answers only a request.",
+  "valid": false,
+  "schema_valid": false,
+  "expect": {
+    "reply": null
+  },
+  "body": {
+    "v": "lucille.exec/1",
+    "job_id": "00000000-0000-4000-8000-000000000700",
+    "op": "host.describe",
+    "args": {},
+    "not_after": 1767229200,
+    "min_host_version": "9.0.0"
+  }
+}

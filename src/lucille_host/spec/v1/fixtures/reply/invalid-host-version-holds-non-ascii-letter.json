@@ -1,0 +1,14 @@
+{
+  "description": "A host_version, '0\u00e9.1.0', with a non-ASCII letter (U+00E9) after its first character.",
+  "valid": false,
+  "schema_valid": false,
+  "body": {
+    "v": "lucille.exec/1",
+    "dir": "reply",
+    "job_id": "00000000-0000-4000-8000-000000001438",
+    "status": "refused",
+    "code": "paused",
+    "policy_digest": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    "host_version": "0\u00e9.1.0"
+  }
+}

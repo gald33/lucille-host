@@ -1,0 +1,17 @@
+{
+  "description": "A failed reply with stdout_truncated and no stdout: each flag comes with its stream.",
+  "valid": false,
+  "schema_valid": false,
+  "body": {
+    "v": "lucille.exec/1",
+    "dir": "reply",
+    "job_id": "00000000-0000-4000-8000-000000000177",
+    "status": "failed",
+    "code": "timeout",
+    "exit_code": -9,
+    "duration_ms": 30000,
+    "policy_digest": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    "host_version": "0.1.0",
+    "stdout_truncated": false
+  }
+}

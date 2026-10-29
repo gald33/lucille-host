@@ -1,0 +1,20 @@
+{
+  "description": "A host.sleep request without not_after.",
+  "valid": false,
+  "schema_valid": false,
+  "expect": {
+    "reply": {
+      "status": "refused",
+      "code": "bad_request"
+    }
+  },
+  "body": {
+    "v": "lucille.exec/1",
+    "dir": "request",
+    "job_id": "00000000-0000-4000-8000-000000000190",
+    "op": "host.sleep",
+    "args": {
+      "n": 1
+    }
+  }
+}

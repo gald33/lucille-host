@@ -1,0 +1,16 @@
+{
+  "description": "A request's fields marked dir reply: not a request, so the host posts nothing.",
+  "valid": false,
+  "schema_valid": false,
+  "expect": {
+    "reply": null
+  },
+  "body": {
+    "v": "lucille.exec/1",
+    "dir": "reply",
+    "job_id": "00000000-0000-4000-8000-000000000146",
+    "op": "host.describe",
+    "args": {},
+    "not_after": 1767229200
+  }
+}

@@ -1,0 +1,21 @@
+{
+  "description": "files.sha256 with a path of one character.",
+  "valid": true,
+  "schema_valid": true,
+  "expect": {
+    "reply": {
+      "status": "done"
+    }
+  },
+  "body": {
+    "v": "lucille.exec/1",
+    "dir": "request",
+    "job_id": "00000000-0000-4000-8000-000000000330",
+    "op": "files.sha256",
+    "args": {
+      "root": "docs",
+      "path": "a"
+    },
+    "not_after": 1767229200
+  }
+}

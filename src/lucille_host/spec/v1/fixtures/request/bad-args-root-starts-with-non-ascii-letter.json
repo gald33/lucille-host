@@ -1,0 +1,22 @@
+{
+  "description": "A root alias, '\u00e9docs', that starts with a non-ASCII letter (U+00E9), not an ASCII lowercase letter. The host refuses it bad_args.",
+  "valid": false,
+  "schema_valid": false,
+  "expect": {
+    "reply": {
+      "status": "refused",
+      "code": "bad_args"
+    }
+  },
+  "body": {
+    "v": "lucille.exec/1",
+    "dir": "request",
+    "job_id": "00000000-0000-4000-8000-000000001276",
+    "op": "files.sha256",
+    "args": {
+      "root": "\u00e9docs",
+      "path": "notes/todo.txt"
+    },
+    "not_after": 1767229200
+  }
+}
