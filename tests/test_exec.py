@@ -35,13 +35,29 @@ def _alive(pid: int) -> bool:
     if sys.platform.startswith("linux"):
         try:
             status = Path(f"/proc/{pid}/status").read_text()
-        except FileNotFoundError:
+        except (FileNotFoundError, ProcessLookupError):
+            # It ended between the two looks: its /proc entry is gone (ENOENT), or going (ESRCH).
             return False
         return "\nState:\tZ" not in status
     shown = subprocess.run(
         ["/bin/ps", "-o", "stat=", "-p", str(pid)], capture_output=True, text=True, check=False
     )
     return bool(shown.stdout.strip()) and not shown.stdout.strip().startswith("Z")
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="reads /proc")
+@pytest.mark.parametrize("gone", [FileNotFoundError, ProcessLookupError])
+def test_alive_is_false_for_a_process_that_ends_between_its_two_looks(
+    monkeypatch: pytest.MonkeyPatch, gone: type[OSError]
+) -> None:
+    """The signal check finds the process, and it is gone before its /proc entry is read."""
+
+    def ended(self: Path, *args: object, **kwargs: object) -> str:
+        raise gone(os.strerror(3 if gone is ProcessLookupError else 2))
+
+    assert _alive(os.getpid())
+    monkeypatch.setattr(Path, "read_text", ended)
+    assert not _alive(os.getpid())
 
 
 def test_exec_env_allowlist(monkeypatch: pytest.MonkeyPatch) -> None:
