@@ -274,6 +274,8 @@ def test_the_tree_check_follows_an_assigned_library_object(tmp_path: Path) -> No
 # --- No register, no invites, anywhere -------------------------------------------------------
 
 REGISTER = [
+    "match client:\n    case object(register=r):\n        r(name='host')\n",
+    "class C:\n    __match_args__ = ('register',)\n",
     "import atexit\natexit.register(print)\n",
     "from atexit import register\n",
     "client.register(name='host')\n",
@@ -305,6 +307,7 @@ def test_register_by_string_is_reported_everywhere(source: str, rel: str) -> Non
 
 
 INVITATION_FORMS = [
+    "match room:\n    case object(invite_from_env=i):\n        pass\n",
     "from switchboard.invite import Invite\n",
     "import switchboard.invite\n",
     "from switchboard import Invite\n",
@@ -569,6 +572,7 @@ def test_each_surface_member_exists_in_the_pinned_library(sub: str, member: str)
 # --- Private members in the runtime ----------------------------------------------------------
 
 PRIVATE_MEMBERS = [
+    (RUNTIME, "match hub:\n    case object(_call=post):\n        post('POST', '/x')\n"),
     (WRAPPER, "from switchboard import client\nclient.Client(None)._call('POST', '/x', json={})\n"),
     (WRAPPER, "def post(hub):\n    return hub._call('POST', '/x')\n"),
     (RUNTIME, "import os\nos._exit(1)\n"),
@@ -747,3 +751,9 @@ def test_script_exit_codes(tmp_path: Path) -> None:
     result = _run_script(str(tmp_path / "tree"))
     assert result.returncode == 1
     assert "src/lucille_host/helper.py:2: [switchboard-import]" in result.stdout
+
+
+@pytest.mark.parametrize("rel", EVERY_ZONE)
+def test_a_name_imported_as_two_things_is_refused(rel: str) -> None:
+    source = "import switchboard as sb\ndef _unused():\n    import json as sb\nsb.cli.main()\n"
+    assert "parse" in rules(source, rel)

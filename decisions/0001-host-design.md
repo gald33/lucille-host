@@ -561,6 +561,8 @@ template test, which needs that hub's injected clock. It may spawn only the loca
 - the Switchboard-surface lint above;
 - a private-string check for strings private to Lucille that must never appear in this repository. Its
   list lives in a repository secret, because a committed denylist would publish the strings it protects.
+  It reads every path git tracks (a gitlink's path included) and every tracked file's contents, as UTF-8
+  lines and again as UTF-16.
 
 **`LICENSE`:** MIT.
 

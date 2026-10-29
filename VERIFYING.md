@@ -84,9 +84,10 @@ enforces.
      - a watched module used as a value (`getattr(os, name)`, `vars(os)`);
      - attributes such as `__dict__`, `__globals__`, `__self__`, a frame's `f_globals` and a
        generator's `gi_code` that lead from an object to modules or code (the dunders among them as a
-       bare name too, such as a module's own `__loader__`); and those names, or a member on the
-       lint's `MEMBERS_BY_STRING` list (`"system"`, `"exec"`, `"import_module"` and the rest), spelled
-       as a string literal to `getattr` and its relatives;
+       bare name too, such as a module's own `__loader__`; an attribute a `match` class pattern
+       reads, `case C(__globals__=g)`, or a `__match_args__` entry names, counts as an attribute);
+       and those names, or a member on the lint's `MEMBERS_BY_STRING` list (`"system"`, `"exec"`,
+       `"import_module"` and the rest), spelled as a string literal to `getattr` and its relatives;
      - a `*` import from a module it watches;
      - a Python file that does not parse, and a name it cannot finish resolving (below);
      - a symbolic link anywhere in the repository that git tracks, or that is untracked and not
@@ -135,8 +136,10 @@ enforces.
    `tools/guards/reexport_probe.py` writes and `tests/guards/test_reexports.py` checks on every
    interpreter CI tests; what this package's own modules bind by an import or by assigning an
    imported name (`paths.osmod` is `os` when `paths` has `import os as osmod`); and a watched
-   module's name, or that name with leading underscores (`random._os`). A name that stands for more
-   names than it follows is a finding: it fails closed.
+   module's name, or that name with leading underscores (`random._os`). It reads a file's imports
+   without regard to scope, so a name the imports bind to two different things (`import os as x`
+   in one place, `import json as x` in another) is a finding: a use could mean either. So is a name
+   that stands for more names than it follows: it fails closed.
 
    **What it is, and what it cannot see.** The rules that apply everywhere are a denylist: they name
    the known forms of a shell, of code run from a string and of a dynamic import, and a form they do
@@ -200,7 +203,8 @@ enforces.
      A name taken from that module is presumed to be Switchboard unless the module shows it is its
      own: a function, class or constant it defines that uses no part of Switchboard in its
      decorators, bases or value;
-   - everywhere, on any reference to a name `register`, called or not, and on the string `"register"`
+   - everywhere, on any reference to a name `register`, called or not (an attribute a `match` class
+     pattern reads, or a `__match_args__` entry names, included), and on the string `"register"`
      passed to `getattr` and its relatives or used as a `**` key;
    - everywhere, on any identifier, attribute, import, keyword argument, parameter, `except ... as`
      name or such string whose name contains `invite`, in any case (function and class names are not
@@ -232,9 +236,13 @@ enforces.
      same name, on that one CI step.
    - The list is one case-sensitive literal substring per line. Blank lines and lines starting with `#`
      are ignored.
-   - It reads the files `git ls-files` lists: each path, and each line of each text file. A symbolic
-     link is read as the path it holds, which is what git publishes for it. Outside a git checkout it
-     walks the tree, skipping `.git`, `.venv`, `__pycache__` and other build caches.
+   - It reads what `git ls-files` lists: every path, a gitlink to another repository included, and
+     the contents of every file, whatever bytes it holds. It reads each line as UTF-8 (a byte that is
+     not UTF-8 is replaced, and a NUL byte does not stop it), and the raw bytes again for each entry
+     in UTF-16, little- and big-endian; a UTF-16 hit names no line. A symbolic link is read as the
+     path it holds, which is what git publishes for it; a gitlink by its path only, since its
+     contents are another repository's. Outside a git checkout it walks the tree, skipping `.git`,
+     `.venv`, `__pycache__` and other build caches.
    - On a hit it prints the file, the line number, and the entry's line number in the list. It never
      prints the entry or the line, because the CI log of a public repository is public. When a file's
      own path matches, the path is withheld too.
