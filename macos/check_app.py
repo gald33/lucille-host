@@ -22,7 +22,9 @@ Each check prints what it saw and exits 1 if anything is wrong:
 - ``launch``: opens the app the way Finder does, checks that it is still running 10 seconds later,
   then stops it.
 - ``ui``: opens the app and drives its menu as a user would, through System Events: reads the
-  menu, chooses Pause Lucille and checks the host's pause flag, then chooses Resume Lucille. It
+  menu; chooses Pause Lucille, then Resume Lucille; switches an ability on and off; adds a folder
+  through the Open panel and the alias dialog and removes it from the Folders submenu; adds the
+  home folder, which needs a confirmation. It checks each step against the host's own state. It
   uses the real HOME and leaves the host as it found it. Where macOS does not let System Events
   drive other apps, it says so and drives nothing. Screenshots go to ``check/screens``.
 - ``gatekeeper``: prints what ``spctl`` says about the app and the disk image. It never fails: an
@@ -36,6 +38,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -434,7 +437,9 @@ def _open_menu_and_read() -> tuple[bool, list[str]]:
     return worked, text.splitlines() if worked else [text]
 
 
-def _drive_menu(checker: Checker, screens: Path, flag: Path) -> None:
+def _drive_menu(checker: Checker, screens: Path, flag: Path) -> bool:
+    """Read the menu, then choose Pause Lucille and Resume Lucille. False if System Events cannot
+    drive the app on this machine."""
     version = build_app.host_version()
     worked, items = _system_events(
         f"{LINES}return (description of every menu bar item of last menu bar) as text"
@@ -444,12 +449,12 @@ def _drive_menu(checker: Checker, screens: Path, flag: Path) -> None:
             "note: System Events cannot read this app's menu bar on this machine, so the menu "
             f"was not driven: {items}"
         )
-        return
+        return False
     print(f"the app's status items: {items.splitlines()}")
     worked, shown = _open_menu_and_read()
     if not worked:
         print(f"note: System Events cannot open the menu on this machine: {shown}")
-        return
+        return False
     print(f"the menu shows: {shown}")
     _screenshot(screens / "2-menu-open.png")
     worked, abilities = _system_events(
@@ -472,7 +477,7 @@ def _drive_menu(checker: Checker, screens: Path, flag: Path) -> None:
     checker.expect(not missing, "the menu holds every item", f"missing: {missing}")
     if flag.exists():
         print("note: the host was paused before this check, so Pause and Resume were not tried")
-        return
+        return True
 
     worked, said = _system_events(
         f'click {STATUS_ITEM}\ndelay 1\nclick menu item "Pause Lucille" of {MENU}'
@@ -499,12 +504,165 @@ def _drive_menu(checker: Checker, screens: Path, flag: Path) -> None:
         "choosing Resume Lucille runs `resume`: the pause flag goes",
         said,
     )
+    return True
+
+
+def _op_state(python: Path, op: str) -> str:
+    """The state ``ops list`` gives one operation, for the real HOME."""
+    for line in _host(python, Path.home(), ["ops", "list"]).stdout.splitlines():
+        name, _, state = line.partition("  ")
+        if name == op:
+            return state
+    return ""
+
+
+def _roots(python: Path) -> dict[str, str]:
+    """``roots list`` for the real HOME, as {alias: path}."""
+    listed = _host(python, Path.home(), ["roots", "list"]).stdout.splitlines()
+    return dict(line.split("  ", 1) for line in listed if "  " in line)
+
+
+def _drive_abilities(checker: Checker, python: Path, screens: Path) -> None:
+    """Switch an ability on and off again from the Abilities submenu."""
+    listing = _host(python, Path.home(), ["ops", "list"]).stdout.splitlines()
+    off = [line.split("  ", 1)[0] for line in listing if line.endswith("  disabled")]
+    if not off:
+        print("note: no ability is plainly off here, so the Abilities submenu was not switched")
+        return
+    op = off[0]
+    submenu = f'menu 1 of menu item "Abilities" of {MENU}'
+    open_submenu = f'click {STATUS_ITEM}\ndelay 1\nclick menu item "Abilities" of {MENU}\ndelay 1\n'
+    try:
+        worked, said = _system_events(f'{open_submenu}click menu item "{op}" of {submenu}')
+        checker.expect(
+            worked and _wait_until(lambda: _op_state(python, op) == "enabled", 15),
+            f"choosing {op} under Abilities runs `ops enable`",
+            said,
+        )
+        time.sleep(2)
+        worked, mark = _system_events(
+            f'{open_submenu}return value of attribute "AXMenuItemMarkChar" of menu item "{op}" '
+            f"of {submenu}"
+        )
+        _screenshot(screens / "4-ability-on.png")
+        _system_events("key code 53\ndelay 0.3\nkey code 53")
+        checker.expect(
+            worked and mark not in ("", "missing value"), f"{op} then has a checkmark", mark
+        )
+        worked, said = _system_events(f'{open_submenu}click menu item "{op}" of {submenu}')
+        checker.expect(
+            worked and _wait_until(lambda: _op_state(python, op) == "disabled", 15),
+            f"choosing {op} again runs `ops disable`",
+            said,
+        )
+    finally:
+        if _op_state(python, op) == "enabled":
+            _host(python, Path.home(), ["ops", "disable", op])
+
+
+def _choose_folder(folder: Path, screens: Path, shot: str) -> tuple[bool, str]:
+    """Choose Add a Folder…, go to ``folder`` in the Open panel and choose it. Returns the name
+    the alias dialog then suggests, and leaves that dialog open."""
+    worked, said = _system_events(
+        f"click {STATUS_ITEM}\ndelay 1\n"
+        f'click (first menu item of {MENU} whose name starts with "Add a Folder")',
+        timeout=60,
+    )
+    if not worked:
+        return False, f"choosing Add a Folder: {said}"
+    time.sleep(2)
+    worked, said = _system_events(
+        "set frontmost to true\n"
+        'keystroke "g" using {command down, shift down}\n'
+        "delay 1\n"
+        f'keystroke "{folder}"\n'
+        "delay 1\n"
+        "key code 36\n"
+        "delay 2",
+        timeout=60,
+    )
+    if not worked:
+        return False, f"going to {folder} in the Open panel: {said}"
+    _screenshot(screens / shot)
+    worked, said = _system_events(
+        'click button "Choose" of window 1\ndelay 2\nreturn value of text field 1 of window 1',
+        timeout=60,
+    )
+    return worked, said if worked else f"choosing the folder: {said}"
+
+
+def _drive_folders(checker: Checker, python: Path, screens: Path) -> None:
+    """Add a folder through the Open panel and the alias dialog, remove it from the Folders
+    submenu, then add the home folder, which needs the user's confirmation."""
+    home = Path.home()
+    folder = home / "lucille-host-ui-check" / "My Project Files"
+    folder.mkdir(parents=True, exist_ok=True)
+    added: list[str] = []
+    try:
+        worked, suggestion = _choose_folder(folder, screens, "5-open-panel.png")
+        checker.expect(
+            worked and suggestion == "my-project-files",
+            "Add a Folder… opens the Open panel, then suggests the name my-project-files",
+            suggestion,
+        )
+        if not worked:
+            return
+        _screenshot(screens / "6-alias-dialog.png")
+        worked, said = _system_events('click button "Add Folder" of window 1')
+        checker.expect(
+            worked and _wait_until(lambda: _roots(python).get(suggestion) == str(folder), 15),
+            "choosing Add Folder runs `roots add my-project-files <the folder>`",
+            f"{said} {_roots(python)}",
+        )
+        added.append(suggestion)
+        time.sleep(2)
+        folders = f'menu 1 of menu item "Folders" of {MENU}'
+        worked, said = _system_events(
+            f'click {STATUS_ITEM}\ndelay 1\nclick menu item "Folders" of {MENU}\ndelay 1\n'
+            f'click menu item "{suggestion}" of {folders}\ndelay 1\n'
+            f'click menu item "Remove" of menu 1 of menu item "{suggestion}" of {folders}'
+        )
+        checker.expect(
+            worked and _wait_until(lambda: suggestion not in _roots(python), 15),
+            "Folders, my-project-files, Remove runs `roots remove my-project-files`",
+            f"{said} {_roots(python)}",
+        )
+
+        worked, suggestion = _choose_folder(home, screens, "7-open-panel-home.png")
+        checker.expect(worked, "the home folder can be chosen in the Open panel", suggestion)
+        if not worked:
+            return
+        worked, said = _system_events(
+            'click button "Add Folder" of window 1\ndelay 3\n'
+            f"{LINES}return (name of every button of window 1) as text"
+        )
+        _screenshot(screens / "8-confirm-home.png")
+        checker.expect(
+            worked and "Add Anyway" in said.splitlines(),
+            "the host refuses the home folder, and the app asks the user to confirm",
+            said,
+        )
+        worked, said = _system_events('click button "Add Anyway" of window 1')
+        checker.expect(
+            worked and _wait_until(lambda: str(home) in _roots(python).values(), 15),
+            "Add Anyway runs `roots add` again with --allow-home-or-root",
+            f"{said} {_roots(python)}",
+        )
+        added.extend(alias for alias, path in _roots(python).items() if path == str(home))
+    finally:
+        for alias, path in _roots(python).items():
+            if alias in added or path in (str(folder), str(home)):
+                _host(python, home, ["roots", "remove", alias])
+        shutil.rmtree(folder.parent, ignore_errors=True)
 
 
 def check_ui(app: Path, checker: Checker, work: Path) -> None:
-    """Open the app and drive its menu the way a user would, through System Events: read the menu,
-    choose Pause Lucille, check the host's pause flag, choose Resume Lucille. It uses the real
-    HOME, and leaves the host as it found it. Where macOS does not let System Events drive other
+    """Open the app and drive its menu the way a user would, through System Events: read the menu;
+    choose Pause Lucille and Resume Lucille, and watch the host's pause flag; switch an ability on
+    and off; add a folder through the Open panel and the alias dialog, and remove it from the
+    Folders submenu; add the home folder, which needs the user's confirmation. Each step is
+    checked against the host's own state. It uses the real HOME, and leaves the host as it found
+    it. Where macOS does not let System Events drive other
     apps (no accessibility permission), it says so and drives nothing. Screenshots go to
     ``<out>/check/screens``."""
     name = build_app.load_pins().app_name
@@ -531,7 +689,9 @@ def check_ui(app: Path, checker: Checker, work: Path) -> None:
     time.sleep(5)
     _screenshot(screens / "1-menu-bar.png")
     try:
-        _drive_menu(checker, screens, flag)
+        if _drive_menu(checker, screens, flag):
+            _drive_abilities(checker, python_in(app), screens)
+            _drive_folders(checker, python_in(app), screens)
     finally:
         subprocess.run(["pkill", "-TERM", "-x", name], check=False)
         checker.expect(_wait_until(lambda: not _running(name), 15), "the app stops on SIGTERM")

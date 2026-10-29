@@ -4,8 +4,6 @@ on:
   push:
     branches: [main]
   pull_request:
-  # Lets a maintainer run the checks on a branch that has no pull request yet.
-  workflow_dispatch:
 
 permissions:
   contents: read
