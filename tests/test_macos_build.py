@@ -37,8 +37,8 @@ def test_the_pins_are_well_formed() -> None:
     assert pins.url.startswith(build_app.PBS_RELEASES)
     assert pins.url.endswith("/" + pins.asset.replace("+", "%2B"))
     assert re.fullmatch(r"[0-9a-f]{64}", pins.sha256)
-    assert pins.app_name == "Loft"
-    assert pins.bundle_id == "com.lucille-ai.loft"
+    assert pins.app_name == "Capsule"
+    assert pins.bundle_id == "com.lucille-ai.capsule"
     assert pins.minimum_macos == "15.0"
 
 
@@ -55,8 +55,9 @@ def test_the_pins_are_well_formed() -> None:
             'x86_64-apple-darwin-install_only_stripped.tar.gz"\nurl',
         ),
         ('minimum_macos = "15.0"', 'minimum_macos = "12.0"'),
-        ('bundle_id = "com.lucille-ai.loft"', 'bundle_id = "Loft"'),
-        ('name = "Loft"', 'name = "Loft/Loft"'),
+        ('bundle_id = "com.lucille-ai.capsule"', 'bundle_id = "Capsule"'),
+        ('name = "Capsule"', 'name = "Capsule/Capsule"'),
+        ('name = "Capsule"', 'name = " Capsule"'),
         ('category = "public.app-category.utilities"', 'category = "utilities"'),
         ("[app]", '[app]\nextra = "x"'),
         ("[app]", "[apps]"),
@@ -119,6 +120,8 @@ def test_info_plist() -> None:
     assert plist["LSUIElement"] is True
     assert plist["CFBundleIdentifier"] == pins.bundle_id
     assert plist["CFBundleExecutable"] == plist["CFBundleName"] == pins.app_name
+    # The app reads its name from this key (HostText.appName).
+    assert plist["CFBundleDisplayName"] == pins.app_name
     assert plist["CFBundlePackageType"] == "APPL"
     assert plist["CFBundleShortVersionString"] == plist["CFBundleVersion"] == "0.1.0"
     assert plist["LucilleHostVersion"] == "0.1.0.dev0"
@@ -423,35 +426,61 @@ def test_every_listed_ability_says_what_lucille_gets() -> None:
         assert detail.startswith("Lucille gets ") and detail.endswith("."), detail
 
 
+def _named_in_swift(words: str, reference: str = "appName") -> str:
+    """``words`` as the Swift source spells them: the app's name is read from the bundle there."""
+    return words.replace(check_app.APP_NAME, f"\\({reference})")
+
+
 def test_the_ui_check_looks_for_the_apps_own_words() -> None:
     text = (build_app.SWIFT_DIR / "HostText.swift").read_text(encoding="utf-8")
     model = (build_app.SWIFT_DIR / "HostModel.swift").read_text(encoding="utf-8")
-    assert f'static let welcomeTitle = "{check_app.WELCOME_TITLE}"' in text
+    welcome = _named_in_swift(check_app.WELCOME_TITLE)
+    assert f'static let welcomeTitle = "{welcome}"' in text
     assert f'static let pausedNote = "{check_app.PAUSED_NOTE}"' in text
-    paused, running = check_app.STATUS_ITEM_NAMES[1], check_app.STATUS_ITEM_NAMES[0]
-    assert f'paused ? "{paused}" : "{running}"' in text
-    assert f'panel.prompt = "{check_app.OPEN_PROMPT}"' in model
+    assert check_app.STATUS_ITEM_NAMES == (check_app.APP_NAME, f"{check_app.APP_NAME}, paused")
+    assert 'paused ? "\\(appName), paused" : appName' in text
+    prompt = _named_in_swift(check_app.OPEN_PROMPT, "HostText.appName")
+    assert f'panel.prompt = "{prompt}"' in model
     assert "by the clock" in text
     assert '"Once this Mac is connected to Lucille, Lucille can use' in text
     source = (build_app.MACOS_DIR / "check_app.py").read_text(encoding="utf-8")
     assert source.count('"Once this Mac is connected to Lucille"') == 2
     # The welcome note says what the app is for in the sentences the folder usage keys hold.
-    assert f'static let appPurpose = "{check_app.PURPOSE}"' in text
+    assert f'static let appPurpose = "{_named_in_swift(check_app.PURPOSE)}"' in text
     assert "        \\(appPurpose)\n\n" in text
 
 
 def test_the_app_and_its_checks_use_the_apps_name() -> None:
     name = build_app.load_pins().app_name
+    text = (build_app.SWIFT_DIR / "HostText.swift").read_text(encoding="utf-8")
     model = (build_app.SWIFT_DIR / "HostModel.swift").read_text(encoding="utf-8")
-    app = (build_app.SWIFT_DIR / "LoftApp.swift").read_text(encoding="utf-8")
+    app = (build_app.SWIFT_DIR / "MenuBarApp.swift").read_text(encoding="utf-8")
+    assert check_app.APP_NAME == name
     assert check_app.WELCOME_TITLE == f"{name} is in your menu bar"
     assert check_app.STATUS_ITEM_NAMES == (name, f"{name}, paused")
     assert check_app.OPEN_PROMPT == f"Allow {name} to Use This Folder"
     assert f"Quit {name}" in check_app.MENU_ITEMS
-    assert app.count(f'"Quit {name}"') == 2
-    assert f'version.map {{ "{name} \\($0)" }} ?? "{name}"' in model
+    assert 'static let quitApp = "Quit \\(appName)"' in text
+    assert app.count("HostText.quitApp") == 2
+    assert 'version.map { "\\(HostText.appName) \\($0)" } ?? HostText.appName' in model
+    assert check_app.PURPOSE == build_app.folder_usage(name)
     assert check_app.PURPOSE.startswith(f"{name} lets Lucille ")
-    # The app's earlier name is gone from what the app shows and what checks it. The host
+    # The Swift code reads the name from the bundle's Info.plist, and spells it only once, as the
+    # fallback for code run outside the app (the self-test), which must be the same name.
+    fallback = (
+        'static let appName = Bundle.main.object(forInfoDictionaryKey: "CFBundleDisplayName")'
+        f' as? String ?? "{name}"'
+    )
+    assert fallback in text
+    workflow = WORKFLOW.read_text(encoding="utf-8")
+    assert f'ditto "build/macos/{name}.app"' in workflow
+    assert f"assert '{name}.app' in sys.base_prefix" in workflow
+    assert f"name: {name.lower()}-macos-screenshots" in workflow
+    for path in [*SWIFT_FILES, build_app.MACOS_DIR / "Tests" / "SelfTest.swift"]:
+        source = path.read_text(encoding="utf-8")
+        expected = 1 if path.name == "HostText.swift" else 0
+        assert len(re.findall(rf"\b{re.escape(name)}\b", source)) == expected, path
+    # The app's earlier names are gone from what the app shows and what checks it. The host
     # program inside keeps its own name, lucille-host.
     for path in [
         *SWIFT_FILES,
@@ -462,7 +491,9 @@ def test_the_app_and_its_checks_use_the_apps_name() -> None:
         build_app.PINS_FILE,
         WORKFLOW,
     ]:
-        assert "Lucille Host" not in path.read_text(encoding="utf-8"), path
+        source = path.read_text(encoding="utf-8")
+        assert "Lucille Host" not in source, path
+        assert "loft" not in source.lower(), path
 
 
 def _constraints_with(old: str, new: str) -> str:
@@ -537,21 +568,22 @@ def test_the_wheel_is_built_with_the_hashed_build_backend(tmp_path: Path) -> Non
 
 
 def test_the_disk_image_name_says_it_is_ad_hoc() -> None:
-    name = build_app.dmg_name("0.1.0", "4466aba0c0de")
-    assert name == "Loft-0.1.0-4466aba0c0de-adhoc-macOS-arm64.dmg"
+    name = build_app.dmg_name("Capsule", "0.1.0", "4466aba0c0de")
+    assert name == "Capsule-0.1.0-4466aba0c0de-adhoc-macOS-arm64.dmg"
     assert name.endswith(build_app.DMG_SUFFIX)
-    assert name != "Loft-0.1.0-macOS-arm64.dmg"
+    assert name != "Capsule-0.1.0-macOS-arm64.dmg"
     for commit in ("", "HEAD", "4466ABA", "4466ab", "../x"):
         with pytest.raises(build_app.BuildError):
-            build_app.dmg_name("0.1.0", commit)
+            build_app.dmg_name("Capsule", "0.1.0", commit)
 
 
 def test_only_this_scripts_disk_images_are_found(tmp_path: Path) -> None:
-    ours = tmp_path / build_app.dmg_name("0.1.0", "abcdef1")
+    ours = tmp_path / build_app.dmg_name("Capsule", "0.1.0", "abcdef1")
     ours.write_bytes(b"")
-    (tmp_path / "Loft-0.1.0-macOS-arm64.dmg").write_bytes(b"")
+    (tmp_path / "Capsule-0.1.0-macOS-arm64.dmg").write_bytes(b"")
+    (tmp_path / build_app.dmg_name("Other", "0.1.0", "abcdef1")).write_bytes(b"")
     (tmp_path / "other.dmg").write_bytes(b"")
-    assert build_app.disk_images(tmp_path) == [ours]
+    assert build_app.disk_images(tmp_path, "Capsule") == [ours]
 
 
 def _steps() -> list[dict[str, object]]:
@@ -572,8 +604,8 @@ def test_the_workflow_uploads_the_disk_image_only_from_a_good_build_of_this_repo
     # The name says the signature is ad hoc, and which event and commit built it, so an artifact
     # from a pull request never has the name of one from a push.
     assert upload["with"]["name"] == (
-        "loft-adhoc-macos-arm64-dmg-${{ github.event_name }}-"
-        "${{ github.event.pull_request.head.sha || github.sha }}"
+        f"{build_app.load_pins().app_name.lower()}-adhoc-macos-arm64-dmg-"
+        "${{ github.event_name }}-${{ github.event.pull_request.head.sha || github.sha }}"
     )
 
 
@@ -697,7 +729,7 @@ def test_the_libraries_and_run_paths_are_read_from_the_load_commands() -> None:
 def _bundle(tmp_path: Path) -> tuple[Path, Path, Path]:
     """A bundle laid out like the app's, with a space in its name: the interpreter, one extension
     module, and one library kept in ``lib/``."""
-    app = tmp_path / "Loft.app"
+    app = tmp_path / "Capsule.app"
     python_dir = app / "Contents" / "Resources" / "python"
     dynload = python_dir / "lib" / "python3.13" / "lib-dynload"
     dynload.mkdir(parents=True)
@@ -774,11 +806,11 @@ def test_libraries_that_do_not_resolve_inside_the_bundle_fail(
 
 def test_only_the_title_or_description_names_the_menu_bar_item() -> None:
     # What System Events reported when only the tooltip carried the name.
-    tooltip_only = {"title": "Computer", "description": "status menu", "help": "Loft"}
-    assert not check_app._named(tooltip_only, "Loft")
-    assert check_app._named({**tooltip_only, "title": "Loft"}, "Loft")
-    assert check_app._named({"description": "Loft, paused"}, "Loft, paused")
-    assert not check_app._named({}, "Loft")
+    tooltip_only = {"title": "Computer", "description": "status menu", "help": "Capsule"}
+    assert not check_app._named(tooltip_only, "Capsule")
+    assert check_app._named({**tooltip_only, "title": "Capsule"}, "Capsule")
+    assert check_app._named({"description": "Capsule, paused"}, "Capsule, paused")
+    assert not check_app._named({}, "Capsule")
 
 
 @pytest.mark.parametrize(

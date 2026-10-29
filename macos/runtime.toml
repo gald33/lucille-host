@@ -13,11 +13,13 @@ url = "https://github.com/astral-sh/python-build-standalone/releases/download/20
 sha256 = "8392b6ea51d94391befb2c31ebe75463f045d0b69dfcf5e1bb3234e1f5fa3405"
 
 [app]
-# The app's name, as macOS and its user see it. The host program inside keeps its own name,
+# The app's name, as macOS and its user see it. This is the one place it is set: build_app.py
+# writes it into Info.plist, the app reads it from there, and the checks read it from here. It is
+# a working name until the first signed build. The host program inside keeps its own name,
 # lucille-host.
-name = "Loft"
+name = "Capsule"
 # The app's permanent identifier. Changing it after a signed release makes macOS ask the user
 # again for every folder and Keychain item.
-bundle_id = "com.lucille-ai.loft"
+bundle_id = "com.lucille-ai.capsule"
 minimum_macos = "15.0"
 category = "public.app-category.utilities"

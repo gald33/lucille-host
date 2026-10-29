@@ -4,7 +4,7 @@ import Foundation
 /// the calls the menu makes, through the same code, with a temporary HOME. CI compiles it with
 /// those files (`macos/check_app.py swift`). Exit status 1 on any failure.
 ///
-///     selftest --vectors alias-vectors.json [--app "Loft.app" --home DIR --version V]
+///     selftest --vectors alias-vectors.json [--app NAME.app --home DIR --version V]
 @main
 struct SelfTest {
     static func main() {
@@ -114,7 +114,7 @@ struct SelfTest {
                 """,
             timedOut: false)
         report.expect(HostText.explain(usage) == Explanation(
-                          message: "Something went wrong in Loft's helper program.",
+                          message: "Something went wrong in \(HostText.appName)'s helper program.",
                           detail: "the following arguments are required: path"),
                       "a usage error is a plain sentence, with the host's words as the detail", "\(HostText.explain(usage))")
         func refusal(_ text: String) -> CLIResult {
@@ -125,16 +125,16 @@ struct SelfTest {
             ("taxes is already a folder alias; remove it first",
              "You already have a folder named taxes. Choose another name."),
             ("the policy holds at most 64 folder aliases",
-             "Loft can use at most 64 folders. Remove one before you add another."),
+             "\(HostText.appName) can use at most 64 folders. Remove one before you add another."),
             ("/Users/a/Library/Application Support/lucille-host is where lucille-host keeps its own files",
-             "That folder holds Loft's own settings, so it can't be added."),
+             "That folder holds \(HostText.appName)'s own settings, so it can't be added."),
             ("the policy file /x/policy.json is invalid: ops.files.sha256.definition must be 64 lowercase hex digits",
-             "Loft's settings file can't be read."),
+             "\(HostText.appName)'s settings file can't be read."),
             ("cannot lock /x/.policy.lock (Operation not supported), so the policy was not changed",
-             "Loft couldn't lock its settings file, so nothing was changed. Try again."),
+             "\(HostText.appName) couldn't lock its settings file, so nothing was changed. Try again."),
             ("files.sha256 is not enabled", "That ability was already off."),
             ("/gone is not a folder", "That folder is no longer there."),
-            ("something new", "Something went wrong in Loft's helper program."),
+            ("something new", "Something went wrong in \(HostText.appName)'s helper program."),
         ]
         for (text, message) in plain {
             let got = HostText.explain(refusal(text))
@@ -198,7 +198,7 @@ struct SelfTest {
         let documents = HostText.aliasPrompt(folderName: "Taxes", note: nil,
                                              place: HostText.place(of: "/Users/a/Documents/Taxes", home: home, synced: true))
         report.expect(documents.contains("access files in your Documents folder. Click Allow")
-                          && documents.hasSuffix("may not work with Loft yet."),
+                          && documents.hasSuffix("may not work with \(HostText.appName) yet."),
                       "a folder in Documents is announced, and an iCloud one warned about", documents)
         let drive = HostText.aliasPrompt(folderName: "Photos", note: nil,
                                          place: HostText.place(of: "/Volumes/Backup/Photos", home: home))
@@ -206,8 +206,8 @@ struct SelfTest {
         report.expect(!HostText.aliasPrompt(folderName: "Work", note: nil).contains("macOS"),
                       "a folder elsewhere brings no announcement")
 
-        report.expect(HostText.statusItemName(paused: false) == "Loft"
-                          && HostText.statusItemName(paused: true) == "Loft, paused",
+        report.expect(HostText.statusItemName(paused: false) == HostText.appName
+                          && HostText.statusItemName(paused: true) == "\(HostText.appName), paused",
                       "the menu bar item has a name, which says when Lucille is paused")
         report.expect(HostText.folderAdded(alias: "taxes").hasPrefix("Once this Mac is connected to Lucille,"),
                       "a folder added is useful once connected, and the app says so")
@@ -215,17 +215,17 @@ struct SelfTest {
                           && !HostText.welcomeText.contains("\\"),
                       "the welcome says where the menu is", HostText.welcomeText)
         report.expect(HostText.welcomeText.hasPrefix(HostText.appPurpose + "\n\n")
-                          && HostText.appPurpose.hasPrefix("Loft lets Lucille use only the folders you choose"),
+                          && HostText.appPurpose.hasPrefix("\(HostText.appName) lets Lucille use only the folders you choose"),
                       "the welcome first says what the app is for", HostText.welcomeText)
         let detailed = Ability(name: "files.sha256", state: "disabled")
         report.expect(detailed.detail == HostText.abilityDetails["files.sha256"] && detailed.detail?.contains("not the contents") == true,
                       "an ability says what Lucille gets")
         let broken = CLIResult(status: CLIResult.notStarted, stdout: "", stderr: "no such file", timedOut: false)
-        report.expect(HostText.explain(broken) == Explanation(message: "Loft is damaged. Download it again.",
+        report.expect(HostText.explain(broken) == Explanation(message: "\(HostText.appName) is damaged. Download it again.",
                                                               detail: "no such file"),
                       "a helper program that cannot start says to download the app again")
         let silent = CLIResult(status: 3, stdout: "", stderr: "", timedOut: false)
-        report.expect(HostText.explain(silent).message == "Something went wrong in Loft's helper program."
+        report.expect(HostText.explain(silent).message == "Something went wrong in \(HostText.appName)'s helper program."
                           && HostText.explain(silent).detail == "It stopped with exit status 3.",
                       "a failure with no reason names no status in its sentence")
 
@@ -308,7 +308,7 @@ struct SelfTest {
         let own = URL(fileURLWithPath: home).appendingPathComponent("Library/Application Support/lucille-host")
         let ownFolder = cli.run(["roots", "add", "own", own.path])
         report.expect(!ownFolder.succeeded
-                          && HostText.explain(ownFolder).message == "That folder holds Loft's own settings, so it can't be added.",
+                          && HostText.explain(ownFolder).message == "That folder holds \(HostText.appName)'s own settings, so it can't be added.",
                       "the host's own folder is refused in plain words", "\(HostText.explain(ownFolder))")
         let off = cli.run(["ops", "disable", "files.sha256"])
         report.expect(!off.succeeded && HostText.explain(off).message == "That ability was already off.",

@@ -1,10 +1,10 @@
 import AppKit
 import SwiftUI
 
-/// Loft, the menu bar app that runs the host. It has no window and no Dock icon (LSUIElement);
+/// The menu bar app that runs the host. It has no window and no Dock icon (LSUIElement);
 /// everything it does is in this menu.
 @main
-struct LoftApp: App {
+struct MenuBarApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @StateObject private var model = HostModel()
 
@@ -47,7 +47,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         alert.messageText = HostText.welcomeTitle
         alert.informativeText = HostText.welcomeText
         alert.addButton(withTitle: "OK")
-        alert.addButton(withTitle: "Quit Loft")
+        alert.addButton(withTitle: HostText.quitApp)
         NSApp.activate()
         if alert.runModal() == .alertSecondButtonReturn {
             NSApplication.shared.terminate(nil)
@@ -122,7 +122,7 @@ struct HostMenu: View {
         Button("Connect to Lucille (coming soon)") {}
             .disabled(true)
         Divider()
-        Button("Quit Loft") { NSApplication.shared.terminate(nil) }
+        Button(HostText.quitApp) { NSApplication.shared.terminate(nil) }
             .keyboardShortcut("q")
     }
 }

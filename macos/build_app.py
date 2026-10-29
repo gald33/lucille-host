@@ -1,5 +1,5 @@
-"""Build Loft, the Mac app that runs the host, for Apple silicon Macs, and a disk image that
-holds it.
+"""Build the Mac app that runs the host, for Apple silicon Macs, and a disk image that holds it.
+The app's name and identifier are in ``macos/runtime.toml``; ``<name>`` below is that name.
 
     uv run --no-project python macos/build_app.py build   # on a Mac: the app and the .dmg
     uv run --no-project python macos/build_app.py plan    # anywhere: check the pins, show the plan
@@ -13,7 +13,7 @@ under ``build/macos/``, which git ignores:
 2. Builds the host's wheel from this checkout (``uv build --wheel``), with a build backend that
    ``macos/build-constraints.txt`` pins by hash (``--build-constraints ... --require-hashes``), and
    exports the runtime dependencies ``uv.lock`` pins, with their hashes (``uv export --frozen``).
-3. Unpacks the runtime into ``Loft.app/Contents/Resources/python``. Keeps one program,
+3. Unpacks the runtime into ``<name>.app/Contents/Resources/python``. Keeps one program,
    ``bin/python3``, and removes what the app never uses (:func:`prune_runtime`). No symbolic link
    is left in the bundle.
 4. Installs the dependencies, then the host wheel, into that interpreter with ``pip install
@@ -26,7 +26,7 @@ under ``build/macos/``, which git ignores:
 7. Signs every Mach-O file in the bundle, innermost first, then the bundle. The signature is ad
    hoc (``codesign -s -``), with the hardened runtime and no entitlements. A signature macOS
    trusts needs a Developer ID and notarization, which this script does not do.
-8. Builds ``Loft-<version>-<commit>-adhoc-macOS-arm64.dmg``, which holds the app and a link to
+8. Builds ``<name>-<version>-<commit>-adhoc-macOS-arm64.dmg``, which holds the app and a link to
    ``/Applications`` on a volume named after the app. The file name says the signature is ad hoc
    and names the commit, so the image cannot be taken for a release asset.
 
@@ -65,25 +65,15 @@ PYPROJECT: Final = MACOS_DIR.parent / "pyproject.toml"
 SWIFT_DIR: Final = MACOS_DIR / "App"
 VERSION_FILE: Final = REPO_ROOT / "src" / "lucille_host" / "__init__.py"
 DEFAULT_OUT: Final = REPO_ROOT / "build" / "macos"
-# Every disk image this script makes starts with DMG_PREFIX and ends with DMG_SUFFIX. A release's
-# image, made elsewhere with a Developer ID signature, will not end so.
-DMG_PREFIX: Final = "Loft-"
+# Every disk image this script makes starts with the app's name and a hyphen, and ends with
+# DMG_SUFFIX. A release's image, made elsewhere with a Developer ID signature, will not end so.
 DMG_SUFFIX: Final = "-adhoc-macOS-arm64.dmg"
 
 PBS_RELEASES: Final = "https://github.com/astral-sh/python-build-standalone/releases/download/"
 # Folder and file names inside the runtime. The pins allow Python 3.13 only, so these are fixed.
 STDLIB: Final = "lib/python3.13"
 INTERPRETER: Final = "bin/python3"
-# What the bundle's Info.plist says for macOS to show when it asks the user about a protected
-# folder: what the app is for, in the sentences the app opens with (HostText.appPurpose). The second
-# sentence is there because host.describe is on by default. macOS is meant to show this under its
-# own question; whether it does, and whether that question names the app or the interpreter, is not
-# yet tested on a Mac (macos/README.md, "What CI does not check").
-FOLDER_USAGE: Final = (
-    "Loft lets Lucille use only the folders you choose on this Mac, and only for the abilities "
-    "you turn on. Lucille can also see which abilities are on, and the names you gave your folders."
-)
-# The Info.plist keys that hold FOLDER_USAGE: Documents, Desktop, Downloads, and removable and
+# The Info.plist keys that hold folder_usage(): Documents, Desktop, Downloads, and removable and
 # network volumes, the places macOS asks about before the host may read them.
 FOLDER_USAGE_KEYS: Final = (
     "NSDocumentsFolderUsageDescription",
@@ -249,11 +239,24 @@ def release_triple(version: str) -> str:
     return ".".join(parts + ["0"] * (3 - len(parts)))
 
 
+def folder_usage(app_name: str) -> str:
+    """What the bundle's Info.plist says for macOS to show when it asks the user about a protected
+    folder: what the app is for, in the sentences the app opens with (HostText.appPurpose). The
+    second sentence is there because host.describe is on by default. macOS is meant to show this
+    under its own question; whether it does, and whether that question names the app or the
+    interpreter, is not yet tested on a Mac (macos/README.md, "What CI does not check")."""
+    return (
+        f"{app_name} lets Lucille use only the folders you choose on this Mac, and only for the "
+        "abilities you turn on. Lucille can also see which abilities are on, and the names you "
+        "gave your folders."
+    )
+
+
 def info_plist(pins: Pins, version: str) -> dict[str, Any]:
     """The app's Info.plist. ``LucilleHostVersion`` is the host's exact version; the bundle
     version strings carry its release numbers, because Apple's format allows nothing else."""
     triple = release_triple(version)
-    usage = dict.fromkeys(FOLDER_USAGE_KEYS, FOLDER_USAGE)
+    usage = dict.fromkeys(FOLDER_USAGE_KEYS, folder_usage(pins.app_name))
     return {
         "CFBundleDevelopmentRegion": "en",
         "CFBundleDisplayName": pins.app_name,
@@ -274,17 +277,17 @@ def info_plist(pins: Pins, version: str) -> dict[str, Any]:
     }
 
 
-def dmg_name(version: str, commit: str) -> str:
+def dmg_name(app_name: str, version: str, commit: str) -> str:
     """The disk image's file name. It names the commit it was built from and says that its
     signature is ad hoc, so that a build from CI cannot be taken for a release asset."""
     if _COMMIT.fullmatch(commit) is None:
         raise BuildError(f"{commit!r} is not an abbreviated commit id")
-    return f"{DMG_PREFIX}{version}-{commit}{DMG_SUFFIX}"
+    return f"{app_name}-{version}-{commit}{DMG_SUFFIX}"
 
 
-def disk_images(out: Path) -> list[Path]:
+def disk_images(out: Path, app_name: str) -> list[Path]:
     """The disk images this script has made in ``out``."""
-    return sorted(out.glob(f"{DMG_PREFIX}*{DMG_SUFFIX}"))
+    return sorted(out.glob(f"{app_name}-*{DMG_SUFFIX}"))
 
 
 def _normal_name(name: str) -> str:
@@ -741,7 +744,7 @@ def plan(out: Path) -> None:
     print(f"app               {out / (pins.app_name + '.app')}")
     print(f"bundle id         {pins.bundle_id}, macOS {pins.minimum_macos} or later, arm64")
     print(f"build backend     {len(constraints)} wheels, by hash, from {BUILD_CONSTRAINTS.name}")
-    print(f"disk image        {out}/{DMG_PREFIX}{version}-<commit>{DMG_SUFFIX}")
+    print(f"disk image        {out}/{pins.app_name}-{version}-<commit>{DMG_SUFFIX}")
     print(f"  volume          {pins.app_name}")
     print(f"Info.plist        written to {plist_path}")
 
@@ -798,9 +801,9 @@ def build(out: Path, archive: Path | None) -> Path:
     )
     sign_app(app, executable, pins.bundle_id)
 
-    for old in disk_images(out):
+    for old in disk_images(out, pins.app_name):
         old.unlink()
-    dmg = out / dmg_name(version, commit)
+    dmg = out / dmg_name(pins.app_name, version, commit)
     make_dmg(app, dmg, pins.app_name, work)
     print(f"app         {app}")
     print(f"disk image  {dmg} ({dmg.stat().st_size} bytes, sha256 {sha256_of(dmg)})")
@@ -809,7 +812,7 @@ def build(out: Path, archive: Path | None) -> Path:
 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        prog="build_app.py", description="Build Loft, the Mac app, and its disk image."
+        prog="build_app.py", description="Build the Mac app and its disk image."
     )
     commands = parser.add_subparsers(dest="command", required=True, metavar="COMMAND")
     plan_parser = commands.add_parser("plan", help="check the pins and write the Info.plist only")

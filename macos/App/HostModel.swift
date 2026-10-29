@@ -34,7 +34,7 @@ final class HostModel: ObservableObject {
     }
 
     var title: String {
-        version.map { "Loft \($0)" } ?? "Loft"
+        version.map { "\(HostText.appName) \($0)" } ?? HostText.appName
     }
 
     /// Pairing is not built yet, so this Mac is never connected; the line says so first.
@@ -127,7 +127,7 @@ final class HostModel: ObservableObject {
         let panel = NSOpenPanel()
         panel.title = "Add a Folder"
         panel.message = "Choose a folder Lucille may work in. Abilities you turn on can use the files in it."
-        panel.prompt = "Allow Loft to Use This Folder"
+        panel.prompt = "Allow \(HostText.appName) to Use This Folder"
         panel.canChooseDirectories = true
         panel.canChooseFiles = false
         panel.allowsMultipleSelection = false
@@ -237,7 +237,7 @@ final class HostModel: ObservableObject {
         if result.cancelled && added {
             showNote(
                 title: "The folder was added",
-                text: "Loft had already added \u{201C}\(alias)\u{201D} when you cancelled. To undo it, choose Folders, then \(alias), then Remove."
+                text: "\(HostText.appName) had already added \u{201C}\(alias)\u{201D} when you cancelled. To undo it, choose Folders, then \(alias), then Remove."
             )
             return
         }
@@ -332,7 +332,7 @@ final class HostModel: ObservableObject {
     private func showFailure(_ explanation: Explanation, action: String) {
         let alert = NSAlert()
         alert.alertStyle = .warning
-        alert.messageText = "Loft could not \(action)."
+        alert.messageText = "\(HostText.appName) could not \(action)."
         alert.informativeText = explanation.message
             + (explanation.detail.map { "\n\nDetails: \($0)" } ?? "")
         alert.addButton(withTitle: "OK")

@@ -126,7 +126,7 @@ struct HostCLI: Sendable {
             return CLIResult(
                 status: CLIResult.notStarted,
                 stdout: "",
-                stderr: "Loft could not start \(python.path): \(error.localizedDescription)",
+                stderr: "\(HostText.appName) could not start \(python.path): \(error.localizedDescription)",
                 timedOut: false
             )
         }

@@ -1,4 +1,4 @@
-# 0002: Loft, the Mac app (draft)
+# 0002: Capsule, the Mac app (draft)
 
 Author: lucille-host maintainers. First written 2026-10-29. Status: **draft.** A first, smaller build exists
 in [`macos/`](../macos/README.md); "What is built today", below, says what it is. Everything else in this
@@ -19,17 +19,18 @@ Python, and without Homebrew. Mac first; nothing here may block a Windows or Lin
 - "Measured" means run on 2026-10-29 in a Linux container, not on a Mac.
 - Every macOS dialog quoted here is quoted from documentation or reports, not seen on a Mac.
 - "Seen in CI" means run on 2026-10-29 on a GitHub-hosted macOS runner, by the first build's workflow.
-- **The app is named Loft** ("Loft, by Lucille" where the brand helps), with the bundle identifier
-  `com.lucille-ai.loft`. Where no name is needed, this record says "the app". Only what a user sees and the
-  app's identifiers carry the name: the package, the command (`lucille-host`), its folders and profiles, and
-  this repository keep theirs.
+- **The app's working name is Capsule** ("Capsule, by Lucille" where the brand helps), with the bundle
+  identifier `com.lucille-ai.capsule`. The name may still change before the first signed build, after which
+  the identifiers cannot (§7); it is checked first ("Not decided yet"). Where no name is needed, this record
+  says "the app". Only what a user sees and the app's identifiers carry the name: the package, the command
+  (`lucille-host`), its folders and profiles, and this repository keep theirs.
 
 ## What is built today
 
 The first build is in [`macos/`](../macos/README.md), and its README is the reference for it. It is not a
 release, and it is for people developing the app.
-- **`Loft.app`**, a menu bar app for Apple silicon Macs with macOS 15 or later, with no main window and no
-  Dock icon; and **`Loft-<version>-<commit>-adhoc-macOS-arm64.dmg`**, a disk image that holds it and a link
+- **`Capsule.app`**, a menu bar app for Apple silicon Macs with macOS 15 or later, with no main window and no
+  Dock icon; and **`Capsule-<version>-<commit>-adhoc-macOS-arm64.dmg`**, a disk image that holds it and a link
   to Applications.
 - **Inside it**, a python-build-standalone CPython 3.13 at `Contents/Resources/python`, pinned in
   `macos/runtime.toml` by URL and sha256, with the host's wheel built from the checkout and the exact wheels
@@ -39,7 +40,7 @@ release, and it is for people developing the app.
   files, and opens no network connection.
 - **The menu** shows the version and "Not connected to Lucille", and offers Pause and Resume, the abilities
   (the operations, switched with `ops enable` and `ops disable`), Add a Folder…, the folders with Remove, and
-  Quit Loft. "Connect to Lucille (coming soon)" is disabled, because the host cannot pair yet.
+  Quit Capsule. "Connect to Lucille (coming soon)" is disabled, because the host cannot pair yet.
 - **It is signed ad hoc**, with the hardened runtime and no entitlements, and it is not notarized, so macOS
   refuses to open it normally.
 - **The `macos-app` workflow** builds it on GitHub's `macos-15` runner, runs each check in
@@ -47,14 +48,15 @@ release, and it is for people developing the app.
   a 7-day artifact when every check passed.
 
 Not built yet: pairing, running in the background and opening at login, the JSON contract (§8), the Welcome
-and main windows, updates, **Remove Loft…** (section 17), Developer ID signing and notarization, ripgrep, and
-the release jobs. The first build also departs from this record in these ways, among others;
+and main windows, updates, **Remove Capsule…** (section 17), Developer ID signing and notarization, ripgrep,
+and the release jobs. The first build also departs from this record in these ways, among others;
 `macos/README.md`, under "Choices made for the first build", says why for most of them:
 - the interpreter is the runtime's own `python3`, not renamed. It is signed ad hoc with
-  `--prefix com.lucille-ai.loft.`, which gives it the identifier `com.lucille-ai.loft.python3` (seen in CI),
-  not the planned `com.lucille-ai.loft.runtime` (§6). The runtime ships hash-checked `.pyc` files (§6);
+  `--prefix com.lucille-ai.capsule.`, which gives it the identifier `com.lucille-ai.capsule.python3` (seen
+  in CI), not the planned `com.lucille-ai.capsule.runtime` (§6). The runtime ships hash-checked `.pyc`
+  files (§6);
 - the command line runs with `PATH=/usr/bin:/bin`, and without `-X utf8` (§6, §9);
-- the app opens from any folder, where the planned app runs only from `/Applications/Loft.app` (§13);
+- the app opens from any folder, where the planned app runs only from `/Applications/Capsule.app` (§13);
 - the app uses the host's `default` profile, the one a `pipx` install uses, not its own `mac-app` profile
   (§9);
 - there is no `MANIFEST.json`. The build writes `Contents/Resources/build-manifest.json` instead, with the
@@ -66,7 +68,7 @@ the release jobs. The first build also departs from this record in these ways, a
 - the words for each ability and the suggested folder names are in the Swift app, not in the core (§8, §12,
   §13);
 - the `Info.plist` has five folder usage keys, not six (no file providers), each with the sentences on what
-  Loft is for, which macOS is meant to show under its folder questions (§12; not yet tested on a Mac);
+  Capsule is for, which macOS is meant to show under its folder questions (§12; not yet tested on a Mac);
 - the app asks about `/` and the Data volume (`/System/Volumes/Data`) as it asks about the home folder, and
   adds either one after **Add Anyway**, where the planned app refuses both outright (§12). Here the first
   build allows more than this record;
@@ -79,7 +81,7 @@ Where this record says what the app does, it describes the planned app.
 
 ## 1. What the Mac app is
 
-- **One disk image, one app.** A signed, notarized and stapled `.dmg` holds `Loft.app`. The user
+- **One disk image, one app.** A signed, notarized and stapled `.dmg` holds `Capsule.app`. The user
   drags it into Applications.
 - **The app is two parts.**
   - A small native menu-bar app, written in Swift. It shows windows and a menu, and it calls macOS.
@@ -119,21 +121,21 @@ The app is done when:
 
 ### 3.1 The final form
 
-1. On Lucille's Computers page: **Download Loft for Mac**. The link points at this repository's
+1. On Lucille's Computers page: **Download Capsule for Mac**. The link points at this repository's
    GitHub Releases, never at a copy on Lucille's servers (Lucille policy as of 2026-10-29; not proven by this
    repository). The page states "A Mac with Apple silicon (any M-series chip, or MacBook Neo), macOS 15 or
    later" and how to check.
 2. The user opens the download. A Finder window shows the app, an arrow and the Applications folder. They
    drag one onto the other. (A standard account may need an administrator's name and password here; that is
    the Finder protecting Applications, not this app.)
-3. They open Loft. macOS asks once whether to open an app downloaded from the internet; Lucille's page
+3. They open Capsule. macOS asks once whether to open an app downloaded from the internet; Lucille's page
    shows a picture of that dialog beforehand. They click **Open**.
 4. **Welcome**: what the app does, in the claim's own terms, and "Nothing runs until you connect and
    confirm." One button: **Connect this Mac to Lucille**. The app says: "Your browser will open Lucille. If it
-   asks to open Loft, click Open."
+   asks to open Capsule, click Open."
 5. Lucille's connect page, signed in: "Connect a computer to your Lucille account (a•••@example.com)? Only
-   continue if you just clicked Connect in Loft on this Mac." The page never submits on its own. The
-   user clicks **Connect**; the browser asks "Open Loft?"; they click **Open** (Lucille policy as of
+   continue if you just clicked Connect in Capsule on this Mac." The page never submits on its own. The
+   user clicks **Connect**; the browser asks "Open Capsule?"; they click **Open** (Lucille policy as of
    2026-10-29 for the page; not proven by this repository).
 6. The app: "Connecting to the Lucille account a•••@example.com. Is this your account?" Then: "Type the
    8-digit number shown on Lucille's page." The user types it. The app answers at once: "Matches. Now click
@@ -144,7 +146,7 @@ The app is done when:
 8. **Folders**: **Choose a Folder…** opens the standard Open panel. The app suggests a short name, which the
    user may change (§12).
 9. **What Lucille may do**: one switch per operation, all off (§13).
-10. **Finish**: "Open Loft when you log in" (on). "macOS will show a notice that Loft can now
+10. **Finish**: "Open Capsule when you log in" (on). "macOS will show a notice that Capsule can now
     open when you log in. That is expected. You can change it later in System Settings › General › Login
     Items & Extensions." **Done.**
 
@@ -169,25 +171,25 @@ never published, because anyone can make a code that passes the host's code chec
 
 | Mistake | What the user sees | Fix, with no Terminal |
 |---|---|---|
-| Opened the app from the disk image, Downloads, or anywhere but Applications | "Loft needs to be in your Applications folder" | Drag it there; **Show Applications Folder** opens the Finder (§6) |
-| Cancelled the browser's "Open Loft?" | Lucille's page: "Didn't open? Try again" (Lucille policy as of 2026-10-29; not proven by this repository) | Re-sends the link; the Connect request lives 20 minutes |
+| Opened the app from the disk image, Downloads, or anywhere but Applications | "Capsule needs to be in your Applications folder" | Drag it there; **Show Applications Folder** opens the Finder (§6) |
+| Cancelled the browser's "Open Capsule?" | Lucille's page: "Didn't open? Try again" (Lucille policy as of 2026-10-29; not proven by this repository) | Re-sends the link; the Connect request lives 20 minutes |
 | Closed the browser tab mid-connect | App: "Waiting for Lucille…" with **Start Over** | A new Connect |
 | Typed the wrong number | "That doesn't match. Type the number Lucille's page shows." After 3 tries: "Nothing was connected. In Lucille, click They differ, then start again." | **Start Over** |
-| Clicked **Don't Allow** on a folder prompt | "macOS is blocking Loft from this folder" | **Open Privacy Settings** (§12) |
+| Clicked **Don't Allow** on a folder prompt | "macOS is blocking Capsule from this folder" | **Open Privacy Settings** (§12) |
 | Chose a folder that is too broad | A second sheet, safe choice as default (§12) | **Choose a Smaller Folder** |
 | Moved, renamed or unplugged a chosen folder | "The folder documents can't be found" (from `roots check`, at launch and in Folders) | **Choose Again**, which removes the alias and adds the folder from the Open panel. A different folder later created at the old path is not detected (not decided yet, §12) |
-| Turned off the login item in System Settings | On next open: "Loft won't start when you log in" | **Turn Back On** |
+| Turned off the login item in System Settings | On next open: "Capsule won't start when you log in" | **Turn Back On** |
 | Quit the app and forgot | Lucille's page shows the computer as not answering (Lucille policy as of 2026-10-29; not proven by this repository) | Open the app |
-| Paused and forgot, or a task was stopped at Quit or log out (§9) | A pause badge on the icon; at launch, "Loft is paused" | **Resume** |
+| Paused and forgot, or a task was stopped at Quit or log out (§9) | A pause badge on the icon; at launch, "Capsule is paused" | **Resume** |
 | The Mac's clock is off by more than 300 s | "Your Mac's clock is off by 7 minutes, so Lucille can't reach it" | **Open Date & Time Settings** |
-| The settings file became invalid | "Loft's settings can't be read, so it is doing nothing" | **Reset Settings** (`policy reset`, §10): folders and operations start from the fresh policy |
-| The Keychain is locked or unusable (`run` exits 23) | "macOS's Keychain isn't available to Loft" | **Try Again**; if it persists, restart the Mac, then **Copy Diagnostics** to ask for help. Not always undone in the app |
+| The settings file became invalid | "Capsule's settings can't be read, so it is doing nothing" | **Reset Settings** (`policy reset`, §10): folders and operations start from the fresh policy |
+| The Keychain is locked or unusable (`run` exits 23) | "macOS's Keychain isn't available to Capsule" | **Try Again**; if it persists, restart the Mac, then **Copy Diagnostics** to ask for help. Not always undone in the app |
 | An update turned an operation off | "Search inside files was turned off because the update changed it" | **Review and Turn On** |
-| Lucille needs a newer host | "Lucille needs Loft 0.3.0 or newer" (the minimum comes from Lucille's request; Lucille policy as of 2026-10-29; not proven by this repository) | **Download**, which opens the release page (§16) |
-| Chose **Keep Both** when dragging an update, making "Loft 2" | "This copy is named Loft 2, so it can't run" | Move Loft 2 to the Trash, then drag the new app again and choose **Replace** |
-| A release turned out bad, and the older one refuses to start after it (§16) | "This Loft is older than the one you used before" | None in the app: the only fix for a bad release is the next release |
+| Lucille needs a newer host | "Lucille needs Capsule 0.3.0 or newer" (the minimum comes from Lucille's request; Lucille policy as of 2026-10-29; not proven by this repository) | **Download**, which opens the release page (§16) |
+| Chose **Keep Both** when dragging an update, making "Capsule 2" | "This copy is named Capsule 2, so it can't run" | Move Capsule 2 to the Trash, then drag the new app again and choose **Replace** |
+| A release turned out bad, and the older one refuses to start after it (§16) | "This Capsule is older than the one you used before" | None in the app: the only fix for a bad release is the next release |
 | Removed the computer on Lucille's page | "This Mac was disconnected in Lucille" | **Connect Again** |
-| Dragged the app to the Trash instead of Remove | Nothing on the Mac; Lucille's page explains (section 17) | Reinstall, then **Remove Loft…** |
+| Dragged the app to the Trash instead of Remove | Nothing on the Mac; Lucille's page explains (section 17) | Reinstall, then **Remove Capsule…** |
 
 ## 4. Packaging
 
@@ -238,9 +240,9 @@ An Intel Mac refuses the app with macOS's own message. **Not decided yet:** Inte
 ## 6. Inside the bundle
 
 ```
-Loft.app/Contents/
+Capsule.app/Contents/
   Info.plist
-  MacOS/Loft                           the Swift menu-bar app (arm64)
+  MacOS/Capsule                           the Swift menu-bar app (arm64)
   Helpers/rg                           ripgrep, built from pinned source (§13), from the first public release
   Resources/
     MANIFEST.json                      versions; sha256 of the runtime tarball, of every wheel installed,
@@ -282,7 +284,7 @@ Loft.app/Contents/
   `checked-hash` files that `verify_app.py` recompiles with the bundled interpreter and compares. **Not
   decided yet** until that measurement. (The runtime's own files are whatever its pinned tarball holds.)
 - **It is renamed** so that Activity Monitor and any macOS prompt name it, not `python3.13`, and it has its own
-  signing identifier (`com.lucille-ai.loft.runtime`).
+  signing identifier (`com.lucille-ai.capsule.runtime`).
 - **Mach-O files under `Contents/Resources`.** Apple's placement table ("Placing Content in a Bundle") puts
   libraries in `Contents/Frameworks` and a helper tool in `Contents/MacOS` or `Contents/Helpers`, and warns
   that incorrectly placed code "might cause problems during notarization". The interpreter is a helper tool,
@@ -341,7 +343,7 @@ Loft.app/Contents/
   network is not yet tested on a Mac; the first candidate tests it. Only if it fails is the app notarized
   and stapled too, before the disk image is built, which costs a second notary round per build. The
   notarization log is kept with every build, success or not.
-- **Identifiers are permanent.** The bundle identifier (`com.lucille-ai.loft`), the interpreter's identifier and the Team ID
+- **Identifiers are permanent.** The bundle identifier (`com.lucille-ai.capsule`), the interpreter's identifier and the Team ID
   decide macOS's privacy grants, the Keychain's trust and the login item (§16 cites the sources). Changing any
   of them after release makes macOS ask every user again.
 - **One version number, for a build from a tag.** For a release or a candidate built from a `v*` tag,
@@ -398,7 +400,7 @@ channel is easier to test.
 **What we chose.** The host runs as a child of the menu-bar app:
 
 ```
-login ─► Loft (menu bar; an "Open at Login" item)
+login ─► Capsule (menu bar; an "Open at Login" item)
             │ starts, with an argv, a built environment, and a pipe on standard input it holds
             ▼
          lucille-host-runtime -I -B -X utf8 -m lucille_host --json run --json-events --exit-on-stdin-eof
@@ -435,10 +437,10 @@ login ─► Loft (menu bar; an "Open at Login" item)
   environment (`SWITCHBOARD_*`, uid 0); 25 a downgrade (§16); anything else is a crash. A `stopped` event with
   a reason comes before every planned exit.
 - **Crashes.** The app restarts `run` with backoff (2, 4, 8 … 300 s). After five crashes in ten minutes it
-  stops and shows "Loft keeps stopping", with the last lines of standard error behind a disclosure.
-- **Quit.** The menu asks first: "Your Mac will stop answering Lucille until you open Loft again." The
+  stops and shows "Capsule keeps stopping", with the last lines of standard error behind a disclosure.
+- **Quit.** The menu asks first: "Your Mac will stop answering Lucille until you open Capsule again." The
   app then closes the pipe and shows "Finishing the current task…" with **Stop now**, which runs `kill`.
-  `kill` also sets the pause flag (`controls.py`), so the sheet says so: "Stop now (Loft will be
+  `kill` also sets the pause flag (`controls.py`), so the sheet says so: "Stop now (Capsule will be
   paused when you next open it)".
 - **Logout, restart, shutdown.** The same, with the drain capped at 20 s. At the cap the app runs `kill`, so the
   operation's process group is killed and the reply `failed killed_locally` is still posted. Only a force-quit
@@ -446,7 +448,7 @@ login ─► Loft (menu bar; an "Open at Login" item)
   (THREAT_MODEL.md, "Known gaps").
 - **After a kill at Quit or log out**, the host is paused at the next launch, which the user did not choose
   after a log out. The app does not resume it on its own: a pause nobody asked for fails safe. The next
-  launch says "Loft is paused. This happens when a task is stopped at Quit or log out." with
+  launch says "Capsule is paused. This happens when a task is stopped at Quit or log out." with
   **Resume**.
 - **The child's environment** is built, never copied: `HOME`, `USER`, `LOGNAME`, `TMPDIR` from the session,
   `LANG=en_US.UTF-8`, `PATH=/var/empty`, and the working directory inside the host's own state folder. agent-
@@ -581,7 +583,7 @@ Lucille does: read the nonce from `pair begin` and put it in the note.
 
 ### 11.5 The URL scheme
 
-- **Scheme `com.lucille-ai.loft:`** (reverse-DNS, private-use), path `/pair?code=<code>`. It is registered only
+- **Scheme `com.lucille-ai.capsule:`** (reverse-DNS, private-use), path `/pair?code=<code>`. It is registered only
   in builds whose core has the nonce check.
 - **The handler acts only while a Connect is pending** (`pair status` reports one). Any other link is ignored,
   and the app's window shows "A website tried to connect this Mac to Lucille. Nothing was connected." The app
@@ -645,7 +647,7 @@ previous folders and operations come back as unchecked boxes (§11.6).
 
 ## 12. Folders and macOS privacy
 
-- **Choose a Folder…** first says what macOS may ask ("macOS may ask whether Loft can access files in
+- **Choose a Folder…** first says what macOS may ask ("macOS may ask whether Capsule can access files in
   your Documents folder. Click Allow."), then opens the standard Open panel: folders only, one at a time,
   starting at Documents.
 - The app asks the core for an alias (`roots add --suggest-alias`), shows "Lucille will know this folder as
@@ -675,7 +677,7 @@ previous folders and operations come back as unchecked boxes (§11.6).
   is why `roots check` runs right after the add, so any prompt or refusal happens during setup, not at an
   unpredictable request from Lucille, and why the first candidate runs `roots check` on a Documents subfolder
   again after the app is relaunched (not yet tested on a Mac).
-- `denied_by_macos` shows "macOS is blocking Loft from this folder" with **Open Privacy Settings**.
+- `denied_by_macos` shows "macOS is blocking Capsule from this folder" with **Open Privacy Settings**.
   Lucille still sees `path_outside_root`; the protocol does not change.
 - **Cloud folders.** iCloud Drive and other cloud-provider folders may be denied even after the panel. The app
   warns when a folder is under `~/Library/Mobile Documents` or `~/Library/CloudStorage`.
@@ -685,11 +687,12 @@ previous folders and operations come back as unchecked boxes (§11.6).
   **Choose Again**. A different folder later made at the same path would be taken as the same root; whether
   `roots add` should record the folder's identity so `roots check` reports that is not decided yet.
 - **Usage descriptions** for Documents, Desktop, Downloads, removable and network volumes and file providers
-  are in the app's `Info.plist`: "Loft runs the operations you turned on, only inside folders you added.
+  are in the app's `Info.plist`: "Capsule runs the operations you turned on, only inside folders you added.
   macOS asks once before it can open this location." The first build has five of these keys, all but file
-  providers, each with the sentences on what Loft is for: "Loft lets Lucille use only the folders you choose
-  on this Mac, and only for the abilities you turn on. Lucille can also see which abilities are on, and the
-  names you gave your folders." The second sentence is there because `host.describe` is on by default (§13).
+  providers, each with the sentences on what Capsule is for: "Capsule lets Lucille use only the folders you
+  choose on this Mac, and only for the abilities you turn on. Lucille can also see which abilities are on,
+  and the names you gave your folders." The second sentence is there because `host.describe` is on by
+  default (§13).
   Whether macOS shows these words, and under which name, is not yet tested on a Mac (see "Who macOS holds
   responsible", above).
 - **No Full Disk Access, ever.** It is system-wide and covers far more than the user's folders.
@@ -711,9 +714,9 @@ previous folders and operations come back as unchecked boxes (§11.6).
   Activity as a fact, with no button. A compromised Lucille must not be able to nudge the user through the app.
 - **Search on a stock Mac.** `files.search` needs `rg`, which a Mac without Homebrew lacks. The app ships
   ripgrep, built from a pinned source commit on the release runner, signed with the app, at
-  `Contents/Helpers/rg`. The catalog lists `/Applications/Loft.app/Contents/Helpers/rg` among its macOS
+  `Contents/Helpers/rg`. The catalog lists `/Applications/Capsule.app/Contents/Helpers/rg` among its macOS
   paths from the first release that has `files.search`, so shipping the binary later changes no definition hash
-  and turns nothing off. This is why the app must live at exactly `/Applications/Loft.app`: it refuses
+  and turns nothing off. This is why the app must live at exactly `/Applications/Capsule.app`: it refuses
   to run anywhere else and asks to be moved there. That path holds the app's name, so after that release the
   name cannot change without a catalog change (0001, "Upgrades": an enabled entry that changes turns off).
 
@@ -724,10 +727,10 @@ previous folders and operations come back as unchecked boxes (§11.6).
 | Pause Lucille | `pause` | A pause badge, and a note: "Paused. Lucille's requests will be turned away until you resume." Works offline. |
 | Resume Lucille | `resume` | |
 | Stop What's Running | `kill` | Shown only while an operation runs. Afterwards: "Stopped, and paused. Resume when you're ready." |
-| Quit Loft | close the pipe (drain); **Stop now** runs `kill`, which also pauses | §9 |
+| Quit Capsule | close the pipe (drain); **Stop now** runs `kill`, which also pauses | §9 |
 | Disconnect from Lucille… (Settings) | `forget` | "Disconnected. Lucille was told." or "Lucille wasn't reachable. In Lucille, open Computers and remove this Mac." |
 | Reset Settings… (Settings) | `policy reset` | Shown when the settings file is invalid (§10) |
-| Remove Loft… (Settings) | section 17 | |
+| Remove Capsule… (Settings) | section 17 | |
 
 Nothing Lucille sends can unpause the host. The app offers no remote control of any kind.
 
@@ -755,17 +758,17 @@ Nothing Lucille sends can unpause the host. The app offers no remote control of 
 **What we chose: no auto-update, and no update check.** The app makes no network connection, so it never looks
 for updates.
 - **The host refuses with `host_too_old`.** `run` emits it as an event, and the app shows "Lucille needs
-  Loft 0.3.0 or newer" with **Download**, which opens the releases page in the browser. Lucille's page can show
+  Capsule 0.3.0 or newer" with **Download**, which opens the releases page in the browser. Lucille's page can show
   the same from the job's refusal (Lucille policy as of 2026-10-29; not proven by this repository).
 - **Updating, not yet tested on a Mac.** The Finder stops you deleting an app that is open (Rogue Amoeba,
   "The Finder Really Should Prevent Moving Running Applications", 2019), and users replacing a running app
   report "The operation can't be completed because the item … is in use" (Mozilla's support forum, for
   Firefox). The app runs from login, so a
   drag over it would usually be refused. And the new copy cannot quit the old one, because it refuses to run
-  anywhere but `/Applications/Loft.app` (§13), which the old copy still occupies. So the app does it:
+  anywhere but `/Applications/Capsule.app` (§13), which the old copy still occupies. So the app does it:
   **Download** opens the release page in the browser, and the app then shows "When the download has
-  finished, click **Prepare to Update**. Loft will finish its current task and quit. Then open the
-  download, drag Loft into Applications, and choose **Replace**." **Prepare to Update** drains, like
+  finished, click **Prepare to Update**. Capsule will finish its current task and quit. Then open the
+  download, drag Capsule into Applications, and choose **Replace**." **Prepare to Update** drains, like
   Quit, and quits. The hardware tests record what the Finder says when the new app is dragged over a
   running old one (§19).
 - **What an update keeps.** The same Team ID and identifiers. For macOS's privacy grants: Apple TN3127, "A
@@ -780,7 +783,7 @@ for updates.
   profile folder, so the pairing, folders and enabled operations carry over, except entries an update
   turned off.
 - **Downgrades are refused.** `run` records the version it last ran as in its state folder. A `run` older than
-  that refuses to start (exit 25), and the app says "This Loft is older than the one you used before.
+  that refuses to start (exit 25), and the app says "This Capsule is older than the one you used before.
   Download the newest." `run --allow-downgrade` overrides it, from Terminal only. An older signed release can be
   a vulnerable one. So a bad release cannot be undone by going back in the app: the only fix is the next
   release. The record is per profile, so the app's and a `pipx` install's do not interfere (§9).
@@ -796,8 +799,8 @@ owner; `PRIVACY.md` says what the check sends before it ships; and the install w
 
 - **Disconnect from Lucille…** runs `forget` and shows whether Lucille was told. The app stays, and the
   login item is removed.
-- **Remove Loft…**
-  1. Explains: "This disconnects this Mac from Lucille, deletes Loft's saved connection and settings
+- **Remove Capsule…**
+  1. Explains: "This disconnects this Mac from Lucille, deletes Capsule's saved connection and settings
      from this Mac, and moves the app to the Trash. Lucille keeps results it already received for up to 24
      hours, and its database backups are not blanked (Lucille policy as of 2026-10-29; not proven by this
      repository; see PRIVACY.md)." Offers **Save a Copy of the Activity Log…**.
@@ -815,9 +818,9 @@ owner; `PRIVACY.md` says what the check sends before it ships; and the install w
   pair. Deleting an app does not unregister its login registration (Apple's Quinn, developer forums thread
   738958, testing a launch agent on macOS 13), so the entry may stay listed in System Settings › General ›
   Login Items & Extensions; without the app it has nothing to start (not yet tested on a Mac). **Remove
-  Loft…** unregisters it. Lucille's page says: "If you removed Loft from your Mac, Remove this
+  Capsule…** unregisters it. Lucille's page says: "If you removed Capsule from your Mac, Remove this
   computer here" (Lucille policy as of 2026-10-29; not proven by this repository). Reinstalling and choosing
-  **Remove Loft…** clears the rest.
+  **Remove Capsule…** clears the rest.
 - The app never says that Lucille deleted its copy.
 
 ## 18. Release pipeline
@@ -871,7 +874,7 @@ manual run.
 disk image. The rule:
 - A GitHub release is marked latest only if it carries the disk image. A version whose Mac jobs failed is
   published without it and with `make_latest` false ("Specifies whether this release should be set as the
-  latest release", GitHub's REST reference), so `releases/latest/download/Loft-macOS-arm64.dmg`
+  latest release", GitHub's REST reference), so `releases/latest/download/Capsule-macOS-arm64.dmg`
   keeps naming the last release that has one.
 - The Mac fix ships as the next patch release, on PyPI and as a disk image together. A failed version is never
   rebuilt under the same number.
@@ -894,7 +897,7 @@ disk image. The rule:
   dependency could use that token.
 - **The first public disk image** ships only in a release whose core has the Connect binding (§11.4), and only
   once the release that adds a rebuild job and `lucille-host verify` exists (0001: "Before anyone other than the
-  repository owner pairs a computer"). The asset name is fixed, `Loft-macOS-arm64.dmg`, so a link to the
+  repository owner pairs a computer"). The asset name is fixed, `Capsule-macOS-arm64.dmg`, so a link to the
   latest release always works.
 
 **The environment `macos-release`** holds the Developer ID certificate and its password, and the App Store
@@ -1003,29 +1006,29 @@ in 10 minutes or less.
 - **THREAT_MODEL.md, a known gap**: a first install trusts the page that linked the download. A page that links
   another developer's notarized app cannot be told apart by someone who checks nothing. The README and the About
   window name the Team ID.
-- **PRIVACY.md** gains two sentences: "The Loft app connects to nothing itself; only the host inside it
+- **PRIVACY.md** gains two sentences: "The Capsule app connects to nothing itself; only the host inside it
   connects, and only to the hub its pairing code named. Lucille's connect page opens in your browser when you
   click Connect." and "macOS may contact Apple to check the app's signature and notarization; that is Apple's
   behaviour, not this project's."
 - **PRIVACY.md's controls sentences** name both shells, since About shows the claim verbatim, for example
-  "a log on your computer (`lucille-host log`; Activity in Loft shows the latest entries)", "Pause
-  in Loft, or `lucille-host pause`", "Stop What's Running, or `lucille-host kill`", "Disconnect in
-  Loft, or `lucille-host forget`". README's copy of the claim and CLAIMS.md's entries for those
+  "a log on your computer (`lucille-host log`; Activity in Capsule shows the latest entries)", "Pause
+  in Capsule, or `lucille-host pause`", "Stop What's Running, or `lucille-host kill`", "Disconnect in
+  Capsule, or `lucille-host forget`". README's copy of the claim and CLAIMS.md's entries for those
   sentences change in the same pull request.
 - **CLAIMS.md and its guard tests**, from the Connect release: "A pairing completes only in answer to a
   Connect this computer asked for", as a guard entry mapped to the nonce tests. It is not a sentence of the
   claim, and Lucille still starts every pairing: the user adds the computer on Lucille's page (0001,
   "Pairing", step 1).
 - **README.md**: "Install on a Mac", naming the download, the Team ID and the signer's name, and the rule
-  "Until this README names a release, a disk image called Loft did not come from this repository."
+  "Until this README names a release, a disk image called Capsule did not come from this repository."
   It says to use either the app or a `pipx` install on one Mac, not both (§9).
 - **VERIFYING.md**, a new section "The Mac app":
   1. `shasum -a 256` against `SHA256SUMS`, and `gh release verify-asset`.
-  2. `gh attestation verify Loft-macOS-arm64.dmg --repo gald33/lucille-host --signer-workflow
+  2. `gh attestation verify Capsule-macOS-arm64.dmg --repo gald33/lucille-host --signer-workflow
      gald33/lucille-host/.github/workflows/release.yml --source-ref refs/tags/vX.Y.Z --deny-self-hosted-runners`.
   3. Apple's view: `spctl -a -t open --context context:primary-signature -vv` and `xcrun stapler validate` on
      the image; `codesign -dv --verbose=4` (Team ID) on the app.
-  4. The Python inside: `tools/macos/verify_app.py "/Applications/Loft.app"` downloads the listed wheels
+  4. The Python inside: `tools/macos/verify_app.py "/Applications/Capsule.app"` downloads the listed wheels
      from PyPI, checks their hashes against the release's lock, and compares every file under `site-packages`
      with the wheels' `RECORD`, listing any file that came from none. The installer-written files of each
      `*.dist-info` (`INSTALLER`, `REQUESTED`, `direct_url.json`, and the rewritten `RECORD`) are named, and
@@ -1110,8 +1113,9 @@ These join 0001's "Host invariants and their tests".
 
 ## Not decided yet
 
-- A trademark search on the name Loft, before the first signed build, after which its identifiers cannot
-  change (§7), and before the catalog lists the bundled `rg` path, which contains it (§13).
+- The app's name. Capsule is a working name. A trademark search on it comes before the first signed build,
+  after which its identifiers cannot change (§7), and before the catalog lists the bundled `rg` path, which
+  contains it (§13).
 - Whether notarization accepts Mach-O files under `Contents/Resources`, or they move to `Contents/Frameworks`
   and the interpreter to `Contents/Helpers` (§6).
 - Whether shipping no `.pyc` makes start-up too slow, and so whether `checked-hash` files with a recompiling

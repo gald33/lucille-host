@@ -29,7 +29,7 @@ pull request.
 The workflow `macos-app` (`.github/workflows/macos-app.yml`) runs on pull requests that change `macos/`,
 `src/`, `pyproject.toml`, `uv.lock` or the workflow itself, on pushes to the branch `macos-app`, and by
 hand.
-- Job `app`, on GitHub-hosted `macos-15` (Apple silicon): it builds the Mac app, Loft, and its disk
+- Job `app`, on GitHub-hosted `macos-15` (Apple silicon): it builds the Mac app, Capsule, and its disk
   image, signed ad hoc, then runs the checks [macos/README.md](macos/README.md#what-ci-checks) lists,
   then the host's test suite on the app's trimmed Python runtime.
 - Its token can only read the repository, its checkout keeps no credentials, and it uses no secret. It

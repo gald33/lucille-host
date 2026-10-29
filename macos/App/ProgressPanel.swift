@@ -16,7 +16,7 @@ final class ProgressPanel: NSObject {
             defer: true
         )
         super.init()
-        panel.title = "Loft"
+        panel.title = HostText.appName
         panel.isReleasedWhenClosed = false
         panel.level = .floating
 

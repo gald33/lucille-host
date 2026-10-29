@@ -1,4 +1,4 @@
-"""Checks on a built Loft app. CI runs each one on a macOS runner after build_app.py.
+"""Checks on the built Mac app. CI runs each one on a macOS runner after build_app.py.
 
     uv run --no-project python macos/check_app.py CHECK [--out build/macos]
 
@@ -151,18 +151,20 @@ FORBIDDEN_LIBRARIES: Final = (
 # (tests/test_macos_build.py checks that they agree): each listed ability's name and what Lucille
 # gets from it, the note the app shows when it opens and the sentence in it on what the app is for
 # (the same sentence the Info.plist gives macOS), the menu's line while paused, the menu bar item's
-# name, and the Open panel's button.
+# name, and the Open panel's button. The app's name in them comes from macos/runtime.toml, which
+# the app reads back from its Info.plist.
+APP_NAME: Final = build_app.load_pins().app_name
 ABILITY_TITLES: Final = {"files.sha256": "Check a file's fingerprint"}
 ABILITY_DETAILS: Final = {
     "files.sha256": (
         "Lucille gets a code that identifies one file's exact contents, not the contents."
     )
 }
-WELCOME_TITLE: Final = "Loft is in your menu bar"
-PURPOSE: Final = build_app.FOLDER_USAGE
+WELCOME_TITLE: Final = f"{APP_NAME} is in your menu bar"
+PURPOSE: Final = build_app.folder_usage(APP_NAME)
 PAUSED_NOTE: Final = "Lucille's requests are turned away until you resume."
-STATUS_ITEM_NAMES: Final = ("Loft", "Loft, paused")
-OPEN_PROMPT: Final = "Allow Loft to Use This Folder"
+STATUS_ITEM_NAMES: Final = (APP_NAME, f"{APP_NAME}, paused")
+OPEN_PROMPT: Final = f"Allow {APP_NAME} to Use This Folder"
 # Loads the native code of the runtime dependencies, the way the host will.
 NATIVE_PROBE: Final = """\
 import sys
@@ -712,7 +714,7 @@ MENU_ITEMS: Final = (
     "Add a Folder…",
     "Folders",
     "Connect to Lucille (coming soon)",
-    "Quit Loft",
+    f"Quit {APP_NAME}",
 )
 # The menu's status line. Pairing is not built, so the Mac is never connected.
 NOT_CONNECTED: Final = "Not connected to Lucille"
@@ -870,7 +872,7 @@ def _drive_menu(checker: Checker, screens: Path, flag: Path) -> bool:
     print(f"the Abilities submenu shows: {listed if worked else abilities}")
     _system_events("key code 53")
     checker.expect(
-        shown[:1] == [f"Loft {version}"],
+        shown[:1] == [f"{APP_NAME} {version}"],
         "the menu's first line names the version",
         f"{shown}",
     )
@@ -1337,7 +1339,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 2
     out = args.out.resolve()
     app = app_path(out)
-    dmgs = build_app.disk_images(out)
+    dmgs = build_app.disk_images(out, APP_NAME)
     work = out / "check"
     checker = Checker()
     if args.check != "dmg" and not checker.expect(app.is_dir(), f"{app} exists"):
