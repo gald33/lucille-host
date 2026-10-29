@@ -727,3 +727,11 @@ def test_only_the_title_or_description_names_the_menu_bar_item() -> None:
     assert check_app._named({**tooltip_only, "title": "Lucille Host"}, "Lucille Host")
     assert check_app._named({"description": "Lucille Host, paused"}, "Lucille Host, paused")
     assert not check_app._named({}, "Lucille Host")
+
+
+@pytest.mark.parametrize(
+    ("said", "width"), [("30", 30.0), ("24.0", 24.0), ("24,5", 24.5), ("", 0.0), ("missing", 0.0)]
+)
+def test_the_menu_bar_items_width_is_read(said: str, width: float) -> None:
+    assert check_app._width({"width": said}) == width
+    assert check_app._width({}) == 0.0

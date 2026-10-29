@@ -759,7 +759,9 @@ def _status_item() -> dict[str, str]:
             f'try\nset end of found to "{key}=" & ({key} of theItem)\nend try\n'
             for key in ("title", "description", "name", "help")
         )
-        + 'try\nset end of found to "width=" & ((item 1 of (size of theItem)) as text)\nend try\n'
+        # Not "item 1 of": inside System Events, "item" names one of its own classes.
+        + "try\nset {theWidth, theHeight} to size of theItem\n"
+        + 'set end of found to "width=" & (theWidth as text)\nend try\n'
         + f"{LINES}return found as text"
     )
     worked, said = _system_events(script)
@@ -767,6 +769,14 @@ def _status_item() -> dict[str, str]:
     if not worked:
         return {}
     return dict(line.partition("=")[::2] for line in said.splitlines())
+
+
+def _width(item: dict[str, str]) -> float:
+    """The menu bar item's width in points, or 0 when System Events did not give one."""
+    try:
+        return float(item.get("width", "").replace(",", "."))
+    except ValueError:
+        return 0.0
 
 
 def _named(item: dict[str, str], name: str) -> bool:
@@ -822,7 +832,7 @@ def _drive_menu(checker: Checker, screens: Path, flag: Path) -> bool:
         f"{item}",
     )
     checker.expect(
-        item.get("width", "").isdigit() and int(item["width"]) >= 16,
+        _width(item) >= 16,
         "the menu bar item is wide enough to show its icon",
         f"{item}",
     )
