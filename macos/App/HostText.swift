@@ -10,6 +10,9 @@ struct Ability: Equatable, Identifiable, Sendable {
     /// What the menu calls it: a few plain words, or the catalog name if the app has none.
     var title: String { HostText.abilityTitles[name] ?? name }
 
+    /// One plain sentence on what Lucille gets while it is on, if the app has one.
+    var detail: String? { HostText.abilityDetails[name] }
+
     /// Whether the Abilities menu lists it. Diagnostic and always-on operations are left out, and
     /// so is a name the policy holds that this release does not have.
     var isShown: Bool { !HostText.unlistedAbilities.contains(name) && !state.hasPrefix("in the policy") }
@@ -63,6 +66,26 @@ enum BroadFolder: Equatable, Sendable {
     case disk
 }
 
+/// What the app itself can see of a folder the host could not add.
+enum FolderAccess: Equatable, Sendable {
+    /// The app sees the folder, so what stopped the host is macOS's privacy protection.
+    case visible
+    /// macOS refuses the app too.
+    case blocked
+    /// The folder is not there, or is not a folder.
+    case missing
+}
+
+/// Where a folder is, when that changes what the app says before it adds the folder.
+struct FolderPlace: Equatable, Sendable {
+    /// The folder macOS protects that holds it: "Documents", "Desktop" or "Downloads".
+    var protectedFolder: String?
+    /// It is on another drive (under /Volumes): an external, removable or network one.
+    var onOtherDrive = false
+    /// It is in iCloud Drive or another cloud folder, or macOS syncs it to iCloud.
+    var inCloud = false
+}
+
 /// Reading what the host's command line prints. It has no machine-readable output yet, so this
 /// follows its text exactly (`src/lucille_host/cli.py`); the self-test checks it against the
 /// real command line on every build.
@@ -75,9 +98,47 @@ enum HostText {
         "files.sha256": "Check a file's fingerprint",
     ]
 
+    /// One plain sentence for each ability the menu lists: what Lucille gets while it is on.
+    /// The menu shows it under the ability (`tests/test_macos_build.py` checks there is one).
+    static let abilityDetails: [String: String] = [
+        "files.sha256": "Lucille gets a code that identifies one file's exact contents, not the contents.",
+    ]
+
     /// Operations the Abilities menu does not list: `host.describe`, which is on from the start
     /// and is described in the menu instead, and `host.sleep`, which is for testing.
     static let unlistedAbilities: Set<String> = ["host.describe", "host.sleep"]
+
+    /// What the app says when it opens, and when it is opened again while it runs: it has no
+    /// window and no Dock icon, so otherwise nothing would seem to happen.
+    static let welcomeTitle = "Lucille Host is in your menu bar"
+    static let welcomeText = """
+        Click its icon near the top right of your screen, by the clock: a small computer, or a \
+        pause sign while Lucille is paused. Everything Lucille Host does is in that menu.
+
+        If you can't see the icon, your menu bar may be too full. Quit another app that has an \
+        icon there, and it will show.
+        """
+
+    /// The menu bar item's name, which VoiceOver reads.
+    static func statusItemName(paused: Bool) -> String {
+        paused ? "Lucille Host, paused" : "Lucille Host"
+    }
+
+    /// The menu's line while Lucille is paused.
+    static let pausedNote = "Lucille's requests are turned away until you resume."
+
+    /// What the app says once a folder is added. Nothing can connect yet, so it says when the
+    /// folder becomes of use.
+    static func folderAdded(alias: String) -> String {
+        "Once this Mac is connected to Lucille, Lucille can use \u{201C}\(alias)\u{201D} for the abilities you turn on."
+    }
+
+    /// What the app says when macOS's privacy protection kept the host from a folder.
+    static let blockedByMacOS = "macOS is blocking Lucille Host from this folder. To allow it, open System Settings, choose Privacy & Security, then Files & Folders, and turn on the switch for this folder's location under Lucille Host. Then add the folder again."
+
+    /// What the app says while a run it stopped waiting for has still not ended. It may hold the
+    /// host's policy lock, so every change to folders and abilities waits for it.
+    static let stuckRun = "A folder check is still stuck, probably on a network or external drive that stopped answering. Until it ends, Lucille Host can't change its folders or abilities. Reconnect the drive, or restart your Mac, then try again."
 
     /// "lucille-host 0.1.0" gives "0.1.0".
     static func version(fromVersionOutput text: String) -> String? {
@@ -148,30 +209,80 @@ enum HostText {
         }
     }
 
-    /// The name dialog's text, with the sentence `note` first when the app had to change the name.
-    static func aliasPrompt(folderName: String, note: String?) -> String {
+    /// Where the folder at `path` is, as far as it changes what the app says first. `synced` is
+    /// whether macOS says the folder is kept in iCloud.
+    static func place(of path: String, home: String, synced: Bool = false) -> FolderPlace {
+        let folder = standardized(path)
+        let homeFolder = standardized(home)
+        func inside(_ parent: String) -> Bool {
+            folder == parent || folder.hasPrefix(parent + "/")
+        }
+        var place = FolderPlace()
+        place.protectedFolder = ["Documents", "Desktop", "Downloads"].first { inside(homeFolder + "/" + $0) }
+        place.onOtherDrive = folder.hasPrefix("/Volumes/")
+        place.inCloud = synced
+            || inside(homeFolder + "/Library/Mobile Documents")
+            || inside(homeFolder + "/Library/CloudStorage")
+        return place
+    }
+
+    /// The name dialog's text, with the sentence `note` first when the app had to change the name,
+    /// and, last, what macOS may ask once the user adds a folder from `place`.
+    static func aliasPrompt(folderName: String, note: String?, place: FolderPlace = FolderPlace()) -> String {
         let purpose = "Lucille will know \u{201C}\(folderName)\u{201D} only by this name. It never learns where the folder is on your Mac."
         let rules = "Use lowercase letters, digits, - and _, up to \(Alias.maxLength) characters."
-        return [note, purpose, rules].compactMap { $0 }.joined(separator: "\n\n")
+        var ask: String?
+        if let protected = place.protectedFolder {
+            ask = "macOS may then ask whether Lucille Host can access files in your \(protected) folder. Click Allow, or the folder can't be added."
+        } else if place.onOtherDrive {
+            ask = "macOS may then ask whether Lucille Host can access files on a removable or network volume. Click Allow, or the folder can't be added."
+        }
+        let cloud = place.inCloud
+            ? "This folder is in iCloud Drive or another cloud folder. Folders there may not work with Lucille Host yet."
+            : nil
+        return [note, purpose, rules, ask, cloud].compactMap { $0 }.joined(separator: "\n\n")
+    }
+
+    /// What the app itself can see of the folder at `path`.
+    static func access(of path: String) -> FolderAccess {
+        var isFolder: ObjCBool = false
+        if FileManager.default.fileExists(atPath: path, isDirectory: &isFolder) {
+            return isFolder.boolValue ? .visible : .missing
+        }
+        do {
+            _ = try FileManager.default.attributesOfItem(atPath: path)
+            return .missing
+        } catch let error as CocoaError where error.code == .fileReadNoPermission {
+            return .blocked
+        } catch {
+            return .missing
+        }
     }
 
     /// What a run was for, when that changes what the user is told.
-    enum Activity: Sendable {
-        case addingFolder
+    enum Activity: Equatable, Sendable {
+        /// Adding a folder, with what the app itself can see of it.
+        case addingFolder(FolderAccess)
         case other
     }
 
     /// What to tell the user when a run failed: a plain sentence for each refusal the host's
-    /// command line gives, and its own words as the detail.
-    static func explain(_ result: CLIResult, during activity: Activity = .other) -> Explanation {
+    /// command line gives, and its own words as the detail. `earlierRunStuck` is whether a run
+    /// the app stopped waiting for has still not ended (`HostCLI.stuckRuns`).
+    static func explain(
+        _ result: CLIResult, during activity: Activity = .other, earlierRunStuck: Bool = false
+    ) -> Explanation {
         if result.status == CLIResult.notStarted {
             return Explanation(message: "Lucille Host is damaged. Download it again.", detail: result.stderr)
+        }
+        if result.status == CLIResult.notFinished || (earlierRunStuck && (result.timedOut || result.cancelled)) {
+            return Explanation(message: stuckRun, detail: nil)
         }
         if result.timedOut {
             let message: String
             switch activity {
             case .addingFolder:
-                message = "Checking this folder took too long. If it is on a network or external drive, check that it is connected."
+                message = "Checking this folder took too long. If macOS asked whether Lucille Host can access it, answer, then add the folder again. If it is on a network or external drive, check that it is connected."
             case .other:
                 message = "Lucille Host's helper program did not answer in time, so it was stopped."
             }
@@ -187,7 +298,7 @@ enum HostText {
                 detail: "It stopped with exit status \(result.status)."
             )
         }
-        return Explanation(message: plain(reason), detail: reason)
+        return Explanation(message: plain(reason, during: activity), detail: reason)
     }
 
     /// The host's reason for a refusal, from its stderr: the lines that are not a usage summary,
@@ -212,7 +323,15 @@ enum HostText {
     }
 
     /// A plain sentence for each refusal `src/lucille_host/cli.py` can give.
-    private static func plain(_ reason: String) -> String {
+    private static func plain(_ reason: String, during activity: Activity) -> String {
+        // The host reads a folder macOS keeps from it as no folder at all, or fails with EPERM.
+        // When the app can see that folder, or is refused too, macOS is what stands in the way.
+        var adding = false
+        var seenByApp = false
+        if case .addingFolder(let access) = activity {
+            adding = true
+            seenByApp = access != .missing
+        }
         let taken = " is already a folder alias; remove it first"
         if reason.hasSuffix(taken) {
             let alias = String(reason.dropLast(taken.count))
@@ -226,7 +345,10 @@ enum HostText {
             return "That folder holds Lucille Host's own settings, so it can't be added."
         }
         if reason.hasSuffix(" is not a folder") {
-            return "That folder is no longer there."
+            return seenByApp ? blockedByMacOS : "That folder is no longer there."
+        }
+        if adding && reason.hasPrefix("Operation not permitted") {
+            return blockedByMacOS
         }
         if reason.hasPrefix("the policy file ") && reason.contains(" is invalid: ") {
             return "Lucille Host's settings file can't be read."

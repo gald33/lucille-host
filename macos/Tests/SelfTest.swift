@@ -142,10 +142,81 @@ struct SelfTest {
                           "the refusal \(text.debugDescription) reads as \(message.debugDescription)", "\(got)")
         }
         let late = CLIResult(status: 15, stdout: "", stderr: "", timedOut: true)
-        report.expect(HostText.explain(late, during: .addingFolder).message.hasPrefix("Checking this folder took too long")
-                          && HostText.explain(late).message != HostText.explain(late, during: .addingFolder).message
+        let adding = HostText.Activity.addingFolder(.visible)
+        report.expect(HostText.explain(late, during: adding).message.hasPrefix("Checking this folder took too long")
+                          && HostText.explain(late, during: adding).message.contains("If macOS asked")
+                          && HostText.explain(late).message != HostText.explain(late, during: adding).message
                           && !HostText.needsHomeConfirmation(late),
                       "a timeout has its own words, and says more while adding a folder")
+
+        // macOS's privacy protection: the host sees no folder, or gets EPERM, where the app sees one.
+        let notAFolder = refusal("/Users/a/Documents/Taxes is not a folder")
+        report.expect(HostText.explain(notAFolder, during: .addingFolder(.visible)).message == HostText.blockedByMacOS
+                          && HostText.explain(notAFolder, during: .addingFolder(.blocked)).message == HostText.blockedByMacOS,
+                      "a folder the app can see, or is refused too, is blocked by macOS")
+        report.expect(HostText.explain(notAFolder, during: .addingFolder(.missing)).message == "That folder is no longer there."
+                          && HostText.explain(notAFolder).message == "That folder is no longer there.",
+                      "a folder nobody can see is gone")
+        let eperm = refusal("Operation not permitted (/Users/a/Documents)")
+        report.expect(HostText.explain(eperm, during: .addingFolder(.visible)).message == HostText.blockedByMacOS
+                          && HostText.explain(eperm, during: .addingFolder(.visible)).detail == "Operation not permitted (/Users/a/Documents)"
+                          && HostText.explain(eperm).message != HostText.blockedByMacOS,
+                      "EPERM while adding a folder is blocked by macOS, with the host's words as the detail")
+        report.expect(HostText.blockedByMacOS.contains("Privacy & Security") && HostText.blockedByMacOS.contains("Files & Folders"),
+                      "it says where to allow it", HostText.blockedByMacOS)
+
+        // A run the app gave up on, which may still hold the host's policy lock.
+        let leftBehind = CLIResult(status: CLIResult.notFinished, stdout: "", stderr: "", timedOut: false, cancelled: true)
+        report.expect(HostText.explain(leftBehind).message == HostText.stuckRun
+                          && HostText.explain(leftBehind, during: adding).message == HostText.stuckRun,
+                      "a run that would not end says that it is stuck")
+        let blockedLater = CLIResult(status: 15, stdout: "", stderr: "", timedOut: false, cancelled: true)
+        report.expect(HostText.explain(late, earlierRunStuck: true).message == HostText.stuckRun
+                          && HostText.explain(late, during: adding, earlierRunStuck: true).message == HostText.stuckRun
+                          && HostText.explain(blockedLater, earlierRunStuck: true).message == HostText.stuckRun,
+                      "a later run that times out or is cancelled names the stuck one, not its own folder")
+        report.expect(HostText.explain(refusal("files.sha256 is not enabled"), earlierRunStuck: true).message
+                          == "That ability was already off.",
+                      "a refusal is still its own, whatever else is stuck")
+
+        // Where a folder is, and what the name dialog says first.
+        let home = "/Users/a"
+        report.expect(HostText.place(of: "/Users/a/Documents/Taxes", home: home).protectedFolder == "Documents"
+                          && HostText.place(of: "/Users/a/Desktop", home: home).protectedFolder == "Desktop"
+                          && HostText.place(of: "/Users/a/Downloads/x/", home: home).protectedFolder == "Downloads"
+                          && HostText.place(of: "/Users/a/Documentsx", home: home) == FolderPlace()
+                          && HostText.place(of: "/Users/a/work", home: home) == FolderPlace(),
+                      "Documents, Desktop and Downloads are protected; a sibling is not")
+        report.expect(HostText.place(of: "/Volumes/Backup/Photos", home: home).onOtherDrive
+                          && !HostText.place(of: "/Users/a/Volumes/x", home: home).onOtherDrive,
+                      "a folder under /Volumes is on another drive")
+        report.expect(HostText.place(of: "/Users/a/Library/Mobile Documents/com~apple~CloudDocs/x", home: home).inCloud
+                          && HostText.place(of: "/Users/a/Library/CloudStorage/Drive/x", home: home).inCloud
+                          && HostText.place(of: "/Users/a/Documents/x", home: home, synced: true).inCloud
+                          && !HostText.place(of: "/Users/a/work", home: home).inCloud,
+                      "iCloud Drive and other cloud folders are in the cloud")
+        let documents = HostText.aliasPrompt(folderName: "Taxes", note: nil,
+                                             place: HostText.place(of: "/Users/a/Documents/Taxes", home: home, synced: true))
+        report.expect(documents.contains("access files in your Documents folder. Click Allow")
+                          && documents.hasSuffix("may not work with Lucille Host yet."),
+                      "a folder in Documents is announced, and an iCloud one warned about", documents)
+        let drive = HostText.aliasPrompt(folderName: "Photos", note: nil,
+                                         place: HostText.place(of: "/Volumes/Backup/Photos", home: home))
+        report.expect(drive.contains("on a removable or network volume. Click Allow"), "a folder on another drive is announced", drive)
+        report.expect(!HostText.aliasPrompt(folderName: "Work", note: nil).contains("macOS"),
+                      "a folder elsewhere brings no announcement")
+
+        report.expect(HostText.statusItemName(paused: false) == "Lucille Host"
+                          && HostText.statusItemName(paused: true) == "Lucille Host, paused",
+                      "the menu bar item has a name, which says when Lucille is paused")
+        report.expect(HostText.folderAdded(alias: "taxes").hasPrefix("Once this Mac is connected to Lucille,"),
+                      "a folder added is useful once connected, and the app says so")
+        report.expect(HostText.welcomeText.contains("menu bar") && HostText.welcomeText.contains("by the clock")
+                          && !HostText.welcomeText.contains("\\"),
+                      "the welcome says where the menu is", HostText.welcomeText)
+        let detailed = Ability(name: "files.sha256", state: "disabled")
+        report.expect(detailed.detail == HostText.abilityDetails["files.sha256"] && detailed.detail?.contains("not the contents") == true,
+                      "an ability says what Lucille gets")
         let broken = CLIResult(status: CLIResult.notStarted, stdout: "", stderr: "no such file", timedOut: false)
         report.expect(HostText.explain(broken) == Explanation(message: "Lucille Host is damaged. Download it again.",
                                                               detail: "no such file"),
@@ -175,6 +246,9 @@ struct SelfTest {
 
     static func checkCLI(app: URL, home: String, version: String, _ report: Report) {
         let cli = HostCLI(python: HostCLI.python(inApp: app), home: home)
+        report.expect(HostText.access(of: home) == .visible
+                          && HostText.access(of: home + "/no such folder") == .missing,
+                      "the app sees a folder that is there, and not one that is not")
         let env = cli.environment()
         report.expect(Set(env.keys).isSubset(of: ["HOME", "PATH", "LANG", "USER", "LOGNAME", "TMPDIR"]),
                       "the environment is fixed", "\(env.keys.sorted())")
@@ -245,6 +319,10 @@ struct SelfTest {
 
         let slow = HostCLI(python: cli.python, home: home, timeout: 0.001).run(["ops", "list"])
         report.expect(slow.timedOut && !slow.succeeded, "a run past its time limit is stopped", "\(slow)")
+        let short = cli.run(["ops", "list"], timeout: 0.001)
+        report.expect(short.timedOut && !short.succeeded, "one run can have its own time limit", "\(short)")
+        let long = HostCLI(python: cli.python, home: home, timeout: 0.001).run(["ops", "list"], timeout: 60)
+        report.expect(long.succeeded, "a longer one too", "\(long)")
         let token = CancelToken()
         token.cancel()
         let started = Date()
@@ -255,6 +333,7 @@ struct SelfTest {
         let absent = HostCLI(python: URL(fileURLWithPath: "/nonexistent/python3"), home: home).run(["--version"])
         report.expect(absent.status == CLIResult.notStarted && !absent.stderr.isEmpty,
                       "a missing interpreter is reported, not a crash", "\(absent)")
+        report.expect(HostCLI.stuckRuns == 0, "every run ended, so none is counted as stuck")
     }
 }
 

@@ -86,14 +86,16 @@ jobs:
           uv run --no-sync python -c "import sys; print(sys.version); print(sys.base_prefix)"
           uv run --no-sync python -c "import sys; assert 'Lucille Host.app' in sys.base_prefix"
           uv run --no-sync pytest -q
-      # Only from a build whose every check passed, and never from a pull request opened from a
-      # fork, which runs that fork's own build code. The file name ends "-adhoc-macOS-arm64.dmg",
-      # so it cannot be taken for a release asset.
+      # Only from a build whose every check passed. This copy of the workflow also skips it for a
+      # pull request from a fork, but such a pull request runs the fork's own copy of this file,
+      # which can upload anything: an artifact on that run is the fork's build, whatever its name.
+      # The artifact's name says which event and which commit built it, and the file name ends
+      # "-adhoc-macOS-arm64.dmg", so it cannot be taken for a release asset.
       - name: Upload the disk image (ad hoc signed, not a release)
         if: ${{ success() && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: lucille-host-adhoc-macos-arm64-dmg
+          name: lucille-host-adhoc-macos-arm64-dmg-${{ github.event_name }}-${{ github.event.pull_request.head.sha || github.sha }}
           path: build/macos/*-adhoc-macOS-arm64.dmg
           if-no-files-found: error
           retention-days: 7

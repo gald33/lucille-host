@@ -29,10 +29,12 @@ enum Alias {
         return scalars.allSatisfy { isLetter($0) || isDigit($0) || $0 == dash || $0 == underscore }
     }
 
-    /// A valid alias made from a folder's name, and not one of `taken`: accents removed,
-    /// lowercase, every other character replaced by "-", runs of "-" joined, everything before
-    /// the first letter dropped, at most 32 characters, and no "-" or "_" at the end. "folder"
-    /// when nothing is left. If the result is taken, "-2", "-3" and so on is added.
+    /// A valid alias made from a folder's name, and not one of `taken`: written in Latin letters
+    /// where macOS can ("日本語" gives "ri-ben-yu"), accents removed, lowercase, every other
+    /// character replaced by "-", runs of "-" joined, "-" and "_" trimmed from both ends,
+    /// "folder-" put first when it starts with a digit ("2026 Taxes" gives "folder-2026-taxes"),
+    /// and at most 32 characters. "folder" when nothing is left. If the result is taken, "-2",
+    /// "-3" and so on is added.
     static func suggest(forFolderName name: String, taken: Set<String> = []) -> String {
         unique(base(forFolderName: name), taken: taken)
     }
@@ -62,19 +64,25 @@ enum Alias {
     }
 
     private static func base(forFolderName name: String) -> String {
-        let folded = name.folding(options: [.diacriticInsensitive, .widthInsensitive], locale: nil)
+        let folded = latin(name)
+            .folding(options: [.diacriticInsensitive, .widthInsensitive], locale: nil)
             .lowercased()
         var kept: [Unicode.Scalar] = []
         for scalar in folded.unicodeScalars {
             let usable = isLetter(scalar) || isDigit(scalar) || scalar == dash || scalar == underscore
             let next = usable ? scalar : dash
-            if kept.isEmpty && !isLetter(next) {
-                continue
-            }
             if next == dash && kept.last == dash {
                 continue
             }
             kept.append(next)
+        }
+        trimStart(&kept)
+        trimEnd(&kept)
+        guard let first = kept.first else {
+            return fallback
+        }
+        if !isLetter(first) {
+            kept = Array("\(fallback)-".unicodeScalars) + kept
         }
         if kept.count > maxLength {
             kept = Array(kept.prefix(maxLength))
@@ -82,6 +90,17 @@ enum Alias {
         trimEnd(&kept)
         let suggestion = string(kept)
         return isValid(suggestion) ? suggestion : fallback
+    }
+
+    /// `name` in Latin letters, without accents, as ICU's "Any-Latin; Latin-ASCII" writes it. On
+    /// a system whose Foundation lacks the transform, `name` as it is: then a name in another
+    /// script gives "folder".
+    private static func latin(_ name: String) -> String {
+        #if canImport(Darwin)
+        return name.applyingTransform(StringTransform("Any-Latin; Latin-ASCII"), reverse: false) ?? name
+        #else
+        return name
+        #endif
     }
 
     /// `alias` itself if nobody uses it, else the first of `alias-2`, `alias-3`, ... that is free,
@@ -100,6 +119,12 @@ enum Alias {
                 return candidate
             }
             number += 1
+        }
+    }
+
+    private static func trimStart(_ scalars: inout [Unicode.Scalar]) {
+        while let first = scalars.first, first == dash || first == underscore {
+            scalars.removeFirst()
         }
     }
 

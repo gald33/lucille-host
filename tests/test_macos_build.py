@@ -390,6 +390,29 @@ def test_every_operation_has_plain_words_or_is_left_out_of_the_menu() -> None:
         assert title[0].isupper() and "." not in title, title
 
 
+def test_every_listed_ability_says_what_lucille_gets() -> None:
+    text = (build_app.SWIFT_DIR / "HostText.swift").read_text(encoding="utf-8")
+    details = _swift_string_table(text, "abilityDetails")
+    assert set(details) == set(_swift_string_table(text, "abilityTitles"))
+    assert details == check_app.ABILITY_DETAILS
+    for detail in details.values():
+        assert detail.startswith("Lucille gets ") and detail.endswith("."), detail
+
+
+def test_the_ui_check_looks_for_the_apps_own_words() -> None:
+    text = (build_app.SWIFT_DIR / "HostText.swift").read_text(encoding="utf-8")
+    model = (build_app.SWIFT_DIR / "HostModel.swift").read_text(encoding="utf-8")
+    assert f'static let welcomeTitle = "{check_app.WELCOME_TITLE}"' in text
+    assert f'static let pausedNote = "{check_app.PAUSED_NOTE}"' in text
+    paused, running = check_app.STATUS_ITEM_NAMES[1], check_app.STATUS_ITEM_NAMES[0]
+    assert f'paused ? "{paused}" : "{running}"' in text
+    assert f'panel.prompt = "{check_app.OPEN_PROMPT}"' in model
+    assert "by the clock" in text
+    assert '"Once this Mac is connected to Lucille, Lucille can use' in text
+    source = (build_app.MACOS_DIR / "check_app.py").read_text(encoding="utf-8")
+    assert source.count('"Once this Mac is connected to Lucille"') == 2
+
+
 def _constraints_with(old: str, new: str) -> str:
     assert old in CONSTRAINTS_TEXT
     return CONSTRAINTS_TEXT.replace(old, new, 1)
@@ -494,7 +517,12 @@ def test_the_workflow_uploads_the_disk_image_only_from_a_good_build_of_this_repo
     assert "success()" in condition and "cancelled" not in condition
     assert "github.event.pull_request.head.repo.full_name == github.repository" in condition
     assert upload["with"]["path"] == f"build/macos/*{build_app.DMG_SUFFIX}"
-    assert "adhoc" in upload["with"]["name"]
+    # The name says the signature is ad hoc, and which event and commit built it, so an artifact
+    # from a pull request never has the name of one from a push.
+    assert upload["with"]["name"] == (
+        "lucille-host-adhoc-macos-arm64-dmg-${{ github.event_name }}-"
+        "${{ github.event.pull_request.head.sha || github.sha }}"
+    )
 
 
 def test_the_workflow_requires_the_menu_to_be_driven() -> None:
@@ -570,3 +598,123 @@ def test_forbidden_imports() -> None:
         "_$s10Foundation4DataV10contentsOf7optionsAcA3URLV_So20NSDataReadingOptionsVtKcfC",
     ]
     assert check_app.forbidden_imports(allowed + refused) == refused
+
+
+OTOOL_LOADS = """\
+Load command 3
+          cmd LC_ID_DYLIB
+      cmdsize 72
+         name @rpath/libself.dylib (offset 24)
+Load command 4
+          cmd LC_LOAD_DYLINKER
+      cmdsize 32
+         name /usr/lib/dyld (offset 12)
+Load command 5
+          cmd LC_LOAD_DYLIB
+      cmdsize 56
+         name @rpath/libtcl9.0.dylib (offset 24)
+   time stamp 0 Thu Jan  1 00:00:00 1970
+      current version 9.0.4
+Load command 6
+          cmd LC_LOAD_WEAK_DYLIB
+      cmdsize 56
+         name /usr/lib/libSystem.B.dylib (offset 24)
+Load command 7
+          cmd LC_RPATH
+      cmdsize 32
+         path @loader_path/../.. (offset 12)
+Load command 8
+          cmd LC_LOAD_DYLIB
+      cmdsize 56
+         name /usr/lib/libSystem.B.dylib (offset 24)
+Load command 9
+          cmd LC_RPATH
+      cmdsize 48
+         path /opt/My Libs/lib (offset 12)
+"""
+
+
+def test_the_libraries_and_run_paths_are_read_from_the_load_commands() -> None:
+    assert check_app.load_commands(OTOOL_LOADS.splitlines()) == (
+        ["@rpath/libtcl9.0.dylib", "/usr/lib/libSystem.B.dylib"],
+        ["@loader_path/../..", "/opt/My Libs/lib"],
+    )
+    assert check_app.load_commands([]) == ([], [])
+
+
+def _bundle(tmp_path: Path) -> tuple[Path, Path, Path]:
+    """A bundle laid out like the app's, with a space in its name: the interpreter, one extension
+    module, and one library kept in ``lib/``."""
+    app = tmp_path / "Lucille Host.app"
+    python_dir = app / "Contents" / "Resources" / "python"
+    dynload = python_dir / "lib" / "python3.13" / "lib-dynload"
+    dynload.mkdir(parents=True)
+    (python_dir / "bin").mkdir()
+    python = python_dir / "bin" / "python3"
+    module = dynload / "_mod.cpython-313-darwin.so"
+    for path in (python, module, python_dir / "lib" / "libkept.dylib"):
+        path.write_bytes(b"")
+    return app, python, module
+
+
+def test_libraries_that_resolve_inside_the_bundle_pass(tmp_path: Path) -> None:
+    app, python, module = _bundle(tmp_path)
+    libraries = [
+        "/usr/lib/libSystem.B.dylib",
+        "/System/Library/Frameworks/CoreFoundation.framework/Versions/A/CoreFoundation",
+        "@rpath/libkept.dylib",
+        "@loader_path/../../libkept.dylib",
+        "@executable_path/../lib/libkept.dylib",
+    ]
+    shown, problems = check_app.resolve_links(
+        app, module, python, (libraries, ["@loader_path/../.."])
+    )
+    assert problems == []
+    kept = "Contents/Resources/python/lib/libkept.dylib"
+    assert shown == [
+        "run path @loader_path/../.. -> Contents/Resources/python/lib",
+        "/usr/lib/libSystem.B.dylib (macOS)",
+        "/System/Library/Frameworks/CoreFoundation.framework/Versions/A/CoreFoundation (macOS)",
+        f"@rpath/libkept.dylib -> {kept}",
+        f"@loader_path/../../libkept.dylib -> {kept}",
+        f"@executable_path/../lib/libkept.dylib -> {kept}",
+    ]
+    # @rpath also tries the interpreter's own run paths, resolved against the interpreter.
+    shown, problems = check_app.resolve_links(
+        app, module, python, (["@rpath/libkept.dylib"], []), ["@executable_path/../lib"]
+    )
+    assert problems == [] and shown == [f"@rpath/libkept.dylib -> {kept}"]
+
+
+@pytest.mark.parametrize(
+    ("libraries", "rpaths", "problem"),
+    [
+        # A library the build removed, still loaded by a module it kept.
+        (["@rpath/libtcl9.0.dylib"], ["@loader_path/../.."], "no such file in the app"),
+        (["@loader_path/../../libgone.dylib"], [], "no such file in the app"),
+        # A relative path that climbs out of the bundle.
+        (
+            ["@loader_path/../../../../../../../../opt/homebrew/lib/libssl.3.dylib"],
+            [],
+            "is outside the app",
+        ),
+        (["@executable_path/../../../../../../usr/local/lib/x.dylib"], [], "is outside the app"),
+        (["@rpath/../../../../../../../../x.dylib"], ["@loader_path/../.."], "is outside the app"),
+        # A run path outside the bundle, even one nothing uses.
+        ([], ["@loader_path/../../../../../../../.."], "is outside the app"),
+        ([], ["/usr/local/lib"], "not a path inside the app"),
+        ([], ["@rpath/lib"], "not a path inside the app"),
+        # A library from anywhere but macOS or the bundle.
+        (["/opt/homebrew/lib/libssl.3.dylib"], [], "not from macOS"),
+        (["/usr/local/lib/libffi.dylib"], [], "not from macOS"),
+        (["/Library/Frameworks/Python.framework/Versions/3.13/Python"], [], "not from macOS"),
+        (["libfoo.dylib"], [], "not from macOS"),
+        (["@rpath/libkept.dylib"], [], "no run path inside the app"),
+    ],
+)
+def test_libraries_that_do_not_resolve_inside_the_bundle_fail(
+    tmp_path: Path, libraries: list[str], rpaths: list[str], problem: str
+) -> None:
+    app, python, module = _bundle(tmp_path)
+    _, problems = check_app.resolve_links(app, module, python, (libraries, rpaths))
+    assert len(problems) == 1 and problem in problems[0], problems

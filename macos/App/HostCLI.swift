@@ -96,11 +96,18 @@ struct HostCLI: Sendable {
 
     var isPaused: Bool { FileManager.default.fileExists(atPath: pauseFlag.path) }
 
-    /// Run one verb and wait for it, up to the time limit or until `cancel` is cancelled. A run
-    /// that is stopped gets SIGTERM, then SIGKILL 2 seconds later. If it still has not ended 2
-    /// seconds after that (a process stuck on a stalled network drive cannot end), the app stops
-    /// waiting for it, and the result has the status `notFinished`.
-    func run(_ verb: [String], cancel: CancelToken? = nil) -> CLIResult {
+    /// How many runs the app stopped waiting for have still not ended. One may hold the host's
+    /// policy lock, and then every change to folders and abilities waits for it.
+    static var stuckRuns: Int { leftBehind.running }
+
+    private static let leftBehind = LeftBehind()
+
+    /// Run one verb and wait for it, up to the time limit (`timeout`, or this command line's) or
+    /// until `cancel` is cancelled. A run that is stopped gets SIGTERM, then SIGKILL 2 seconds
+    /// later. If it still has not ended 2 seconds after that (a process stuck on a stalled network
+    /// drive cannot end), the app stops waiting for it, counts it in `stuckRuns` until it ends,
+    /// and the result has the status `notFinished`.
+    func run(_ verb: [String], cancel: CancelToken? = nil, timeout: TimeInterval? = nil) -> CLIResult {
         let process = Process()
         process.executableURL = python
         process.arguments = arguments(for: verb)
@@ -125,7 +132,7 @@ struct HostCLI: Sendable {
         }
         let out = PipeReader(stdout.fileHandleForReading)
         let err = PipeReader(stderr.fileHandleForReading)
-        let deadline = Date().addingTimeInterval(timeout)
+        let deadline = Date().addingTimeInterval(timeout ?? self.timeout)
         var timedOut = false
         var cancelled = false
         while true {
@@ -147,6 +154,7 @@ struct HostCLI: Sendable {
             if exited.wait(timeout: .now() + 2) == .timedOut {
                 kill(process.processIdentifier, SIGKILL)
                 if exited.wait(timeout: .now() + 2) == .timedOut {
+                    HostCLI.leftBehind.add(process)
                     return CLIResult(
                         status: CLIResult.notFinished,
                         stdout: "",
@@ -164,6 +172,26 @@ struct HostCLI: Sendable {
             timedOut: timedOut,
             cancelled: cancelled
         )
+    }
+}
+
+/// The runs the app stopped waiting for because they would not end.
+private final class LeftBehind: @unchecked Sendable {
+    private let lock = NSLock()
+    private var processes: [Process] = []
+
+    func add(_ process: Process) {
+        lock.lock()
+        processes.append(process)
+        lock.unlock()
+    }
+
+    /// How many of them are still running. Those that have ended are forgotten.
+    var running: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        processes.removeAll { !$0.isRunning }
+        return processes.count
     }
 }
 

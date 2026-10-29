@@ -14,20 +14,24 @@ Each check prints what it saw and exits 1 if anything is wrong:
   makes, through the same code.
 - ``relocate``: copies the app to another folder, whose path has a space in it, and runs ``host``
   and ``swift`` on the copy.
-- ``links``: no Mach-O file in the bundle loads a library from outside macOS or the bundle (no
-  ``/Library/Frameworks``, ``/usr/local``, ``/opt/homebrew`` or build folder); none says it needs a
-  newer macOS than ``LSMinimumSystemVersion``; no file in the bundle holds the build folder's
-  path; and the app's own executable imports no function from :data:`FORBIDDEN_IMPORTS` and the
-  lists after it, which start processes or open network connections, and links none of
-  :data:`FORBIDDEN_LIBRARIES`. That last part reads only what the executable imports by name: code
-  that reaches such a function another way (through the Objective-C runtime, say) is not seen.
+- ``links``: every library a Mach-O file in the bundle loads is macOS's own, or resolves, the
+  way dyld resolves ``@loader_path``, ``@executable_path`` and ``@rpath``, to a file that exists
+  inside the bundle; every run path resolves inside the bundle (:func:`resolve_links`). It prints
+  where each one resolves. No Mach-O file says it needs a newer macOS than
+  ``LSMinimumSystemVersion``; no file in the bundle holds the build folder's path; and the app's
+  own executable imports no function from :data:`FORBIDDEN_IMPORTS` and the lists after it, which
+  start processes or open network connections, and links none of :data:`FORBIDDEN_LIBRARIES`.
+  That last part reads only what the executable imports by name: code that reaches such a
+  function another way (through the Objective-C runtime, say) is not seen.
 - ``signature``: ``codesign --verify --deep --strict`` passes on the app, and ``codesign --verify
   --strict`` on each Mach-O file in it; every Mach-O file has the hardened runtime flag; the app
   and the interpreter carry no entitlements.
 - ``launch``: opens the app the way Finder does, checks that it is still running 10 seconds later,
   then stops it.
-- ``ui``: opens the app and drives its menu as a user would, through System Events: reads the
-  menu; chooses Pause Lucille, then Resume Lucille; switches an ability on and off; adds a folder
+- ``ui``: opens the app and drives it as a user would, through System Events: reads the note
+  that says where the menu is, when the app opens and when it is opened again; reads the menu bar
+  item's name and the menu; chooses Pause Lucille, then Resume Lucille, and reads the name again;
+  switches an ability on and off; adds a folder
   through the Open panel and the name dialog, with a name the app must correct first, and removes
   it from the Folders submenu; chooses the home folder, which the app asks about first, picks
   Choose a Smaller Folder once, then adds it. It checks each step against the host's own state.
@@ -63,15 +67,19 @@ TESTS_DIR: Final = build_app.MACOS_DIR / "Tests"
 ALIAS_VECTORS: Final = TESTS_DIR / "alias-vectors.json"
 # The app's Swift files that use Foundation only, so a test driver can run them without a screen.
 LOGIC_SOURCES: Final = ("Alias.swift", "HostCLI.swift", "HostText.swift")
-# A library path a Mach-O file may name: macOS's own, or one relative to the bundle.
-ALLOWED_LINK_PREFIXES: Final = (
-    "/usr/lib/",
-    "/System/Library/",
-    "@rpath/",
-    "@loader_path/",
-    "@executable_path/",
+# Where macOS keeps its own libraries. Most of them exist only in the system's shared cache, so
+# the links check does not look for them on disk. Every other library must be in the bundle.
+SYSTEM_LIBRARY_PREFIXES: Final = ("/usr/lib/", "/System/Library/")
+# The load commands that name a library a Mach-O file loads.
+LOAD_COMMANDS: Final = frozenset(
+    {
+        "LC_LOAD_DYLIB",
+        "LC_LOAD_WEAK_DYLIB",
+        "LC_REEXPORT_DYLIB",
+        "LC_LAZY_LOAD_DYLIB",
+        "LC_LOAD_UPWARD_DYLIB",
+    }
 )
-FORBIDDEN_LINK_PREFIXES: Final = ("/Library/Frameworks", "/usr/local", "/opt/homebrew")
 # What the app's own executable must not import: functions that start a process or open a
 # network connection, and the classes that do either. HostCLI.swift starts the interpreter with
 # Foundation's Process (NSTask), which imports none of these names.
@@ -138,9 +146,20 @@ FORBIDDEN_LIBRARIES: Final = (
     "/NetworkExtension.framework/",
     "/WebKit.framework/",
 )
-# The Abilities menu's words for each operation it lists, as in App/HostText.swift
-# (tests/test_macos_build.py checks that the two agree).
+# The app's words that the ui check looks for, as in App/HostText.swift and App/HostModel.swift
+# (tests/test_macos_build.py checks that they agree): each listed ability's name and what Lucille
+# gets from it, the note the app shows when it opens, the menu's line while paused, the menu bar
+# item's name, and the Open panel's button.
 ABILITY_TITLES: Final = {"files.sha256": "Check a file's fingerprint"}
+ABILITY_DETAILS: Final = {
+    "files.sha256": (
+        "Lucille gets a code that identifies one file's exact contents, not the contents."
+    )
+}
+WELCOME_TITLE: Final = "Lucille Host is in your menu bar"
+PAUSED_NOTE: Final = "Lucille's requests are turned away until you resume."
+STATUS_ITEM_NAMES: Final = ("Lucille Host", "Lucille Host, paused")
+OPEN_PROMPT: Final = "Allow Lucille Host to Use This Folder"
 # Loads the native code of the runtime dependencies, the way the host will.
 NATIVE_PROBE: Final = """\
 import sys
@@ -386,13 +405,108 @@ def _otool(flag: str, path: Path) -> list[str]:
     ).stdout.splitlines()
 
 
-def _links(path: Path, commands: Sequence[str]) -> list[str]:
-    """The libraries and run paths a Mach-O file names, as otool prints them."""
-    names = [line.strip().split(" (")[0] for line in _otool("-L", path)[1:] if line.strip()]
-    for number, line in enumerate(commands):
-        if line.strip() == "cmd LC_RPATH" and number + 2 < len(commands):
-            names.append("rpath " + commands[number + 2].strip().split(" (offset")[0])
-    return names
+def load_commands(commands: Sequence[str]) -> tuple[list[str], list[str]]:
+    """What a Mach-O file loads, from ``otool -l``'s lines: the libraries its load commands name
+    (:data:`LOAD_COMMANDS`), and its run paths (``LC_RPATH``), each in order and once. Its own
+    install name (``LC_ID_DYLIB``) and dyld's (``LC_LOAD_DYLINKER``) are not libraries it loads."""
+    libraries: list[str] = []
+    rpaths: list[str] = []
+    command = None
+    for line in commands:
+        key, _, value = line.strip().partition(" ")
+        value = value.strip()
+        if key == "cmd":
+            command = value
+            continue
+        if key == "name" and command in LOAD_COMMANDS:
+            found = libraries
+        elif key == "path" and command == "LC_RPATH":
+            found = rpaths
+        else:
+            continue
+        name = value.rsplit(" (offset ", 1)[0]
+        if name not in found:
+            found.append(name)
+    return libraries, rpaths
+
+
+def _expand(path: str, loader: Path, executable: Path) -> Path | None:
+    """``path`` with a leading ``@loader_path`` or ``@executable_path`` replaced, and ``..``
+    resolved, as dyld reads it; None for any other form."""
+    for token, folder in (("@loader_path", loader.parent), ("@executable_path", executable.parent)):
+        if path == token or path.startswith(token + "/"):
+            return Path(os.path.normpath(f"{folder}{path[len(token) :]}"))
+    return None
+
+
+def _shown_in(app: Path, path: Path) -> str:
+    return str(path.relative_to(app)) if path.is_relative_to(app) else str(path)
+
+
+def resolve_links(
+    app: Path,
+    file: Path,
+    executable: Path,
+    names: tuple[Sequence[str], Sequence[str]],
+    executable_rpaths: Sequence[str] = (),
+    is_file: Callable[[Path], bool] = Path.is_file,
+) -> tuple[list[str], list[str]]:
+    """Where each library ``file`` loads would come from, and what is wrong with any of them.
+
+    ``names`` is what :func:`load_commands` read from ``file``, and ``executable_rpaths`` the run
+    paths of ``executable``, the program that loads it (the app's own executable, or the
+    interpreter). As dyld does, ``@loader_path`` is ``file``'s folder, ``@executable_path`` is
+    ``executable``'s, and ``@rpath`` tries ``file``'s run paths, then ``executable``'s. A library
+    from macOS (:data:`SYSTEM_LIBRARY_PREFIXES`) is not looked for on disk. Any other library must
+    resolve to a file that exists inside ``app``, and each of ``file``'s run paths to a folder
+    inside it: a ``..`` that leaves the bundle, an absolute path anywhere else, and a library the
+    build removed are each a problem. dyld would also try the run paths of whatever loaded
+    ``file``; this does not, so it can refuse, but never pass, a library only those would find.
+
+    Returns one line for each library and run path, saying where it resolves, and the problems.
+    """
+    libraries, rpaths = names
+    shown: list[str] = []
+    problems: list[str] = []
+    search: list[Path] = []
+    for rpath in rpaths:
+        where = _expand(rpath, file, executable)
+        if where is None:
+            problems.append(f"run path {rpath}: not a path inside the app")
+        elif not where.is_relative_to(app):
+            problems.append(f"run path {rpath}: {where} is outside the app")
+        else:
+            search.append(where)
+            shown.append(f"run path {rpath} -> {_shown_in(app, where)}")
+    for rpath in executable_rpaths:
+        where = _expand(rpath, executable, executable)
+        if where is not None and where.is_relative_to(app) and where not in search:
+            search.append(where)
+    for name in libraries:
+        if name.startswith(SYSTEM_LIBRARY_PREFIXES):
+            shown.append(f"{name} (macOS)")
+            continue
+        if name.startswith("@rpath/"):
+            if not search:
+                problems.append(f"{name}: no run path inside the app to look in")
+                continue
+            rest = name.removeprefix("@rpath/")
+            candidates = [Path(os.path.normpath(folder / rest)) for folder in search]
+        else:
+            where = _expand(name, file, executable)
+            candidates = [] if where is None else [where]
+        outside = [path for path in candidates if not path.is_relative_to(app)]
+        found = next((path for path in candidates if is_file(path)), None)
+        if not candidates:
+            problems.append(f"{name}: not from macOS, and not a path inside the app")
+        elif outside:
+            problems.append(f"{name}: {outside[0]} is outside the app")
+        elif found is None:
+            tried = ", ".join(_shown_in(app, path) for path in candidates)
+            problems.append(f"{name}: no such file in the app (tried {tried})")
+        else:
+            shown.append(f"{name} -> {_shown_in(app, found)}")
+    return shown, problems
 
 
 def check_imports(executable: Path, checker: Checker) -> None:
@@ -414,7 +528,9 @@ def check_imports(executable: Path, checker: Checker) -> None:
         "\n".join(bad),
     )
     libraries = [
-        name for name in _links(executable, []) if any(lib in name for lib in FORBIDDEN_LIBRARIES)
+        name
+        for name in load_commands(_otool("-l", executable))[0]
+        if any(lib in name for lib in FORBIDDEN_LIBRARIES)
     ]
     checker.expect(
         not libraries,
@@ -426,29 +542,34 @@ def check_imports(executable: Path, checker: Checker) -> None:
 def check_links(app: Path, checker: Checker) -> None:
     build_dir = str(build_app.REPO_ROOT)
     minimum = build_app.load_pins().minimum_macos
+    main = app / "Contents" / "MacOS" / build_app.load_pins().app_name
+    python = python_in(app)
     files = build_app.macho_files(app)
     checker.expect(bool(files), f"{len(files)} Mach-O files in the bundle")
+    commands = {path: _otool("-l", path) for path in files}
     for path in files:
-        commands = _otool("-l", path)
-        versions = minimum_macos_versions(commands)
+        versions = minimum_macos_versions(commands[path])
         checker.expect(
             bool(versions) and not any(newer_than(version, minimum) for version in versions),
             f"{path.relative_to(app)} runs on macOS {minimum} (it asks for {versions})",
         )
-        names = _links(path, commands)
-        bad = []
-        for name in names:
-            target = name.removeprefix("rpath path ").removeprefix("rpath ")
-            if name.startswith("rpath"):
-                ok = target.startswith("@")
-            else:
-                ok = target.startswith(ALLOWED_LINK_PREFIXES) and not target.startswith(
-                    FORBIDDEN_LINK_PREFIXES
-                )
-            if not ok or build_dir in target:
-                bad.append(name)
+        # The app's own executable runs alone; everything else is loaded by the interpreter.
+        executable = main if path.parent == main.parent else python
+        names = load_commands(commands[path])
+        executable_rpaths = load_commands(commands.get(executable, []))[1]
+        shown, problems = resolve_links(app, path, executable, names, executable_rpaths)
+        problems += [
+            f"{name}: names the build folder"
+            for name in [*names[0], *names[1]]
+            if build_dir in name
+        ]
+        print(f"{path.relative_to(app)} loads:")
+        for line in shown:
+            print(f"  {line}")
         checker.expect(
-            not bad, f"{path.relative_to(app)} names only macOS or the bundle", "\n".join(bad)
+            not problems,
+            f"{path.relative_to(app)} loads only from macOS and the bundle",
+            "\n".join(problems),
         )
     needle = build_dir.encode()
     holding = [
@@ -614,20 +735,83 @@ def _open_menu_and_read() -> tuple[bool, list[str]]:
     return worked, text.splitlines() if worked else [text]
 
 
-def _drive_menu(checker: Checker, screens: Path, flag: Path) -> bool:
-    """Read the menu, then choose Pause Lucille and Resume Lucille. False if System Events cannot
-    drive the app on this machine."""
-    version = build_app.host_version()
+def _can_drive() -> bool:
+    """Whether System Events can read this app's menu bar here."""
     worked, items = _system_events(
         f"{LINES}return (description of every menu bar item of last menu bar) as text"
     )
     if not worked:
         print(
-            "note: System Events cannot read this app's menu bar on this machine, so the menu "
+            "note: System Events cannot read this app's menu bar on this machine, so the app "
             f"was not driven: {items}"
         )
         return False
     print(f"the app's status items: {items.splitlines()}")
+    return True
+
+
+def _status_item_names() -> list[str]:
+    """What System Events reports of the menu bar item's name: its description, title, name and
+    help, the first of which VoiceOver reads."""
+    script = (
+        f"set found to {{}}\nset theItem to {STATUS_ITEM}\n"
+        + "".join(
+            f'try\nset end of found to "{key}=" & ({key} of theItem)\nend try\n'
+            for key in ("description", "title", "name", "help")
+        )
+        + f"{LINES}return found as text"
+    )
+    worked, said = _system_events(script)
+    print(f"the menu bar item says: {said.splitlines() if worked else said}")
+    return [line.partition("=")[2] for line in said.splitlines()] if worked else []
+
+
+def _welcome(checker: Checker, shot: Path, when: str) -> None:
+    """The app shows a note that says where its menu is; read it, and choose OK."""
+    texts: list[str] = []
+
+    def shown() -> bool:
+        nonlocal texts
+        worked, texts = _window_list("value of every static text")
+        return worked and WELCOME_TITLE in texts
+
+    found = _wait_until(shown, 20)
+    _screenshot(shot)
+    checker.expect(
+        found and any("by the clock" in text for text in texts),
+        f"{when}, the app says where its menu is",
+        f"{texts}",
+    )
+    worked, said = _system_events('click button "OK" of window 1')
+    checker.expect(
+        worked
+        and _wait_until(
+            lambda: WELCOME_TITLE not in _window_list("value of every static text")[1], 10
+        ),
+        "OK closes the note",
+        said,
+    )
+
+
+def _drive_welcome(checker: Checker, screens: Path, app: Path) -> None:
+    """The app has no window and no Dock icon, so when it opens, and when it is opened again
+    while it runs, it says where its menu is."""
+    _welcome(checker, screens / "1-welcome.png", "when it opens")
+    done = subprocess.run(["open", str(app)], capture_output=True, text=True, check=False)
+    checker.expect(done.returncode == 0, "open opens the running app again", _shown(done))
+    _welcome(checker, screens / "1-welcome-again.png", "when it is opened again")
+
+
+def _drive_menu(checker: Checker, screens: Path, flag: Path) -> bool:
+    """Read the menu bar item's name and the menu, then choose Pause Lucille and Resume Lucille.
+    False if System Events cannot open the menu on this machine."""
+    version = build_app.host_version()
+    names = _status_item_names()
+    checker.expect(
+        STATUS_ITEM_NAMES[0] in names,
+        f"the menu bar item is named {STATUS_ITEM_NAMES[0]!r}, which VoiceOver reads",
+        f"{names}",
+    )
     worked, shown = _open_menu_and_read()
     if not worked:
         print(f"note: System Events cannot open the menu on this machine: {shown}")
@@ -660,6 +844,11 @@ def _drive_menu(checker: Checker, screens: Path, flag: Path) -> bool:
         "Abilities lists each ability in plain words, and not host.sleep or host.describe",
         abilities,
     )
+    checker.expect(
+        worked and set(ABILITY_DETAILS.values()) <= set(listed),
+        "under each ability, a sentence says what Lucille gets",
+        abilities,
+    )
     if flag.exists():
         print("note: the host was paused before this check, so Pause and Resume were not tried")
         return True
@@ -679,10 +868,17 @@ def _drive_menu(checker: Checker, screens: Path, flag: Path) -> bool:
     checker.expect(
         worked
         and f"{NOT_CONNECTED} \N{MIDDLE DOT} Paused" in shown
+        and PAUSED_NOTE in shown
         and "Resume Lucille" in shown
         and "Pause Lucille" not in shown,
         "the menu then says it is paused, and offers Resume Lucille",
         f"{shown}",
+    )
+    names = _status_item_names()
+    checker.expect(
+        STATUS_ITEM_NAMES[1] in names,
+        f"the menu bar item is then named {STATUS_ITEM_NAMES[1]!r}",
+        f"{names}",
     )
     worked, said = _system_events(
         f'click {STATUS_ITEM}\ndelay 1\nclick menu item "Resume Lucille" of {MENU}'
@@ -777,7 +973,7 @@ def _go_to_folder(folder: Path, screens: Path, shot: str) -> tuple[bool, str]:
     if not worked:
         return False, f"going to {folder} in the Open panel: {said}"
     _screenshot(screens / shot)
-    worked, said = _system_events('click button "Choose" of window 1\ndelay 2', timeout=60)
+    worked, said = _system_events(f'click button "{OPEN_PROMPT}" of window 1\ndelay 2', timeout=60)
     return worked, said if worked else f"choosing the folder: {said}"
 
 
@@ -852,7 +1048,9 @@ def _drive_folders(checker: Checker, python: Path, screens: Path) -> None:
             f"{said} {_roots(python)}",
         )
         added.append("my-project-files")
-        _acknowledge(checker, "Lucille can now use the folder", screens / "8-folder-added.png")
+        _acknowledge(
+            checker, "Once this Mac is connected to Lucille", screens / "8-folder-added.png"
+        )
         time.sleep(1)
         folders = f'menu 1 of menu item "Folders" of {MENU}'
         worked, said = _system_events(
@@ -885,7 +1083,7 @@ def _drive_folders(checker: Checker, python: Path, screens: Path) -> None:
         worked, said = _system_events('click button "Choose a Smaller Folder" of window 1\ndelay 2')
         worked, buttons = _window_list("name of every button")
         checker.expect(
-            worked and "Choose" in buttons and "Add Anyway" not in buttons,
+            worked and OPEN_PROMPT in buttons and "Add Anyway" not in buttons,
             "Choose a Smaller Folder opens the Open panel again",
             f"{said} {buttons}",
         )
@@ -912,7 +1110,9 @@ def _drive_folders(checker: Checker, python: Path, screens: Path) -> None:
             f"{said} {_roots(python)}",
         )
         added.append(alias)
-        _acknowledge(checker, "Lucille can now use the folder", screens / "12-home-added.png")
+        _acknowledge(
+            checker, "Once this Mac is connected to Lucille", screens / "12-home-added.png"
+        )
     finally:
         for alias, path in _roots(python).items():
             if alias in added or path in (str(folder), str(home)):
@@ -921,7 +1121,8 @@ def _drive_folders(checker: Checker, python: Path, screens: Path) -> None:
 
 
 def check_ui(app: Path, checker: Checker, work: Path, require_driven: bool = False) -> None:
-    """Open the app and drive its menu the way a user would, through System Events: read the menu;
+    """Open the app and drive it the way a user would, through System Events: read the note that
+    says where its menu is, when it opens and when it is opened again; read the menu;
     choose Pause Lucille and Resume Lucille, and watch the host's pause flag; switch an ability on
     and off; add a folder through the Open panel and the name dialog, and remove it from the
     Folders submenu; add the home folder, which the app asks about first. Each step is checked
@@ -951,9 +1152,13 @@ def check_ui(app: Path, checker: Checker, work: Path, require_driven: bool = Fal
     if not checker.expect(_wait_until(lambda: bool(_running(name)), 15), "the app is running"):
         return
     time.sleep(5)
-    _screenshot(screens / "1-menu-bar.png")
     try:
-        if _drive_menu(checker, screens, flag):
+        driven = _can_drive()
+        if driven:
+            _drive_welcome(checker, screens, app)
+            _screenshot(screens / "1-menu-bar.png")
+            driven = _drive_menu(checker, screens, flag)
+        if driven:
             _drive_abilities(checker, python_in(app), screens)
             _drive_folders(checker, python_in(app), screens)
         elif require_driven:

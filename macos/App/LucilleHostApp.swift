@@ -5,14 +5,53 @@ import SwiftUI
 /// does is in this menu.
 @main
 struct LucilleHostApp: App {
+    @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @StateObject private var model = HostModel()
 
     var body: some Scene {
-        MenuBarExtra {
+        // The title is the menu bar item's name, which VoiceOver reads; only the icon shows.
+        MenuBarExtra(
+            HostText.statusItemName(paused: model.paused),
+            systemImage: model.paused ? "pause.circle" : "desktopcomputer"
+        ) {
             HostMenu(model: model)
-        } label: {
-            Image(systemName: model.paused ? "pause.circle" : "desktopcomputer")
-                .accessibilityLabel(model.paused ? "Lucille Host, paused" : "Lucille Host")
+        }
+    }
+}
+
+/// Says where the menu is when the app opens, and when it is opened again while it runs: it has
+/// no window and no Dock icon, so otherwise nothing would seem to happen. Quit is offered too,
+/// for when the menu bar has no room for the icon.
+@MainActor
+final class AppDelegate: NSObject, NSApplicationDelegate {
+    private var showing = false
+
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        Task { @MainActor in
+            try? await Task.sleep(for: .seconds(1))
+            self.showWhereTheMenuIs()
+        }
+    }
+
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        showWhereTheMenuIs()
+        return false
+    }
+
+    private func showWhereTheMenuIs() {
+        guard !showing else {
+            return
+        }
+        showing = true
+        defer { showing = false }
+        let alert = NSAlert()
+        alert.messageText = HostText.welcomeTitle
+        alert.informativeText = HostText.welcomeText
+        alert.addButton(withTitle: "OK")
+        alert.addButton(withTitle: "Quit Lucille Host")
+        NSApp.activate()
+        if alert.runModal() == .alertSecondButtonReturn {
+            NSApplication.shared.terminate(nil)
         }
     }
 }
@@ -23,6 +62,12 @@ struct HostMenu: View {
     var body: some View {
         Text(model.title)
         Text(model.statusLine)
+        if model.paused {
+            Text(HostText.pausedNote)
+        }
+        if model.stuck {
+            Text("A folder check is stuck. Reconnect the drive or restart your Mac.")
+        }
         if let problem = model.problem {
             Button(problem.message) { model.showProblem() }
         }
@@ -47,6 +92,9 @@ struct HostMenu: View {
                     )
                 )
                 .disabled(!ability.canChange)
+                if let detail = ability.detail {
+                    Text(detail)
+                }
                 if let note = ability.note {
                     Text(note)
                 }

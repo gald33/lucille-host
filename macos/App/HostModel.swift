@@ -13,9 +13,14 @@ final class HostModel: ObservableObject {
     @Published private(set) var abilitiesRead = true
     @Published private(set) var foldersRead = true
     @Published private(set) var problem: Explanation?
+    /// Whether a run the app stopped waiting for has still not ended (`HostCLI.stuckRuns`).
+    @Published private(set) var stuck = false
 
     private let cli: HostCLI
     private var menuObserver: NSObjectProtocol?
+    /// How long adding a folder may take. macOS may first ask the user about the folder, and the
+    /// progress window's Cancel button stops the run sooner.
+    private let addTimeout: TimeInterval = 600
 
     init() {
         cli = HostCLI(python: HostCLI.python(inApp: Bundle.main.bundleURL), home: HostCLI.userHome())
@@ -52,18 +57,28 @@ final class HostModel: ObservableObject {
     }
 
     func setPaused(_ pause: Bool) {
-        perform([pause ? "pause" : "resume"], failing: pause ? "pause" : "resume")
+        perform(
+            [pause ? "pause" : "resume"],
+            waiting: pause ? "Pausing Lucille\u{2026}" : "Resuming Lucille\u{2026}",
+            failing: pause ? "pause" : "resume"
+        )
     }
 
     func setAbility(_ ability: Ability, on: Bool) {
+        let action = "turn \(on ? "on" : "off") \u{201C}\(ability.title)\u{201D}"
         perform(
             ["ops", on ? "enable" : "disable", ability.name],
-            failing: "turn \(on ? "on" : "off") \u{201C}\(ability.title)\u{201D}"
+            waiting: "Turning \(on ? "on" : "off") \u{201C}\(ability.title)\u{201D}\u{2026}",
+            failing: action
         )
     }
 
     func removeFolder(_ folder: Folder) {
-        perform(["roots", "remove", folder.alias], failing: "remove the folder \(folder.alias)")
+        perform(
+            ["roots", "remove", folder.alias],
+            waiting: "Removing the folder \u{201C}\(folder.alias)\u{201D}\u{2026}",
+            failing: "remove the folder \(folder.alias)"
+        )
     }
 
     /// Show the problem the menu reports, with the host's own words.
@@ -97,7 +112,9 @@ final class HostModel: ObservableObject {
             let taken = Set(folders.map(\.alias))
             let suggestion = Alias.suggest(forFolderName: url.lastPathComponent, taken: taken)
             let name = FileManager.default.displayName(atPath: path)
-            guard let alias = askForAlias(suggestion: suggestion, folderName: name, taken: taken) else {
+            let synced = (try? url.resourceValues(forKeys: [.isUbiquitousItemKey]))?.isUbiquitousItem ?? false
+            let place = HostText.place(of: path, home: cli.home, synced: synced)
+            guard let alias = askForAlias(suggestion: suggestion, folderName: name, taken: taken, place: place) else {
                 return
             }
             Task { await addRoot(alias: alias, path: path, allowBroad: allowBroad) }
@@ -110,7 +127,7 @@ final class HostModel: ObservableObject {
         let panel = NSOpenPanel()
         panel.title = "Add a Folder"
         panel.message = "Choose a folder Lucille may work in. Abilities you turn on can use the files in it."
-        panel.prompt = "Choose"
+        panel.prompt = "Allow Lucille Host to Use This Folder"
         panel.canChooseDirectories = true
         panel.canChooseFiles = false
         panel.allowsMultipleSelection = false
@@ -136,18 +153,43 @@ final class HostModel: ObservableObject {
         folders = rootsRun.succeeded ? HostText.folders(fromList: rootsRun.stdout) : []
         problem = results.first(where: { !$0.succeeded }).map { HostText.explain($0) }
         paused = cli.isPaused
+        stuck = HostCLI.stuckRuns > 0
+        labelStatusItem()
     }
 
-    private func run(_ verb: [String], cancel: CancelToken? = nil) async -> CLIResult {
+    /// Give the menu bar item its name, for VoiceOver, and say there when Lucille is paused.
+    private func labelStatusItem() {
+        let name = HostText.statusItemName(paused: paused)
+        for window in NSApp.windows {
+            var views = window.contentView.map { [$0] } ?? []
+            while let view = views.popLast() {
+                if let button = view as? NSStatusBarButton {
+                    button.setAccessibilityLabel(name)
+                    button.toolTip = name
+                }
+                views.append(contentsOf: view.subviews)
+            }
+        }
+    }
+
+    private func run(
+        _ verb: [String], cancel: CancelToken? = nil, timeout: TimeInterval? = nil
+    ) async -> CLIResult {
         let cli = self.cli
-        return await Task.detached(priority: .userInitiated) { cli.run(verb, cancel: cancel) }.value
+        return await Task.detached(priority: .userInitiated) {
+            cli.run(verb, cancel: cancel, timeout: timeout)
+        }.value
     }
 
-    private func perform(_ verb: [String], failing action: String) {
+    /// Run a verb that changes something, with a window that has a Cancel button if it takes more
+    /// than a moment. A run the user cancels is not a failure, unless one the app gave up on
+    /// still holds things up.
+    private func perform(_ verb: [String], waiting message: String, failing action: String) {
         Task {
-            let result = await run(verb)
-            if !result.succeeded {
-                showFailure(HostText.explain(result), action: action)
+            let result = await runWithProgress(verb, message: message)
+            let stuck = HostCLI.stuckRuns > 0
+            if !result.succeeded && (!result.cancelled || stuck || result.status == CLIResult.notFinished) {
+                showFailure(HostText.explain(result, earlierRunStuck: stuck), action: action)
             }
             await reload()
         }
@@ -160,7 +202,8 @@ final class HostModel: ObservableObject {
         if allowBroad {
             verb.append("--allow-home-or-root")
         }
-        var result = await runWithProgress(verb, message: "Checking the folder \u{201C}\(alias)\u{201D}\u{2026}")
+        let checking = "Checking the folder \u{201C}\(alias)\u{201D}\u{2026}"
+        var result = await runWithProgress(verb, message: checking, timeout: addTimeout)
         if HostText.needsHomeConfirmation(result) {
             guard confirmBroadFolder(.holdsHome) else {
                 await reload()
@@ -168,31 +211,35 @@ final class HostModel: ObservableObject {
                 return
             }
             verb.append("--allow-home-or-root")
-            result = await runWithProgress(verb, message: "Checking the folder \u{201C}\(alias)\u{201D}\u{2026}")
+            result = await runWithProgress(verb, message: checking, timeout: addTimeout)
         }
         await reload()
         let added = folders.contains(Folder(alias: alias, path: path))
-        if result.cancelled {
-            if added {
-                showNote(
-                    title: "The folder was added",
-                    text: "Lucille Host had already added \u{201C}\(alias)\u{201D} when you cancelled. To undo it, choose Folders, then \(alias), then Remove."
-                )
-            }
-            return
-        }
-        if result.succeeded {
+        let stuck = HostCLI.stuckRuns > 0
+        if result.cancelled && added {
             showNote(
-                title: "Folder added",
-                text: "Lucille can now use the folder \u{201C}\(alias)\u{201D}, for abilities you turn on."
+                title: "The folder was added",
+                text: "Lucille Host had already added \u{201C}\(alias)\u{201D} when you cancelled. To undo it, choose Folders, then \(alias), then Remove."
             )
             return
         }
-        showFailure(HostText.explain(result, during: .addingFolder), action: "add the folder")
+        if result.cancelled && !stuck && result.status != CLIResult.notFinished {
+            return
+        }
+        if result.succeeded {
+            showNote(title: "Folder added", text: HostText.folderAdded(alias: alias))
+            return
+        }
+        let explanation = HostText.explain(
+            result, during: .addingFolder(HostText.access(of: path)), earlierRunStuck: stuck
+        )
+        showFailure(explanation, action: "add the folder")
     }
 
     /// Run a verb; if it takes longer than a moment, show a window with a Cancel button.
-    private func runWithProgress(_ verb: [String], message: String) async -> CLIResult {
+    private func runWithProgress(
+        _ verb: [String], message: String, timeout: TimeInterval? = nil
+    ) async -> CLIResult {
         let token = CancelToken()
         let panel = ProgressPanel(message: message) { token.cancel() }
         let shower = Task { @MainActor in
@@ -201,20 +248,22 @@ final class HostModel: ObservableObject {
                 panel.show()
             }
         }
-        let result = await run(verb, cancel: token)
+        let result = await run(verb, cancel: token, timeout: timeout)
         shower.cancel()
         panel.close()
         return result
     }
 
     /// Ask for the name Lucille will see, starting from a suggestion. Nil when the user cancels.
-    private func askForAlias(suggestion: String, folderName: String, taken: Set<String>) -> String? {
+    private func askForAlias(
+        suggestion: String, folderName: String, taken: Set<String>, place: FolderPlace
+    ) -> String? {
         var current = suggestion
         var note: String?
         while true {
             let alert = NSAlert()
             alert.messageText = "Name Lucille will see"
-            alert.informativeText = HostText.aliasPrompt(folderName: folderName, note: note)
+            alert.informativeText = HostText.aliasPrompt(folderName: folderName, note: note, place: place)
             let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 280, height: 24))
             field.stringValue = current
             field.placeholderString = "Name Lucille will see"

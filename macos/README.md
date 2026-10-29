@@ -8,8 +8,8 @@ image is not notarized, so macOS refuses to open it normally (see [The disk imag
 
 ## What this builds
 
-- **`Lucille Host.app`**, a menu bar app for Apple silicon Macs with macOS 15 or later. It has no window
-  and no Dock icon.
+- **`Lucille Host.app`**, a menu bar app for Apple silicon Macs with macOS 15 or later. It has no main
+  window and no Dock icon.
 - Inside it, a Python 3.13 runtime from [python-build-standalone](https://github.com/astral-sh/python-build-standalone),
   pinned in [`runtime.toml`](runtime.toml) by its URL and its sha256. The build refuses any other file.
 - Installed into that runtime: the host's wheel, built from this checkout, and the exact dependency
@@ -22,33 +22,61 @@ image is not notarized, so macOS refuses to open it normally (see [The disk imag
   to the Applications folder. The name says the signature is ad hoc and names the commit, so the image
   cannot be taken for a release asset.
 
+## What the app does when it opens
+
+The app has no window to show, so when it opens it says where it is: "Lucille Host is in your menu
+bar", and where to click. It says so again whenever it is opened while it runs, for someone who could
+not find the icon. The note offers **Quit Lucille Host** too, because on a crowded menu bar, or beside
+a notch, macOS hides icons that do not fit, and then the menu cannot be reached.
+
+The menu bar item is named "Lucille Host", or "Lucille Host, paused", for VoiceOver.
+
 ## What the menu does
 
 | Item | What it runs |
 |---|---|
 | "Lucille Host *version*" | `--version` |
-| "Not connected to Lucille" | Nothing. The host cannot pair yet, so this Mac is never connected. When the host is paused, the line reads "Not connected to Lucille · Paused", from the pause flag the host keeps (see below), and the icon changes. |
+| "Not connected to Lucille" | Nothing. The host cannot pair yet, so this Mac is never connected. When the host is paused, the line reads "Not connected to Lucille · Paused", from the pause flag the host keeps (see below), a line under it says that Lucille's requests are turned away until you resume, and the icon changes. |
 | Pause Lucille / Resume Lucille | `pause` / `resume` |
-| Abilities | `ops list`. Each ability shows in a few plain words, such as "Check a file's fingerprint", with a checkmark when it is enabled. Choosing one runs `ops enable` or `ops disable`. `host.sleep`, which is for testing, is not listed. Nor is `host.describe`; while it is on, the menu says what it shares once connected. |
+| Abilities | `ops list`. Each ability shows in a few plain words, such as "Check a file's fingerprint", with a checkmark when it is enabled, and a sentence under it says what Lucille gets: "Lucille gets a code that identifies one file's exact contents, not the contents." Choosing one runs `ops enable` or `ops disable`. `host.sleep`, which is for testing, is not listed. Nor is `host.describe`; while it is on, the menu says what it shares once connected. |
 | Add a Folder… | See below. |
 | Folders | `roots list`. Each folder has a **Remove** item, which runs `roots remove <alias>`. |
 | Connect to Lucille (coming soon) | Nothing. It is disabled. |
 | Quit Lucille Host | Quits the app. |
 
-**Add a Folder…** opens the standard Open panel. If the folder chosen is the home folder, holds it, or is
-the whole disk, the app first says which, and what is inside, with **Choose a Smaller Folder** as the
-default button; that button opens the Open panel again. Then the app asks for the name Lucille will see,
-suggesting one made from the folder's name that no other folder uses (`taxes`, then `taxes-2`). A name the
-host would refuse is turned into one it accepts, and shown again before anything is added. Then the app
-runs `roots add <alias> <path>`, with `--allow-home-or-root` only if the user chose Add Anyway. If that
-takes more than a moment (a network drive, say), a small window with a **Cancel** button shows; Cancel
-stops the run. On success the app says that Lucille can now use the folder.
+**Add a Folder…** opens the standard Open panel, whose button reads "Allow Lucille Host to Use This
+Folder". If the folder chosen is the home folder, holds it, or is the whole disk, the app first says
+which, and what is inside, with **Choose a Smaller Folder** as the default button; that button opens the
+Open panel again. Then the app asks for the name Lucille will see, suggesting one made from the folder's
+name that no other folder uses: written in Latin letters where macOS can, so that `日本語` gives
+`ri-ben-yu`, with `folder-` put first when it starts with a digit (`2026 Taxes` gives
+`folder-2026-taxes`), and `-2`, `-3` added when it is taken. A name the host would refuse is turned into
+one it accepts, and shown again before anything is added.
+
+The same dialog says what macOS may ask next. For a folder in Documents, Desktop or Downloads, or on
+another drive, it says that macOS may ask whether Lucille Host can access it, and to click Allow. For a
+folder in iCloud Drive or another cloud folder, it says that such folders may not work yet.
+
+Then the app runs `roots add <alias> <path>`, with `--allow-home-or-root` only if the user chose Add
+Anyway. If that takes more than a moment (a network drive, or a question from macOS), a small window with
+a **Cancel** button shows; Cancel stops the run. On success the app says that once this Mac is
+connected, Lucille can use the folder for the abilities the user turns on. If the host found no folder
+there but the app can see one, or macOS refuses the app too, the app says that macOS is blocking Lucille
+Host from the folder, and where in System Settings to allow it.
 
 The menu reads the host's state again each time it opens. When the host cannot be read, the menu says
 so ("Couldn't read your folders") instead of showing an empty list, and a short line at the top names the
 problem; choosing it shows the details. When a verb fails, the app says why in a plain sentence for each
-refusal the host's command line gives (a name already in use, the 64-folder limit, the host's own folder,
-an unreadable settings file), and shows the host's own words as a detail.
+refusal it knows from the host's command line (a name already in use, the 64-folder limit, the host's own
+folder, an unreadable settings file, and the others in `App/HostText.swift`), and shows the host's own
+words as a detail. A refusal it does not know reads "Something went wrong in Lucille Host's helper
+program", with the host's words as the detail.
+
+Pause, Resume, the ability switches and Remove show the same window with a **Cancel** button when they
+take more than a moment. A run the app gave up on (see below) may still hold the lock the host takes to
+change its settings, and then every change to folders or abilities waits for it. While such a run is
+still going, the menu says that a folder check is stuck, and a change that times out or is cancelled
+says so too, rather than blaming its own folder.
 
 ## How the app talks to the host
 
@@ -61,9 +89,11 @@ an unreadable settings file), and shows the host's own words as a detail.
 - The arguments go as an argv array, never through a shell.
 - The environment is fixed. It holds `HOME`, `USER`, `LOGNAME`, `TMPDIR`, `PATH=/usr/bin:/bin` and
   `LANG`, and nothing else from the app's own environment.
-- Each run has a 30-second limit. A run that passes it, or that the user cancels, gets SIGTERM, then
-  SIGKILL 2 seconds later. A process that still has not ended 2 seconds after that (one stuck on a stalled
-  network drive cannot end) is left behind, and the app stops waiting for it.
+- Each run has a time limit: 10 minutes for `roots add`, which may wait on a question from macOS or on
+  a slow drive, and 30 seconds for every other verb. A run that passes it, or that the user cancels, gets
+  SIGTERM, then SIGKILL 2 seconds later. A process that still has not ended 2 seconds after that (one
+  stuck on a stalled network drive cannot end) is left behind, and the app stops waiting for it. The app
+  counts it as stuck until it ends.
 - The app writes none of the host's files. It reads one, the pause flag at
   `~/Library/Application Support/lucille-host/default/state/paused`, to show whether the host is paused.
 - The app opens no network connection and listens on nothing.
@@ -146,6 +176,8 @@ sign. CI checks the following on every build:
 A signature that macOS trusts needs a Developer ID certificate and notarization. This build does
 neither. Whether the native code still loads with no entitlement under a Developer ID signature is
 not tested yet, and nor is whether Apple's notary service accepts code under `Contents/Resources`.
+There is reason to expect that it does: BeeWare's Briefcase signs the Mach-O files it puts under
+`Contents/Resources` the same way, inside out, and its apps are notarized.
 
 ## What CI checks
 
@@ -158,22 +190,47 @@ secret. A check that finds a problem fails the build.
 | `host` | The interpreter in the bundle runs the host in isolated mode, with nonsense in `PYTHONHOME` and `PYTHONPATH`: `--version`, `ops list`, a `roots` round trip, `pause` and `resume`, and the refusal of a home folder. The dependencies' native code loads. |
 | `swift` | The app's own Swift code that runs the command line and reads its output works against the real command line, through the same calls the menu makes: the folder name suggestions and corrections, the plain sentence for each refusal, the time limit and Cancel. |
 | `relocate` | A copy of the app in another folder, with a space in its path, passes `host` and `swift`. |
-| `links` | No Mach-O file names a library outside macOS or the bundle, or needs a newer macOS than the app's minimum, and no file holds the build folder's path. The app's executable imports nothing on the lists above. |
+| `links` | Every library a Mach-O file loads is macOS's own (`/usr/lib/`, `/System/Library/`), or resolves to a file that exists inside the bundle. `@loader_path`, `@executable_path` and `@rpath` are resolved as dyld resolves them, `..` included, so a path that climbs out of the bundle, and a library the build removed, both fail. Every run path must resolve inside the bundle. The log shows where each library and run path resolves. No Mach-O file needs a newer macOS than the app's minimum, and no file holds the build folder's path. The app's executable imports nothing on the lists above. |
 | `signature` | The signature is valid after the runs above, on the app and on each Mach-O file in it; every Mach-O file has the hardened runtime, and nothing has entitlements. |
 | `launch` | The app opens the way Finder opens it, and is still running 10 seconds later. |
-| `ui` | Driven through System Events as a user would: the menu shows the version, "Not connected to Lucille" and every item, and lists abilities in plain words; Pause Lucille and Resume Lucille change the host's pause flag and the status line; an ability switches on, shows a checkmark, and switches off; Add a Folder… goes through the Open panel and the name dialog, where a typed name the host would refuse comes back corrected, and adds the folder; Remove in the Folders submenu removes it; the home folder brings up the question first, Choose a Smaller Folder goes back to the Open panel, and Add Anyway adds it. Each step is checked against what the host's command line then reports. With `--require-driven`, as CI runs it, a machine where System Events cannot drive the app fails the check. Screenshots are kept as the artifact `lucille-host-macos-screenshots`. |
+| `ui` | Driven through System Events as a user would: the app says where its menu is when it opens, and again when it is opened while it runs; the menu bar item is named "Lucille Host"; the menu shows the version, "Not connected to Lucille" and every item, and lists abilities in plain words, each with its sentence on what Lucille gets; Pause Lucille and Resume Lucille change the host's pause flag, the status line and the menu bar item's name; an ability switches on, shows a checkmark, and switches off; Add a Folder… goes through the Open panel and the name dialog, where a typed name the host would refuse comes back corrected, and adds the folder; Remove in the Folders submenu removes it; the home folder brings up the question first, Choose a Smaller Folder goes back to the Open panel, and Add Anyway adds it. Each step is checked against what the host's command line then reports. With `--require-driven`, as CI runs it, a machine where System Events cannot drive the app fails the check. Screenshots are kept as the artifact `lucille-host-macos-screenshots`. |
 | `gatekeeper` | Prints `spctl`'s verdict. It is "rejected", as expected for an ad hoc signature, and does not fail the build. |
 | `dmg` | Exactly one disk image was built, its name ends `-adhoc-macOS-arm64.dmg`, and it verifies, mounts, and holds the app, with a valid signature, and a link to `/Applications`. |
 | test suite | The host's whole test suite passes on the trimmed runtime. |
 
+## What CI does not check
+
+CI adds its folders under the home folder, where macOS asks nothing. These need a Mac and a person, and
+none has been done yet:
+
+- **A folder in Documents, Desktop or Downloads.** Whether macOS asks at all after the Open panel,
+  whether its question names Lucille Host rather than `python3`, and whether the folder is added after
+  Allow. After Don't Allow, whether the app says that macOS is blocking it, and whether System Settings,
+  Privacy & Security, Files & Folders then shows a switch under Lucille Host.
+- **A folder on an external or network drive, and one in iCloud Drive.**
+- **A stalled network drive.** Whether Cancel works, and whether the menu then says a folder check is
+  stuck.
+- **VoiceOver.** Whether it reads the menu bar item as "Lucille Host", and "Lucille Host, paused".
+- **A full menu bar, or one beside a notch,** where macOS hides the icon.
+
 ## The disk image from CI
 
-The `macos-app` workflow uploads the disk image as the artifact `lucille-host-adhoc-macos-arm64-dmg`, and
-keeps it for 7 days. It does so only when every check passed, and never for a pull request opened from a
-fork, whose build code is the fork's. **It is ad hoc signed and not notarized**, and its name ends
-`-adhoc-macOS-arm64.dmg`. When it is downloaded with a browser, macOS refuses to open the app normally,
-because it cannot verify who made it. It is for people developing the app, on their own Mac. Do not give
-it to anyone else, and do not tell anyone to work around the warning.
+The `macos-app` workflow uploads the disk image as the artifact
+`lucille-host-adhoc-macos-arm64-dmg-<event>-<commit>`, and keeps it for 7 days. It does so only when every
+check passed.
+
+This workflow's own copy skips the upload for a pull request opened from a fork. That does not stop a
+fork: its pull request runs the fork's copy of the workflow, as well as the fork's build code, and that
+copy can upload anything, under any name. So an artifact on a fork's pull request run is the fork's build.
+The repository's Actions setting "Approval for running fork pull request workflows from contributors",
+at its strictest, makes every such run wait for a maintainer. It is a setting, which no file here can
+enforce or show. Take a disk image only from a run on a push to this repository, or on a pull request
+from one of its own branches; the artifact's name says which event and which commit built it.
+
+**It is ad hoc signed and not notarized**, and its name ends `-adhoc-macOS-arm64.dmg`. When it is
+downloaded with a browser, macOS refuses to open the app normally, because it cannot verify who made it.
+It is for people developing the app, on their own Mac. Do not give it to anyone else, and do not tell
+anyone to work around the warning.
 
 ## Not done yet
 
@@ -181,8 +238,14 @@ it to anyone else, and do not tell anyone to work around the warning.
   not exist yet. Until then, no build is fit for other people. The first task once it exists is to send
   this exact layout to Apple's notary service and read its log, even if it passes; the signature then
   needs a secure timestamp (`--timestamp`, not `--timestamp=none`). If the notary objects to code under
-  `Contents/Resources`, the runtime moves to `Contents/Frameworks` and the interpreter to
-  `Contents/Helpers`, as Apple's guide to embedding nonstandard code describes.
+  `Contents/Resources`, there are two ways out, and both are work. One is a `Python.framework` layout
+  under `Contents/Frameworks`, as Briefcase uses. The other moves each Mach-O file, the interpreter and
+  every extension module, to `Contents/Frameworks` or `Contents/Helpers`, fixes its load paths with
+  `install_name_tool`, and leaves a symbolic link at its old place, so that Python still finds each
+  module in its package. That second way needs the build's rule against symbolic links in the bundle
+  relaxed for exactly those links. Moving the whole runtime would not do: those folders are for code
+  only, and Apple's signing tools take a folder with a dot in its name, such as `python3.13` or a
+  `.dist-info`, for a bundle.
 - **Pairing.** The host has no `pair` verb yet, so "Connect to Lucille" is disabled.
 - **Running in the background.** The host has no long-running loop yet, so the app starts nothing that
   keeps running, and it does not open at login.
@@ -190,6 +253,11 @@ it to anyone else, and do not tell anyone to work around the warning.
 - **Uninstall.** Dragging the app to the Trash removes it. The host's own folder,
   `~/Library/Application Support/lucille-host`, stays.
 - **Intel Macs.** The locked `cryptography` publishes no Intel macOS wheel, so the app is Apple silicon only.
+- **A Welcome window and a main window.** The design has a Welcome window that leads through
+  connecting, choosing a folder and turning on an ability, and a main window with the status, folders,
+  abilities, activity and settings. This build has the menu, and a note that says where it is.
+- **An Open Privacy Settings button.** When macOS blocks a folder, the app says where to go in System
+  Settings, but cannot open it: that needs `NSWorkspace`, which the checks above keep out of the app.
 - An app icon, an activity view, and a machine-readable output from the host's command line, which the
   app would read instead of its text.
 
@@ -201,8 +269,8 @@ The design may change each of these.
   Python instead, so that every host process is one named, signed program, which the Keychain and the
   privacy prompts recognise, and so that the bundle holds no general-purpose interpreter. Chosen for the
   first build; the design may change it.
-- **Python lives in `Contents/Resources/python`.** If notarization objects to code there, it moves to
-  `Contents/Frameworks`.
+- **Python lives in `Contents/Resources/python`.** If notarization objects to code there, see "Not done
+  yet" for the two ways out.
 - **The bundle identifier `com.lucille-ai.host` is a placeholder.** It must be final before the first
   signed release, because changing it later makes macOS ask the user again about every folder and
   Keychain item.
@@ -223,3 +291,21 @@ The design may change each of these.
   never needs to write one.
 - **`PATH` is `/usr/bin:/bin`** for the host's command line.
 - **The disk image is a plain `hdiutil` image**, with no background picture or window layout.
+
+These depart from the design's screens. Each was chosen for the first build; the design may change it.
+
+- **The name step is one dialog, with the name in a field the user can change.** The design shows the
+  name in a confirmation sheet, with a separate Change name… button.
+- **The Open panel opens where macOS chooses**, not in Documents.
+- **What macOS may ask is said in the name dialog**, just before the run that makes macOS ask, not in a
+  screen before the Open panel.
+- **There is no Open Privacy Settings button** (see "Not done yet").
+- **The pause icon replaces the app's icon**, a pause sign in place of the computer, where the design adds
+  a pause badge to the app's icon.
+- **Pausing shows no note.** The design confirms Pause with "Paused. Lucille's requests will be turned
+  away until you resume."; this build says so in the menu, under the status line, while paused.
+- **A name in a script macOS cannot write in Latin letters gives `folder`**, and on a system whose
+  Foundation lacks ICU's transforms (the Swift self-test does not run on one today) every non-Latin name
+  does.
+- **The app says where its menu is each time it opens.** It keeps no settings of its own, so it cannot
+  tell a first launch from a later one.
