@@ -26,6 +26,16 @@ pull request.
 - The workflow's token can only read the repository (`permissions: contents: read`), and the checkout
   keeps no credentials (`persist-credentials: false`).
 
+The workflow `macos-app` (`.github/workflows/macos-app.yml`) runs on pull requests that change `macos/`,
+`src/`, `pyproject.toml`, `uv.lock` or the workflow itself, on pushes to the branch `macos-app`, and by
+hand.
+- Job `app`, on GitHub-hosted `macos-15` (Apple silicon): it builds the Mac app and its disk image,
+  signed ad hoc, then runs the checks [macos/README.md](macos/README.md#what-ci-checks) lists, then the
+  host's test suite on the app's trimmed Python runtime.
+- Its token can only read the repository, its checkout keeps no credentials, and it uses no secret. It
+  uploads the disk image only when every check passed, and never for a pull request from a fork. The
+  image's name ends `-adhoc-macOS-arm64.dmg`: it is not a release.
+
 **The four guards.** What the guards are for: they catch accidental and casual violations of the rules
 below, in the forms they list. They are not a sandbox, and they are not a defence against an author who
 sets out to get past them. A maintainer reviews every pull request before it merges, and that review is

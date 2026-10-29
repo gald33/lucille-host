@@ -13,5 +13,12 @@
   {"folder": "日本語", "alias": "folder"},
   {"folder": "___", "alias": "folder"},
   {"folder": "", "alias": "folder"},
-  {"folder": "/", "alias": "folder"}
+  {"folder": "/", "alias": "folder"},
+  {"folder": "2026 Taxes", "taken": ["taxes"], "alias": "taxes-2"},
+  {"folder": "Taxes", "taken": ["taxes", "taxes-2"], "alias": "taxes-3"},
+  {"folder": "Taxes", "taken": ["documents"], "alias": "taxes"},
+  {"folder": "日本語", "taken": ["folder"], "alias": "folder-2"},
+  {"folder": "a-very-long-folder-name-that-goes-past-the-limit", "taken": ["a-very-long-folder-name-that-goe"], "alias": "a-very-long-folder-name-that-g-2"},
+  {"folder": "abcdefghijklmnopqrstuvwxyzabc-de", "taken": ["abcdefghijklmnopqrstuvwxyzabc-de"], "alias": "abcdefghijklmnopqrstuvwxyzabc-2"},
+  {"folder": "Notes", "taken": ["notes", "notes-2", "notes-3", "notes-4", "notes-5", "notes-6", "notes-7", "notes-8", "notes-9"], "alias": "notes-10"}
 ]

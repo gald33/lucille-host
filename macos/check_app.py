@@ -15,18 +15,25 @@ Each check prints what it saw and exits 1 if anything is wrong:
 - ``relocate``: copies the app to another folder, whose path has a space in it, and runs ``host``
   and ``swift`` on the copy.
 - ``links``: no Mach-O file in the bundle loads a library from outside macOS or the bundle (no
-  ``/Library/Frameworks``, ``/usr/local``, ``/opt/homebrew`` or build folder), and no file in the
-  bundle holds the build folder's path.
-- ``signature``: ``codesign --verify --deep --strict`` passes; every Mach-O file has the hardened
-  runtime flag; the app and the interpreter carry no entitlements.
+  ``/Library/Frameworks``, ``/usr/local``, ``/opt/homebrew`` or build folder); none says it needs a
+  newer macOS than ``LSMinimumSystemVersion``; no file in the bundle holds the build folder's
+  path; and the app's own executable imports no function from :data:`FORBIDDEN_IMPORTS` and the
+  lists after it, which start processes or open network connections, and links none of
+  :data:`FORBIDDEN_LIBRARIES`. That last part reads only what the executable imports by name: code
+  that reaches such a function another way (through the Objective-C runtime, say) is not seen.
+- ``signature``: ``codesign --verify --deep --strict`` passes on the app, and ``codesign --verify
+  --strict`` on each Mach-O file in it; every Mach-O file has the hardened runtime flag; the app
+  and the interpreter carry no entitlements.
 - ``launch``: opens the app the way Finder does, checks that it is still running 10 seconds later,
   then stops it.
 - ``ui``: opens the app and drives its menu as a user would, through System Events: reads the
   menu; chooses Pause Lucille, then Resume Lucille; switches an ability on and off; adds a folder
-  through the Open panel and the alias dialog and removes it from the Folders submenu; adds the
-  home folder, which needs a confirmation. It checks each step against the host's own state. It
-  uses the real HOME and leaves the host as it found it. Where macOS does not let System Events
-  drive other apps, it says so and drives nothing. Screenshots go to ``check/screens``.
+  through the Open panel and the name dialog, with a name the app must correct first, and removes
+  it from the Folders submenu; chooses the home folder, which the app asks about first, picks
+  Choose a Smaller Folder once, then adds it. It checks each step against the host's own state.
+  It uses the real HOME and leaves the host as it found it. Where macOS does not let System Events
+  drive other apps, it says so and drives nothing, which is a failure with ``--require-driven``
+  (CI passes it). Screenshots go to ``check/screens``.
 - ``gatekeeper``: prints what ``spctl`` says about the app and the disk image. It never fails: an
   ad hoc signature is refused until the app is signed with a Developer ID and notarized.
 - ``dmg``: ``hdiutil verify`` passes, and the mounted image holds the app, with a valid signature,
@@ -65,6 +72,75 @@ ALLOWED_LINK_PREFIXES: Final = (
     "@executable_path/",
 )
 FORBIDDEN_LINK_PREFIXES: Final = ("/Library/Frameworks", "/usr/local", "/opt/homebrew")
+# What the app's own executable must not import: functions that start a process or open a
+# network connection, and the classes that do either. HostCLI.swift starts the interpreter with
+# Foundation's Process (NSTask), which imports none of these names.
+FORBIDDEN_IMPORTS: Final = frozenset(
+    {
+        "_fork",
+        "_vfork",
+        "_execl",
+        "_execle",
+        "_execlp",
+        "_execv",
+        "_execve",
+        "_execvp",
+        "_execvP",
+        "_fexecve",
+        "_system",
+        "_popen",
+        "_socket",
+        "_socketpair",
+        "_bind",
+        "_listen",
+        "_accept",
+        "_connect",
+        "_getaddrinfo",
+        "_gethostbyname",
+        "_dlopen",
+        "_dlsym",
+    }
+)
+FORBIDDEN_IMPORT_PREFIXES: Final = (
+    "_posix_spawn",
+    "_nw_",
+    "_CFSocket",
+    "_CFStream",
+    "_CFReadStream",
+    "_CFWriteStream",
+    "_CFHTTP",
+    "_CFHost",
+    "_CFNetService",
+    "_xpc_connection",
+    "_OBJC_CLASS_$_NSURLSession",
+    "_OBJC_CLASS_$_NSURLConnection",
+    "_OBJC_CLASS_$_NSURLDownload",
+    "_OBJC_CLASS_$_NSWorkspace",
+    "_OBJC_CLASS_$_NSAppleScript",
+    "_OBJC_CLASS_$_NSUserScriptTask",
+    "_OBJC_CLASS_$_NSUserUnixTask",
+    "_OBJC_CLASS_$_NSUserAppleScriptTask",
+    "_OBJC_CLASS_$_NSNetService",
+    "_OBJC_CLASS_$_NSStream",
+    "_OBJC_CLASS_$_NSInputStream",
+    "_OBJC_CLASS_$_NSOutputStream",
+    "_OBJC_CLASS_$_NSSocketPort",
+    "_OBJC_CLASS_$_NSXPCConnection",
+    "_OBJC_CLASS_$_NSXPCListener",
+    "_OBJC_CLASS_$_WKWebView",
+)
+# Swift names, as they appear inside a mangled symbol: Foundation's URLSession and URLRequest, and
+# Network's connection and listener types.
+FORBIDDEN_SWIFT_NAMES: Final = ("10URLSession", "10URLRequest", "12NWConnection", "10NWListener")
+FORBIDDEN_LIBRARIES: Final = (
+    "/Network.framework/",
+    "/CFNetwork.framework/",
+    "/NetworkExtension.framework/",
+    "/WebKit.framework/",
+)
+# The Abilities menu's words for each operation it lists, as in App/HostText.swift
+# (tests/test_macos_build.py checks that the two agree).
+ABILITY_TITLES: Final = {"files.sha256": "Check a file's fingerprint"}
 # Loads the native code of the runtime dependencies, the way the host will.
 NATIVE_PROBE: Final = """\
 import sys
@@ -255,27 +331,111 @@ def check_relocate(app: Path, checker: Checker, work: Path) -> None:
         check_swift(moved, checker, work)
 
 
-def _links(path: Path) -> list[str]:
-    """The libraries and run paths a Mach-O file names, as otool prints them."""
-    listed = subprocess.run(
-        ["otool", "-L", str(path)], capture_output=True, text=True, check=True
-    ).stdout.splitlines()[1:]
-    names = [line.strip().split(" (")[0] for line in listed if line.strip()]
-    commands = subprocess.run(
-        ["otool", "-l", str(path)], capture_output=True, text=True, check=True
+def _version(text: str) -> tuple[int, ...]:
+    return tuple(int(part) for part in text.split("."))
+
+
+def minimum_macos_versions(commands: Sequence[str]) -> list[str]:
+    """The oldest macOS each slice of a Mach-O file says it runs on, from ``otool -l``'s lines:
+    ``minos`` of each macOS ``LC_BUILD_VERSION``, or ``version`` of an ``LC_VERSION_MIN_MACOSX``."""
+    found = []
+    command = None
+    platform = None
+    for line in commands:
+        words = line.split()
+        if len(words) < 2:
+            continue
+        if words[0] == "cmd":
+            command = words[1]
+            platform = None
+        elif command == "LC_BUILD_VERSION" and words[0] == "platform":
+            platform = words[1]
+        elif command == "LC_BUILD_VERSION" and words[0] == "minos" and platform in ("1", "MACOS"):
+            found.append(words[1])
+        elif command == "LC_VERSION_MIN_MACOSX" and words[0] == "version":
+            found.append(words[1])
+    return found
+
+
+def newer_than(version: str, limit: str) -> bool:
+    """Whether macOS ``version`` is later than ``limit``; an unreadable version counts as later."""
+    try:
+        theirs, ours = _version(version), _version(limit)
+    except ValueError:
+        return True
+    width = max(len(theirs), len(ours))
+    return theirs + (0,) * (width - len(theirs)) > ours + (0,) * (width - len(ours))
+
+
+def forbidden_imports(symbols: Sequence[str]) -> list[str]:
+    """The symbols in ``symbols`` (what ``nm -u`` prints) that the app's executable must not
+    import."""
+    return [
+        symbol
+        for symbol in symbols
+        if symbol in FORBIDDEN_IMPORTS
+        or symbol.startswith(FORBIDDEN_IMPORT_PREFIXES)
+        or any(name in symbol for name in FORBIDDEN_SWIFT_NAMES)
+        or ("10contentsOf" in symbol and "3URLV" in symbol)
+    ]
+
+
+def _otool(flag: str, path: Path) -> list[str]:
+    return subprocess.run(
+        ["otool", flag, str(path)], capture_output=True, text=True, check=True
     ).stdout.splitlines()
+
+
+def _links(path: Path, commands: Sequence[str]) -> list[str]:
+    """The libraries and run paths a Mach-O file names, as otool prints them."""
+    names = [line.strip().split(" (")[0] for line in _otool("-L", path)[1:] if line.strip()]
     for number, line in enumerate(commands):
         if line.strip() == "cmd LC_RPATH" and number + 2 < len(commands):
             names.append("rpath " + commands[number + 2].strip().split(" (offset")[0])
     return names
 
 
+def check_imports(executable: Path, checker: Checker) -> None:
+    """The app's own executable imports nothing that starts a process or opens a connection."""
+    done = subprocess.run(
+        ["nm", "-u", "-j", str(executable)], capture_output=True, text=True, check=False
+    )
+    symbols = [line.strip() for line in done.stdout.splitlines() if line.strip()]
+    checker.expect(
+        done.returncode == 0 and bool(symbols),
+        f"nm lists the {len(symbols)} symbols the app's executable imports",
+        _shown(done),
+    )
+    print("\n".join(symbols))
+    bad = forbidden_imports(symbols)
+    checker.expect(
+        not bad,
+        "the app's executable imports nothing that starts a process or opens a connection",
+        "\n".join(bad),
+    )
+    libraries = [
+        name for name in _links(executable, []) if any(lib in name for lib in FORBIDDEN_LIBRARIES)
+    ]
+    checker.expect(
+        not libraries,
+        "the app's executable links no networking or web framework",
+        "\n".join(libraries),
+    )
+
+
 def check_links(app: Path, checker: Checker) -> None:
     build_dir = str(build_app.REPO_ROOT)
+    minimum = build_app.load_pins().minimum_macos
     files = build_app.macho_files(app)
     checker.expect(bool(files), f"{len(files)} Mach-O files in the bundle")
     for path in files:
-        names = _links(path)
+        commands = _otool("-l", path)
+        versions = minimum_macos_versions(commands)
+        checker.expect(
+            bool(versions) and not any(newer_than(version, minimum) for version in versions),
+            f"{path.relative_to(app)} runs on macOS {minimum} (it asks for {versions})",
+        )
+        names = _links(path, commands)
         bad = []
         for name in names:
             target = name.removeprefix("rpath path ").removeprefix("rpath ")
@@ -301,6 +461,7 @@ def check_links(app: Path, checker: Checker) -> None:
         f"no file in the bundle holds the build folder ({build_dir})",
         "\n".join(holding[:50]),
     )
+    check_imports(app / "Contents" / "MacOS" / build_app.load_pins().app_name, checker)
 
 
 def _codesign_display(path: Path, *extra: str) -> subprocess.CompletedProcess[str]:
@@ -319,6 +480,20 @@ def check_signature(app: Path, checker: Checker) -> None:
     checker.expect(done.returncode == 0, "codesign --verify --deep --strict passes", _shown(done))
     print(done.stderr, end="")
     main = app / "Contents" / "MacOS" / build_app.load_pins().app_name
+    for path in build_app.macho_files(app):
+        if path == main:
+            continue
+        done = subprocess.run(
+            ["codesign", "--verify", "--strict", "--verbose=2", str(path)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        checker.expect(
+            done.returncode == 0,
+            f"{path.relative_to(app.parent)} has a valid signature of its own",
+            _shown(done),
+        )
     for path in [app, *build_app.macho_files(app)]:
         if path == main:
             continue
@@ -403,6 +578,8 @@ MENU_ITEMS: Final = (
     "Connect to Lucille (coming soon)",
     "Quit Lucille Host",
 )
+# The menu's status line. Pairing is not built, so the Mac is never connected.
+NOT_CONNECTED: Final = "Not connected to Lucille"
 
 
 def _system_events(body: str, timeout: float = 30) -> tuple[bool, str]:
@@ -461,7 +638,8 @@ def _drive_menu(checker: Checker, screens: Path, flag: Path) -> bool:
         f'{LINES}return (name of every menu item of menu 1 of menu item "Abilities" of {MENU}) '
         "as text"
     )
-    print(f"the Abilities submenu shows: {abilities.splitlines() if worked else abilities}")
+    listed = abilities.splitlines() if worked else []
+    print(f"the Abilities submenu shows: {listed if worked else abilities}")
     _system_events("key code 53")
     checker.expect(
         shown[:1] == [f"Lucille Host {version}"],
@@ -469,12 +647,19 @@ def _drive_menu(checker: Checker, screens: Path, flag: Path) -> bool:
         f"{shown}",
     )
     checker.expect(
-        "Not paused" in shown and "Pause Lucille" in shown,
-        "the menu says the host is not paused, and offers Pause Lucille",
+        NOT_CONNECTED in shown and "Pause Lucille" in shown,
+        f"the menu says {NOT_CONNECTED!r}, and offers Pause Lucille",
         f"{shown}",
     )
     missing = [item for item in MENU_ITEMS if item not in shown]
     checker.expect(not missing, "the menu holds every item", f"missing: {missing}")
+    checker.expect(
+        worked
+        and set(ABILITY_TITLES.values()) <= set(listed)
+        and not {"host.sleep", "host.describe", *ABILITY_TITLES} & set(listed),
+        "Abilities lists each ability in plain words, and not host.sleep or host.describe",
+        abilities,
+    )
     if flag.exists():
         print("note: the host was paused before this check, so Pause and Resume were not tried")
         return True
@@ -492,8 +677,11 @@ def _drive_menu(checker: Checker, screens: Path, flag: Path) -> bool:
     _screenshot(screens / "3-paused.png")
     _system_events("key code 53")
     checker.expect(
-        worked and "Resume Lucille" in shown and "Pause Lucille" not in shown,
-        "the menu then offers Resume Lucille",
+        worked
+        and f"{NOT_CONNECTED} \N{MIDDLE DOT} Paused" in shown
+        and "Resume Lucille" in shown
+        and "Pause Lucille" not in shown,
+        "the menu then says it is paused, and offers Resume Lucille",
         f"{shown}",
     )
     worked, said = _system_events(
@@ -523,36 +711,36 @@ def _roots(python: Path) -> dict[str, str]:
 
 
 def _drive_abilities(checker: Checker, python: Path, screens: Path) -> None:
-    """Switch an ability on and off again from the Abilities submenu."""
-    listing = _host(python, Path.home(), ["ops", "list"]).stdout.splitlines()
-    off = [line.split("  ", 1)[0] for line in listing if line.endswith("  disabled")]
+    """Switch an ability on and off again from the Abilities submenu, by its plain words."""
+    off = [op for op in ABILITY_TITLES if _op_state(python, op) == "disabled"]
     if not off:
-        print("note: no ability is plainly off here, so the Abilities submenu was not switched")
+        print("note: no listed ability is plainly off here, so the Abilities submenu was not used")
         return
     op = off[0]
+    title = ABILITY_TITLES[op]
     submenu = f'menu 1 of menu item "Abilities" of {MENU}'
     open_submenu = f'click {STATUS_ITEM}\ndelay 1\nclick menu item "Abilities" of {MENU}\ndelay 1\n'
     try:
-        worked, said = _system_events(f'{open_submenu}click menu item "{op}" of {submenu}')
+        worked, said = _system_events(f'{open_submenu}click menu item "{title}" of {submenu}')
         checker.expect(
             worked and _wait_until(lambda: _op_state(python, op) == "enabled", 15),
-            f"choosing {op} under Abilities runs `ops enable`",
+            f"choosing {title!r} under Abilities runs `ops enable {op}`",
             said,
         )
         time.sleep(2)
         worked, mark = _system_events(
-            f'{open_submenu}return value of attribute "AXMenuItemMarkChar" of menu item "{op}" '
-            f"of {submenu}"
+            f'{open_submenu}return value of attribute "AXMenuItemMarkChar" of menu item '
+            f'"{title}" of {submenu}'
         )
         _screenshot(screens / "4-ability-on.png")
         _system_events("key code 53\ndelay 0.3\nkey code 53")
         checker.expect(
-            worked and mark not in ("", "missing value"), f"{op} then has a checkmark", mark
+            worked and mark not in ("", "missing value"), f"{title!r} then has a checkmark", mark
         )
-        worked, said = _system_events(f'{open_submenu}click menu item "{op}" of {submenu}')
+        worked, said = _system_events(f'{open_submenu}click menu item "{title}" of {submenu}')
         checker.expect(
             worked and _wait_until(lambda: _op_state(python, op) == "disabled", 15),
-            f"choosing {op} again runs `ops disable`",
+            f"choosing {title!r} again runs `ops disable {op}`",
             said,
         )
     finally:
@@ -561,8 +749,8 @@ def _drive_abilities(checker: Checker, python: Path, screens: Path) -> None:
 
 
 def _choose_folder(folder: Path, screens: Path, shot: str) -> tuple[bool, str]:
-    """Choose Add a Folder…, go to ``folder`` in the Open panel and choose it. Returns the name
-    the alias dialog then suggests, and leaves that dialog open."""
+    """Choose Add a Folder…, go to ``folder`` in the Open panel and choose it. Whatever the app
+    shows next is left open."""
     worked, said = _system_events(
         f"click {STATUS_ITEM}\ndelay 1\n"
         f'click (first menu item of {MENU} whose name starts with "Add a Folder")',
@@ -571,6 +759,11 @@ def _choose_folder(folder: Path, screens: Path, shot: str) -> tuple[bool, str]:
     if not worked:
         return False, f"choosing Add a Folder: {said}"
     time.sleep(2)
+    return _go_to_folder(folder, screens, shot)
+
+
+def _go_to_folder(folder: Path, screens: Path, shot: str) -> tuple[bool, str]:
+    """In the open Open panel, go to ``folder`` and choose it."""
     worked, said = _system_events(
         "set frontmost to true\n"
         'keystroke "g" using {command down, shift down}\n'
@@ -584,71 +777,142 @@ def _choose_folder(folder: Path, screens: Path, shot: str) -> tuple[bool, str]:
     if not worked:
         return False, f"going to {folder} in the Open panel: {said}"
     _screenshot(screens / shot)
-    worked, said = _system_events(
-        'click button "Choose" of window 1\ndelay 2\nreturn value of text field 1 of window 1',
-        timeout=60,
-    )
+    worked, said = _system_events('click button "Choose" of window 1\ndelay 2', timeout=60)
     return worked, said if worked else f"choosing the folder: {said}"
 
 
+def _window_list(what: str) -> tuple[bool, list[str]]:
+    """``what`` of every element of one kind in the app's front window, such as ``name of every
+    button``."""
+    worked, said = _system_events(f"{LINES}return ({what} of window 1) as text")
+    return worked, said.splitlines() if worked else [said]
+
+
+def _name_field() -> tuple[bool, str]:
+    return _system_events("return value of text field 1 of window 1")
+
+
+def _acknowledge(checker: Checker, words: str, shot: Path) -> None:
+    """The app shows a note holding ``words``; read it and choose OK."""
+    time.sleep(2)
+    worked, texts = _window_list("value of every static text")
+    _screenshot(shot)
+    checker.expect(
+        worked and any(words in text for text in texts),
+        f"the app then says {words!r}",
+        f"{texts}",
+    )
+    _system_events('click button "OK" of window 1')
+
+
 def _drive_folders(checker: Checker, python: Path, screens: Path) -> None:
-    """Add a folder through the Open panel and the alias dialog, remove it from the Folders
-    submenu, then add the home folder, which needs the user's confirmation."""
+    """Add a folder through the Open panel and the name dialog, correcting a name the host would
+    refuse, then remove it from the Folders submenu. Then choose the home folder: the app asks
+    first; Choose a Smaller Folder goes back to the Open panel, and Add Anyway adds it."""
     home = Path.home()
     folder = home / "lucille-host-ui-check" / "My Project Files"
     folder.mkdir(parents=True, exist_ok=True)
     added: list[str] = []
     try:
-        worked, suggestion = _choose_folder(folder, screens, "5-open-panel.png")
+        worked, said = _choose_folder(folder, screens, "5-open-panel.png")
+        if not checker.expect(
+            worked, "Add a Folder… opens the Open panel, and a folder is chosen", said
+        ):
+            return
+        worked, suggestion = _name_field()
+        _screenshot(screens / "6-name-dialog.png")
         checker.expect(
             worked and suggestion == "my-project-files",
-            "Add a Folder… opens the Open panel, then suggests the name my-project-files",
+            "the name dialog then suggests my-project-files",
             suggestion,
         )
-        if not worked:
-            return
-        _screenshot(screens / "6-alias-dialog.png")
-        worked, said = _system_events('click button "Add Folder" of window 1')
+        # Delete what the field holds with Backspace, which needs no Edit menu, then type a name
+        # the host would refuse.
+        worked, said = _system_events(
+            "set frontmost to true\n"
+            "repeat 40 times\nkey code 51\nend repeat\n"
+            'keystroke "My Project Files"\n'
+            "delay 0.5\n"
+            'click button "Add Folder" of window 1\n'
+            "delay 2\n"
+            "return value of text field 1 of window 1"
+        )
+        _screenshot(screens / "7-name-corrected.png")
         checker.expect(
-            worked and _wait_until(lambda: _roots(python).get(suggestion) == str(folder), 15),
-            "choosing Add Folder runs `roots add my-project-files <the folder>`",
+            worked and said == "my-project-files",
+            "a typed name the host would refuse comes back as one it accepts, not added",
             f"{said} {_roots(python)}",
         )
-        added.append(suggestion)
-        time.sleep(2)
+        checker.expect("my-project-files" not in _roots(python), "nothing is added before then")
+        worked, said = _system_events('click button "Add Folder" of window 1')
+        checker.expect(
+            worked
+            and _wait_until(lambda: _roots(python).get("my-project-files") == str(folder), 15),
+            "Add Folder then runs `roots add my-project-files <the folder>`",
+            f"{said} {_roots(python)}",
+        )
+        added.append("my-project-files")
+        _acknowledge(checker, "Lucille can now use the folder", screens / "8-folder-added.png")
+        time.sleep(1)
         folders = f'menu 1 of menu item "Folders" of {MENU}'
         worked, said = _system_events(
             f'click {STATUS_ITEM}\ndelay 1\nclick menu item "Folders" of {MENU}\ndelay 1\n'
-            f'click menu item "{suggestion}" of {folders}\ndelay 1\n'
-            f'click menu item "Remove" of menu 1 of menu item "{suggestion}" of {folders}'
+            f'click menu item "my-project-files" of {folders}\ndelay 1\n'
+            f'click menu item "Remove" of menu 1 of menu item "my-project-files" of {folders}'
         )
         checker.expect(
-            worked and _wait_until(lambda: suggestion not in _roots(python), 15),
+            worked and _wait_until(lambda: "my-project-files" not in _roots(python), 15),
             "Folders, my-project-files, Remove runs `roots remove my-project-files`",
             f"{said} {_roots(python)}",
         )
 
-        worked, suggestion = _choose_folder(home, screens, "7-open-panel-home.png")
-        checker.expect(worked, "the home folder can be chosen in the Open panel", suggestion)
-        if not worked:
+        worked, said = _choose_folder(home, screens, "9-open-panel-home.png")
+        if not checker.expect(worked, "the home folder can be chosen in the Open panel", said):
             return
-        worked, said = _system_events(
-            'click button "Add Folder" of window 1\ndelay 3\n'
-            f"{LINES}return (name of every button of window 1) as text"
-        )
-        _screenshot(screens / "8-confirm-home.png")
+        worked, buttons = _window_list("name of every button")
+        _screenshot(screens / "10-confirm-home.png")
         checker.expect(
-            worked and "Add Anyway" in said.splitlines(),
-            "the host refuses the home folder, and the app asks the user to confirm",
-            said,
+            worked and {"Choose a Smaller Folder", "Add Anyway"} <= set(buttons),
+            "the app asks about the home folder before naming it",
+            f"{buttons}",
         )
-        worked, said = _system_events('click button "Add Anyway" of window 1')
+        worked, texts = _window_list("value of every static text")
         checker.expect(
-            worked and _wait_until(lambda: str(home) in _roots(python).values(), 15),
-            "Add Anyway runs `roots add` again with --allow-home-or-root",
+            worked and any(text.startswith("This is your home folder.") for text in texts),
+            "it says that this is the home folder, and what it holds",
+            f"{texts}",
+        )
+        worked, said = _system_events('click button "Choose a Smaller Folder" of window 1\ndelay 2')
+        worked, buttons = _window_list("name of every button")
+        checker.expect(
+            worked and "Choose" in buttons and "Add Anyway" not in buttons,
+            "Choose a Smaller Folder opens the Open panel again",
+            f"{said} {buttons}",
+        )
+        _system_events("key code 53")
+        time.sleep(2)
+        checker.expect(
+            str(home) not in _roots(python).values(), "cancelling the Open panel adds nothing"
+        )
+
+        worked, said = _choose_folder(home, screens, "11-open-panel-home.png")
+        if not checker.expect(worked, "the home folder can be chosen again", said):
+            return
+        worked, said = _system_events('click button "Add Anyway" of window 1\ndelay 2')
+        worked, alias = _name_field()
+        checker.expect(
+            worked and bool(alias) and str(home) not in _roots(python).values(),
+            "Add Anyway goes on to the name dialog, and adds nothing yet",
+            alias,
+        )
+        worked, said = _system_events('click button "Add Folder" of window 1')
+        checker.expect(
+            worked and _wait_until(lambda: _roots(python).get(alias) == str(home), 15),
+            "Add Folder then runs `roots add` with --allow-home-or-root",
             f"{said} {_roots(python)}",
         )
-        added.extend(alias for alias, path in _roots(python).items() if path == str(home))
+        added.append(alias)
+        _acknowledge(checker, "Lucille can now use the folder", screens / "12-home-added.png")
     finally:
         for alias, path in _roots(python).items():
             if alias in added or path in (str(folder), str(home)):
@@ -656,14 +920,14 @@ def _drive_folders(checker: Checker, python: Path, screens: Path) -> None:
         shutil.rmtree(folder.parent, ignore_errors=True)
 
 
-def check_ui(app: Path, checker: Checker, work: Path) -> None:
+def check_ui(app: Path, checker: Checker, work: Path, require_driven: bool = False) -> None:
     """Open the app and drive its menu the way a user would, through System Events: read the menu;
     choose Pause Lucille and Resume Lucille, and watch the host's pause flag; switch an ability on
-    and off; add a folder through the Open panel and the alias dialog, and remove it from the
-    Folders submenu; add the home folder, which needs the user's confirmation. Each step is
-    checked against the host's own state. It uses the real HOME, and leaves the host as it found
-    it. Where macOS does not let System Events drive other
-    apps (no accessibility permission), it says so and drives nothing. Screenshots go to
+    and off; add a folder through the Open panel and the name dialog, and remove it from the
+    Folders submenu; add the home folder, which the app asks about first. Each step is checked
+    against the host's own state. It uses the real HOME, and leaves the host as it found it. Where
+    macOS does not let System Events drive other apps (no accessibility permission), it says so
+    and drives nothing; with ``require_driven`` that is a failure. Screenshots go to
     ``<out>/check/screens``."""
     name = build_app.load_pins().app_name
     screens = work / "screens"
@@ -692,6 +956,8 @@ def check_ui(app: Path, checker: Checker, work: Path) -> None:
         if _drive_menu(checker, screens, flag):
             _drive_abilities(checker, python_in(app), screens)
             _drive_folders(checker, python_in(app), screens)
+        elif require_driven:
+            checker.expect(False, "System Events drove the menu, as --require-driven asks")
     finally:
         subprocess.run(["pkill", "-TERM", "-x", name], check=False)
         checker.expect(_wait_until(lambda: not _running(name), 15), "the app stops on SIGTERM")
@@ -700,29 +966,38 @@ def check_ui(app: Path, checker: Checker, work: Path) -> None:
             print(f"the app's {log.stem.removeprefix('app-')}: {text[-5000:]!r}")
 
 
-def check_gatekeeper(app: Path, dmg: Path) -> None:
-    for argv in (
-        ["spctl", "--assess", "--type", "execute", "--verbose=4", str(app)],
-        [
-            "spctl",
-            "--assess",
-            "--type",
-            "open",
-            "--context",
-            "context:primary-signature",
-            "--verbose=4",
-            str(dmg),
-        ],
-    ):
+def check_gatekeeper(app: Path, dmgs: Sequence[Path]) -> None:
+    assessments = [["spctl", "--assess", "--type", "execute", "--verbose=4", str(app)]]
+    for dmg in dmgs:
+        assessments.append(
+            [
+                "spctl",
+                "--assess",
+                "--type",
+                "open",
+                "--context",
+                "context:primary-signature",
+                "--verbose=4",
+                str(dmg),
+            ]
+        )
+    for argv in assessments:
         done = subprocess.run(argv, capture_output=True, text=True, check=False)
         print(f"{' '.join(argv[:4])} ...: exit {done.returncode}")
         print((done.stdout + done.stderr).strip())
     print("An ad hoc signature is expected to be refused here until notarization exists.")
 
 
-def check_dmg(dmg: Path, checker: Checker) -> None:
-    if not checker.expect(dmg.is_file(), f"{dmg.name} exists"):
+def check_dmg(dmgs: Sequence[Path], checker: Checker) -> None:
+    if not checker.expect(
+        len(dmgs) == 1, "exactly one disk image was built", f"{[dmg.name for dmg in dmgs]}"
+    ):
         return
+    dmg = dmgs[0]
+    checker.expect(
+        dmg.name.endswith(build_app.DMG_SUFFIX),
+        f"its name, {dmg.name}, says that it is signed ad hoc",
+    )
     print(f"{dmg.name}: {dmg.stat().st_size} bytes, sha256 {build_app.sha256_of(dmg)}")
     done = subprocess.run(
         ["hdiutil", "verify", str(dmg)], capture_output=True, text=True, check=False
@@ -802,13 +1077,18 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument(
         "--out", type=Path, default=build_app.DEFAULT_OUT, help="the folder build_app.py wrote to"
     )
+    parser.add_argument(
+        "--require-driven",
+        action="store_true",
+        help="ui: fail if System Events cannot drive the app's menu (CI passes this)",
+    )
     args = parser.parse_args(argv)
     if sys.platform != "darwin":
         print("check_app.py: these checks run on macOS", file=sys.stderr)
         return 2
     out = args.out.resolve()
     app = app_path(out)
-    dmg = out / build_app.dmg_name(build_app.host_version())
+    dmgs = build_app.disk_images(out)
     work = out / "check"
     checker = Checker()
     if args.check != "dmg" and not checker.expect(app.is_dir(), f"{app} exists"):
@@ -826,11 +1106,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     elif args.check == "launch":
         check_launch(app, checker)
     elif args.check == "ui":
-        check_ui(app, checker, work)
+        check_ui(app, checker, work, args.require_driven)
     elif args.check == "gatekeeper":
-        check_gatekeeper(app, dmg)
+        check_gatekeeper(app, dmgs)
     else:
-        check_dmg(dmg, checker)
+        check_dmg(dmgs, checker)
     if checker.failures:
         print(f"{len(checker.failures)} failed: " + "; ".join(checker.failures), file=sys.stderr)
         return 1

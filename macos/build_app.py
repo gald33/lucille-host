@@ -9,8 +9,9 @@ under ``build/macos/``, which git ignores:
 
 1. Downloads the Python runtime that ``macos/runtime.toml`` pins, and stops unless the file's
    sha256 is the pinned one.
-2. Builds the host's wheel from this checkout (``uv build --wheel``), and exports the runtime
-   dependencies ``uv.lock`` pins, with their hashes (``uv export --frozen``).
+2. Builds the host's wheel from this checkout (``uv build --wheel``), with a build backend that
+   ``macos/build-constraints.txt`` pins by hash (``--build-constraints ... --require-hashes``), and
+   exports the runtime dependencies ``uv.lock`` pins, with their hashes (``uv export --frozen``).
 3. Unpacks the runtime into ``Lucille Host.app/Contents/Resources/python``. Keeps one program,
    ``bin/python3``, and removes what the app never uses (:func:`prune_runtime`). No symbolic link
    is left in the bundle.
@@ -24,11 +25,13 @@ under ``build/macos/``, which git ignores:
 7. Signs every Mach-O file in the bundle, innermost first, then the bundle. The signature is ad
    hoc (``codesign -s -``), with the hardened runtime and no entitlements. A signature macOS
    trusts needs a Developer ID and notarization, which this script does not do.
-8. Builds ``Lucille-Host-<version>-macOS-arm64.dmg``, which holds the app and a link to
-   ``/Applications``.
+8. Builds ``Lucille-Host-<version>-<commit>-adhoc-macOS-arm64.dmg``, which holds the app and a
+   link to ``/Applications``. The name says the signature is ad hoc and names the commit, so the
+   image cannot be taken for a release asset.
 
-``plan`` reads the pins and the version and writes the ``Info.plist`` the app would get, without
-running any other program. Exit codes: 0 done, 1 refused or failed, 2 usage error.
+``plan`` reads the pins, the build constraints and the version, and writes the ``Info.plist`` the
+app would get, without running any other program. Exit codes: 0 done, 1 refused or failed, 2
+usage error.
 """
 
 from __future__ import annotations
@@ -56,9 +59,14 @@ from typing import Any, Final
 MACOS_DIR: Final = Path(__file__).resolve().parent
 REPO_ROOT: Final = MACOS_DIR.parent
 PINS_FILE: Final = MACOS_DIR / "runtime.toml"
+BUILD_CONSTRAINTS: Final = MACOS_DIR / "build-constraints.txt"
+PYPROJECT: Final = MACOS_DIR.parent / "pyproject.toml"
 SWIFT_DIR: Final = MACOS_DIR / "App"
 VERSION_FILE: Final = REPO_ROOT / "src" / "lucille_host" / "__init__.py"
 DEFAULT_OUT: Final = REPO_ROOT / "build" / "macos"
+# Every disk image this script makes ends with this. A release's image, made elsewhere with a
+# Developer ID signature, will not.
+DMG_SUFFIX: Final = "-adhoc-macOS-arm64.dmg"
 
 PBS_RELEASES: Final = "https://github.com/astral-sh/python-build-standalone/releases/download/"
 # Folder and file names inside the runtime. The pins allow Python 3.13 only, so these are fixed.
@@ -104,6 +112,9 @@ _BUNDLE_ID = re.compile(r"[a-z][a-z0-9-]*(?:\.[a-z][a-z0-9-]*){2,}")
 _MACOS_VERSION = re.compile(r"(?P<major>\d+)\.\d+")
 _VERSION_LINE = re.compile(r'^__version__ = "([^"\n]+)"$', re.MULTILINE)
 _RELEASE = re.compile(r"\d+(?:\.\d+){0,2}")
+_COMMIT = re.compile(r"[0-9a-f]{7,40}")
+# One exact requirement, ``name==version``, as pyproject.toml and build-constraints.txt write it.
+_EXACT = re.compile(r"(?P<name>[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?)==(?P<version>[^\s;,]+)")
 # The first four bytes of a Mach-O file: thin 64- and 32-bit, either byte order, and universal.
 _MACHO_MAGIC: Final = frozenset(
     {
@@ -256,8 +267,89 @@ def info_plist(pins: Pins, version: str) -> dict[str, Any]:
     }
 
 
-def dmg_name(version: str) -> str:
-    return f"Lucille-Host-{version}-macOS-arm64.dmg"
+def dmg_name(version: str, commit: str) -> str:
+    """The disk image's file name. It names the commit it was built from and says that its
+    signature is ad hoc, so that a build from CI cannot be taken for a release asset."""
+    if _COMMIT.fullmatch(commit) is None:
+        raise BuildError(f"{commit!r} is not an abbreviated commit id")
+    return f"Lucille-Host-{version}-{commit}{DMG_SUFFIX}"
+
+
+def disk_images(out: Path) -> list[Path]:
+    """The disk images this script has made in ``out``."""
+    return sorted(out.glob(f"Lucille-Host-*{DMG_SUFFIX}"))
+
+
+def _normal_name(name: str) -> str:
+    return re.sub(r"[-_.]+", "-", name).lower()
+
+
+def parse_build_constraints(text: str) -> dict[str, tuple[str, tuple[str, ...]]]:
+    """``{name: (version, sha256s)}`` for each requirement of build-constraints.txt. Each one is
+    ``name==version`` with at least one ``--hash=sha256:...``, and no name appears twice."""
+    found: dict[str, tuple[str, tuple[str, ...]]] = {}
+    for raw in text.replace("\\\n", " ").splitlines():
+        line = raw.split(" #", 1)[0].strip()
+        if not line or line.startswith("#"):
+            continue
+        head, *options = line.split()
+        match = _EXACT.fullmatch(head)
+        if match is None:
+            raise PinError(f"build-constraints.txt: {head!r} is not name==version")
+        hashes = []
+        for option in options:
+            digest = option.removeprefix("--hash=sha256:")
+            if digest == option or _SHA256.fullmatch(digest) is None:
+                raise PinError(f"build-constraints.txt: {option!r} is not --hash=sha256:<hex>")
+            hashes.append(digest)
+        if not hashes:
+            raise PinError(f"build-constraints.txt: {head} has no --hash")
+        name = _normal_name(match["name"])
+        if name in found:
+            raise PinError(f"build-constraints.txt: {name} appears twice")
+        found[name] = (match["version"], tuple(hashes))
+    return found
+
+
+def build_constraint_problems(
+    requires: Sequence[str], constraints: Mapping[str, tuple[str, tuple[str, ...]]]
+) -> list[str]:
+    """How the hashed build constraints differ from pyproject.toml's ``[build-system] requires``:
+    each requirement there must be exact, and the two must name the same versions."""
+    problems = []
+    wanted: dict[str, str] = {}
+    for requirement in requires:
+        match = _EXACT.fullmatch(requirement.strip())
+        if match is None:
+            problems.append(f"the build requirement {requirement!r} is not pinned with ==")
+            continue
+        wanted[_normal_name(match["name"])] = match["version"]
+    for name, version in sorted(wanted.items()):
+        if name not in constraints:
+            problems.append(f"{name}=={version} has no line in build-constraints.txt")
+        elif constraints[name][0] != version:
+            problems.append(
+                f"build-constraints.txt pins {name}=={constraints[name][0]}, but pyproject.toml "
+                f"requires {name}=={version}"
+            )
+    for name in sorted(set(constraints) - set(wanted)):
+        problems.append(f"build-constraints.txt pins {name}, which pyproject.toml does not require")
+    return problems
+
+
+def load_build_constraints(
+    constraints_file: Path = BUILD_CONSTRAINTS, pyproject: Path = PYPROJECT
+) -> dict[str, tuple[str, tuple[str, ...]]]:
+    """The hashed build constraints, checked against pyproject.toml."""
+    constraints = parse_build_constraints(constraints_file.read_text(encoding="utf-8"))
+    data = tomllib.loads(pyproject.read_text(encoding="utf-8"))
+    requires = data.get("build-system", {}).get("requires", [])
+    problems = build_constraint_problems(requires, constraints)
+    if problems:
+        raise PinError(
+            "the build constraints do not match pyproject.toml:\n  " + "\n  ".join(problems)
+        )
+    return constraints
 
 
 def sha256_of(path: Path) -> str:
@@ -357,10 +449,26 @@ def _remove(path: Path) -> None:
         shutil.rmtree(path)
 
 
+def build_wheel_argv(out: Path) -> list[str]:
+    """``uv build`` for the host's wheel: its build backend comes only from the files
+    build-constraints.txt names by hash."""
+    return [
+        "uv",
+        "build",
+        "--wheel",
+        "--build-constraints",
+        str(BUILD_CONSTRAINTS),
+        "--require-hashes",
+        "--out-dir",
+        str(out),
+        str(REPO_ROOT),
+    ]
+
+
 def build_wheel(work: Path, version: str) -> Path:
     """The host's wheel, built from this checkout."""
     out = work / "wheel"
-    _run(["uv", "build", "--wheel", "--out-dir", str(out), str(REPO_ROOT)])
+    _run(build_wheel_argv(out))
     wheels = sorted(out.glob("*.whl"))
     expected = f"lucille_host-{version}-py3-none-any.whl"
     if [wheel.name for wheel in wheels] != [expected]:
@@ -613,6 +721,7 @@ def plan(out: Path) -> None:
     """Check the pins and the version, write the Info.plist the app would get, and say what
     ``build`` would do. Runs no other program."""
     pins = load_pins()
+    constraints = load_build_constraints()
     version = host_version()
     out.mkdir(parents=True, exist_ok=True)
     plist_path = out / "Info.plist"
@@ -624,7 +733,8 @@ def plan(out: Path) -> None:
     print(f"  sha256          {pins.sha256}")
     print(f"app               {out / (pins.app_name + '.app')}")
     print(f"bundle id         {pins.bundle_id}, macOS {pins.minimum_macos} or later, arm64")
-    print(f"disk image        {out / dmg_name(version)}")
+    print(f"build backend     {len(constraints)} wheels, by hash, from {BUILD_CONSTRAINTS.name}")
+    print(f"disk image        {out}/Lucille-Host-{version}-<commit>{DMG_SUFFIX}")
     print(f"Info.plist        written to {plist_path}")
 
 
@@ -633,7 +743,9 @@ def build(out: Path, archive: Path | None) -> Path:
     if sys.platform != "darwin" or platform.machine() != "arm64":
         raise BuildError("build runs on an Apple silicon Mac; `plan` runs anywhere")
     pins = load_pins()
+    load_build_constraints()
     version = host_version()
+    commit = _output(["git", "-C", str(REPO_ROOT), "rev-parse", "--short=12", "HEAD"])
     work = out / "work"
     if work.exists():
         shutil.rmtree(work)
@@ -664,6 +776,7 @@ def build(out: Path, archive: Path | None) -> Path:
         plistlib.dump(info_plist(pins, version), handle, sort_keys=True)
     (contents / "PkgInfo").write_text("APPL????", encoding="ascii")
     manifest = {
+        "commit": commit,
         "host_version": version,
         "host_wheel": {"name": wheel.name, "sha256": sha256_of(wheel)},
         "python": {"asset": pins.asset, "url": pins.url, "sha256": pins.sha256},
@@ -677,7 +790,9 @@ def build(out: Path, archive: Path | None) -> Path:
     )
     sign_app(app, executable, pins.bundle_id)
 
-    dmg = out / dmg_name(version)
+    for old in disk_images(out):
+        old.unlink()
+    dmg = out / dmg_name(version, commit)
     make_dmg(app, dmg, pins.app_name, work)
     print(f"app         {app}")
     print(f"disk image  {dmg} ({dmg.stat().st_size} bytes, sha256 {sha256_of(dmg)})")

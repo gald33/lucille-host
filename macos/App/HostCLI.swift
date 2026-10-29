@@ -10,20 +10,43 @@ import Glibc
 struct CLIResult: Equatable, Sendable {
     /// The status when the program could not be started at all.
     static let notStarted: Int32 = -1
+    /// The status when a stopped run did not end, even after SIGKILL, and the app gave up waiting.
+    static let notFinished: Int32 = -2
 
     let status: Int32
     let stdout: String
     let stderr: String
     let timedOut: Bool
+    /// The user cancelled the run, and the app stopped it.
+    var cancelled = false
 
-    var succeeded: Bool { status == 0 && !timedOut }
+    var succeeded: Bool { status == 0 && !timedOut && !cancelled }
+}
+
+/// Lets the user stop a run before its time limit. `HostCLI.run` looks at it every tenth of a
+/// second, and stops the program once it is cancelled.
+final class CancelToken: @unchecked Sendable {
+    private let lock = NSLock()
+    private var cancelled = false
+
+    var isCancelled: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return cancelled
+    }
+
+    func cancel() {
+        lock.lock()
+        cancelled = true
+        lock.unlock()
+    }
 }
 
 /// Runs the host's command line. It is the only program the app starts: the Python interpreter
 /// inside the app, with `-I` (isolated: no PYTHON* variables, no user site-packages, no current
 /// folder on the import path) and `-B` (no .pyc writes inside the signed app), running the
 /// `lucille_host` package. Arguments go as an argv array, never through a shell. The environment
-/// is fixed, not inherited. Every run has a time limit.
+/// is fixed, not inherited. Every run has a time limit, and the user can cancel one.
 struct HostCLI: Sendable {
     let python: URL
     let home: String
@@ -73,8 +96,11 @@ struct HostCLI: Sendable {
 
     var isPaused: Bool { FileManager.default.fileExists(atPath: pauseFlag.path) }
 
-    /// Run one verb and wait for it, up to the time limit. A run that takes longer is stopped.
-    func run(_ verb: [String]) -> CLIResult {
+    /// Run one verb and wait for it, up to the time limit or until `cancel` is cancelled. A run
+    /// that is stopped gets SIGTERM, then SIGKILL 2 seconds later. If it still has not ended 2
+    /// seconds after that (a process stuck on a stalled network drive cannot end), the app stops
+    /// waiting for it, and the result has the status `notFinished`.
+    func run(_ verb: [String], cancel: CancelToken? = nil) -> CLIResult {
         let process = Process()
         process.executableURL = python
         process.arguments = arguments(for: verb)
@@ -93,26 +119,50 @@ struct HostCLI: Sendable {
             return CLIResult(
                 status: CLIResult.notStarted,
                 stdout: "",
-                stderr: "Lucille Host could not start its helper program (\(error.localizedDescription)).",
+                stderr: "Lucille Host could not start \(python.path): \(error.localizedDescription)",
                 timedOut: false
             )
         }
         let out = PipeReader(stdout.fileHandleForReading)
         let err = PipeReader(stderr.fileHandleForReading)
+        let deadline = Date().addingTimeInterval(timeout)
         var timedOut = false
-        if exited.wait(timeout: .now() + timeout) == .timedOut {
-            timedOut = true
+        var cancelled = false
+        while true {
+            if cancel?.isCancelled == true {
+                cancelled = true
+                break
+            }
+            let step = min(0.1, max(0, deadline.timeIntervalSinceNow))
+            if exited.wait(timeout: .now() + step) == .success {
+                break
+            }
+            if Date() >= deadline {
+                timedOut = true
+                break
+            }
+        }
+        if timedOut || cancelled {
             process.terminate()
             if exited.wait(timeout: .now() + 2) == .timedOut {
                 kill(process.processIdentifier, SIGKILL)
-                exited.wait()
+                if exited.wait(timeout: .now() + 2) == .timedOut {
+                    return CLIResult(
+                        status: CLIResult.notFinished,
+                        stdout: "",
+                        stderr: "",
+                        timedOut: timedOut,
+                        cancelled: cancelled
+                    )
+                }
             }
         }
         return CLIResult(
             status: process.terminationStatus,
             stdout: out.text(),
             stderr: err.text(),
-            timedOut: timedOut
+            timedOut: timedOut,
+            cancelled: cancelled
         )
     }
 }

@@ -24,7 +24,7 @@ struct HostMenu: View {
         Text(model.title)
         Text(model.statusLine)
         if let problem = model.problem {
-            Text(problem)
+            Button(problem.message) { model.showProblem() }
         }
         Divider()
         if model.paused {
@@ -33,12 +33,14 @@ struct HostMenu: View {
             Button("Pause Lucille") { model.setPaused(true) }
         }
         Menu("Abilities") {
-            if model.abilities.isEmpty {
+            if !model.abilitiesRead {
+                Text("Couldn't read abilities")
+            } else if model.listedAbilities.isEmpty {
                 Text("None to show")
             }
-            ForEach(model.abilities) { ability in
+            ForEach(model.listedAbilities) { ability in
                 Toggle(
-                    ability.name,
+                    ability.title,
                     isOn: Binding(
                         get: { ability.isOn },
                         set: { model.setAbility(ability, on: $0) }
@@ -49,11 +51,17 @@ struct HostMenu: View {
                     Text(note)
                 }
             }
+            if model.describeIsOn {
+                Divider()
+                Text("Once connected, Lucille sees which abilities are on and your folders' names")
+            }
         }
         Divider()
         Button("Add a Folder…") { model.addFolder() }
         Menu("Folders") {
-            if model.folders.isEmpty {
+            if !model.foldersRead {
+                Text("Couldn't read your folders")
+            } else if model.folders.isEmpty {
                 Text("No folders yet")
             }
             ForEach(model.folders) { folder in
