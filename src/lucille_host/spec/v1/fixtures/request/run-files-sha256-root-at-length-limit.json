@@ -1,0 +1,26 @@
+{
+  "description": "files.sha256 with a folder alias of 32 characters, the most the schema allows, which the local policy holds.",
+  "valid": true,
+  "schema_valid": true,
+  "host_state": {
+    "roots": [
+      "dddddddddddddddddddddddddddddddd"
+    ]
+  },
+  "expect": {
+    "reply": {
+      "status": "done"
+    }
+  },
+  "body": {
+    "v": "lucille.exec/1",
+    "dir": "request",
+    "job_id": "00000000-0000-4000-8000-000000000694",
+    "op": "files.sha256",
+    "args": {
+      "root": "dddddddddddddddddddddddddddddddd",
+      "path": "notes/todo.txt"
+    },
+    "not_after": 1767229200
+  }
+}

@@ -1,0 +1,19 @@
+{
+  "description": "A host_version, '\u00e90.1.0', that starts with a non-ASCII letter (U+00E9), not an ASCII digit.",
+  "valid": false,
+  "schema_valid": false,
+  "body": {
+    "host_version": "\u00e90.1.0",
+    "protocol": "lucille.exec/1",
+    "os_family": "linux",
+    "catalog_version": "0.1.0",
+    "enabled_ops": [
+      "host.describe",
+      "files.sha256"
+    ],
+    "root_aliases": [
+      "docs"
+    ],
+    "policy_digest": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+  }
+}

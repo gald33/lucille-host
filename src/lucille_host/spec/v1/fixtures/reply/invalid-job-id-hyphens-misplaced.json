@@ -1,0 +1,14 @@
+{
+  "description": "A job_id with its first hyphen one place early (still 36 characters).",
+  "valid": false,
+  "schema_valid": false,
+  "body": {
+    "v": "lucille.exec/1",
+    "dir": "reply",
+    "job_id": "0000000-00000-4000-8000-000000000309",
+    "status": "refused",
+    "code": "paused",
+    "policy_digest": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    "host_version": "0.1.0"
+  }
+}

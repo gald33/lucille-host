@@ -99,6 +99,7 @@ This repository proves only the host's side. The full design is
 | `src/lucille_host/conformance/` | A test suite that plays a hostile Lucille against the installed program. No scenarios yet. |
 | [spec/](spec/) | The protocol between Lucille and the host, `lucille.exec/1`: [PROTOCOL.md](spec/PROTOCOL.md) and its changelog. A draft; no release implements it yet. |
 | `src/lucille_host/spec/` | The protocol's JSON Schemas and golden fixtures, which ship in the wheel. |
+| `tools/spec/` | Writes the protocol fixtures for each place in each schema pattern; a test checks that the committed fixtures are what it writes. |
 | `tools/guards/` | Checks CI runs on every change. They catch accidental and casual violations; they are not a sandbox or a defence against a determined author, and maintainer review of every pull request is the backstop. [VERIFYING.md](VERIFYING.md) describes each one and what it cannot see. |
 | [macos/](macos/README.md) | A first build of Capsule, the Mac app, which lets Lucille use only the folders you choose: a menu bar app that drives the host's command line, and the scripts that build and check it. Not a release. |
 | [PRIVACY.md](PRIVACY.md) | The claim, and what this project must never claim. |

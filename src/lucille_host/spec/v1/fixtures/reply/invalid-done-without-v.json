@@ -1,0 +1,18 @@
+{
+  "description": "A done reply without v.",
+  "valid": false,
+  "schema_valid": false,
+  "body": {
+    "dir": "reply",
+    "job_id": "00000000-0000-4000-8000-000000000210",
+    "status": "done",
+    "exit_code": 0,
+    "stdout": "",
+    "stderr": "",
+    "stdout_truncated": false,
+    "stderr_truncated": false,
+    "duration_ms": 12,
+    "policy_digest": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    "host_version": "0.1.0"
+  }
+}

@@ -1,0 +1,20 @@
+{
+  "description": "A min_host_version, 0.1.1234567890, whose patch part has 10 digits. The host refuses it bad_request.",
+  "valid": false,
+  "schema_valid": false,
+  "expect": {
+    "reply": {
+      "status": "refused",
+      "code": "bad_request"
+    }
+  },
+  "body": {
+    "v": "lucille.exec/1",
+    "dir": "request",
+    "job_id": "00000000-0000-4000-8000-000000001391",
+    "op": "host.describe",
+    "args": {},
+    "not_after": 1767229200,
+    "min_host_version": "0.1.1234567890"
+  }
+}

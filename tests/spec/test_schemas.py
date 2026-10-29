@@ -8,6 +8,7 @@ properties and set ``additionalProperties`` to false; so must every schema that 
 
 from __future__ import annotations
 
+import json
 import re
 from collections.abc import Iterator, Mapping
 from typing import Any
@@ -171,6 +172,20 @@ def test_closed_value_lists() -> None:
     assert reply["status"]["enum"] == ["done", "refused", "failed"]
     assert reply["refused_code"]["enum"] == list(_support.REFUSED_CODES)
     assert reply["failed_code"]["enum"] == list(_support.FAILED_CODES)
+    document = spec.load_schema("host.describe")["properties"]
+    assert document["protocol"]["const"] == spec.PROTOCOL
+    assert document["os_family"]["enum"] == ["linux", "macos"]
+
+
+def test_the_reference_reading_states_the_schemas_bounds() -> None:
+    # _support.decide() states these bounds itself, as the prose does; the schemas state them too.
+    defs = spec.load_schema("request")["$defs"]
+    assert (defs["not_after"]["minimum"], defs["not_after"]["maximum"]) == (
+        0,
+        _support.NOT_AFTER_MAX,
+    )
+    assert (defs["cap"]["minimum"], defs["cap"]["maximum"]) == (_support.CAP_MIN, _support.CAP_MAX)
+    assert defs["op_name"]["maxLength"] == _support.OP_MAX
 
 
 def test_request_has_one_closed_branch_per_operation() -> None:
@@ -263,3 +278,37 @@ def test_bounded_request_fits_the_request_size_rule() -> None:
         }
         largest = max(largest, _support.serialized_size(body))
     assert largest < _support.REQUEST_LIMIT
+
+
+def _admitted_characters(pattern: str, every: str) -> set[str]:
+    """The characters of ``every`` the pattern admits anywhere. Fails on what it does not read."""
+    admitted: set[str] = set()
+    body = pattern.removeprefix("^").removesuffix("$")
+    for token in re.findall(r"\[(?:\\.|[^\]])*\]|\\.|\{\d+(?:,\d+)?\}|.", body):
+        if token.startswith("["):
+            admitted |= set(re.findall(token, every))
+        elif token.startswith("\\"):
+            assert token == "\\.", f"an escape this test does not read: {token} in {pattern}"
+            admitted.add(".")
+        elif token[0] not in "{()|*+?":
+            admitted.add(token)
+    return admitted
+
+
+def test_largest_host_describe_document_is_under_8_kib() -> None:
+    # spec/PROTOCOL.md section 11: the largest document the schema allows, written with no
+    # insignificant whitespace, measures under 8 KiB as a JSON-encoded stdout string.
+    schema = spec.load_schema("host.describe")
+    document = _support.largest_host_describe(schema)
+    assert _support.schema_accepts("host.describe", document)
+    stdout = json.dumps(document, ensure_ascii=True, separators=(",", ":"))
+    assert _support.serialized_size(stdout) < 8 * 1024
+    # That size holds only while every character a value may hold is written as one byte, both in
+    # the document and in the stdout string that holds it: ASCII, and no quote, backslash or
+    # control character. largest_host_describe() fills the values with such characters.
+    patterns = [node["pattern"] for _, node in subschemas(schema) if "pattern" in node]
+    assert len(patterns) == 5
+    every = "".join(map(chr, range(0x110000)))
+    for pattern in patterns:
+        wide = sorted(c for c in _admitted_characters(pattern, every) if len(json.dumps(c)) != 3)
+        assert wide == [], f"{pattern} admits characters JSON writes in more than one byte"

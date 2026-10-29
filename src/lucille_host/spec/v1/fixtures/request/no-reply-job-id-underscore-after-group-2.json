@@ -1,0 +1,16 @@
+{
+  "description": "A job_id, 00000000-0000_4000-8000-000000001060, with '_' in place of the hyphen after its second group. The host posts nothing.",
+  "valid": false,
+  "schema_valid": false,
+  "expect": {
+    "reply": null
+  },
+  "body": {
+    "v": "lucille.exec/1",
+    "dir": "request",
+    "job_id": "00000000-0000_4000-8000-000000001060",
+    "op": "host.describe",
+    "args": {},
+    "not_after": 1767229200
+  }
+}

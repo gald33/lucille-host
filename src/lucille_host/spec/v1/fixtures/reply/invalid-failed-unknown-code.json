@@ -1,0 +1,16 @@
+{
+  "description": "A failed reply with a code that is not in its list.",
+  "valid": false,
+  "schema_valid": false,
+  "body": {
+    "v": "lucille.exec/1",
+    "dir": "reply",
+    "job_id": "00000000-0000-4000-8000-000000000165",
+    "status": "failed",
+    "code": "error",
+    "exit_code": -9,
+    "duration_ms": 30000,
+    "policy_digest": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    "host_version": "0.1.0"
+  }
+}

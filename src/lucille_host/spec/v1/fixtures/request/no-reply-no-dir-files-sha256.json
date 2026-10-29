@@ -1,0 +1,18 @@
+{
+  "description": "A files.sha256 request without dir: the host posts nothing.",
+  "valid": false,
+  "schema_valid": false,
+  "expect": {
+    "reply": null
+  },
+  "body": {
+    "v": "lucille.exec/1",
+    "job_id": "00000000-0000-4000-8000-000000000193",
+    "op": "files.sha256",
+    "args": {
+      "root": "docs",
+      "path": "notes/todo.txt"
+    },
+    "not_after": 1767229200
+  }
+}

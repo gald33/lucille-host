@@ -1,0 +1,14 @@
+{
+  "description": "A policy_digest of 63 hex digits, not 64.",
+  "valid": false,
+  "schema_valid": false,
+  "body": {
+    "v": "lucille.exec/1",
+    "dir": "reply",
+    "job_id": "00000000-0000-4000-8000-000000001409",
+    "status": "refused",
+    "code": "paused",
+    "policy_digest": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcde",
+    "host_version": "0.1.0"
+  }
+}

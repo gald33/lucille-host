@@ -1,0 +1,14 @@
+{
+  "description": "A failed reply without job_id.",
+  "valid": false,
+  "schema_valid": false,
+  "body": {
+    "v": "lucille.exec/1",
+    "dir": "reply",
+    "status": "failed",
+    "code": "interrupted",
+    "duration_ms": 0,
+    "policy_digest": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    "host_version": "0.1.0"
+  }
+}
