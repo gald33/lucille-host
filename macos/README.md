@@ -70,6 +70,10 @@ for check in host swift relocate links signature launch ui gatekeeper dmg; do
 done
 ```
 
+On your own Mac, `ui` needs your terminal to have Accessibility permission (System Settings, Privacy &
+Security, Accessibility), and it takes over the screen for about a minute. It changes your own host's
+settings while it runs (it pauses, switches an ability, adds folders) and puts them back at the end.
+
 `uv run --no-project python macos/build_app.py plan` runs on any system. It checks the pins, and writes
 the `Info.plist` the app would get, without running any other program.
 
@@ -104,15 +108,34 @@ sign. CI checks the following on every build:
   hardened runtime with no entitlement.
 
 A signature that macOS trusts needs a Developer ID certificate and notarization. This build does
-neither.
+neither. Whether the native code still loads with no entitlement under a Developer ID signature is
+not tested yet.
+
+## What CI checks
+
+The `macos-app` workflow builds the app on a GitHub-hosted Apple silicon runner (`macos-15`) and runs
+each check in [`check_app.py`](check_app.py). A check that finds a problem fails the build.
+
+| Check | What it shows |
+|---|---|
+| `host` | The interpreter in the bundle runs the host in isolated mode, with nonsense in `PYTHONHOME` and `PYTHONPATH`: `--version`, `ops list`, a `roots` round trip, `pause` and `resume`, and the refusal of a home folder. The dependencies' native code loads. |
+| `swift` | The app's own Swift code that runs the command line and reads its output works against the real command line, through the same calls the menu makes. |
+| `relocate` | A copy of the app in another folder, with a space in its path, passes `host` and `swift`. |
+| `links` | No Mach-O file names a library outside macOS or the bundle, and no file holds the build folder's path. |
+| `signature` | The signature is valid after the runs above, every Mach-O file has the hardened runtime, and nothing has entitlements. |
+| `launch` | The app opens the way Finder opens it, and is still running 10 seconds later. |
+| `ui` | Driven through System Events as a user would: the menu shows the version and every item; Pause Lucille and Resume Lucille change the host's pause flag; an ability switches on, shows a checkmark, and switches off; Add a Folder… goes through the Open panel and the alias dialog and adds the folder; Remove in the Folders submenu removes it; the home folder is added only after the confirmation. Each step is checked against what the host's command line then reports. Screenshots are kept as the artifact `lucille-host-macos-screenshots`. |
+| `gatekeeper` | Prints `spctl`'s verdict. It is "rejected", as expected for an ad hoc signature, and does not fail the build. |
+| `dmg` | The disk image verifies, mounts, and holds the app, with a valid signature, and a link to `/Applications`. |
+| test suite | The host's whole test suite passes on the trimmed runtime. |
 
 ## The disk image from CI
 
 The `macos-app` workflow uploads the disk image as the artifact `lucille-host-macos-arm64-dmg` and keeps
 it for 7 days. **It is ad hoc signed and not notarized.** When it is downloaded with a browser, macOS
-refuses to open the app normally and says it cannot check it for malicious software. It is for people
-developing the app, on their own Mac. Do not give it to anyone else, and do not tell anyone to work
-around the warning.
+refuses to open the app normally, because it cannot verify who made it. It is for people developing
+the app, on their own Mac. Do not give it to anyone else, and do not tell anyone to work around the
+warning.
 
 ## Not done yet
 
@@ -125,8 +148,9 @@ around the warning.
 - **Uninstall.** Dragging the app to the Trash removes it. The host's own folder,
   `~/Library/Application Support/lucille-host`, stays.
 - **Intel Macs.** The locked `cryptography` publishes no Intel macOS wheel, so the app is Apple silicon only.
-- An app icon, a plain sentence for each ability, an activity view, and a machine-readable output from
-  the host's command line, which the app would read instead of its text.
+- An app icon, a plain sentence for each ability (the menu shows names such as `files.sha256`), an
+  activity view, and a machine-readable output from the host's command line, which the app would read
+  instead of its text.
 
 ## Choices made for the first build
 
