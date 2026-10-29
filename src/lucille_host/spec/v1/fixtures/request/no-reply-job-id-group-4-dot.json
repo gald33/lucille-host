@@ -1,0 +1,16 @@
+{
+  "description": "A job_id, 00000000-0000-4000-.000-000000001036, with '.' in its fourth group: not lowercase hex. The host posts nothing.",
+  "valid": false,
+  "schema_valid": false,
+  "expect": {
+    "reply": null
+  },
+  "body": {
+    "v": "lucille.exec/1",
+    "dir": "request",
+    "job_id": "00000000-0000-4000-.000-000000001036",
+    "op": "host.describe",
+    "args": {},
+    "not_after": 1767229200
+  }
+}

@@ -10,6 +10,8 @@ A fixture labels its message in two ways (spec/PROTOCOL.md, "Fixtures"):
 A request fixture also says what the host replies, given its ``host_state``. That is checked here
 against a reference reading of the spec's refusal order (``_support.decide``), so that the expected
 replies agree with the spec and with each other.
+
+A ``host.describe`` fixture holds one document ``host.describe`` returns, labelled the same way.
 """
 
 from __future__ import annotations
@@ -27,8 +29,23 @@ from tests.spec import _support
 
 REQUEST_FIXTURES = spec.fixture_paths("request")
 REPLY_FIXTURES = spec.fixture_paths("reply")
+DESCRIBE_FIXTURES = spec.fixture_paths("host.describe")
 DECODE_FIXTURES = spec.fixture_paths("decode")
 FAKE_JOB_ID = re.compile(r"00000000-0000-4000-8000-[0-9]{12}\Z")
+# The two fake job ids with a letter in every group, one in a valid request and one in a valid
+# reply (spec/PROTOCOL.md, "Fixtures").
+HEX_JOB_IDS = ("abcdefab-cdef-4abc-8def-abcdefabcdef", "fedcbafe-dcba-4fed-8cba-fedcbafedcba")
+# The order of a fixture's keys: the order of the table in spec/PROTOCOL.md, "Fixtures".
+KEY_ORDER = (
+    "description",
+    "valid",
+    "schema_valid",
+    "prose_rule",
+    "host_state",
+    "expect",
+    "op",
+    "body",
+)
 # Codes a valid request can never draw: each says the sender broke the spec.
 SENDER_FAULTS = {"bad_request", "bad_args", "unknown_op"}
 
@@ -47,6 +64,7 @@ def _all() -> dict[str, dict[str, dict[str, Any]]]:
 def test_there_are_fixtures_of_every_kind() -> None:
     assert len(REQUEST_FIXTURES) >= 60
     assert len(REPLY_FIXTURES) >= 30
+    assert len(DESCRIBE_FIXTURES) >= 10
     assert len(DECODE_FIXTURES) >= 5
 
 
@@ -80,6 +98,29 @@ def test_request_fixture_expects_the_reply_the_spec_gives(path: Path) -> None:
 def test_reply_fixture_is_labelled_correctly(path: Path) -> None:
     fixture = spec.load_fixture(path)
     assert _support.label_errors("reply", fixture, spec.load_schema("reply")) == []
+
+
+@pytest.mark.parametrize("path", DESCRIBE_FIXTURES, ids=_ids(DESCRIBE_FIXTURES))
+def test_host_describe_fixture_is_labelled_correctly(path: Path) -> None:
+    fixture = spec.load_fixture(path)
+    schema = spec.load_schema("host.describe")
+    assert _support.label_errors("host.describe", fixture, schema) == []
+
+
+def test_the_largest_document_fixture_is_the_largest_the_schema_allows() -> None:
+    fixture = _all()["host.describe"]["valid-largest"]
+    assert fixture["body"] == _support.largest_host_describe(spec.load_schema("host.describe"))
+
+
+def test_the_shortest_document_fixture_is_the_shortest_the_schema_allows() -> None:
+    fixture = _all()["host.describe"]["valid-shortest"]
+    schema = spec.load_schema("host.describe")
+    assert fixture["body"] == _support.shortest_host_describe(schema)
+    assert fixture["valid"]
+    shortest = _support.serialized_size(fixture["body"])
+    for other in _all()["host.describe"].values():
+        if other["valid"]:
+            assert _support.serialized_size(other["body"]) >= shortest
 
 
 def test_host_describe_reply_carries_its_document_in_stdout() -> None:
@@ -144,12 +185,12 @@ def test_one_request_per_operation_and_per_code() -> None:
 def test_the_listed_invalid_requests_are_there() -> None:
     requests = _all()["request"]
     for key in ("argv", "exe", "env", "cwd"):
-        fixture = requests[f"bad-request-extra-key-{key}"]
+        fixture = requests[f"bad-request-extra-key-{key}-files-sha256"]
         assert key in fixture["body"]
         assert fixture["expect"]["reply"] == _support.refused("bad_request")
     assert requests["bad-request-wrong-v"]["body"]["v"] != spec.PROTOCOL
     for name in (
-        "bad-request-oversize-request",
+        "bad-request-request-past-size-limit",
         "bad-args-path-oversize",
         "bad-request-op-oversize",
     ):
@@ -164,6 +205,17 @@ def test_the_listed_invalid_requests_are_there() -> None:
         assert any(f.get("prose_rule") == rule for f in replies.values()), rule
 
 
+def test_the_request_size_bound_has_a_fixture_on_each_side() -> None:
+    # Each holds the same fault, a path over 1024 characters, so only the size picks the code.
+    requests = _all()["request"]
+    at = requests["bad-args-request-at-size-limit"]
+    past = requests["bad-request-request-past-size-limit"]
+    assert _support.serialized_size(at["body"]) == _support.REQUEST_LIMIT
+    assert _support.serialized_size(past["body"]) == _support.REQUEST_LIMIT + 1
+    assert at["expect"]["reply"] == _support.refused("bad_args")
+    assert past["expect"]["reply"] == _support.refused("bad_request")
+
+
 def test_fixture_job_ids_are_obviously_fake_and_distinct() -> None:
     well_formed = _support.ecma_regex(spec.load_schema("request")["$defs"]["job_id"]["pattern"])
     seen: list[str] = []
@@ -172,9 +224,17 @@ def test_fixture_job_ids_are_obviously_fake_and_distinct() -> None:
             body = fixture["body"]
             job_id = body.get("job_id") if isinstance(body, dict) else None
             if isinstance(job_id, str) and well_formed.search(job_id):
-                assert FAKE_JOB_ID.match(job_id), job_id
+                assert FAKE_JOB_ID.match(job_id) or job_id in HEX_JOB_IDS, job_id
                 seen.append(job_id)
     assert len(seen) == len(set(seen))
+    for kind, job_id in zip(("request", "reply"), HEX_JOB_IDS, strict=True):
+        assert any(f["valid"] and f["body"]["job_id"] == job_id for f in _all()[kind].values())
+
+
+def test_fixture_keys_come_in_the_order_the_spec_lists_them() -> None:
+    for kind in ("request", "reply", "host.describe"):
+        for name, fixture in _all()[kind].items():
+            assert list(fixture) == [k for k in KEY_ORDER if k in fixture], f"{kind}/{name}"
 
 
 def test_default_host_state() -> None:

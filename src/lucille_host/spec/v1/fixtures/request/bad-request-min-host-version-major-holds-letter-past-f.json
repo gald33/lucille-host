@@ -1,0 +1,20 @@
+{
+  "description": "A min_host_version, 9g.1.1, whose major part holds a lowercase letter past 'f' after its first digit. The host refuses it bad_request.",
+  "valid": false,
+  "schema_valid": false,
+  "expect": {
+    "reply": {
+      "status": "refused",
+      "code": "bad_request"
+    }
+  },
+  "body": {
+    "v": "lucille.exec/1",
+    "dir": "request",
+    "job_id": "00000000-0000-4000-8000-000000001319",
+    "op": "host.describe",
+    "args": {},
+    "not_after": 1767229200,
+    "min_host_version": "9g.1.1"
+  }
+}

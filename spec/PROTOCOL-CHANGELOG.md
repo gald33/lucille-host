@@ -50,8 +50,49 @@ The first version.
   measured; decoding, redaction and capping; `not_after`, TTLs and expiry; dedupe, restarts and transport
   failures; pause, kill, timeout and drain.
 - **Files.** JSON Schemas (draft 2020-12) for the request, the reply and the `host.describe` document, closed
-  at every level; golden fixtures for requests, replies and decoding. Both ship in the wheel under
-  `lucille_host/spec/v1/`.
+  at every level; golden fixtures for requests, replies, `host.describe` documents and decoding. Both ship
+  in the wheel under `lucille_host/spec/v1/`.
 - **Not specified in v1.** Detecting a leak of a room's key alone; re-finding an offer a crash hid; how a
   receiver treats a body with a duplicate key ([PROTOCOL.md §19](PROTOCOL.md#19-not-specified-in-v1)).
+- **Revised in the draft, after review.**
+  - Check 3 of the accept policy compares the two hub URLs as strings once every `/` at the end of each
+    is removed ([PROTOCOL.md §6](PROTOCOL.md#6-offers-and-the-hosts-accept-policy)). That is exactly how
+    agent-switchboard 2.6.0 stores both: it removes them when it decodes a pairing code (sb
+    `pairing.py:599`) and when it keeps an offered room (`sharing.py:1613`). The reviewed text removed one
+    trailing `/` and compared the two "as URLs", which left open whether case, a default port or a query
+    counted. Now a code or a room from any writer that adds `/` at the end compares equal, and the rest of
+    each URL must match as written: case, a port, a query, a fragment, and a `/` before a query or a
+    fragment, which is not at the end. 2.6.0 itself writes no `/` at the end of either URL
+    (`pairing.py:1430`, `sharing.py:1433`), so between two 2.6.0 sides only the second half matters (see
+    the next entry).
+  - Lucille mints each work room with the same hub URL as the pairing code it gave that computer, every
+    trailing `/` aside ([PROTOCOL.md §6](PROTOCOL.md#6-offers-and-the-hosts-accept-policy)). Check 3
+    compares the two as strings, so a room minted on the same hub under another spelling of its URL, such as
+    another case or a port, would fail it, and the host would leave the room for good.
+  - Before the checks of the refusal order, `host_too_old` included, the host sets aside a body that is not
+    a JSON object, has no `dir: "request"` or has no well-formed `job_id`, and posts nothing for it
+    ([PROTOCOL.md §12](PROTOCOL.md#12-which-refusal-wins)). §10 already said the host posts nothing for
+    such a body; §12 now says that this comes before the checks. Dedupe, the first check, can still end in
+    no reply.
+  - The prose now states the forms the schemas already held `host_version` and `catalog_version` to: a
+    digit first for `host_version`, a letter or digit first for `catalog_version`, then letters, digits,
+    `.`, `+`, `_` or `-`; and that neither list in the `host.describe` document names an entry twice
+    ([PROTOCOL.md §11](PROTOCOL.md#11-replies)). This changes nothing either side may send.
+  - Fixtures ([PROTOCOL.md §20](PROTOCOL.md#20-fixtures)). A fixture kind for the `host.describe`
+    document, `fixtures/host.describe/`. Two fake job ids with a letter in every group join the numbered
+    ones. §20 now lists what the fixtures are written to pin, and says that a change to a pattern that
+    none of its lists names may pass every test, with examples. With the fixtures added, they now hold: a
+    request with two faults for each two neighbouring checks of §12 that one request can fail together,
+    and for each of four bodies the host does not answer with a `min_host_version` the host is older than;
+    a body at and one past each numeric and length bound no pattern implies; and, for each pattern but the
+    one that refuses only U+0000, in each message and document, the bodies `tools/spec/gen_fixtures.py` writes: an empty string, one character of each
+    refused kind in each class's place, each separator left out, doubled or replaced, each counted
+    repetition one past its bound, and each part of `min_host_version` empty or `00`. A test checks that
+    the script writes exactly the committed files, and that each of their bodies has that one fault and no
+    other. Some fixtures are renamed, so that the members of each family are named alike, and some are
+    replaced by the script's.
+  - Editorial: three citations of agent-switchboard 2.6.0 are corrected (the share wake at
+    `sharing.py:1175-1186`, in §5; `ShareStore`'s owner-only text at `:263-273` and the `Store`
+    interface's request to keep the store encrypted at rest at `:237-240`, in §18), and §10 gives `1.2`
+    and `1.2-beta` as host versions that do not start with a numeric triple.
 - First accepted by: no host release yet. Lucille: not yet.

@@ -1,0 +1,14 @@
+{
+  "description": "A host_version, 1.2.3-Beta_1+local, that holds a digit, a lowercase and an uppercase letter, '.', '-', '_' and '+'.",
+  "valid": true,
+  "schema_valid": true,
+  "body": {
+    "v": "lucille.exec/1",
+    "dir": "reply",
+    "job_id": "00000000-0000-4000-8000-000000000696",
+    "status": "refused",
+    "code": "paused",
+    "policy_digest": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    "host_version": "1.2.3-Beta_1+local"
+  }
+}

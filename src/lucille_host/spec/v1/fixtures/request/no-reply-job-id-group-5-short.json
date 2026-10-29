@@ -1,0 +1,16 @@
+{
+  "description": "A job_id whose fifth group is a digit short (35 characters). The host posts nothing.",
+  "valid": false,
+  "schema_valid": false,
+  "expect": {
+    "reply": null
+  },
+  "body": {
+    "v": "lucille.exec/1",
+    "dir": "request",
+    "job_id": "00000000-0000-4000-8000-00000001088",
+    "op": "host.describe",
+    "args": {},
+    "not_after": 1767229200
+  }
+}

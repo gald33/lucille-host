@@ -1,0 +1,21 @@
+{
+  "description": "not_after 4294967295, the most the schema allows, received 86400 s before it.",
+  "valid": true,
+  "schema_valid": true,
+  "host_state": {
+    "received_at": 4294880895
+  },
+  "expect": {
+    "reply": {
+      "status": "done"
+    }
+  },
+  "body": {
+    "v": "lucille.exec/1",
+    "dir": "request",
+    "job_id": "00000000-0000-4000-8000-000000000135",
+    "op": "host.describe",
+    "args": {},
+    "not_after": 4294967295
+  }
+}

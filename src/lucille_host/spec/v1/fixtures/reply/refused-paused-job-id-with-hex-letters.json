@@ -1,0 +1,14 @@
+{
+  "description": "A reply whose job_id has a letter from 'a' to 'f' in every group.",
+  "valid": true,
+  "schema_valid": true,
+  "body": {
+    "v": "lucille.exec/1",
+    "dir": "reply",
+    "job_id": "fedcbafe-dcba-4fed-8cba-fedcbafedcba",
+    "status": "refused",
+    "code": "paused",
+    "policy_digest": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    "host_version": "0.1.0"
+  }
+}

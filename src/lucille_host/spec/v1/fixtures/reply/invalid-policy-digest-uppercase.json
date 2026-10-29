@@ -1,14 +1,14 @@
 {
-  "description": "policy_digest is lowercase hex.",
+  "description": "A policy_digest of 64 characters, one of them an uppercase letter: not lowercase hex.",
   "valid": false,
   "schema_valid": false,
   "body": {
     "v": "lucille.exec/1",
     "dir": "reply",
-    "job_id": "00000000-0000-4000-8000-000000000114",
+    "job_id": "00000000-0000-4000-8000-000000001400",
     "status": "refused",
     "code": "paused",
-    "policy_digest": "0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF",
+    "policy_digest": "A123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
     "host_version": "0.1.0"
   }
 }

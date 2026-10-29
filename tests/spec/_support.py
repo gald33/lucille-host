@@ -10,6 +10,10 @@
   refusal wins"), used only to check that each request fixture's expected reply agrees with the
   spec. It is not the host. The host's own checks, when they are written, live in the runtime
   package and are held to the same fixtures.
+- :func:`same_hub` is a reference reading of check 3 of the host's accept policy
+  (``spec/PROTOCOL.md``, section 6), and :func:`largest_host_describe` and
+  :func:`shortest_host_describe` build the largest and the shortest document
+  ``host.describe.schema.json`` allows.
 """
 
 from __future__ import annotations
@@ -28,6 +32,7 @@ REQUEST_LIMIT = 16384  # bytes, serialized as spec/PROTOCOL.md says
 STREAM_LIMIT = 65536  # bytes of one stream's JSON-encoded string, quotes included
 NOT_AFTER_RANGE = 86400  # seconds after the host received a request
 NOT_AFTER_MAX = 4294967295
+OP_MAX = 64  # characters in an op name
 CAP_MIN = 2  # the empty stream, "", measures 2 bytes
 CAP_MAX = 2147483647
 CATALOG = ("host.describe", "host.sleep", "files.sha256", "files.search")
@@ -162,7 +167,7 @@ def _bad_request(body: Mapping[str, Any], state: Mapping[str, Any]) -> bool:
     if body["v"] != spec.PROTOCOL:
         return True
     op = body["op"]
-    if not isinstance(op, str) or len(op) > 64 or _regex("op_name").search(op) is None:
+    if not isinstance(op, str) or len(op) > OP_MAX or _regex("op_name").search(op) is None:
         return True
     if not isinstance(body["args"], dict):
         return True
@@ -250,6 +255,8 @@ def decide(body: Any, state: Mapping[str, Any]) -> dict[str, str] | None:
     op = body["op"]
     if op not in CATALOG:
         return refused("unknown_op")
+    # Section 10 gives not_enabled only to an op in the catalog. Every op that reaches this line
+    # is in it, so the check reads the local policy alone.
     if op not in state["enabled_ops"]:
         return refused("not_enabled")
     if _bad_args(op, body["args"]):
@@ -272,6 +279,75 @@ def effective_caps(body: Mapping[str, Any], state: Mapping[str, Any]) -> dict[st
     return {stream: min(asked.get(stream, own[stream]), own[stream]) for stream in own}
 
 
+def same_hub(room_url: str, code_url: str) -> bool:
+    """Check 3: the room's hub is the one the pairing code named.
+
+    Both URLs are compared as strings with every trailing ``/`` removed, as agent-switchboard 2.6.0
+    removes them when it decodes a pairing code (its ``pairing.py:599``) and when it keeps an
+    offered room (its ``sharing.py:1613``).
+    """
+    return room_url.rstrip("/") == code_url.rstrip("/")
+
+
+def largest_host_describe(schema: Mapping[str, Any]) -> dict[str, Any]:
+    """The largest document ``schema`` (``host.describe.schema.json``) allows.
+
+    Every string at its most characters and both lists at their most entries. Every character
+    the patterns allow is ASCII that JSON writes as one byte, and none is a quote or a backslash,
+    so the size depends only on those counts.
+    """
+    props = schema["properties"]
+    defs = schema["$defs"]
+
+    def most(sub: Mapping[str, Any], key: str) -> int:
+        target = defs[sub["$ref"].removeprefix("#/$defs/")] if "$ref" in sub else sub
+        return int(target[key])
+
+    op_length = most(props["enabled_ops"]["items"], "maxLength")
+    root_length = most(props["root_aliases"]["items"], "maxLength")
+    return {
+        "host_version": "1" + "a" * (most(props["host_version"], "maxLength") - 1),
+        "protocol": props["protocol"]["const"],
+        "os_family": max(props["os_family"]["enum"], key=len),
+        "catalog_version": "1" + "a" * (most(props["catalog_version"], "maxLength") - 1),
+        "enabled_ops": [
+            f"op{i:03d}." + "a" * (op_length - 6) for i in range(props["enabled_ops"]["maxItems"])
+        ],
+        "root_aliases": [
+            f"r{i:03d}" + "a" * (root_length - 4) for i in range(props["root_aliases"]["maxItems"])
+        ],
+        "policy_digest": "f" * most(props["policy_digest"], "maxLength"),
+    }
+
+
+def shortest_host_describe(schema: Mapping[str, Any]) -> dict[str, Any]:
+    """The shortest document ``schema`` (``host.describe.schema.json``) allows.
+
+    Every string at its fewest characters, both lists empty, and the shorter ``os_family``. The
+    size depends only on those counts, as in :func:`largest_host_describe`. The schema sets no
+    least number of entries for either list; a schema that did would need entries written here.
+    """
+    props = schema["properties"]
+    defs = schema["$defs"]
+    for name in ("enabled_ops", "root_aliases"):
+        if "minItems" in props[name]:
+            raise ValueError(f"{name} has a least number of entries")
+
+    def least(sub: Mapping[str, Any]) -> int:
+        target = defs[sub["$ref"].removeprefix("#/$defs/")] if "$ref" in sub else sub
+        return int(target.get("minLength", 0))
+
+    return {
+        "host_version": "1" * least(props["host_version"]),
+        "protocol": props["protocol"]["const"],
+        "os_family": min(props["os_family"]["enum"], key=len),
+        "catalog_version": "1" * least(props["catalog_version"]),
+        "enabled_ops": [],
+        "root_aliases": [],
+        "policy_digest": "0" * least(props["policy_digest"]),
+    }
+
+
 # --- Fixture labels --------------------------------------------------------------------------
 
 FIXTURE_KEYS = {
@@ -280,11 +356,12 @@ FIXTURE_KEYS = {
         {"prose_rule", "host_state"},
     ),
     "reply": ({"description", "valid", "schema_valid", "body"}, {"prose_rule", "op"}),
+    "host.describe": ({"description", "valid", "schema_valid", "body"}, set()),
 }
 
 
 def label_errors(kind: str, fixture: Mapping[str, Any], schema: Mapping[str, Any]) -> list[str]:
-    """Where a request or reply fixture's labels disagree with ``schema`` and the prose rules.
+    """Where a request, reply or document fixture's labels disagree with ``schema`` and the rules.
 
     ``schema_valid`` must be what the schema says. A fixture the schema accepts is ``valid``
     exactly when it breaks no prose rule, and an invalid one names the one rule it breaks in

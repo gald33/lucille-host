@@ -37,7 +37,7 @@ MAJOR = 1
 # The schema files of this major: ``<name>.schema.json``.
 SCHEMA_NAMES = ("request", "reply", "host.describe")
 # The fixture directories of this major: ``fixtures/<kind>/*.json``.
-FIXTURE_KINDS = ("request", "reply", "decode")
+FIXTURE_KINDS = ("request", "reply", "host.describe", "decode")
 
 _HERE = Path(__file__).resolve().parent
 
@@ -67,7 +67,10 @@ def fixture_paths(kind: str) -> list[Path]:
 
 
 def load_fixture(path: Path) -> dict[str, Any]:
-    """One fixture file, parsed. A string in it may hold an unpaired surrogate, on purpose."""
+    """One fixture file, parsed. A string in it may hold an unpaired surrogate, on purpose.
+
+    It reads whatever path it is given; :func:`fixture_paths` lists the ones this package ships.
+    """
     return _read(path)
 
 

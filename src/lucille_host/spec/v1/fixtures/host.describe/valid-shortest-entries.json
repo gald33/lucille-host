@@ -1,0 +1,18 @@
+{
+  "description": "Each list holds one entry of the fewest characters the schema allows: an operation name of three, a folder alias of one; a catalog_version of one character, a letter.",
+  "valid": true,
+  "schema_valid": true,
+  "body": {
+    "host_version": "1",
+    "protocol": "lucille.exec/1",
+    "os_family": "linux",
+    "catalog_version": "a",
+    "enabled_ops": [
+      "a.b"
+    ],
+    "root_aliases": [
+      "d"
+    ],
+    "policy_digest": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+  }
+}

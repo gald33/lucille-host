@@ -1,0 +1,19 @@
+{
+  "description": "not_after 0, the least the schema allows: valid, and long past.",
+  "valid": true,
+  "schema_valid": true,
+  "expect": {
+    "reply": {
+      "status": "refused",
+      "code": "expired"
+    }
+  },
+  "body": {
+    "v": "lucille.exec/1",
+    "dir": "request",
+    "job_id": "00000000-0000-4000-8000-000000000136",
+    "op": "host.describe",
+    "args": {},
+    "not_after": 0
+  }
+}
