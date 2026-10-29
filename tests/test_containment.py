@@ -560,3 +560,38 @@ def test_a_mount_point_with_a_carriage_return_is_one_line(
     table.write_bytes(b"77 50 0:41 / /mnt/pr\rx rw,relatime - proc proc rw\n")
     monkeypatch.setattr("lucille_host.mounts.MOUNTINFO", str(table))
     assert [(m.point, m.fstype) for m in mounts.table()] == [("/mnt/pr\rx", "proc")]
+
+
+def test_a_hard_link_to_a_file_in_a_linked_profile_folder_is_refused(tmp_path: Path) -> None:
+    """The profile folder is a link to another disk; a hard link to the policy file there, inside
+    an enabled folder (as a hard-link backup tool would leave), is still the host's own file."""
+    host_dir = tmp_path / "config" / "lucille-host"
+    host_dir.mkdir(parents=True)
+    other_disk = tmp_path / "otherdisk" / "default"
+    other_disk.mkdir(parents=True)
+    (other_disk / "policy.toml").write_text("version = 1\n")
+    (host_dir / "default").symlink_to(other_disk)
+    root = tmp_path / "root"
+    root.mkdir()
+    os.link(other_disk / "policy.toml", root / "h")
+    (root / "mine.txt").write_text("the user's")
+    own = (str(host_dir),)
+    assert contain(str(root), "h", own=own) is None
+    assert contain(str(root), "mine.txt", own=own) == os.path.realpath(root)
+
+
+def test_a_link_loop_in_the_hosts_own_folders_is_walked_once(own: tuple[Path, Path, Path]) -> None:
+    above, host_dir, config = own
+    (config / "loop").symlink_to(host_dir)
+    (config / "self").symlink_to(".")
+    assert contain(str(above), "notes.txt", own=(str(host_dir),)) == os.path.realpath(above)
+    assert contain(str(above), "lucille-host/default/policy.toml", own=(str(host_dir),)) is None
+
+
+def test_own_folders_too_large_to_list_refuse_every_path(
+    own: tuple[Path, Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    above, host_dir, _ = own
+    monkeypatch.setattr("lucille_host.containment.MAX_OWN_ENTRIES", 1)
+    assert contain(str(above), "notes.txt", own=(str(host_dir),)) is None
+    assert containment.inside_own(str(above), (str(host_dir),))

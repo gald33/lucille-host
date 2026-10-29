@@ -5,6 +5,7 @@ from __future__ import annotations
 import dataclasses
 import json
 import os
+import signal
 import sys
 from pathlib import Path
 from typing import Any
@@ -228,7 +229,40 @@ def test_a_pause_after_the_decision_stops_the_start(
     assert not marker.exists()
     lines = [json.loads(line) for line in ctx.audit.path.read_text().splitlines()]
     assert [line["kind"] for line in lines] == ["execution"]
-    assert (lines[0]["started"], lines[0]["paused"]) == (False, True)
+    assert (lines[0]["started"], lines[0]["stopped"]) == (False, "paused")
+
+
+@pytest.mark.parametrize("signum", [signal.SIGTERM, signal.SIGHUP, signal.SIGINT])
+def test_a_drain_signal_after_the_decision_stops_the_start(
+    tmp_path: Path, make_context: MakeContext, monkeypatch: pytest.MonkeyPatch, signum: int
+) -> None:
+    """The signal lands once the decision to run is written, before the child starts: nothing new
+    starts while the host drains (spec section 16), so the decision is not carried out."""
+    marker = tmp_path / "the-child-ran"
+    ctx = make_context(enabled=["host.sleep"])
+    real_check = check
+
+    def deciding_to_run_a_marker(job: Job, context: Any) -> Any:
+        ready = real_check(job, context)
+        assert isinstance(ready, Ready)
+        return dataclasses.replace(
+            ready, argv=(sys.executable, "-c", f"open({str(marker)!r}, 'w').close()")
+        )
+
+    real_decision = ctx.audit.decision
+
+    def decision(*args: Any, **kwargs: Any) -> None:
+        real_decision(*args, **kwargs)
+        ctx.controls.on_signal(signum, None)
+
+    monkeypatch.setattr("lucille_host.jobs.check", deciding_to_run_a_marker)
+    monkeypatch.setattr(ctx.audit, "decision", decision)
+    reply = json.loads(process(Job(job_id=JOB_ID, op="host.sleep", args={"n": 1}), ctx))
+    assert (reply["status"], reply["code"]) == ("failed", "interrupted")
+    assert not marker.exists()
+    lines = [json.loads(line) for line in ctx.audit.path.read_text().splitlines()]
+    assert [line["kind"] for line in lines] == ["received", "decision", "execution", "sent"]
+    assert (lines[2]["started"], lines[2]["stopped"]) == (False, "draining")
 
 
 def test_an_operation_with_no_root_runs_in_the_filesystem_root(make_context: MakeContext) -> None:

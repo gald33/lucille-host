@@ -47,10 +47,11 @@ The rules, all decided before anything runs:
   program;
 - the host's own files (:attr:`lucille_host.paths.Dirs.own`: its config and state folders and
   everything in them, the policy, the digest key and the audit log among them) are outside every
-  folder. They are compared by device and inode, with links in them followed and not, so another
-  spelling of one (a second mount of one of its folders, a hard link to one of its files, the
-  folder a link in them points to) is caught too: a path that reaches one is an escape, and so is a
-  folder inside one;
+  folder. They are compared by device and inode, with links in them followed and not and linked
+  folders walked too, so another spelling of one (a second mount of one of its folders, a hard link
+  to one of its files, the folder a link in them points to and the files in it) is caught too: a
+  path that reaches one is an escape, and so is a folder inside one. Folders holding more than
+  :data:`MAX_OWN_ENTRIES` entries make every path an escape;
 - a directory the host cannot open (one it may search but not read, say), more than
   :data:`MAX_STEPS` lookups, and any other error while walking are escapes: the host does not run
   what it could not check.
@@ -78,6 +79,8 @@ __all__ = ["MAX_LINKS", "contain", "inside_own", "on_proc"]
 MAX_LINKS: Final = 32 if sys.platform == "darwin" else 40
 # A bound on the lookups one walk may make, so that link targets full of ".." cannot make it slow.
 MAX_STEPS: Final = 65536
+# A bound on the entries listed in the host's own folders, which hold a few files.
+MAX_OWN_ENTRIES: Final = 10000
 
 # Errors from looking up one name that mean "nothing is there to follow": the walk ends inside.
 _ABSENT: Final = frozenset({errno.ENOENT, errno.ENOTDIR, errno.ENAMETOOLONG})
@@ -106,26 +109,47 @@ def _identity(info: os.stat_result) -> tuple[int, int]:
     return info.st_dev, info.st_ino
 
 
+class _TooManyOwn(OSError):
+    """The host's own folders hold more than MAX_OWN_ENTRIES entries."""
+
+
 def _identities(folders: Iterable[str]) -> frozenset[tuple[int, int]]:
-    """The device and inode of each of the host's own folders and of everything in them. A folder
-    that does not exist holds nothing to reach."""
-    found = set()
-    for folder in folders:
+    """The device and inode of each of the host's own folders and of everything in them, links
+    in them followed and not, into linked folders too (a profile folder moved to another disk and
+    linked back, say), each folder walked once however it is reached. A folder that does not exist
+    holds nothing to reach. More than :data:`MAX_OWN_ENTRIES` entries raises :class:`_TooManyOwn`:
+    rather than walk a tree a link has pulled in, the host refuses every path."""
+    found: set[tuple[int, int]] = set()
+    walked: set[tuple[int, int]] = set()
+    pending = list(folders)
+    entries = 0
+    while pending:
+        folder = pending.pop()
         try:
-            found.add(_identity(os.stat(folder)))
+            info = os.stat(folder)
         except (OSError, ValueError):
             continue
-        for here, folder_names, file_names in os.walk(folder):
-            for name in (*folder_names, *file_names):
-                # The entry itself, and what it points to if it is a link (a profile folder
-                # moved to another disk and linked back, say).
-                for follow in (False, True):
-                    try:
-                        found.add(
-                            _identity(os.stat(os.path.join(here, name), follow_symlinks=follow))
-                        )
-                    except OSError:
-                        continue
+        found.add(_identity(info))
+        if not stat.S_ISDIR(info.st_mode) or _identity(info) in walked:
+            continue
+        walked.add(_identity(info))
+        try:
+            names = os.listdir(folder)
+        except OSError:
+            continue
+        for name in names:
+            entries += 1
+            if entries > MAX_OWN_ENTRIES:
+                raise _TooManyOwn(errno.E2BIG, "the host's own folders hold too many entries")
+            path = os.path.join(folder, name)
+            for follow in (False, True):
+                try:
+                    entry = os.stat(path, follow_symlinks=follow)
+                except OSError:
+                    continue
+                found.add(_identity(entry))
+                if follow and stat.S_ISDIR(entry.st_mode):
+                    pending.append(path)
     return frozenset(found)
 
 
@@ -151,10 +175,13 @@ def on_proc(folder: str) -> bool:
 
 
 def inside_own(folder: str, own: Iterable[str]) -> bool:
-    """Whether ``folder`` is one of the host's own folders, or inside one, by device and inode."""
+    """Whether ``folder`` is one of the host's own folders, or inside one, by device and inode.
+    True also where the host's own folders are too large to list."""
     try:
         own_ids = _identities(own)
         return any(_identity(os.stat(above)) in own_ids for above in _above(folder))
+    except _TooManyOwn:
+        return True
     except (OSError, ValueError):
         return False
 

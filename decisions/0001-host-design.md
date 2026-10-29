@@ -445,9 +445,10 @@ policy changed. A plain hash would let anyone holding it confirm a guessed folde
 - **`kill`** (or a second Ctrl-C) also sets the flag. It kills the in-flight process group, and replies
   `failed` with `killed_locally`.
 - **The first SIGTERM, SIGHUP or Ctrl-C drains** (a signal ignored when the host started, as SIGHUP is
-  under `nohup`, stays ignored). The running op finishes and replies, and nothing new starts. Only a
-  running host enforces a time limit or a kill: if the host is killed or crashes while an op runs, the
-  op keeps running without either (THREAT_MODEL.md, "Known gaps").
+  under `nohup`, stays ignored). The running op finishes and replies, and nothing new starts, an op
+  decided but not yet started included (`failed` with `interrupted`). Only a running host enforces a
+  time limit or a kill: if the host is killed or crashes while an op runs, the op keeps running without
+  either (THREAT_MODEL.md, "Known gaps").
 - **Removal on the Lucille side** ends the pair there (Lucille policy as of 2026-10-27; not proven by
   this repository).
   - If Lucille's forget reached the hub, the host learns it on its next resolve, forgets its own copy,

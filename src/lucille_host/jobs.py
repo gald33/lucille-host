@@ -21,10 +21,10 @@ bytes are handed back to be posted. A refusal the read loop already decided is p
 
 While the host drains (the first SIGTERM, SIGHUP or Ctrl-C), :func:`process` starts nothing: it
 raises :class:`Draining` before it records anything, and the read loop stops reading. The pause flag
-is read again just before the child starts, after the ``start`` line's executable is hashed: a pause
-that lands after the decision to run stops the start, and the reply is ``failed interrupted``, as
-for a child that could not be started. One that lands after that re-read cannot stop the start;
-``kill`` stops the child from its first poll.
+and the drain are read again just before the child starts, after the ``start`` line's executable is
+hashed: a pause or a drain that lands after the decision to run stops the start, and the reply is
+``failed interrupted``, as for a child that could not be started. One that lands after that re-read
+cannot stop the start; ``kill`` stops the child from its first poll, and a drain lets it finish.
 """
 
 from __future__ import annotations
@@ -116,8 +116,12 @@ class Draining(Exception):
     """The host is draining: it starts nothing new, and records nothing for a request it got."""
 
 
-class _PausedBeforeStart(Exception):
-    """The pause flag was set between the decision to run and the start."""
+class _StoppedBeforeStart(Exception):
+    """The pause flag was set, or the drain began, between the decision to run and the start."""
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
 
 
 def check(job: Job, ctx: Context) -> str | Ready:
@@ -180,8 +184,8 @@ def execute(ready: Ready, ctx: Context) -> Outcome:
     Writes the ``start`` audit line before the child starts and the ``execution`` line before
     returning. A child the host decided on and then did not start is ``failed interrupted``: the
     host did not carry out its decision. That is a child that could not be started (its executable
-    or its folder went away in between, say), or one a pause that landed after the decision
-    stopped.
+    or its folder went away in between, say), or one a pause or a drain that landed after the
+    decision stopped.
     """
     job_id = ready.job.job_id
     if ready.argv is None:
@@ -207,8 +211,10 @@ def execute(ready: Ready, ctx: Context) -> Outcome:
     )
 
     def started(executable_sha256: str) -> None:
+        if ctx.controls.draining.is_set():
+            raise _StoppedBeforeStart("draining")
         if ctx.controls.paused():
-            raise _PausedBeforeStart
+            raise _StoppedBeforeStart("paused")
         ctx.audit.start(
             job_id,
             op=ready.operation.name,
@@ -224,8 +230,8 @@ def execute(ready: Ready, ctx: Context) -> Outcome:
     except _exec.NotStarted as exc:
         ctx.audit.execution(job_id, op=ready.operation.name, started=False, errno=exc.errno)
         return Outcome(status="failed", code="interrupted", duration_ms=0)
-    except _PausedBeforeStart:
-        ctx.audit.execution(job_id, op=ready.operation.name, started=False, paused=True)
+    except _StoppedBeforeStart as stopped:
+        ctx.audit.execution(job_id, op=ready.operation.name, started=False, stopped=stopped.reason)
         return Outcome(status="failed", code="interrupted", duration_ms=0)
     if result.ended == "killed":
         ctx.controls.kill_done()

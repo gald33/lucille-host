@@ -49,9 +49,23 @@ The first version.
   named rules `strings`, `integers`, `request-size`, `stream-size` and `not-after-range`; how size is
   measured; decoding, redaction and capping, and the host's rule `raw-ceiling` (at most 4 MiB of each
   stream's raw output is kept, and what is not kept sets the truncation flag); containment, which keeps
-  paths out of the host's own folders and Linux's `/proc`, and off FIFOs, sockets and devices; `not_after`, TTLs and expiry;
-  dedupe, restarts and transport failures; pause (read again just before a start), kill, timeout and
-  drain.
+  paths out of the host's own folders and Linux's `/proc`, and off FIFOs, sockets and devices;
+  `not_after`, TTLs and expiry; dedupe, restarts and transport failures; pause (read again just before a
+  start), kill, timeout and drain.
+- **Revised in the draft, with the host's first code.** These change what a side may send or must do:
+  - `failed` means the host decided to run the operation and it did not finish; it was "it started and did
+    not finish". `interrupted` now covers, besides a restart between the decision and the reply, a decision
+    the host did not carry out because a pause or a drain came before the start, or because the process
+    could not be started. So `interrupted` does not say whether the operation ran, and Lucille must not
+    read it as either (§11).
+  - SIGHUP drains as SIGTERM and Ctrl-C do, unless the host was started with it ignored; an operation
+    decided but not yet started when the drain begins is not started (§16).
+  - The pause flag is read again just before a start, and a pause set in between turns the decision into
+    `failed` with `interrupted` (§16).
+  - A stream's truncation flag is also set by output the host did not keep under `raw-ceiling` (§11, §13).
+  - `path_outside_root` also covers a path into the host's own configuration or state folders, through
+    Linux's `/proc`, or naming a FIFO, socket or device (§10).
+  The reply schema's descriptions changed to match; no field, status or code was added or removed.
 - **Files.** JSON Schemas (draft 2020-12) for the request, the reply and the `host.describe` document, closed
   at every level; golden fixtures for requests, replies and decoding. Both ship in the wheel under
   `lucille_host/spec/v1/`.

@@ -514,8 +514,10 @@ The first counting reply for a job decides it, and a later one is never applied
 - `failed`: the host decided to run it, and it did not finish. `code` is one of `timeout` (it ran past its
   time limit), `killed_locally` (the user killed it) and `interrupted` (the host did not carry out its
   decision: a restart came between the decision and the reply, [§15](#15-dedupe-restarts-and-transport-failures),
-  the user paused the host between the decision and the start, or the process it decided to run could
-  not be started: its executable or its folder went away in between, say, or starting it failed).
+  the user paused the host or it began to drain between the decision and the start, or the process it
+  decided to run could not be started: its executable or its folder went away in between, say, or
+  starting it failed). So `interrupted` does not say whether the operation ran: after a restart it may
+  have.
 
 These lists are closed. A receiver refuses a reply with any other status or code.
 
@@ -758,8 +760,9 @@ offline, nothing happens and the requests expire. Nothing Lucille sends can unpa
   has its process group killed, and the host replies `failed` with `timeout`.
 
 **Drain.** The first SIGTERM, SIGHUP or Ctrl-C drains: the running operation finishes and its reply is
-posted, and nothing new starts. A signal the host was started with ignored (SIGHUP under `nohup`) stays
-ignored. Only a running host enforces a time limit or a kill.
+posted, and nothing new starts. An operation decided but not yet started is not started: `failed` with
+`interrupted`. A signal the host was started with ignored (SIGHUP under `nohup`) stays ignored. Only a
+running host enforces a time limit or a kill.
 
 ## 17. What a reply may do on Lucille's side
 

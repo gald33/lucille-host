@@ -239,7 +239,8 @@ what is running."
   `test_the_controls_work_where_the_filesystem_cannot_lock`,
   `test_no_order_of_a_kill_and_a_resume_leaves_a_kill_request_alone`,
   `test_an_ignored_sighup_stays_ignored`, `test_the_signal_handler_takes_no_lock`); `tests/test_jobs.py`
-  (`test_draining_starts_nothing_and_records_nothing`, `test_a_pause_after_the_decision_stops_the_start`);
+  (`test_draining_starts_nothing_and_records_nothing`, `test_a_pause_after_the_decision_stops_the_start`,
+  `test_a_drain_signal_after_the_decision_stops_the_start`);
   `tests/test_exec.py` (`test_exec_timeout_kills_group`, `test_a_user_kill_takes_the_whole_group`,
   `test_no_child_outlives_an_exception_in_the_wait`).
 - Limit: only a running host enforces a kill or a time limit. An operation running when the host itself
