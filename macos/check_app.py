@@ -35,9 +35,9 @@ Each check prints what it saw and exits 1 if anything is wrong:
   and reads the name again; switches an ability on and off; adds a folder through the Open panel
   and the name dialog, with a name the app must correct first, and removes it from the Folders
   submenu; chooses the home folder, which the app asks about first, picks Choose a Smaller Folder
-  once, then adds it; chooses the Data volume and then ``/``, which the app refuses each time with
-  only Choose a Smaller Folder and Cancel, and adds neither. It checks each step against the
-  host's own state.
+  once, then adds it; chooses the Data volume, and then ``/`` through a link to it, which the app
+  refuses each time with Choose a Smaller Folder and Cancel and no button that adds the folder,
+  and adds neither. It checks each step against the host's own state.
   It uses the real HOME and leaves the host as it found it. Where macOS does not let System Events
   drive other apps, it says so and drives nothing, which is a failure with ``--require-driven``
   (CI passes it). Screenshots go to ``check/screens``.
@@ -168,11 +168,16 @@ PAUSED_NOTE: Final = "Lucille's requests are turned away until you resume."
 STATUS_ITEM_NAMES: Final = (APP_NAME, f"{APP_NAME}, paused")
 OPEN_PROMPT: Final = f"Allow {APP_NAME} to Use This Folder"
 # What the app says when the whole disk is chosen, and the only buttons that note has. The ui
-# check chooses the two folders of the whole disk that the design names.
+# check chooses the two folders of the whole disk that the design names: the Data volume by its
+# path, and ``/`` through a link to it, so that Go to Folder is given a path that names one
+# folder, as everywhere else in the check.
 WHOLE_DISK_TITLE: Final = f"{APP_NAME} can't use your whole disk"
 WHOLE_DISK_TEXT: Final = "This folder holds every user's files on "
 WHOLE_DISK_BUTTONS: Final = ("Choose a Smaller Folder", "Cancel")
 WHOLE_DISK_FOLDERS: Final = (Path("/System/Volumes/Data"), Path("/"))
+# The start of a button that would add the folder or allow it: Add Anyway, Add Folder, and the
+# Open panel's own button.
+ADDING_BUTTONS: Final = ("Add", "Allow")
 # Loads the native code of the runtime dependencies, the way the host will.
 NATIVE_PROBE: Final = """\
 import sys
@@ -1174,18 +1179,27 @@ def _drive_folders(checker: Checker, python: Path, screens: Path) -> None:
         shutil.rmtree(folder.parent, ignore_errors=True)
 
 
-def _whole_disk_refused(checker: Checker, folder: Path, shot: Path) -> bool:
-    """The app's front window is the note that refuses the whole disk, with only its two
-    buttons. If it is something else, such as the name dialog, say what it holds."""
+def _whole_disk_refused(checker: Checker, chosen: str, shot: Path) -> bool:
+    """The app's front window is the note that refuses the whole disk: it has Choose a Smaller
+    Folder and Cancel, and no button that adds the folder. That the note has those two buttons
+    and no other is pinned in its source (``tests/test_macos_build.py``); a named button the
+    window itself adds is printed, not failed. If the window is something else, such as the name
+    dialog, say what it holds."""
     time.sleep(1)
     worked, buttons = _window_list("name of every button")
     _screenshot(shot)
-    named = sorted(button for button in buttons if button not in ("", "missing value"))
-    shown = worked and named == sorted(WHOLE_DISK_BUTTONS)
+    named = [button for button in buttons if button not in ("", "missing value")]
+    print(f"the window after choosing {chosen} has the named buttons {named}")
+    adding = [
+        button
+        for button in named
+        if button not in WHOLE_DISK_BUTTONS and button.startswith(ADDING_BUTTONS)
+    ]
+    shown = worked and set(WHOLE_DISK_BUTTONS) <= set(named) and not adding
     checker.expect(
         shown,
-        f"choosing {folder} brings up a note whose only buttons are Choose a Smaller Folder "
-        "and Cancel",
+        f"choosing {chosen} brings up a note with Choose a Smaller Folder and Cancel, and no "
+        "button that adds it",
         f"{buttons}" if shown else f"{buttons}; a text field there holds {_name_field()[1]!r}",
     )
     worked, texts = _window_list("value of every static text")
@@ -1200,17 +1214,21 @@ def _whole_disk_refused(checker: Checker, folder: Path, shot: Path) -> bool:
 
 
 def _drive_whole_disk(checker: Checker, python: Path, screens: Path) -> None:
-    """Choose the Data volume, then ``/``: each time the app says it never adds the whole disk,
-    with Choose a Smaller Folder, which goes back to the Open panel, and Cancel as its only
-    buttons. Nothing is added."""
+    """Choose the Data volume, then ``/`` through a link to it: each time the app says it never
+    adds the whole disk, with Choose a Smaller Folder, which goes back to the Open panel, and
+    Cancel. Nothing is added."""
     before = _roots(python)
-    refused = {str(folder) for folder in WHOLE_DISK_FOLDERS}
     data, disk = WHOLE_DISK_FOLDERS
+    link = Path.home() / "lucille-host-ui-check-disk" / "Startup Disk"
+    refused = {str(data), str(disk), str(link)}
     try:
+        link.parent.mkdir(parents=True, exist_ok=True)
+        link.unlink(missing_ok=True)
+        link.symlink_to(disk, target_is_directory=True)
         worked, said = _choose_folder(data, screens, "13-open-panel-data.png")
         if not checker.expect(worked, f"{data} can be chosen in the Open panel", said):
             return
-        if not _whole_disk_refused(checker, data, screens / "14-refuse-data.png"):
+        if not _whole_disk_refused(checker, str(data), screens / "14-refuse-data.png"):
             return
         worked, said = _system_events('click button "Choose a Smaller Folder" of window 1\ndelay 2')
         worked, buttons = _window_list("name of every button")
@@ -1219,10 +1237,11 @@ def _drive_whole_disk(checker: Checker, python: Path, screens: Path) -> None:
             "Choose a Smaller Folder opens the Open panel again",
             f"{said} {buttons}",
         )
-        worked, said = _go_to_folder(disk, screens, "15-open-panel-disk.png")
-        if not checker.expect(worked, f"{disk} can be chosen in the Open panel", said):
+        worked, said = _go_to_folder(link, screens, "15-open-panel-disk.png")
+        through = f"{disk}, through the link {link}"
+        if not checker.expect(worked, f"{through}, can be chosen in the Open panel", said):
             return
-        if not _whole_disk_refused(checker, disk, screens / "16-refuse-disk.png"):
+        if not _whole_disk_refused(checker, through, screens / "16-refuse-disk.png"):
             return
         worked, said = _system_events('click button "Cancel" of window 1\ndelay 2')
         still, buttons = _window_list("name of every button")
@@ -1245,6 +1264,13 @@ def _drive_whole_disk(checker: Checker, python: Path, screens: Path) -> None:
         for alias, path in _roots(python).items():
             if path in refused:
                 _host(python, Path.home(), ["roots", "remove", alias])
+        # The link alone, never what it leads to.
+        if link.is_symlink():
+            link.unlink()
+        try:
+            link.parent.rmdir()
+        except OSError:
+            pass
 
 
 def check_ui(app: Path, checker: Checker, work: Path, require_driven: bool = False) -> None:
@@ -1253,10 +1279,11 @@ def check_ui(app: Path, checker: Checker, work: Path, require_driven: bool = Fal
     menu; choose Pause Lucille and Resume Lucille, and watch the host's pause flag; switch an
     ability on and off; add a folder through the Open panel and the name dialog, and remove it from
     the Folders submenu; add the home folder, which the app asks about first; choose the Data
-    volume and ``/``, which the app refuses. Each step is checked against the host's own state. It
-    uses the real HOME, and leaves the host as it found it. Where macOS does not let System Events
-    drive other apps (no accessibility permission), it says so and drives nothing; with
-    ``require_driven`` that is a failure. Screenshots go to ``<out>/check/screens``."""
+    volume, and ``/`` through a link to it, which the app refuses. Each step is checked against
+    the host's own state. It uses the real HOME, and leaves the host as it found it. Where macOS
+    does not let System Events drive other apps (no accessibility permission), it says so and
+    drives nothing; with ``require_driven`` that is a failure. Screenshots go to
+    ``<out>/check/screens``."""
     name = build_app.load_pins().app_name
     screens = work / "screens"
     screens.mkdir(parents=True, exist_ok=True)

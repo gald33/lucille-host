@@ -193,27 +193,34 @@ enum HostText {
     static let wholeDisk = ["/", "/System", "/System/Volumes", "/System/Volumes/Data"]
 
     /// Whether `path` is the whole disk: one of `wholeDisk` as written or with its links
-    /// followed, in any case, or the same folder as one of them by device and inode.
+    /// followed, in any case, or the same folder as one of them by device and inode. It reads the
+    /// disk, on the caller's thread, only when the path as written names none of them: it follows
+    /// the path's links once, and reads the device and inode of what they lead to.
     static func isWholeDisk(path: String) -> Bool {
-        let spellings = [
-            standardized(path),
-            standardized(URL(fileURLWithPath: path).resolvingSymlinksInPath().path),
-        ]
-        let named = spellings.contains { spelling in
-            wholeDisk.contains { spelling.caseInsensitiveCompare($0) == .orderedSame }
-        }
-        if named {
+        if namesWholeDisk(path) {
             return true
         }
-        guard let identity = fileIdentity(path) else {
+        let real = URL(fileURLWithPath: path).resolvingSymlinksInPath().path
+        if namesWholeDisk(real) {
+            return true
+        }
+        guard let identity = fileIdentity(real) else {
             return false
         }
         return wholeDisk.contains { fileIdentity($0) == identity }
     }
 
+    /// Whether `path` names one of `wholeDisk`, in any case, without reading the disk.
+    private static func namesWholeDisk(_ path: String) -> Bool {
+        let spelling = standardized(path)
+        return wholeDisk.contains { spelling.caseInsensitiveCompare($0) == .orderedSame }
+    }
+
     /// The `roots add` command line for a folder. `--allow-home-or-root` is there only when the
     /// user confirmed a home folder or a folder holding it, and never for the whole disk, whatever
-    /// was confirmed.
+    /// was confirmed. It reads the disk (`isWholeDisk`) only for a confirmed folder, which
+    /// `addFolder` has just read, so any other folder gets no read before the run and its window
+    /// with Cancel.
     static func addFolderArguments(alias: String, path: String, confirmedHome: Bool) -> [String] {
         var verb = ["roots", "add", alias, path]
         if confirmedHome && !isWholeDisk(path: path) {
@@ -227,18 +234,18 @@ enum HostText {
     /// asked about: the app refuses it. The host decides; this lets the app ask before the user
     /// names the folder.
     static func broadFolder(path: String, home: String) -> BroadFolder? {
-        if isWholeDisk(path: path) {
-            return nil
-        }
         let folder = standardized(path)
         let homeFolder = standardized(home)
+        let kind: BroadFolder
         if folder == homeFolder {
-            return .home
+            kind = .home
+        } else if homeFolder.hasPrefix(folder + "/") {
+            kind = .holdsHome
+        } else {
+            return nil
         }
-        if homeFolder.hasPrefix(folder + "/") {
-            return .holdsHome
-        }
-        return nil
+        // Only a folder that is the home folder or holds it, by its path, is read from the disk.
+        return isWholeDisk(path: path) ? nil : kind
     }
 
     /// What the home folder holds, as the app's questions about it say.
@@ -443,10 +450,10 @@ enum HostText {
         return clean.isEmpty ? path : clean
     }
 
-    /// A folder's device and inode, with its links followed; nil when it cannot be read.
+    /// The device and inode of the folder at `path`, whose links are already followed (none of
+    /// `wholeDisk` is a link); nil when it cannot be read.
     private static func fileIdentity(_ path: String) -> [UInt64]? {
-        let real = URL(fileURLWithPath: path).resolvingSymlinksInPath().path
-        guard let attributes = try? FileManager.default.attributesOfItem(atPath: real),
+        guard let attributes = try? FileManager.default.attributesOfItem(atPath: path),
               let device = attributes[.systemNumber] as? NSNumber,
               let inode = attributes[.systemFileNumber] as? NSNumber
         else {

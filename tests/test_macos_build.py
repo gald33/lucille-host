@@ -486,7 +486,8 @@ def test_the_app_never_passes_the_broad_flag_for_the_whole_disk() -> None:
     disks = set(re.findall(r'"([^"]+)"', listed.group(1)))
     assert disks == {"/", "/System", "/System/Volumes", "/System/Volumes/Data"}
     assert {str(folder) for folder in check_app.WHOLE_DISK_FOLDERS} == {"/", "/System/Volumes/Data"}
-    # Its note offers a smaller folder, the default, and Cancel, and nothing that adds it.
+    # Its note has exactly two buttons, a smaller folder, the default, and Cancel. The ui check
+    # finds both on the screen, and no button that adds the folder; the "no other" is this pin.
     refusal = re.search(
         r"private func refuseWholeDisk\(\) -> Bool \{(.*?)\n    \}\n", model, re.DOTALL
     )
@@ -494,6 +495,30 @@ def test_the_app_never_passes_the_broad_flag_for_the_whole_disk() -> None:
     buttons = re.findall(r'addButton\(withTitle: "([^"]+)"\)', refusal.group(1))
     assert buttons == list(check_app.WHOLE_DISK_BUTTONS)
     assert "return alert.runModal() == .alertFirstButtonReturn" in refusal.group(1)
+
+
+def _swift_function(text: str, signature: str) -> str:
+    found = re.search(re.escape(signature) + r".*?\n    \}\n", text, re.DOTALL)
+    assert found is not None, signature
+    return found.group(0)
+
+
+def test_the_whole_disk_check_reads_the_disk_only_when_it_must() -> None:
+    # The app runs these on its main thread, where a stalled network folder would freeze the
+    # menu with no Cancel. A path that names the whole disk is never read; a folder that is not
+    # the home folder or above it is read once, where the app chooses it, and not again to ask
+    # about it or to build the command line.
+    text = (build_app.SWIFT_DIR / "HostText.swift").read_text(encoding="utf-8")
+    whole = _swift_function(text, "static func isWholeDisk(path: String) -> Bool {")
+    assert whole.index("if namesWholeDisk(path) {") < whole.index("resolvingSymlinksInPath")
+    assert whole.count("resolvingSymlinksInPath") == 1
+    identity = _swift_function(text, "private static func fileIdentity(")
+    assert "resolvingSymlinksInPath" not in identity
+    broad = _swift_function(text, "static func broadFolder(path: String, home: String)")
+    assert broad.count("isWholeDisk(") == 1
+    assert broad.index("return nil") < broad.index("isWholeDisk(")
+    adds = _swift_function(text, "static func addFolderArguments(")
+    assert "confirmedHome && !isWholeDisk(path: path)" in adds
 
 
 def test_the_app_and_its_checks_use_the_apps_name() -> None:
