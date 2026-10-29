@@ -155,15 +155,33 @@ final class HostModel: ObservableObject {
         paused = cli.isPaused
         stuck = HostCLI.stuckRuns > 0
         labelStatusItem()
+        // SwiftUI may put a new icon in the menu bar after `paused` changes; name that one too.
+        Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(500))
+            self.labelStatusItem()
+        }
     }
 
-    /// Give the menu bar item its name, for VoiceOver, and say there when Lucille is paused.
+    /// The menu bar icon. Its accessibility description is the menu bar item's title, which
+    /// VoiceOver reads: the app's name, and whether Lucille is paused.
+    static func icon(paused: Bool) -> NSImage {
+        let name = HostText.statusItemName(paused: paused)
+        let symbol = paused ? "pause.circle" : "desktopcomputer"
+        let image = NSImage(systemSymbolName: symbol, accessibilityDescription: name) ?? NSImage()
+        image.isTemplate = true
+        return image
+    }
+
+    /// Give the menu bar item its name, for VoiceOver, and say there when Lucille is paused: on
+    /// the button, and on the icon it shows, whose description macOS reports as the item's title.
     private func labelStatusItem() {
         let name = HostText.statusItemName(paused: paused)
         for window in NSApp.windows {
             var views = window.contentView.map { [$0] } ?? []
             while let view = views.popLast() {
                 if let button = view as? NSStatusBarButton {
+                    button.image?.accessibilityDescription = name
+                    button.setAccessibilityTitle(name)
                     button.setAccessibilityLabel(name)
                     button.toolTip = name
                 }

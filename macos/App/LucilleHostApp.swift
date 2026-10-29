@@ -9,12 +9,11 @@ struct LucilleHostApp: App {
     @StateObject private var model = HostModel()
 
     var body: some Scene {
-        // The title is the menu bar item's name, which VoiceOver reads; only the icon shows.
-        MenuBarExtra(
-            HostText.statusItemName(paused: model.paused),
-            systemImage: model.paused ? "pause.circle" : "desktopcomputer"
-        ) {
+        MenuBarExtra {
             HostMenu(model: model)
+        } label: {
+            Image(nsImage: HostModel.icon(paused: model.paused))
+                .accessibilityLabel(HostText.statusItemName(paused: model.paused))
         }
     }
 }

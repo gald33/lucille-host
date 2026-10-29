@@ -718,3 +718,12 @@ def test_libraries_that_do_not_resolve_inside_the_bundle_fail(
     app, python, module = _bundle(tmp_path)
     _, problems = check_app.resolve_links(app, module, python, (libraries, rpaths))
     assert len(problems) == 1 and problem in problems[0], problems
+
+
+def test_only_the_title_or_description_names_the_menu_bar_item() -> None:
+    # What System Events reported when only the tooltip carried the name.
+    tooltip_only = {"title": "Computer", "description": "status menu", "help": "Lucille Host"}
+    assert not check_app._named(tooltip_only, "Lucille Host")
+    assert check_app._named({**tooltip_only, "title": "Lucille Host"}, "Lucille Host")
+    assert check_app._named({"description": "Lucille Host, paused"}, "Lucille Host, paused")
+    assert not check_app._named({}, "Lucille Host")

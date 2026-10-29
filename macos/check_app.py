@@ -750,20 +750,29 @@ def _can_drive() -> bool:
     return True
 
 
-def _status_item_names() -> list[str]:
-    """What System Events reports of the menu bar item's name: its description, title, name and
-    help, the first of which VoiceOver reads."""
+def _status_item() -> dict[str, str]:
+    """What System Events reports of the menu bar item: its title and description, which
+    VoiceOver reads as its name, its name and help (the tooltip), and its width."""
     script = (
         f"set found to {{}}\nset theItem to {STATUS_ITEM}\n"
         + "".join(
             f'try\nset end of found to "{key}=" & ({key} of theItem)\nend try\n'
-            for key in ("description", "title", "name", "help")
+            for key in ("title", "description", "name", "help")
         )
+        + 'try\nset end of found to "width=" & ((item 1 of (size of theItem)) as text)\nend try\n'
         + f"{LINES}return found as text"
     )
     worked, said = _system_events(script)
     print(f"the menu bar item says: {said.splitlines() if worked else said}")
-    return [line.partition("=")[2] for line in said.splitlines()] if worked else []
+    if not worked:
+        return {}
+    return dict(line.partition("=")[::2] for line in said.splitlines())
+
+
+def _named(item: dict[str, str], name: str) -> bool:
+    """Whether VoiceOver reads ``name`` for the menu bar item: its title or its description. Its
+    help, the tooltip, does not count."""
+    return name in (item.get("title"), item.get("description"))
 
 
 def _welcome(checker: Checker, shot: Path, when: str) -> None:
@@ -806,11 +815,16 @@ def _drive_menu(checker: Checker, screens: Path, flag: Path) -> bool:
     """Read the menu bar item's name and the menu, then choose Pause Lucille and Resume Lucille.
     False if System Events cannot open the menu on this machine."""
     version = build_app.host_version()
-    names = _status_item_names()
+    item = _status_item()
     checker.expect(
-        STATUS_ITEM_NAMES[0] in names,
-        f"the menu bar item is named {STATUS_ITEM_NAMES[0]!r}, which VoiceOver reads",
-        f"{names}",
+        _named(item, STATUS_ITEM_NAMES[0]),
+        f"the menu bar item's title or description is {STATUS_ITEM_NAMES[0]!r}",
+        f"{item}",
+    )
+    checker.expect(
+        item.get("width", "").isdigit() and int(item["width"]) >= 16,
+        "the menu bar item is wide enough to show its icon",
+        f"{item}",
     )
     worked, shown = _open_menu_and_read()
     if not worked:
@@ -874,11 +888,11 @@ def _drive_menu(checker: Checker, screens: Path, flag: Path) -> bool:
         "the menu then says it is paused, and offers Resume Lucille",
         f"{shown}",
     )
-    names = _status_item_names()
+    item = _status_item()
     checker.expect(
-        STATUS_ITEM_NAMES[1] in names,
-        f"the menu bar item is then named {STATUS_ITEM_NAMES[1]!r}",
-        f"{names}",
+        _named(item, STATUS_ITEM_NAMES[1]),
+        f"the menu bar item's title or description is then {STATUS_ITEM_NAMES[1]!r}",
+        f"{item}",
     )
     worked, said = _system_events(
         f'click {STATUS_ITEM}\ndelay 1\nclick menu item "Resume Lucille" of {MENU}'
