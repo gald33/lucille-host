@@ -69,9 +69,8 @@ and the release jobs. The first build also departs from this record in these way
   §13);
 - the `Info.plist` has five folder usage keys, not six (no file providers), each with the sentences on what
   Capsule is for, which macOS is meant to show under its folder questions (§12; not yet tested on a Mac);
-- the app asks about `/` and the Data volume (`/System/Volumes/Data`) as it asks about the home folder, and
-  adds either one after **Add Anyway**, where the planned app refuses both outright (§12). Here the first
-  build allows more than this record;
+- the app refuses outright, besides `/` and the Data volume, the two folders between them, `/System` and
+  `/System/Volumes`, which hold the Data volume (§12). Here the first build allows less than this record;
 - the build scripts and their pins are in `macos/`, not `tools/macos/`, and the checks on the Swift sources
   are in `tests/test_macos_build.py` and `check_app.py links`, not in a `macos_lint` guard (§20);
 - the workflow is `macos-app.yml`, not a job in `ci.yml`, and it uploads the disk image on pushes and on the
@@ -834,8 +833,8 @@ action: the signing steps use Apple's own tools and `gh`, which the images ship.
 | `macos-candidate.yml` | manual, on `main` or a `v*` tag, in environment `macos-release` | A signed, notarized candidate, uploaded only to a **draft** release that is never published, then checked by a separate job that holds no secret. Draft releases are visible only to people with write access. |
 | `release.yml` | a protected `v*` tag | The wheel on PyPI (environment `pypi`, as 0001), then the Mac jobs below, then one immutable GitHub Release. |
 
-Today the first build has its own workflow, `macos-app.yml`, beside `ci.yml`. It runs on pushes to its
-branch, on pull requests that touch `macos/`, `src/`, `pyproject.toml`, `uv.lock` or the workflow, and by
+Today the first build has its own workflow, `macos-app.yml`, beside `ci.yml`. It runs on pushes to
+`main`, on pull requests that touch `macos/`, `src/`, `pyproject.toml`, `uv.lock` or the workflow, and by
 hand. It uploads the ad-hoc disk image as a 7-day artifact whenever every check passed, except for a pull
 request from a fork (`macos/README.md`, "The disk image from CI"). The plan above uploads one only on a
 manual run.

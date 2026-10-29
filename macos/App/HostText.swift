@@ -59,11 +59,12 @@ struct Explanation: Equatable, Sendable {
     let detail: String?
 }
 
-/// A folder the host adds only once the user confirms (`--allow-home-or-root`).
+/// A folder the app adds only once the user confirms, because the host adds it only with
+/// `--allow-home-or-root`. The whole disk is not one: the app refuses it outright
+/// (`HostText.isWholeDisk`).
 enum BroadFolder: Equatable, Sendable {
     case home
     case holdsHome
-    case disk
 }
 
 /// What the app itself can see of a folder the host could not add.
@@ -178,21 +179,59 @@ enum HostText {
     }
 
     /// Whether `roots add` refused because the folder is the home folder, holds it, or is "/".
-    /// The user may then confirm, and the app adds `--allow-home-or-root`.
+    /// The user may then confirm, unless it is the whole disk, and the app adds
+    /// `--allow-home-or-root`.
     static func needsHomeConfirmation(_ result: CLIResult) -> Bool {
         result.status == 1 && !result.timedOut && !result.cancelled
             && result.stderr.contains("--allow-home-or-root")
     }
 
-    /// Whether `path` is one the host adds only with the user's confirmation, as far as the app
-    /// can tell from the path: the home folder, a folder that holds it, or "/". The host decides;
-    /// this lets the app ask before the user names the folder.
+    /// The whole disk, which the app never adds, whatever the user chooses: the top of the
+    /// startup disk, the Data volume that holds every user's files, and the two folders between
+    /// them, which hold that volume. The command line still adds each of them with
+    /// `--allow-home-or-root`; the app never passes it for them (`addFolderArguments`).
+    static let wholeDisk = ["/", "/System", "/System/Volumes", "/System/Volumes/Data"]
+
+    /// Whether `path` is the whole disk: one of `wholeDisk` as written or with its links
+    /// followed, in any case, or the same folder as one of them by device and inode.
+    static func isWholeDisk(path: String) -> Bool {
+        let spellings = [
+            standardized(path),
+            standardized(URL(fileURLWithPath: path).resolvingSymlinksInPath().path),
+        ]
+        let named = spellings.contains { spelling in
+            wholeDisk.contains { spelling.caseInsensitiveCompare($0) == .orderedSame }
+        }
+        if named {
+            return true
+        }
+        guard let identity = fileIdentity(path) else {
+            return false
+        }
+        return wholeDisk.contains { fileIdentity($0) == identity }
+    }
+
+    /// The `roots add` command line for a folder. `--allow-home-or-root` is there only when the
+    /// user confirmed a home folder or a folder holding it, and never for the whole disk, whatever
+    /// was confirmed.
+    static func addFolderArguments(alias: String, path: String, confirmedHome: Bool) -> [String] {
+        var verb = ["roots", "add", alias, path]
+        if confirmedHome && !isWholeDisk(path: path) {
+            verb.append("--allow-home-or-root")
+        }
+        return verb
+    }
+
+    /// Whether `path` is one the app asks about before it adds it, as far as it can tell from the
+    /// path: the home folder, or a folder that holds it. The whole disk holds it too, but is not
+    /// asked about: the app refuses it. The host decides; this lets the app ask before the user
+    /// names the folder.
     static func broadFolder(path: String, home: String) -> BroadFolder? {
+        if isWholeDisk(path: path) {
+            return nil
+        }
         let folder = standardized(path)
         let homeFolder = standardized(home)
-        if folder == "/" {
-            return .disk
-        }
         if folder == homeFolder {
             return .home
         }
@@ -202,27 +241,33 @@ enum HostText {
         return nil
     }
 
-    /// The question the app asks before it adds a broad folder: a title and a sentence for each
-    /// kind. `diskName` is what Finder calls the startup disk.
-    static func broadFolderQuestion(_ kind: BroadFolder, diskName: String) -> (title: String, text: String) {
-        let inside = "your Documents, Desktop and Downloads folders, your Library, and other apps' files"
+    /// What the home folder holds, as the app's questions about it say.
+    private static let homeContents = "your Documents, Desktop and Downloads folders, your Library, and other apps' files"
+
+    /// The question the app asks before it adds the home folder, or a folder that holds it: a
+    /// title and a sentence for each kind.
+    static func broadFolderQuestion(_ kind: BroadFolder) -> (title: String, text: String) {
         switch kind {
         case .home:
             return (
                 "Add your whole home folder?",
-                "This is your home folder. It holds \(inside). Abilities you turn on could use any file in it. Most people choose one folder inside it instead."
+                "This is your home folder. It holds \(homeContents). Abilities you turn on could use any file in it. Most people choose one folder inside it instead."
             )
         case .holdsHome:
             return (
                 "Add a folder that holds your home folder?",
-                "This folder holds your home folder, with \(inside). Abilities you turn on could use any file in it. Most people choose one smaller folder instead."
-            )
-        case .disk:
-            return (
-                "Add your whole startup disk?",
-                "\(diskName) is your whole startup disk. It holds your home folder, with \(inside), and every other file on this Mac. Abilities you turn on could use any file on it. Most people choose one folder instead."
+                "This folder holds your home folder, with \(homeContents). Abilities you turn on could use any file in it. Most people choose one smaller folder instead."
             )
         }
+    }
+
+    /// What the app says when the user chooses the whole disk, which it never adds: a title and
+    /// a sentence. `diskName` is what Finder calls the startup disk.
+    static func wholeDiskRefusal(diskName: String) -> (title: String, text: String) {
+        (
+            "\(appName) can't use your whole disk",
+            "This folder holds every user's files on \(diskName), your startup disk: your home folder, with \(homeContents), and the files of everyone else who uses this Mac. \(appName) never lets Lucille use all of that. Choose one folder instead."
+        )
     }
 
     /// Where the folder at `path` is, as far as it changes what the app says first. `synced` is
@@ -396,6 +441,18 @@ enum HostText {
     private static func standardized(_ path: String) -> String {
         let clean = (path as NSString).standardizingPath
         return clean.isEmpty ? path : clean
+    }
+
+    /// A folder's device and inode, with its links followed; nil when it cannot be read.
+    private static func fileIdentity(_ path: String) -> [UInt64]? {
+        let real = URL(fileURLWithPath: path).resolvingSymlinksInPath().path
+        guard let attributes = try? FileManager.default.attributesOfItem(atPath: real),
+              let device = attributes[.systemNumber] as? NSNumber,
+              let inode = attributes[.systemFileNumber] as? NSNumber
+        else {
+            return nil
+        }
+        return [device.uint64Value, inode.uint64Value]
     }
 
     private static func pairs(_ text: String) -> [(String, String)] {

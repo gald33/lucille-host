@@ -454,6 +454,46 @@ def test_the_ui_check_looks_for_the_apps_own_words() -> None:
     # The welcome note says what the app is for in the sentences the folder usage keys hold.
     assert f'static let appPurpose = "{_named_in_swift(check_app.PURPOSE)}"' in text
     assert "        \\(appPurpose)\n\n" in text
+    # The note that refuses the whole disk.
+    assert f'"{_named_in_swift(check_app.WHOLE_DISK_TITLE)}",' in text
+    assert f'"{check_app.WHOLE_DISK_TEXT}\\(diskName), your startup disk: ' in text
+
+
+_BROAD_FLAG = '"--allow-home-or-root"'
+
+
+def test_the_app_never_passes_the_broad_flag_for_the_whole_disk() -> None:
+    text = (build_app.SWIFT_DIR / "HostText.swift").read_text(encoding="utf-8")
+    model = (build_app.SWIFT_DIR / "HostModel.swift").read_text(encoding="utf-8")
+    # One place builds the argument, and it leaves the flag out for the whole disk. Elsewhere the
+    # app only reads the flag's name in the host's refusals.
+    for path in SWIFT_FILES:
+        source = path.read_text(encoding="utf-8")
+        if path.name != "HostText.swift":
+            assert _BROAD_FLAG not in source, path.name
+    assert text.count(f"append({_BROAD_FLAG})") == 1
+    assert text.count(_BROAD_FLAG) == 1 + text.count(f".contains({_BROAD_FLAG})")
+    adds = re.search(r"static func addFolderArguments\(.*?\n    \}\n", text, re.DOTALL)
+    assert adds is not None
+    assert (
+        f"if confirmedHome && !isWholeDisk(path: path) {{\n            verb.append({_BROAD_FLAG})"
+    ) in adds.group(0)
+    assert model.count("HostText.addFolderArguments(") == 2
+    # The whole disk the app refuses holds the two folders the design names, which the ui check
+    # chooses, and the two folders between them.
+    listed = re.search(r"static let wholeDisk = \[(.*?)\]", text)
+    assert listed is not None
+    disks = set(re.findall(r'"([^"]+)"', listed.group(1)))
+    assert disks == {"/", "/System", "/System/Volumes", "/System/Volumes/Data"}
+    assert {str(folder) for folder in check_app.WHOLE_DISK_FOLDERS} == {"/", "/System/Volumes/Data"}
+    # Its note offers a smaller folder, the default, and Cancel, and nothing that adds it.
+    refusal = re.search(
+        r"private func refuseWholeDisk\(\) -> Bool \{(.*?)\n    \}\n", model, re.DOTALL
+    )
+    assert refusal is not None
+    buttons = re.findall(r'addButton\(withTitle: "([^"]+)"\)', refusal.group(1))
+    assert buttons == list(check_app.WHOLE_DISK_BUTTONS)
+    assert "return alert.runModal() == .alertFirstButtonReturn" in refusal.group(1)
 
 
 def test_the_app_and_its_checks_use_the_apps_name() -> None:

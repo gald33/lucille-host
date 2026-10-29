@@ -35,7 +35,9 @@ Each check prints what it saw and exits 1 if anything is wrong:
   and reads the name again; switches an ability on and off; adds a folder through the Open panel
   and the name dialog, with a name the app must correct first, and removes it from the Folders
   submenu; chooses the home folder, which the app asks about first, picks Choose a Smaller Folder
-  once, then adds it. It checks each step against the host's own state.
+  once, then adds it; chooses the Data volume and then ``/``, which the app refuses each time with
+  only Choose a Smaller Folder and Cancel, and adds neither. It checks each step against the
+  host's own state.
   It uses the real HOME and leaves the host as it found it. Where macOS does not let System Events
   drive other apps, it says so and drives nothing, which is a failure with ``--require-driven``
   (CI passes it). Screenshots go to ``check/screens``.
@@ -165,6 +167,12 @@ PURPOSE: Final = build_app.folder_usage(APP_NAME)
 PAUSED_NOTE: Final = "Lucille's requests are turned away until you resume."
 STATUS_ITEM_NAMES: Final = (APP_NAME, f"{APP_NAME}, paused")
 OPEN_PROMPT: Final = f"Allow {APP_NAME} to Use This Folder"
+# What the app says when the whole disk is chosen, and the only buttons that note has. The ui
+# check chooses the two folders of the whole disk that the design names.
+WHOLE_DISK_TITLE: Final = f"{APP_NAME} can't use your whole disk"
+WHOLE_DISK_TEXT: Final = "This folder holds every user's files on "
+WHOLE_DISK_BUTTONS: Final = ("Choose a Smaller Folder", "Cancel")
+WHOLE_DISK_FOLDERS: Final = (Path("/System/Volumes/Data"), Path("/"))
 # Loads the native code of the runtime dependencies, the way the host will.
 NATIVE_PROBE: Final = """\
 import sys
@@ -1166,16 +1174,89 @@ def _drive_folders(checker: Checker, python: Path, screens: Path) -> None:
         shutil.rmtree(folder.parent, ignore_errors=True)
 
 
+def _whole_disk_refused(checker: Checker, folder: Path, shot: Path) -> bool:
+    """The app's front window is the note that refuses the whole disk, with only its two
+    buttons. If it is something else, such as the name dialog, say what it holds."""
+    time.sleep(1)
+    worked, buttons = _window_list("name of every button")
+    _screenshot(shot)
+    named = sorted(button for button in buttons if button not in ("", "missing value"))
+    shown = worked and named == sorted(WHOLE_DISK_BUTTONS)
+    checker.expect(
+        shown,
+        f"choosing {folder} brings up a note whose only buttons are Choose a Smaller Folder "
+        "and Cancel",
+        f"{buttons}" if shown else f"{buttons}; a text field there holds {_name_field()[1]!r}",
+    )
+    worked, texts = _window_list("value of every static text")
+    checker.expect(
+        worked
+        and WHOLE_DISK_TITLE in texts
+        and any(text.startswith(WHOLE_DISK_TEXT) for text in texts),
+        f"it says {WHOLE_DISK_TITLE!r}, and what the disk holds",
+        f"{texts}",
+    )
+    return shown
+
+
+def _drive_whole_disk(checker: Checker, python: Path, screens: Path) -> None:
+    """Choose the Data volume, then ``/``: each time the app says it never adds the whole disk,
+    with Choose a Smaller Folder, which goes back to the Open panel, and Cancel as its only
+    buttons. Nothing is added."""
+    before = _roots(python)
+    refused = {str(folder) for folder in WHOLE_DISK_FOLDERS}
+    data, disk = WHOLE_DISK_FOLDERS
+    try:
+        worked, said = _choose_folder(data, screens, "13-open-panel-data.png")
+        if not checker.expect(worked, f"{data} can be chosen in the Open panel", said):
+            return
+        if not _whole_disk_refused(checker, data, screens / "14-refuse-data.png"):
+            return
+        worked, said = _system_events('click button "Choose a Smaller Folder" of window 1\ndelay 2')
+        worked, buttons = _window_list("name of every button")
+        checker.expect(
+            worked and OPEN_PROMPT in buttons and "Add Anyway" not in buttons,
+            "Choose a Smaller Folder opens the Open panel again",
+            f"{said} {buttons}",
+        )
+        worked, said = _go_to_folder(disk, screens, "15-open-panel-disk.png")
+        if not checker.expect(worked, f"{disk} can be chosen in the Open panel", said):
+            return
+        if not _whole_disk_refused(checker, disk, screens / "16-refuse-disk.png"):
+            return
+        worked, said = _system_events('click button "Cancel" of window 1\ndelay 2')
+        still, buttons = _window_list("name of every button")
+        checker.expect(
+            worked
+            and not (still and {OPEN_PROMPT, "Add Folder", *WHOLE_DISK_BUTTONS} & set(buttons)),
+            "Cancel closes the note, and opens nothing after it",
+            f"{said} {buttons}",
+        )
+        after = _roots(python)
+        checker.expect(
+            after == before and not refused & set(after.values()),
+            "neither is added",
+            f"{after}",
+        )
+    finally:
+        # Close whatever the app still shows, and take out anything of the whole disk it added.
+        for _ in range(2):
+            _system_events('click button "Cancel" of window 1\ndelay 1')
+        for alias, path in _roots(python).items():
+            if path in refused:
+                _host(python, Path.home(), ["roots", "remove", alias])
+
+
 def check_ui(app: Path, checker: Checker, work: Path, require_driven: bool = False) -> None:
     """Open the app and drive it the way a user would, through System Events: read the note that
     says what it is for and where its menu is, when it opens and when it is opened again; read the
     menu; choose Pause Lucille and Resume Lucille, and watch the host's pause flag; switch an
     ability on and off; add a folder through the Open panel and the name dialog, and remove it from
-    the Folders submenu; add the home folder, which the app asks about first. Each step is checked
-    against the host's own state. It uses the real HOME, and leaves the host as it found it. Where
-    macOS does not let System Events drive other apps (no accessibility permission), it says so
-    and drives nothing; with ``require_driven`` that is a failure. Screenshots go to
-    ``<out>/check/screens``."""
+    the Folders submenu; add the home folder, which the app asks about first; choose the Data
+    volume and ``/``, which the app refuses. Each step is checked against the host's own state. It
+    uses the real HOME, and leaves the host as it found it. Where macOS does not let System Events
+    drive other apps (no accessibility permission), it says so and drives nothing; with
+    ``require_driven`` that is a failure. Screenshots go to ``<out>/check/screens``."""
     name = build_app.load_pins().app_name
     screens = work / "screens"
     screens.mkdir(parents=True, exist_ok=True)
@@ -1207,6 +1288,7 @@ def check_ui(app: Path, checker: Checker, work: Path, require_driven: bool = Fal
         if driven:
             _drive_abilities(checker, python_in(app), screens)
             _drive_folders(checker, python_in(app), screens)
+            _drive_whole_disk(checker, python_in(app), screens)
         elif require_driven:
             checker.expect(False, "System Events drove the menu, as --require-driven asks")
     finally:

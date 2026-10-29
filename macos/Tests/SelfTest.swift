@@ -232,16 +232,41 @@ struct SelfTest {
         report.expect(HostText.broadFolder(path: "/Users/a", home: "/Users/a") == .home, "the home folder is broad")
         report.expect(HostText.broadFolder(path: "/Users/a/", home: "/Users/a") == .home, "with a slash too")
         report.expect(HostText.broadFolder(path: "/Users", home: "/Users/a") == .holdsHome, "a folder holding it is")
-        report.expect(HostText.broadFolder(path: "/", home: "/Users/a") == .disk, "the top of the disk is")
         report.expect(HostText.broadFolder(path: "/Users/a/Documents", home: "/Users/a") == nil, "a folder inside is not")
         report.expect(HostText.broadFolder(path: "/Users/ab", home: "/Users/a") == nil, "a sibling is not")
-        let disk = HostText.broadFolderQuestion(.disk, diskName: "Macintosh HD")
-        report.expect(disk.text.hasPrefix("Macintosh HD is your whole startup disk"), "the disk is named as Finder names it")
-        for kind in [BroadFolder.home, .holdsHome, .disk] {
-            let question = HostText.broadFolderQuestion(kind, diskName: "Macintosh HD")
+        for kind in [BroadFolder.home, .holdsHome] {
+            let question = HostText.broadFolderQuestion(kind)
             report.expect(question.text.contains("Documents, Desktop and Downloads") && question.text.contains("Library"),
                           "the question for \(kind) says what is inside")
         }
+        let confirmedHome = HostText.addFolderArguments(alias: "home", path: "/Users/a", confirmedHome: true)
+        report.expect(confirmedHome == ["roots", "add", "home", "/Users/a", "--allow-home-or-root"],
+                      "a confirmed home folder gets --allow-home-or-root", "\(confirmedHome)")
+        let unconfirmedHome = HostText.addFolderArguments(alias: "home", path: "/Users/a", confirmedHome: false)
+        report.expect(unconfirmedHome == ["roots", "add", "home", "/Users/a"],
+                      "an unconfirmed one does not", "\(unconfirmedHome)")
+
+        // The whole disk is refused outright: never asked about, and never given the flag.
+        let wholeDisk = ["/", "/System", "/System/Volumes", "/System/Volumes/Data",
+                         "/System/Volumes/Data/", "//System//Volumes/Data", "/system/volumes/DATA"]
+        for disk in wholeDisk {
+            report.expect(HostText.isWholeDisk(path: disk), "\(disk) is the whole disk")
+            report.expect(HostText.broadFolder(path: disk, home: "/Users/a") == nil,
+                          "\(disk) is not asked about, as the home folder is")
+            report.expect(HostText.addFolderArguments(alias: "disk", path: disk, confirmedHome: true)
+                              == ["roots", "add", "disk", disk],
+                          "\(disk) never gets --allow-home-or-root, even confirmed")
+        }
+        for folder in ["/Users", "/Users/a", "/System/Volumes/Data/Users", "/System/Library",
+                       "/Volumes/Data", "/Users/a/System/Volumes/Data", "/Systems"] {
+            report.expect(!HostText.isWholeDisk(path: folder), "\(folder) is not the whole disk")
+        }
+        let refusal = HostText.wholeDiskRefusal(diskName: "Macintosh HD")
+        report.expect(refusal.title == "\(HostText.appName) can't use your whole disk"
+                          && refusal.text.hasPrefix("This folder holds every user's files on Macintosh HD, your startup disk")
+                          && refusal.text.contains("Documents, Desktop and Downloads") && refusal.text.contains("Library")
+                          && refusal.text.hasSuffix("Choose one folder instead."),
+                      "the refusal names the disk as Finder names it, and says what is on it", "\(refusal)")
         let prompt = HostText.aliasPrompt(folderName: "Taxes", note: "Note.")
         report.expect(prompt.hasPrefix("Note.\n\nLucille will know") && prompt.contains("never learns where"),
                       "the name dialog leads with its note, then its purpose", prompt)
@@ -314,11 +339,28 @@ struct SelfTest {
         report.expect(!off.succeeded && HostText.explain(off).message == "That ability was already off.",
                       "turning off an ability that is off is refused in plain words", "\(HostText.explain(off))")
 
-        let broad = cli.run(["roots", "add", "home", home])
+        let broad = cli.run(HostText.addFolderArguments(alias: "home", path: home, confirmedHome: false))
         report.expect(HostText.needsHomeConfirmation(broad), "the home folder needs confirmation", "\(broad)")
-        let confirmed = cli.run(["roots", "add", "home", home, "--allow-home-or-root"])
+        let confirmed = cli.run(HostText.addFolderArguments(alias: "home", path: home, confirmedHome: true))
         report.expect(confirmed.succeeded, "and is added once confirmed", "\(confirmed)")
         report.expect(cli.run(["roots", "remove", "home"]).succeeded, "and removed again")
+
+        // The whole disk, and a link to it: the command line the app builds, even confirmed, is
+        // refused by the host, so nothing is added.
+        report.expect(!HostText.isWholeDisk(path: home) && !HostText.isWholeDisk(path: folder.path),
+                      "the home folder and a folder in it are not the whole disk")
+        for (name, target) in [("Whole Disk", "/"), ("Data Volume", "/System/Volumes/Data")] {
+            let link = URL(fileURLWithPath: home).appendingPathComponent(name).path
+            try? FileManager.default.createSymbolicLink(atPath: link, withDestinationPath: target)
+            report.expect(HostText.isWholeDisk(path: link), "a link to \(target) is the whole disk too")
+            for path in [target, link] {
+                let refused = cli.run(HostText.addFolderArguments(alias: "disk", path: path, confirmedHome: true))
+                report.expect(HostText.needsHomeConfirmation(refused)
+                                  && HostText.folders(fromList: cli.run(["roots", "list"]).stdout).isEmpty,
+                              "the host refuses \(path) as the app asks to add it, and nothing is added", "\(refused)")
+            }
+            try? FileManager.default.removeItem(atPath: link)
+        }
 
         let slow = HostCLI(python: cli.python, home: home, timeout: 0.001).run(["ops", "list"])
         report.expect(slow.timedOut && !slow.succeeded, "a run past its time limit is stopped", "\(slow)")

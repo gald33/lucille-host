@@ -95,19 +95,26 @@ final class HostModel: ObservableObject {
         alert.runModal()
     }
 
-    /// Choose a folder in the standard Open panel, name it, and add it. A folder the host adds
-    /// only with the user's confirmation is confirmed first.
+    /// Choose a folder in the standard Open panel, name it, and add it. The whole disk is refused
+    /// outright; the home folder, or a folder that holds it, is confirmed first.
     func addFolder() {
         var chosen = chooseFolder()
         while let url = chosen {
             let path = url.path
-            var allowBroad = false
+            if HostText.isWholeDisk(path: path) {
+                guard refuseWholeDisk() else {
+                    return
+                }
+                chosen = chooseFolder()
+                continue
+            }
+            var confirmedHome = false
             if let kind = HostText.broadFolder(path: path, home: cli.home) {
                 guard confirmBroadFolder(kind) else {
                     chosen = chooseFolder()
                     continue
                 }
-                allowBroad = true
+                confirmedHome = true
             }
             let taken = Set(folders.map(\.alias))
             let suggestion = Alias.suggest(forFolderName: url.lastPathComponent, taken: taken)
@@ -117,7 +124,7 @@ final class HostModel: ObservableObject {
             guard let alias = askForAlias(suggestion: suggestion, folderName: name, taken: taken, place: place) else {
                 return
             }
-            Task { await addRoot(alias: alias, path: path, allowBroad: allowBroad) }
+            Task { await addRoot(alias: alias, path: path, confirmedHome: confirmedHome) }
             return
         }
     }
@@ -215,21 +222,31 @@ final class HostModel: ObservableObject {
 
     /// Run `roots add`, with a window that has a Cancel button while the host checks the folder,
     /// which can take long on a network drive.
-    private func addRoot(alias: String, path: String, allowBroad: Bool) async {
-        var verb = ["roots", "add", alias, path]
-        if allowBroad {
-            verb.append("--allow-home-or-root")
-        }
+    private func addRoot(alias: String, path: String, confirmedHome: Bool) async {
         let checking = "Checking the folder \u{201C}\(alias)\u{201D}\u{2026}"
-        var result = await runWithProgress(verb, message: checking, timeout: addTimeout)
+        var result = await runWithProgress(
+            HostText.addFolderArguments(alias: alias, path: path, confirmedHome: confirmedHome),
+            message: checking, timeout: addTimeout
+        )
         if HostText.needsHomeConfirmation(result) {
+            // The host found the folder broad where its path did not show it. The whole disk is
+            // still refused outright.
+            if HostText.isWholeDisk(path: path) {
+                await reload()
+                if refuseWholeDisk() {
+                    addFolder()
+                }
+                return
+            }
             guard confirmBroadFolder(.holdsHome) else {
                 await reload()
                 addFolder()
                 return
             }
-            verb.append("--allow-home-or-root")
-            result = await runWithProgress(verb, message: checking, timeout: addTimeout)
+            result = await runWithProgress(
+                HostText.addFolderArguments(alias: alias, path: path, confirmedHome: true),
+                message: checking, timeout: addTimeout
+            )
         }
         await reload()
         let added = folders.contains(Folder(alias: alias, path: path))
@@ -304,12 +321,10 @@ final class HostModel: ObservableObject {
         }
     }
 
-    /// Ask before adding a folder that is the home folder, holds it, or is the whole disk. True
-    /// when the user chooses Add Anyway; Choose a Smaller Folder, the default, is false.
+    /// Ask before adding a folder that is the home folder or holds it. True when the user chooses
+    /// Add Anyway; Choose a Smaller Folder, the default, is false.
     private func confirmBroadFolder(_ kind: BroadFolder) -> Bool {
-        let question = HostText.broadFolderQuestion(
-            kind, diskName: FileManager.default.displayName(atPath: "/")
-        )
+        let question = HostText.broadFolderQuestion(kind)
         let alert = NSAlert()
         alert.alertStyle = .warning
         alert.messageText = question.title
@@ -318,6 +333,20 @@ final class HostModel: ObservableObject {
         alert.addButton(withTitle: "Add Anyway")
         NSApp.activate()
         return alert.runModal() == .alertSecondButtonReturn
+    }
+
+    /// Say that the app never adds the whole disk. True when the user chooses Choose a Smaller
+    /// Folder, the default; false on Cancel. No button adds it.
+    private func refuseWholeDisk() -> Bool {
+        let refusal = HostText.wholeDiskRefusal(diskName: FileManager.default.displayName(atPath: "/"))
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = refusal.title
+        alert.informativeText = refusal.text
+        alert.addButton(withTitle: "Choose a Smaller Folder")
+        alert.addButton(withTitle: "Cancel")
+        NSApp.activate()
+        return alert.runModal() == .alertFirstButtonReturn
     }
 
     private func showNote(title: String, text: String) {

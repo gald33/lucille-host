@@ -64,9 +64,19 @@ question. Whether it does, and whether that question names Capsule at all, is no
 | Quit Capsule | Quits the app. |
 
 **Add a Folder…** opens the standard Open panel, whose button reads "Allow Capsule to Use This Folder".
-If the folder chosen is the home folder, holds it, or is the whole disk, the app first says which, and
-what is inside, with **Choose a Smaller Folder** as the default button; that button opens the Open panel
-again. Then the app asks for the name Lucille will see, suggesting one made from the folder's
+
+The app never adds the whole disk: `/`, the Data volume (`/System/Volumes/Data`), which holds every
+user's files, and the two folders between them, `/System` and `/System/Volumes`, which hold it. It
+knows each by its path, as chosen or with its links followed and in any case, or as the same folder by
+device and inode. If the folder chosen is one of them, the app says that it never lets Lucille use the
+whole disk, with two buttons: **Choose a Smaller Folder**, the default, which opens the Open panel
+again, and **Cancel**. Nothing else is offered, and the app never passes `--allow-home-or-root` for
+it. The command line still adds any of them with that flag.
+
+If the folder chosen is the home folder or holds it, the app first says which, and what is inside, with
+**Choose a Smaller Folder** as the default button, and **Add Anyway**.
+
+Then the app asks for the name Lucille will see, suggesting one made from the folder's
 name that no other folder uses: written in Latin letters where macOS can, so that `日本語` gives
 `ri-ben-yu`, with `folder-` put first when it starts with a digit (`2026 Taxes` gives
 `folder-2026-taxes`), and `-2`, `-3` added when it is taken. A name the host would refuse is turned into
@@ -77,8 +87,10 @@ another drive, it says that macOS may ask whether Capsule can access it, and to 
 folder in iCloud Drive or another cloud folder, it says that such folders may not work yet.
 
 Then the app runs `roots add <alias> <path>`, with `--allow-home-or-root` only if the user chose Add
-Anyway. If that takes more than a moment (a network drive, or a question from macOS), a small window with
-a **Cancel** button shows; Cancel stops the run. On success the app says that once this Mac is
+Anyway, and never for the whole disk. If that takes more than a moment (a network drive, or a question
+from macOS), a small window with a **Cancel** button shows; Cancel stops the run. If the host refuses
+the folder as the home folder or one that holds it, where the app could not tell from the path, the
+app asks then, unless the folder is the whole disk. On success the app says that once this Mac is
 connected, Lucille can use the folder for the abilities the user turns on. If the host found no folder
 there but the app can see one, or macOS refuses the app too, the app says that macOS is blocking Capsule
 from the folder, and where in System Settings to allow it.
@@ -207,12 +219,12 @@ secret. A check that finds a problem fails the build.
 | Check | What it shows |
 |---|---|
 | `host` | The interpreter in the bundle runs the host in isolated mode, with nonsense in `PYTHONHOME` and `PYTHONPATH`: `--version`, `ops list`, a `roots` round trip, `pause` and `resume`, and the refusal of a home folder. The dependencies' native code loads. |
-| `swift` | The app's own Swift code that runs the command line and reads its output works against the real command line, through the same calls the menu makes: the folder name suggestions and corrections, the plain sentence for each refusal, the time limit and Cancel. |
+| `swift` | The app's own Swift code that runs the command line and reads its output works against the real command line, through the same calls the menu makes: the folder name suggestions and corrections, which folders are the whole disk (a link to one included), that the command line the app builds for them never has `--allow-home-or-root` and that the host then adds nothing, the plain sentence for each refusal, the time limit and Cancel. |
 | `relocate` | A copy of the app in another folder, with a space in its path, passes `host` and `swift`. |
 | `links` | Every library a Mach-O file loads is macOS's own (`/usr/lib/`, `/System/Library/`), or resolves to a file that exists inside the bundle. `@loader_path`, `@executable_path` and `@rpath` are resolved as dyld resolves them, `..` included, so a path that climbs out of the bundle, and a library the build removed, both fail. Every run path must resolve inside the bundle. The log shows where each library and run path resolves. No Mach-O file needs a newer macOS than the app's minimum, and no file holds the build folder's path. The app's executable imports nothing on the lists above. |
 | `signature` | The signature is valid after the runs above, on the app and on each Mach-O file in it; every Mach-O file has the hardened runtime, and nothing has entitlements. The interpreter's signing identifier is `com.lucille-ai.capsule.python3`. The log shows each Mach-O file's signing identifier. |
 | `launch` | The app opens the way Finder opens it, and is still running 10 seconds later. |
-| `ui` | Driven through System Events as a user would: the app says what it is for and where its menu is when it opens, and again when it is opened while it runs; the menu bar item's title or description, which VoiceOver reads as its name, is "Capsule" (its tooltip does not count); the menu shows the version, "Not connected to Lucille" and every item, and lists abilities in plain words, each with its sentence on what Lucille gets; Pause Lucille and Resume Lucille change the host's pause flag, the status line and the menu bar item's name; an ability switches on, shows a checkmark, and switches off; Add a Folder… goes through the Open panel and the name dialog, where a typed name the host would refuse comes back corrected, and adds the folder; Remove in the Folders submenu removes it; the home folder brings up the question first, Choose a Smaller Folder goes back to the Open panel, and Add Anyway adds it. Each step is checked against what the host's command line then reports. With `--require-driven`, as CI runs it, a machine where System Events cannot drive the app fails the check. Screenshots are kept as the artifact `capsule-macos-screenshots`. |
+| `ui` | Driven through System Events as a user would: the app says what it is for and where its menu is when it opens, and again when it is opened while it runs; the menu bar item's title or description, which VoiceOver reads as its name, is "Capsule" (its tooltip does not count); the menu shows the version, "Not connected to Lucille" and every item, and lists abilities in plain words, each with its sentence on what Lucille gets; Pause Lucille and Resume Lucille change the host's pause flag, the status line and the menu bar item's name; an ability switches on, shows a checkmark, and switches off; Add a Folder… goes through the Open panel and the name dialog, where a typed name the host would refuse comes back corrected, and adds the folder; Remove in the Folders submenu removes it; the home folder brings up the question first, Choose a Smaller Folder goes back to the Open panel, and Add Anyway adds it; the Data volume, then `/`, each bring up the note that refuses the whole disk, whose only buttons are Choose a Smaller Folder, which goes back to the Open panel, and Cancel, and neither is added. Each step is checked against what the host's command line then reports. With `--require-driven`, as CI runs it, a machine where System Events cannot drive the app fails the check. Screenshots are kept as the artifact `capsule-macos-screenshots`. |
 | `gatekeeper` | Prints `spctl`'s verdict. It is "rejected", as expected for an ad hoc signature, and does not fail the build. |
 | `dmg` | Exactly one disk image was built, its name ends `-adhoc-macOS-arm64.dmg`, and it verifies, mounts, and holds the app, with a valid signature, and a link to `/Applications`. |
 | test suite | The host's whole test suite passes on the trimmed runtime. |
@@ -313,9 +325,13 @@ The design ([decisions/0002-macos-app.md](../decisions/0002-macos-app.md)) may c
 - **The words for each ability are in the app** (`App/HostText.swift`). The design moves them into the
   host's catalog, so that every app shows the same reviewed words. A test fails when the catalog has an
   operation the app neither names nor leaves out of the menu.
-- **The app asks about a broad folder before the user names it**, when it can tell from the path (the home
-  folder, a folder above it, or `/`). The host still decides; when it refuses a folder the app did not
-  recognise, such as the Data volume (`/System/Volumes/Data`), the app asks then.
+- **The app asks about the home folder before the user names it**, when it can tell from the path (the
+  home folder, or a folder above it). The host still decides; when it refuses a folder the app did not
+  recognise, such as `/System/Volumes/Data/Users`, which holds the home folder through the Data volume,
+  the app asks then.
+- **The app refuses `/System` and `/System/Volumes` too.** The design refuses `/` and the Data volume
+  outright. The two folders between them hold the Data volume, so the first build refuses them as well,
+  where the design would ask about them as folders that hold the home folder.
 - **`.pyc` files are hash-checked**, so a copied app with new file times still uses them, and Python
   never needs to write one.
 - **`PATH` is `/usr/bin:/bin`** for the host's command line.
@@ -329,10 +345,6 @@ These depart from the design's screens. Each was chosen for the first build; the
 - **What macOS may ask is said in the name dialog**, just before the run that makes macOS ask, not in a
   screen before the Open panel.
 - **There is no Open Privacy Settings button** (see "Not done yet").
-- **The whole disk can be added after Add Anyway.** The app asks about `/` and the Data volume
-  (`/System/Volumes/Data`) as it asks about the home folder, and adds either one if the user chooses Add
-  Anyway. The design refuses both in the app, and leaves them to the command line's flag, so here the
-  first build allows more than the design.
 - **The pause icon replaces the app's icon**, a pause sign in place of the computer, where the design adds
   a pause badge to the app's icon.
 - **Pausing shows no note.** The design confirms Pause with "Paused. Lucille's requests will be turned
