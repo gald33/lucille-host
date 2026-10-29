@@ -200,11 +200,34 @@ def test_a_symbolic_link_outside_git_is_checked_too(tmp_path: Path) -> None:
     assert [(v.path, v.line) for v in found] == [("dangling", 1), ("dir-link", 1)]
 
 
-def test_binary_file_contents_are_skipped(tmp_path: Path) -> None:
+def test_a_file_holding_a_nul_byte_is_still_read(tmp_path: Path) -> None:
     entry = synthetic_entry()
-    (tmp_path / "blob.bin").write_bytes(b"\0\1" + entry.encode())
+    (tmp_path / "blob.bin").write_bytes(b"\0\1\n" + entry.encode())
     (tmp_path / "text.txt").write_text("plain\n")
-    assert private_strings.check(tmp_path, parse_entries(entry)) == []
+    found = private_strings.check(tmp_path, parse_entries(entry))
+    assert [(v.path, v.line) for v in found] == [("blob.bin", 2)]
+
+
+@pytest.mark.parametrize("encoding", ["utf-16", "utf-16-le", "utf-16-be"])
+def test_utf16_text_is_read(tmp_path: Path, encoding: str) -> None:
+    entry = synthetic_entry()
+    (tmp_path / "wide.txt").write_bytes(f"before\n{entry}\nafter\n".encode(encoding))
+    found = private_strings.check(tmp_path, parse_entries(entry))
+    assert [(v.path, v.line) for v in found] == [("wide.txt", 0)]
+    assert "UTF-16" in found[0].message
+
+
+def test_a_gitlink_is_checked_by_its_path(tmp_path: Path) -> None:
+    entry = synthetic_entry()
+    _git(tmp_path, "init", "-q")
+    (tmp_path / "plain.txt").write_text("plain\n")
+    _git(tmp_path, "add", "plain.txt")
+    # A gitlink: the path of another repository, at a commit. Nothing is checked out there.
+    commit = "0123456789abcdef0123456789abcdef01234567"
+    _git(tmp_path, "update-index", "--add", "--cacheinfo", f"160000,{commit},vendor/{entry}")
+    found = private_strings.check(tmp_path, parse_entries(entry))
+    assert len(found) == 1 and found[0].line == 0
+    assert "path withheld" in found[0].path and "path matches" in found[0].message
 
 
 def test_fork_pull_request_without_the_list_is_skipped_and_says_so(tmp_path: Path) -> None:

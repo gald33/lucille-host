@@ -83,6 +83,15 @@ def _kept(path: Path, symlinks: bool) -> bool:
     return path.is_file()
 
 
+def tracked_paths(root: Path) -> list[str]:
+    """Every path git tracks under root, whatever it is (a gitlink to another repository, too),
+    or, outside a work tree, every file the walk finds. Sorted."""
+    names = _git_ls_files(root, untracked=False)
+    if not names:
+        names = _walk(root)
+    return sorted(set(names))
+
+
 def repo_files(root: Path, *, untracked: bool = False, symlinks: bool = False) -> list[str]:
     """Root-relative POSIX paths of the files a guard should read.
 
@@ -185,8 +194,10 @@ class Ref:
 def import_aliases(tree: ast.Module, package: str) -> dict[str, str]:
     """Each name the file's imports bind, mapped to the dotted name it stands for.
 
-    Scopes are ignored: an import inside a function counts for the whole file, which can only
-    make a guard stricter.
+    Scopes are ignored: an import inside a function counts for the whole file. That makes a guard
+    stricter only while each name stands for one target, so a name the imports bind to two
+    different targets is itself a finding (:func:`import_alias_conflicts`): here the last binding
+    wins, and a use could mean the other one.
     """
     aliases: dict[str, str] = {}
     for node in ast.walk(tree):
@@ -204,6 +215,39 @@ def import_aliases(tree: ast.Module, package: str) -> dict[str, str]:
                     target = f"{module}.{alias.name}" if module else alias.name
                     aliases[alias.asname or alias.name] = target
     return aliases
+
+
+def import_alias_conflicts(tree: ast.Module, package: str, rel: str) -> list[Violation]:
+    """A ``parse`` finding for each name the file's imports bind to more than one target
+    (``import os as x`` in one place, ``import json as x`` in another): the guards resolve a name
+    through one binding for the whole file, so they cannot tell which one a use means."""
+    bound: dict[str, dict[str, int]] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                name = alias.asname or alias.name.split(".")[0]
+                target = alias.name if alias.asname else name
+                bound.setdefault(name, {}).setdefault(target, node.lineno)
+        elif isinstance(node, ast.ImportFrom):
+            module = absolute_module(node.module, node.level, package)
+            for alias in node.names:
+                if alias.name != "*":
+                    target = f"{module}.{alias.name}" if module else alias.name
+                    bound.setdefault(alias.asname or alias.name, {}).setdefault(target, node.lineno)
+    found: list[Violation] = []
+    for name, targets in sorted(bound.items()):
+        if len(targets) > 1:
+            line = max(targets.values())
+            listed = ", ".join(sorted(targets))
+            found.append(
+                Violation(
+                    rel,
+                    line,
+                    "parse",
+                    f"{name} is imported as more than one thing ({listed}); give each its own name",
+                )
+            )
+    return found
 
 
 def annotation_nodes(tree: ast.Module) -> set[int]:
@@ -255,6 +299,30 @@ class _Collector(ast.NodeVisitor):
 
     def visit_Attribute(self, node: ast.Attribute) -> None:
         self._chain(node, None)
+
+    def visit_MatchClass(self, node: ast.MatchClass) -> None:
+        # ``case C(name=p)`` reads the attribute ``name`` of the subject, as ``subject.name`` does.
+        for attr in node.kwd_attrs:
+            self.refs.append(Ref(node.lineno, "use", ("", attr), f"<expr>.{attr}"))
+        self.generic_visit(node)
+
+    def _match_args(self, targets: list[ast.expr], value: ast.expr | None) -> None:
+        # ``__match_args__`` names the attributes a positional class pattern reads.
+        named = any(isinstance(t, ast.Name) and t.id == "__match_args__" for t in targets)
+        if not named or not isinstance(value, ast.Tuple | ast.List):
+            return
+        for element in value.elts:
+            if isinstance(element, ast.Constant) and isinstance(element.value, str):
+                text = element.value
+                self.refs.append(Ref(element.lineno, "use", ("", text), f"<expr>.{text}"))
+
+    def visit_Assign(self, node: ast.Assign) -> None:
+        self._match_args(node.targets, node.value)
+        self.generic_visit(node)
+
+    def visit_AnnAssign(self, node: ast.AnnAssign) -> None:
+        self._match_args([node.target], node.value)
+        self.generic_visit(node)
 
     def visit_Name(self, node: ast.Name) -> None:
         self._chain(node, None)

@@ -265,6 +265,19 @@ BANNED_EVERYWHERE = [
     ("native-code", "from win32ctypes.core import ctypes\n"),
     ("dynamic-import", "from keyring.core import load_keyring\nload_keyring('socket.socket')\n"),
     ("dynamic-import", "import keyring.core\nkeyring.core._load_keyring_class(name)\n"),
+    # One name imported as two things: a use could mean either, so the lint refuses the name.
+    ("parse", "import os as x\ndef _unused():\n    import json as x\nx.system('id')\n"),
+    ("parse", "import builtins as b\ndef _unused():\n    import json as b\nb.eval('1')\n"),
+    ("parse", "from os import system as run\nfrom json import loads as run\n"),
+    # A class pattern reads the attributes it names, as an attribute does.
+    (
+        "dunder",
+        "match _f:\n    case object(__globals__=g, __builtins__=b):\n        b['x']('...')\n",
+    ),
+    ("dunder", "match _f:\n    case object(gi_frame=frame):\n        pass\n"),
+    # __match_args__ names the attributes a positional class pattern reads.
+    ("dunder", "class C:\n    __match_args__ = ('__globals__',)\n"),
+    ("dunder", "class C:\n    __match_args__: tuple = ('f_globals',)\n"),
 ]
 
 # Every attribute the [dunder] rule refuses, written out here so that dropping one from the lint
