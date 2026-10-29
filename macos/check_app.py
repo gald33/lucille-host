@@ -21,6 +21,10 @@ Each check prints what it saw and exits 1 if anything is wrong:
   runtime flag; the app and the interpreter carry no entitlements.
 - ``launch``: opens the app the way Finder does, checks that it is still running 10 seconds later,
   then stops it.
+- ``ui``: opens the app and drives its menu as a user would, through System Events: reads the
+  menu, chooses Pause Lucille and checks the host's pause flag, then chooses Resume Lucille. It
+  uses the real HOME and leaves the host as it found it. Where macOS does not let System Events
+  drive other apps, it says so and drives nothing. Screenshots go to ``check/screens``.
 - ``gatekeeper``: prints what ``spctl`` says about the app and the disk image. It never fails: an
   ad hoc signature is refused until the app is signed with a Developer ID and notarized.
 - ``dmg``: ``hdiutil verify`` passes, and the mounted image holds the app, with a valid signature,
@@ -384,6 +388,158 @@ def check_launch(app: Path, checker: Checker) -> None:
         print(logs.stdout[-20000:])
 
 
+# The menu bar app's status item, and its menu, as System Events names them.
+STATUS_ITEM: Final = "menu bar item 1 of last menu bar"
+MENU: Final = f"menu 1 of {STATUS_ITEM}"
+LINES: Final = "set AppleScript's text item delimiters to linefeed\n"
+# The items the menu shows whatever the host's state, besides its first line.
+MENU_ITEMS: Final = (
+    "Abilities",
+    "Add a Folder…",
+    "Folders",
+    "Connect to Lucille (coming soon)",
+    "Quit Lucille Host",
+)
+
+
+def _system_events(body: str, timeout: float = 30) -> tuple[bool, str]:
+    """Run AppleScript against the app's process through System Events: (worked, what it said)."""
+    name = build_app.load_pins().app_name
+    script = f'tell application "System Events"\ntell process "{name}"\n{body}\nend tell\nend tell'
+    try:
+        done = subprocess.run(
+            ["osascript", "-e", script],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            timeout=timeout,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        return False, f"osascript did not finish within {timeout:.0f} s"
+    return done.returncode == 0, (done.stdout if done.returncode == 0 else done.stderr).strip()
+
+
+def _screenshot(path: Path) -> None:
+    done = subprocess.run(
+        ["screencapture", "-x", str(path)], capture_output=True, text=True, timeout=30, check=False
+    )
+    print(f"screenshot {path.name}: " + ("saved" if path.is_file() else _shown(done)))
+
+
+def _open_menu_and_read() -> tuple[bool, list[str]]:
+    worked, text = _system_events(
+        f"click {STATUS_ITEM}\ndelay 1\n{LINES}return (name of every menu item of {MENU}) as text"
+    )
+    return worked, text.splitlines() if worked else [text]
+
+
+def _drive_menu(checker: Checker, screens: Path, flag: Path) -> None:
+    version = build_app.host_version()
+    worked, items = _system_events(
+        f"{LINES}return (description of every menu bar item of last menu bar) as text"
+    )
+    if not worked:
+        print(
+            "note: System Events cannot read this app's menu bar on this machine, so the menu "
+            f"was not driven: {items}"
+        )
+        return
+    print(f"the app's status items: {items.splitlines()}")
+    worked, shown = _open_menu_and_read()
+    if not worked:
+        print(f"note: System Events cannot open the menu on this machine: {shown}")
+        return
+    print(f"the menu shows: {shown}")
+    _screenshot(screens / "2-menu-open.png")
+    worked, abilities = _system_events(
+        f'{LINES}return (name of every menu item of menu 1 of menu item "Abilities" of {MENU}) '
+        "as text"
+    )
+    print(f"the Abilities submenu shows: {abilities.splitlines() if worked else abilities}")
+    _system_events("key code 53")
+    checker.expect(
+        shown[:1] == [f"Lucille Host {version}"],
+        "the menu's first line names the version",
+        f"{shown}",
+    )
+    checker.expect(
+        "Not paused" in shown and "Pause Lucille" in shown,
+        "the menu says the host is not paused, and offers Pause Lucille",
+        f"{shown}",
+    )
+    missing = [item for item in MENU_ITEMS if item not in shown]
+    checker.expect(not missing, "the menu holds every item", f"missing: {missing}")
+    if flag.exists():
+        print("note: the host was paused before this check, so Pause and Resume were not tried")
+        return
+
+    worked, said = _system_events(
+        f'click {STATUS_ITEM}\ndelay 1\nclick menu item "Pause Lucille" of {MENU}'
+    )
+    checker.expect(
+        worked and _wait_until(flag.exists, 15),
+        "choosing Pause Lucille runs `pause`: the pause flag appears",
+        said,
+    )
+    time.sleep(3)
+    worked, shown = _open_menu_and_read()
+    _screenshot(screens / "3-paused.png")
+    _system_events("key code 53")
+    checker.expect(
+        worked and "Resume Lucille" in shown and "Pause Lucille" not in shown,
+        "the menu then offers Resume Lucille",
+        f"{shown}",
+    )
+    worked, said = _system_events(
+        f'click {STATUS_ITEM}\ndelay 1\nclick menu item "Resume Lucille" of {MENU}'
+    )
+    checker.expect(
+        worked and _wait_until(lambda: not flag.exists(), 15),
+        "choosing Resume Lucille runs `resume`: the pause flag goes",
+        said,
+    )
+
+
+def check_ui(app: Path, checker: Checker, work: Path) -> None:
+    """Open the app and drive its menu the way a user would, through System Events: read the menu,
+    choose Pause Lucille, check the host's pause flag, choose Resume Lucille. It uses the real
+    HOME, and leaves the host as it found it. Where macOS does not let System Events drive other
+    apps (no accessibility permission), it says so and drives nothing. Screenshots go to
+    ``<out>/check/screens``."""
+    name = build_app.load_pins().app_name
+    screens = work / "screens"
+    screens.mkdir(parents=True, exist_ok=True)
+    flag = Path.home() / "Library" / "Application Support" / "lucille-host" / "default"
+    flag = flag / "state" / "paused"
+    if _running(name):
+        subprocess.run(["pkill", "-x", name], check=False)
+        _wait_until(lambda: not _running(name), 10)
+    out_log = work / "app-stdout.txt"
+    err_log = work / "app-stderr.txt"
+    for log in (out_log, err_log):
+        log.write_text("", encoding="utf-8")
+    done = subprocess.run(
+        ["open", "--stdout", str(out_log), "--stderr", str(err_log), str(app)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    checker.expect(done.returncode == 0, "open starts the app", _shown(done))
+    if not checker.expect(_wait_until(lambda: bool(_running(name)), 15), "the app is running"):
+        return
+    time.sleep(5)
+    _screenshot(screens / "1-menu-bar.png")
+    try:
+        _drive_menu(checker, screens, flag)
+    finally:
+        subprocess.run(["pkill", "-TERM", "-x", name], check=False)
+        checker.expect(_wait_until(lambda: not _running(name), 15), "the app stops on SIGTERM")
+        for log in (out_log, err_log):
+            text = log.read_text(encoding="utf-8", errors="replace")
+            print(f"the app's {log.stem.removeprefix('app-')}: {text[-5000:]!r}")
+
+
 def check_gatekeeper(app: Path, dmg: Path) -> None:
     for argv in (
         ["spctl", "--assess", "--type", "execute", "--verbose=4", str(app)],
@@ -467,7 +623,17 @@ def check_dmg(dmg: Path, checker: Checker) -> None:
                     break
 
 
-CHECKS: Final = ("host", "swift", "relocate", "links", "signature", "launch", "gatekeeper", "dmg")
+CHECKS: Final = (
+    "host",
+    "swift",
+    "relocate",
+    "links",
+    "signature",
+    "launch",
+    "ui",
+    "gatekeeper",
+    "dmg",
+)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -499,6 +665,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         check_signature(app, checker)
     elif args.check == "launch":
         check_launch(app, checker)
+    elif args.check == "ui":
+        check_ui(app, checker, work)
     elif args.check == "gatekeeper":
         check_gatekeeper(app, dmg)
     else:

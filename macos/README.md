@@ -65,7 +65,7 @@ uv run --no-project python macos/build_app.py build
 The app and the disk image land in `build/macos/`, which git ignores. Then run the checks CI runs:
 
 ```sh
-for check in host swift relocate links signature launch gatekeeper dmg; do
+for check in host swift relocate links signature launch ui gatekeeper dmg; do
   uv run --no-project python macos/check_app.py "$check"
 done
 ```

@@ -17,7 +17,7 @@ release follows it once, on a clean machine, and reports each step they could no
   JSON Schemas and golden fixtures are in `src/lucille_host/spec/v1/`, and ship in the wheel.
 
 **What CI runs.** The workflow `ci` (`.github/workflows/ci.yml`) runs on every push to `main` and on every
-pull request.
+pull request. A maintainer can also start it by hand on any branch.
 - Job `test`, on GitHub-hosted `ubuntu-latest` and `macos-latest`, with Python 3.11 and 3.13: it runs
   `uv sync --locked --extra conformance`, then `pytest`. `--locked` fails if `uv.lock` does not match
   `pyproject.toml`, so the exact pins you read are the pins that ran.
