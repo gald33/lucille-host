@@ -1,0 +1,17 @@
+[
+  {"folder": "Documents", "alias": "documents"},
+  {"folder": "My Projects", "alias": "my-projects"},
+  {"folder": "2026 Taxes", "alias": "taxes"},
+  {"folder": "Café Notes", "alias": "cafe-notes"},
+  {"folder": "Photos (Old).backup", "alias": "photos-old-backup"},
+  {"folder": "under_score", "alias": "under_score"},
+  {"folder": "--x--", "alias": "x"},
+  {"folder": "__init", "alias": "init"},
+  {"folder": "Q3   Reports!!", "alias": "q3-reports"},
+  {"folder": "a-very-long-folder-name-that-goes-past-the-limit", "alias": "a-very-long-folder-name-that-goe"},
+  {"folder": "abcdefghijklmnopqrstuvwxyzabcde-x", "alias": "abcdefghijklmnopqrstuvwxyzabcde"},
+  {"folder": "日本語", "alias": "folder"},
+  {"folder": "___", "alias": "folder"},
+  {"folder": "", "alias": "folder"},
+  {"folder": "/", "alias": "folder"}
+]

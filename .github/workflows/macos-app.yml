@@ -1,0 +1,93 @@
+name: macos-app
+
+# Builds the Mac app and its disk image on a GitHub-hosted Apple silicon runner, then checks
+# them. The signature is ad hoc: nothing here holds a secret, signs with a Developer ID or
+# notarizes. See macos/README.md.
+
+on:
+  push:
+    branches: [macos-app]
+  pull_request:
+    paths:
+      - "macos/**"
+      - "src/**"
+      - "pyproject.toml"
+      - "uv.lock"
+      - ".github/workflows/macos-app.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# GitHub-hosted runners only, and every action pinned by full commit SHA
+# (tools/guards/workflow_lint.py fails the build otherwise).
+
+jobs:
+  app:
+    name: build and check the app (macos-15, arm64)
+    runs-on: macos-15
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          version: "0.11.32"
+          python-version: "3.13"
+          enable-cache: false
+      - name: Show the machine and the tools
+        run: |
+          sw_vers
+          uname -m
+          xcrun swiftc --version
+          uv --version
+      - name: Check the pins (plan)
+        run: uv run --no-project python macos/build_app.py plan
+      - name: Build the app and the disk image
+        run: uv run --no-project python macos/build_app.py build
+      - name: "Check: the embedded interpreter runs the host"
+        if: ${{ !cancelled() }}
+        run: uv run --no-project python macos/check_app.py host
+      - name: "Check: the app's Swift code against the real command line"
+        if: ${{ !cancelled() }}
+        run: uv run --no-project python macos/check_app.py swift
+      - name: "Check: a copy in another folder still works"
+        if: ${{ !cancelled() }}
+        run: uv run --no-project python macos/check_app.py relocate
+      - name: "Check: no library or path from outside the bundle"
+        if: ${{ !cancelled() }}
+        run: uv run --no-project python macos/check_app.py links
+      - name: "Check: the signature (after the runs above, so nothing was written)"
+        if: ${{ !cancelled() }}
+        run: uv run --no-project python macos/check_app.py signature
+      - name: "Check: the app launches and keeps running"
+        if: ${{ !cancelled() }}
+        run: uv run --no-project python macos/check_app.py launch
+      - name: "Gatekeeper's verdict (printed only; ad hoc builds are refused)"
+        if: ${{ !cancelled() }}
+        run: uv run --no-project python macos/check_app.py gatekeeper
+      - name: "Check: the disk image"
+        if: ${{ !cancelled() }}
+        run: uv run --no-project python macos/check_app.py dmg
+      - name: "Check: the host's test suite passes on the pruned runtime"
+        if: ${{ !cancelled() }}
+        run: |
+          copy="$RUNNER_TEMP/pruned/Lucille Host.app"
+          mkdir -p "$RUNNER_TEMP/pruned"
+          ditto "build/macos/Lucille Host.app" "$copy"
+          python="$copy/Contents/Resources/python/bin/python3"
+          export UV_PROJECT_ENVIRONMENT="$RUNNER_TEMP/pruned-venv"
+          uv venv --python "$python" "$UV_PROJECT_ENVIRONMENT"
+          uv sync --locked --extra conformance --python "$UV_PROJECT_ENVIRONMENT/bin/python"
+          uv run --no-sync python -c "import sys; print(sys.version); print(sys.base_prefix)"
+          uv run --no-sync python -c "import sys; assert 'Lucille Host.app' in sys.base_prefix"
+          uv run --no-sync pytest -q
+      - name: Upload the disk image
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: lucille-host-macos-arm64-dmg
+          path: build/macos/*.dmg
+          if-no-files-found: error
+          retention-days: 7

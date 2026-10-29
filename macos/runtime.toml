@@ -1,0 +1,21 @@
+# What the Mac app is built from, besides this repository and uv.lock.
+#
+# build_app.py reads this file. It downloads the Python runtime from `url` and refuses to build
+# unless the download's sha256 is `sha256`. To move to a new runtime, change all four values in
+# one reviewed commit: the asset name, its version, its URL and its sha256 from the release's
+# SHA256SUMS file.
+
+[python]
+# python-build-standalone, Apple silicon, the "install_only_stripped" flavour.
+version = "3.13.18"
+asset = "cpython-3.13.18+20261026-aarch64-apple-darwin-install_only_stripped.tar.gz"
+url = "https://github.com/astral-sh/python-build-standalone/releases/download/20261026/cpython-3.13.18%2B20261026-aarch64-apple-darwin-install_only_stripped.tar.gz"
+sha256 = "8392b6ea51d94391befb2c31ebe75463f045d0b69dfcf5e1bb3234e1f5fa3405"
+
+[app]
+name = "Lucille Host"
+# A placeholder until the project chooses its permanent identifier. Changing it after a signed
+# release makes macOS ask the user again for every folder and Keychain item.
+bundle_id = "com.lucille-ai.host"
+minimum_macos = "15.0"
+category = "public.app-category.utilities"

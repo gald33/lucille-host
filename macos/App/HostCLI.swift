@@ -1,0 +1,137 @@
+import Foundation
+
+#if canImport(Darwin)
+import Darwin
+#elseif canImport(Glibc)
+import Glibc
+#endif
+
+/// What one run of the host's command line did.
+struct CLIResult: Equatable, Sendable {
+    /// The status when the program could not be started at all.
+    static let notStarted: Int32 = -1
+
+    let status: Int32
+    let stdout: String
+    let stderr: String
+    let timedOut: Bool
+
+    var succeeded: Bool { status == 0 && !timedOut }
+}
+
+/// Runs the host's command line. It is the only program the app starts: the Python interpreter
+/// inside the app, with `-I` (isolated: no PYTHON* variables, no user site-packages, no current
+/// folder on the import path) and `-B` (no .pyc writes inside the signed app), running the
+/// `lucille_host` package. Arguments go as an argv array, never through a shell. The environment
+/// is fixed, not inherited. Every run has a time limit.
+struct HostCLI: Sendable {
+    let python: URL
+    let home: String
+    let timeout: TimeInterval
+
+    init(python: URL, home: String, timeout: TimeInterval = 30) {
+        self.python = python
+        self.home = home
+        self.timeout = timeout
+    }
+
+    /// The interpreter inside an app bundle.
+    static func python(inApp app: URL) -> URL {
+        app.appendingPathComponent("Contents/Resources/python/bin/python3")
+    }
+
+    /// The home folder the host uses: HOME when it is an absolute path, as the host reads it.
+    static func userHome() -> String {
+        if let home = ProcessInfo.processInfo.environment["HOME"], home.hasPrefix("/") {
+            return home
+        }
+        return NSHomeDirectory()
+    }
+
+    func arguments(for verb: [String]) -> [String] {
+        ["-I", "-B", "-m", "lucille_host"] + verb
+    }
+
+    /// The whole environment a run gets. Nothing else from the app's own environment passes.
+    func environment() -> [String: String] {
+        var env = ["HOME": home, "PATH": "/usr/bin:/bin", "LANG": "en_US.UTF-8"]
+        let own = ProcessInfo.processInfo.environment
+        for key in ["USER", "LOGNAME", "TMPDIR"] {
+            if let value = own[key] {
+                env[key] = value
+            }
+        }
+        return env
+    }
+
+    /// The flag file `lucille-host pause` writes for the default profile (`controls.py` and
+    /// `paths.py`). The app only reads it, to show the state; `pause` and `resume` change it.
+    var pauseFlag: URL {
+        URL(fileURLWithPath: home)
+            .appendingPathComponent("Library/Application Support/lucille-host/default/state/paused")
+    }
+
+    var isPaused: Bool { FileManager.default.fileExists(atPath: pauseFlag.path) }
+
+    /// Run one verb and wait for it, up to the time limit. A run that takes longer is stopped.
+    func run(_ verb: [String]) -> CLIResult {
+        let process = Process()
+        process.executableURL = python
+        process.arguments = arguments(for: verb)
+        process.environment = environment()
+        process.currentDirectoryURL = URL(fileURLWithPath: "/")
+        process.standardInput = FileHandle.nullDevice
+        let stdout = Pipe()
+        let stderr = Pipe()
+        process.standardOutput = stdout
+        process.standardError = stderr
+        let exited = DispatchSemaphore(value: 0)
+        process.terminationHandler = { _ in exited.signal() }
+        do {
+            try process.run()
+        } catch {
+            return CLIResult(
+                status: CLIResult.notStarted,
+                stdout: "",
+                stderr: "Lucille Host could not start its helper program (\(error.localizedDescription)).",
+                timedOut: false
+            )
+        }
+        let out = PipeReader(stdout.fileHandleForReading)
+        let err = PipeReader(stderr.fileHandleForReading)
+        var timedOut = false
+        if exited.wait(timeout: .now() + timeout) == .timedOut {
+            timedOut = true
+            process.terminate()
+            if exited.wait(timeout: .now() + 2) == .timedOut {
+                kill(process.processIdentifier, SIGKILL)
+                exited.wait()
+            }
+        }
+        return CLIResult(
+            status: process.terminationStatus,
+            stdout: out.text(),
+            stderr: err.text(),
+            timedOut: timedOut
+        )
+    }
+}
+
+/// Reads one pipe to its end on another thread, so that a child that writes a lot cannot fill the
+/// pipe and wait forever.
+private final class PipeReader: @unchecked Sendable {
+    private var data = Data()
+    private let done = DispatchSemaphore(value: 0)
+
+    init(_ handle: FileHandle) {
+        DispatchQueue.global(qos: .userInitiated).async {
+            self.data = handle.readDataToEndOfFile()
+            self.done.signal()
+        }
+    }
+
+    func text() -> String {
+        done.wait()
+        return String(decoding: data, as: UTF8.self)
+    }
+}
