@@ -10,6 +10,9 @@ This folder builds a first, small version of Loft. It is not a release and it is
 anyone who is not developing it. It cannot connect to Lucille, because the host cannot pair yet. Its disk
 image is not notarized, so macOS refuses to open it normally (see [The disk image from CI](#the-disk-image-from-ci)).
 
+The design of the full app is [decisions/0002-macos-app.md](../decisions/0002-macos-app.md). It says what this
+build is, and what is planned after it.
+
 ## What this builds
 
 - **`Loft.app`**, a menu bar app for Apple silicon Macs with macOS 15 or later. It has no main
@@ -273,12 +276,12 @@ anyone to work around the warning.
 
 ## Choices made for the first build
 
-The design may change each of these.
+The design ([decisions/0002-macos-app.md](../decisions/0002-macos-app.md)) may change each of these.
 
-- **The app runs the runtime's own `python3`.** The design proposes a small native launcher that embeds
-  Python instead, so that every host process is one named, signed program, which the Keychain and the
-  privacy prompts recognise, and so that the bundle holds no general-purpose interpreter. Chosen for the
-  first build; the design may change it.
+- **The app runs the runtime's own `python3`.** The design renames it `lucille-host-runtime`, with its own
+  signing identifier, so that macOS's prompts and Activity Monitor name it. A small native launcher that
+  embeds Python, so that the bundle holds no general-purpose interpreter, is an option it has not decided.
+  Chosen for the first build; the design may change it.
 - **Python lives in `Contents/Resources/python`.** If notarization objects to code there, see "Not done
   yet" for the two ways out.
 - **The app is named Loft, with the bundle identifier `com.lucille-ai.loft`.** Only the app has the new
@@ -290,7 +293,7 @@ The design may change each of these.
   menu.
 - **macOS 15 or later, Apple silicon only.**
 - **The app reads the host's text output and the pause flag.** The design adds a versioned JSON output
-  and a status file to the host's command line; until then, `App/HostText.swift` follows the text, and
+  to the host's command line, and an event stream from the running host; until then, `App/HostText.swift` follows the text, and
   the Swift self-test checks it against the real command line on every build.
 - **The words for each ability are in the app** (`App/HostText.swift`). The design moves them into the
   host's catalog, so that every app shows the same reviewed words. A test fails when the catalog has an

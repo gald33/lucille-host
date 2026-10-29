@@ -106,7 +106,7 @@ This repository proves only the host's side. The full design is
 | [THREAT_MODEL.md](THREAT_MODEL.md) | What the host defends against, and what is left. |
 | [VERIFYING.md](VERIFYING.md) | How a third party checks the program (draft). |
 | [SECURITY.md](SECURITY.md) | How to report a vulnerability, and what a bad release means for you. |
-| [decisions/](decisions/) | Design records. |
+| [decisions/](decisions/) | Design records: [0001](decisions/0001-host-design.md), the host, and [0002](decisions/0002-macos-app.md), Loft, the Mac app. |
 
 ## Development
 
