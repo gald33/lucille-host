@@ -50,9 +50,9 @@ Not built yet: pairing, running in the background and opening at login, the JSON
 and main windows, updates, **Remove Loft…** (section 17), Developer ID signing and notarization, ripgrep, and
 the release jobs. The first build also departs from this record in these ways, among others;
 `macos/README.md`, under "Choices made for the first build", says why for most of them:
-- the interpreter is the runtime's own `python3`, not renamed, and signed ad hoc with
-  `--prefix com.lucille-ai.loft.` but no identifier of the planned form, `com.lucille-ai.loft.runtime`; the
-  `signature` check prints the identifier it gets (§6). The runtime ships hash-checked `.pyc` files (§6);
+- the interpreter is the runtime's own `python3`, not renamed. It is signed ad hoc with
+  `--prefix com.lucille-ai.loft.`, which gives it the identifier `com.lucille-ai.loft.python3` (seen in CI),
+  not the planned `com.lucille-ai.loft.runtime` (§6). The runtime ships hash-checked `.pyc` files (§6);
 - the command line runs with `PATH=/usr/bin:/bin`, and without `-X utf8` (§6, §9);
 - the app opens from any folder, where the planned app runs only from `/Applications/Loft.app` (§13);
 - the app uses the host's `default` profile, the one a `pipx` install uses, not its own `mac-app` profile

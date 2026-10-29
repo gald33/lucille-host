@@ -210,7 +210,7 @@ secret. A check that finds a problem fails the build.
 | `swift` | The app's own Swift code that runs the command line and reads its output works against the real command line, through the same calls the menu makes: the folder name suggestions and corrections, the plain sentence for each refusal, the time limit and Cancel. |
 | `relocate` | A copy of the app in another folder, with a space in its path, passes `host` and `swift`. |
 | `links` | Every library a Mach-O file loads is macOS's own (`/usr/lib/`, `/System/Library/`), or resolves to a file that exists inside the bundle. `@loader_path`, `@executable_path` and `@rpath` are resolved as dyld resolves them, `..` included, so a path that climbs out of the bundle, and a library the build removed, both fail. Every run path must resolve inside the bundle. The log shows where each library and run path resolves. No Mach-O file needs a newer macOS than the app's minimum, and no file holds the build folder's path. The app's executable imports nothing on the lists above. |
-| `signature` | The signature is valid after the runs above, on the app and on each Mach-O file in it; every Mach-O file has the hardened runtime, and nothing has entitlements. The log shows each Mach-O file's signing identifier. |
+| `signature` | The signature is valid after the runs above, on the app and on each Mach-O file in it; every Mach-O file has the hardened runtime, and nothing has entitlements. The interpreter's signing identifier is `com.lucille-ai.loft.python3`. The log shows each Mach-O file's signing identifier. |
 | `launch` | The app opens the way Finder opens it, and is still running 10 seconds later. |
 | `ui` | Driven through System Events as a user would: the app says what it is for and where its menu is when it opens, and again when it is opened while it runs; the menu bar item's title or description, which VoiceOver reads as its name, is "Loft" (its tooltip does not count); the menu shows the version, "Not connected to Lucille" and every item, and lists abilities in plain words, each with its sentence on what Lucille gets; Pause Lucille and Resume Lucille change the host's pause flag, the status line and the menu bar item's name; an ability switches on, shows a checkmark, and switches off; Add a Folder… goes through the Open panel and the name dialog, where a typed name the host would refuse comes back corrected, and adds the folder; Remove in the Folders submenu removes it; the home folder brings up the question first, Choose a Smaller Folder goes back to the Open panel, and Add Anyway adds it. Each step is checked against what the host's command line then reports. With `--require-driven`, as CI runs it, a machine where System Events cannot drive the app fails the check. Screenshots are kept as the artifact `loft-macos-screenshots`. |
 | `gatekeeper` | Prints `spctl`'s verdict. It is "rejected", as expected for an ad hoc signature, and does not fail the build. |
@@ -287,10 +287,10 @@ The design ([decisions/0002-macos-app.md](../decisions/0002-macos-app.md)) may c
 
 - **The app runs the runtime's own `python3`.** The design renames it `lucille-host-runtime`, signed with
   the identifier `com.lucille-ai.loft.runtime`, so that macOS's prompts and Activity Monitor name it. The
-  first build keeps the name `python3`, and signs it with `--prefix com.lucille-ai.loft.` but no identifier
-  of its own choosing; the `signature` check prints the identifier it gets. A small native launcher that
-  embeds Python, so that the bundle holds no general-purpose interpreter, is an option the design has not
-  decided. Chosen for the first build; the design may change it.
+  first build keeps the name `python3`, and signs it with `--prefix com.lucille-ai.loft.`, which gives it
+  the identifier `com.lucille-ai.loft.python3`; the `signature` check checks that. A small native
+  launcher that embeds Python, so that the bundle holds no general-purpose interpreter, is an option the
+  design has not decided. Chosen for the first build; the design may change it.
 - **Python lives in `Contents/Resources/python`.** If notarization objects to code there, see "Not done
   yet" for the two ways out.
 - **The app is named Loft, with the bundle identifier `com.lucille-ai.loft`.** Only the app has the new

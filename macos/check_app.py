@@ -25,7 +25,8 @@ Each check prints what it saw and exits 1 if anything is wrong:
   function another way (through the Objective-C runtime, say) is not seen.
 - ``signature``: ``codesign --verify --deep --strict`` passes on the app, and ``codesign --verify
   --strict`` on each Mach-O file in it; every Mach-O file has the hardened runtime flag; the app
-  and the interpreter carry no entitlements. It prints each Mach-O file's signing identifier.
+  and the interpreter carry no entitlements; the interpreter's signing identifier is the bundle
+  identifier, a dot and ``python3``. It prints each Mach-O file's signing identifier.
 - ``launch``: opens the app the way Finder does, checks that it is still running 10 seconds later,
   then stops it.
 - ``ui``: opens the app and drives it as a user would, through System Events: reads the note
@@ -602,7 +603,11 @@ def check_signature(app: Path, checker: Checker) -> None:
     )
     checker.expect(done.returncode == 0, "codesign --verify --deep --strict passes", _shown(done))
     print(done.stderr, end="")
-    main = app / "Contents" / "MacOS" / build_app.load_pins().app_name
+    pins = build_app.load_pins()
+    main = app / "Contents" / "MacOS" / pins.app_name
+    # sign_app signs with --prefix "<bundle id>.", which codesign puts before a derived identifier
+    # that has no dot in it, such as the interpreter's file name.
+    interpreter_id = f"{pins.bundle_id}.{Path(build_app.INTERPRETER).name}"
     for path in build_app.macho_files(app):
         if path == main:
             continue
@@ -624,6 +629,12 @@ def check_signature(app: Path, checker: Checker) -> None:
         flags = [line for line in done.stderr.splitlines() if "flags=" in line]
         named = [line for line in done.stderr.splitlines() if line.startswith("Identifier=")]
         print(f"{path.relative_to(app.parent)}: {named[0] if named else 'no Identifier line'}")
+        if path == python_in(app):
+            checker.expect(
+                named == [f"Identifier={interpreter_id}"],
+                f"the interpreter's signing identifier is {interpreter_id}",
+                _shown(done),
+            )
         checker.expect(
             done.returncode == 0 and bool(flags) and "runtime" in flags[0],
             f"{path.relative_to(app.parent)} is signed with the hardened runtime",
