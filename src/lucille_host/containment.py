@@ -30,7 +30,8 @@ The rules, all decided before anything runs:
   another link, say) is refused, which errs on the safe side;
 - a relative target is resolved from the link's own directory, and a ``..`` that would climb above
   the folder is an escape;
-- more than :data:`MAX_LINKS` links is an escape, as the kernel's own limit makes it an error;
+- more than :data:`MAX_LINKS` links is an escape, as the kernel's own limit makes it an error (its
+  MAXSYMLINKS: 40 on Linux, 32 on macOS);
 - a component that does not exist, or whose name the filesystem refuses as too long, ends the walk
   inside, with nothing found: nothing further exists for the child to follow;
 - a component that is not a directory where the path goes on below it ends the walk inside too,
@@ -73,7 +74,8 @@ from lucille_host import mounts
 
 __all__ = ["MAX_LINKS", "contain", "inside_own", "on_proc"]
 
-MAX_LINKS: Final = 40
+# The kernel's own limit on links followed in one lookup (MAXSYMLINKS).
+MAX_LINKS: Final = 32 if sys.platform == "darwin" else 40
 # A bound on the lookups one walk may make, so that link targets full of ".." cannot make it slow.
 MAX_STEPS: Final = 65536
 

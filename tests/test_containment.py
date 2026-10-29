@@ -121,8 +121,14 @@ def test_too_many_links_is_an_escape(tree: tuple[Path, Path]) -> None:
     root, _ = tree
     for index in range(MAX_LINKS + 1):
         (root / f"l{index}").symlink_to(f"l{index + 1}" if index < MAX_LINKS else "file.txt")
-    assert contain(str(root), f"l{MAX_LINKS - 39}") is not None
+    # l1 starts a chain of MAX_LINKS links, which the kernel follows; l0 one of MAX_LINKS + 1.
+    assert contain(str(root), "l1") is not None
     assert contain(str(root), "l0") is None
+    # MAX_LINKS is this kernel's own limit: it follows l1's chain and refuses l0's.
+    assert os.stat(root / "l1").st_size == 1
+    with pytest.raises(OSError) as refused:
+        os.stat(root / "l0")
+    assert refused.value.errno == errno.ELOOP
 
 
 def test_what_does_not_exist_cannot_lead_out(tree: tuple[Path, Path]) -> None:
