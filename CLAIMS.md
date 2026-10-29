@@ -3,8 +3,8 @@
 This file takes each sentence of the claim in [PRIVACY.md](PRIVACY.md) and says what backs it.
 
 **Status: no release exists.** Version `0.1.0.dev0` has the catalog, the executor, the local policy, the
-audit log and the local controls. It cannot pair with Lucille or read a request yet, so many tests named
-below do not exist yet.
+audit log, the local controls, and the stores and Switchboard client set-up that pairing will use. It cannot
+pair with Lucille or read a request yet, so many tests named below do not exist yet.
 
 **How to read it.**
 - **Code** names the file that makes the sentence true. "Not written yet" means the code does not exist.
@@ -40,8 +40,13 @@ backstop ([VERIFYING.md](VERIFYING.md) says what each guard cannot see).
   invariant "Nothing Lucille sends can widen what the host permits" (pending, conformance).
 - Note: the AST lint reads this repository's code, not its dependencies'. agent-switchboard 2.6.0's
   `switchboard/client.py`, which the runtime imports, can run `git` to detect an agent's identity.
-  Whether the host's own calls reach that path is not checked yet; invariant "The host's stores and
-  Switchboard footprint are its own" (pending: no subprocess from pairing) is the test for it.
+  `tests/test_store.py` (`test_no_write_under_home_switchboard`) makes the pairing and sharing calls the
+  host will make (accept a code, resolve, touch, accept an offered room, look it up, leave it, forget the
+  pair), the way it will make them (`base=None`, its own stores and its own client factory), against the
+  library's in-process hub, and an audit hook records that none of them starts a process. The `pair` and
+  `run` verbs that will make these calls are not written yet, so invariant "The host's stores and
+  Switchboard footprint are its own" (pending: no subprocess from pairing, through those verbs) is still
+  the test that covers the host itself.
 
 **C2.** "It can run only the operations built into this release (listed in `src/lucille_host/ops/` and by
 `lucille-host ops list`), and only on folders you add."
@@ -169,8 +174,9 @@ changes, and, to within a day, when lucille-host was last running and when your 
 
 **C10.** "Requests and replies travel through Lucille's Switchboard hub, encrypted between your computer and
 Lucille's backend."
-- Code: `src/lucille_host/_switchboard.py` (the one runtime module that imports `switchboard`; stubs in
-  `0.1.0.dev0`); the hub check in `pair` (not written yet).
+- Code: `src/lucille_host/_switchboard.py` (the one runtime module that imports `switchboard`; in
+  `0.1.0.dev0` it holds the host's stores and its client factory, and no verb calls it yet); the hub
+  check in `pair` (not written yet).
 - Tests: `tests/guards/test_switchboard_lint.py` (`switchboard` is imported in one runtime module only,
   as the lint resolves names, through each file's imports and through that module; no `register` or
   invite is used anywhere, and no `share_new` outside the conformance package and the tests); `tests/test_import_graph.py` (the runtime never imports the hub server's `fastapi` or
@@ -289,4 +295,5 @@ These existing tests back the design rather than one sentence of the claim.
 | `tests/test_import_graph.py` | The runtime imports no hub server. (That the base install has none is `pyproject.toml`'s dependency list: the server comes only with the `[conformance]` extra.) The README's "opens no listening port" also needs the pending socket test. |
 | `tests/test_cli.py` | `lucille-host` and `lucille-host --version` print the version, and the version has one source. |
 | `tests/spec/` | The protocol spec, [spec/PROTOCOL.md](spec/PROTOCOL.md): every object in its schemas is closed and every value bounded; each fixture validates, or fails, as labelled, and each request fixture expects the reply the spec's refusal order gives, and the fixtures for each place in each pattern are the ones `tools/spec/gen_fixtures.py` writes; check 3 of the accept policy compares hub URLs as strings with every trailing `/` removed, which is how the pinned agent-switchboard keeps both a pairing code's hub and an offered room's, shown by running the library; the wheel ships the schemas and fixtures, and an installed copy loads them. These test the spec. The host's own checks of steps 5 to 9 are held to the request fixtures by `tests/test_catalog.py`, and its decoding to the decode fixtures by `tests/test_output.py` and `tests/test_exec.py`; its check of the envelope is not written yet. |
-| `tests/test_skeleton.py` | What `0.1.0.dev0` still leaves to later releases: the Switchboard calls `_switchboard.py` names exist in the pinned library, and the conformance suite with no scenarios exits 1 rather than reporting a pass. |
+| `tests/test_store.py`, `tests/test_state.py`, `tests/vendored/test_pairing_store.py` | Part of invariant "The host's stores and Switchboard footprint are its own". The pair and the work rooms' keys are kept in one OS-keyring item per profile, and the pair store over it passes the eight cases of agent-switchboard v2.6.0's own store test that exercise the store under test; under `--store-file`, they are kept in files of mode 0600 in the host's state folder, with a warning that this is weaker. Neither store writes under `~/.switchboard`, and the calls through them start no process. A keyring backend that stores nothing is refused, and the startup checks refuse running as root and any `SWITCHBOARD_*` variable. The stores' locks keep out other threads and other processes, and keyring writes that would only record when something was last used are made at most once an hour. The host's client factory builds no Switchboard client unless `XDG_RUNTIME_DIR` names the host's private runtime folder, and gives each a fresh signing identity. Pending: the planted signer socket, and all of this through the `pair` and `run` verbs, which are not written yet. |
+| `tests/test_skeleton.py` | What the host builds on and `0.1.0.dev0` still leaves to later releases: every part of Switchboard the Switchboard-surface lint allows exists in the pinned library, as do the methods the host calls on what those return, and the managed hub's URL in the library is the host's; the conformance suite with no scenarios exits 1 rather than reporting a pass. |

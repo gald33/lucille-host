@@ -61,8 +61,28 @@ class Dirs:
     state: Path
 
     @property
+    def profile(self) -> str:
+        """The profile's name: the last part of the config directory, on both systems."""
+        return self.config.name
+
+    @property
     def policy_file(self) -> Path:
         return self.config / "policy.toml"
+
+    @property
+    def host_file(self) -> Path:
+        """Which store the pair is kept in, and the loopback hub, if one is configured."""
+        return self.config / "host.json"
+
+    @property
+    def runtime(self) -> Path:
+        """The private folder the host gives Switchboard as ``XDG_RUNTIME_DIR``."""
+        return self.state / "run"
+
+    @property
+    def store_files(self) -> Path:
+        """Where ``--store-file`` keeps the pair and the work rooms' keys, in plain files."""
+        return self.state / "pairs"
 
     @property
     def own(self) -> tuple[Path, ...]:

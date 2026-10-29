@@ -6,12 +6,25 @@ import contextlib
 import subprocess
 import sys
 from collections.abc import Callable, Iterator
+from dataclasses import dataclass
 from pathlib import Path
 
 from lucille_host.jobs import Context
+from lucille_host.paths import Dirs
+from tests._keyring import MemoryKeyring
 
 # make_context(enabled=..., roots=..., log_results=..., audit=...) -> Context
 MakeContext = Callable[..., Context]
+
+
+@dataclass(frozen=True)
+class HostEnv:
+    """What the host_env fixture gives a test: the private home, the default profile's
+    directories in it, and the keyring in memory the host uses."""
+
+    home: Path
+    dirs: Dirs
+    keyring: MemoryKeyring
 
 
 _HOLD = (
@@ -21,6 +34,26 @@ _HOLD = (
     "print('held', flush=True)\n"
     "sys.stdin.read()\n"
 )
+
+
+_TRY = (
+    "import os, sys\n"
+    "descriptor = os.open(sys.argv[1], os.O_RDWR | os.O_CREAT, 0o600)\n"
+    "try:\n"
+    "    os.lockf(descriptor, os.F_TLOCK, 0)\n"
+    "except OSError:\n"
+    "    print('held')\n"
+    "else:\n"
+    "    print('free')\n"
+)
+
+
+def lock_free(lock: Path) -> bool:
+    """Whether another process could take ``lock`` right now."""
+    result = subprocess.run(
+        [sys.executable, "-c", _TRY, str(lock)], capture_output=True, text=True, check=True
+    )
+    return result.stdout == "free\n"
 
 
 @contextlib.contextmanager
