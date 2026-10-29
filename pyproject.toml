@@ -1,0 +1,85 @@
+[build-system]
+# The build backend and its own dependencies are pinned exactly, so a rebuild of a release uses the
+# same build code. uv.lock does not cover build dependencies, so they are pinned here.
+requires = [
+    "hatchling==1.32.4",
+    "packaging==26.3",
+    "pathspec==1.1.1",
+    "pluggy==1.7.0",
+    "tomlkit==0.15.2",
+    "trove-classifiers==2026.9.21.13",
+]
+build-backend = "hatchling.build"
+
+[project]
+name = "lucille-host"
+dynamic = ["version"]
+description = "A small program that will run a closed, reviewed set of named operations on your computer when your paired Lucille account asks. No release yet: this version is a skeleton."
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "lucille-host maintainers" }]
+requires-python = ">=3.11"
+classifiers = [
+    "Development Status :: 2 - Pre-Alpha",
+    "Environment :: Console",
+    "Operating System :: MacOS",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+]
+# Runtime dependencies. uv.lock pins these and everything they pull in to exact versions.
+dependencies = [
+    "agent-switchboard==2.6.*",
+    "keyring>=25",
+]
+
+[project.optional-dependencies]
+# The conformance suite drives a real local hub, which needs Switchboard's server extra.
+# The runtime never imports it (tests/test_import_graph.py).
+conformance = [
+    "agent-switchboard[server]==2.6.*",
+    "starlette>=1.9",
+]
+# Release verification (PEP 740 attestations).
+verify = [
+    "pypi-attestations",
+]
+
+[project.scripts]
+lucille-host = "lucille_host.cli:main"
+
+[project.urls]
+Source = "https://github.com/gald33/lucille-host"
+Issues = "https://github.com/gald33/lucille-host/issues"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3",
+    "pyyaml>=6.0.2",
+    "ruff>=0.15",
+]
+
+[tool.hatch.version]
+# Single source of the version: __version__ in the package.
+path = "src/lucille_host/__init__.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/lucille_host"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# Lets the guard tests import tools.guards from the repository root.
+pythonpath = ["."]
+addopts = ["-ra", "--strict-markers", "--strict-config"]
+xfail_strict = true
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]
