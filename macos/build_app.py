@@ -1,4 +1,5 @@
-"""Build the Lucille Host app for Apple silicon Macs, and a disk image that holds it.
+"""Build Loft, the Mac app that runs the host, for Apple silicon Macs, and a disk image that
+holds it.
 
     uv run --no-project python macos/build_app.py build   # on a Mac: the app and the .dmg
     uv run --no-project python macos/build_app.py plan    # anywhere: check the pins, show the plan
@@ -12,7 +13,7 @@ under ``build/macos/``, which git ignores:
 2. Builds the host's wheel from this checkout (``uv build --wheel``), with a build backend that
    ``macos/build-constraints.txt`` pins by hash (``--build-constraints ... --require-hashes``), and
    exports the runtime dependencies ``uv.lock`` pins, with their hashes (``uv export --frozen``).
-3. Unpacks the runtime into ``Lucille Host.app/Contents/Resources/python``. Keeps one program,
+3. Unpacks the runtime into ``Loft.app/Contents/Resources/python``. Keeps one program,
    ``bin/python3``, and removes what the app never uses (:func:`prune_runtime`). No symbolic link
    is left in the bundle.
 4. Installs the dependencies, then the host wheel, into that interpreter with ``pip install
@@ -25,9 +26,9 @@ under ``build/macos/``, which git ignores:
 7. Signs every Mach-O file in the bundle, innermost first, then the bundle. The signature is ad
    hoc (``codesign -s -``), with the hardened runtime and no entitlements. A signature macOS
    trusts needs a Developer ID and notarization, which this script does not do.
-8. Builds ``Lucille-Host-<version>-<commit>-adhoc-macOS-arm64.dmg``, which holds the app and a
-   link to ``/Applications``. The name says the signature is ad hoc and names the commit, so the
-   image cannot be taken for a release asset.
+8. Builds ``Loft-<version>-<commit>-adhoc-macOS-arm64.dmg``, which holds the app and a link to
+   ``/Applications`` on a volume named after the app. The file name says the signature is ad hoc
+   and names the commit, so the image cannot be taken for a release asset.
 
 ``plan`` reads the pins, the build constraints and the version, and writes the ``Info.plist`` the
 app would get, without running any other program. Exit codes: 0 done, 1 refused or failed, 2
@@ -64,17 +65,30 @@ PYPROJECT: Final = MACOS_DIR.parent / "pyproject.toml"
 SWIFT_DIR: Final = MACOS_DIR / "App"
 VERSION_FILE: Final = REPO_ROOT / "src" / "lucille_host" / "__init__.py"
 DEFAULT_OUT: Final = REPO_ROOT / "build" / "macos"
-# Every disk image this script makes ends with this. A release's image, made elsewhere with a
-# Developer ID signature, will not.
+# Every disk image this script makes starts with DMG_PREFIX and ends with DMG_SUFFIX. A release's
+# image, made elsewhere with a Developer ID signature, will not end so.
+DMG_PREFIX: Final = "Loft-"
 DMG_SUFFIX: Final = "-adhoc-macOS-arm64.dmg"
 
 PBS_RELEASES: Final = "https://github.com/astral-sh/python-build-standalone/releases/download/"
 # Folder and file names inside the runtime. The pins allow Python 3.13 only, so these are fixed.
 STDLIB: Final = "lib/python3.13"
 INTERPRETER: Final = "bin/python3"
-# What the bundle's Info.plist says each time macOS asks the user about a protected folder.
+# What the bundle's Info.plist says each time macOS asks the user about a protected folder: what
+# the app is for, in the sentence the app opens with (HostText.appPurpose). macOS shows it under its
+# own question, which names the app.
 FOLDER_USAGE: Final = (
-    "Lucille Host reads files here only for abilities you turn on, in folders you add."
+    "Loft lets Lucille use only the folders you choose on this Mac, and only for the abilities "
+    "you turn on."
+)
+# The Info.plist keys that hold FOLDER_USAGE: Documents, Desktop, Downloads, and removable and
+# network volumes, the places macOS asks about before the host may read them.
+FOLDER_USAGE_KEYS: Final = (
+    "NSDocumentsFolderUsageDescription",
+    "NSDesktopFolderUsageDescription",
+    "NSDownloadsFolderUsageDescription",
+    "NSRemovableVolumesUsageDescription",
+    "NSNetworkVolumesUsageDescription",
 )
 # Keys an Info.plist of this app must never carry: a scripting surface, Services, network
 # exceptions, or an update feed. The app has none of these.
@@ -237,16 +251,7 @@ def info_plist(pins: Pins, version: str) -> dict[str, Any]:
     """The app's Info.plist. ``LucilleHostVersion`` is the host's exact version; the bundle
     version strings carry its release numbers, because Apple's format allows nothing else."""
     triple = release_triple(version)
-    usage = {
-        key: FOLDER_USAGE
-        for key in (
-            "NSDocumentsFolderUsageDescription",
-            "NSDesktopFolderUsageDescription",
-            "NSDownloadsFolderUsageDescription",
-            "NSRemovableVolumesUsageDescription",
-            "NSNetworkVolumesUsageDescription",
-        )
-    }
+    usage = dict.fromkeys(FOLDER_USAGE_KEYS, FOLDER_USAGE)
     return {
         "CFBundleDevelopmentRegion": "en",
         "CFBundleDisplayName": pins.app_name,
@@ -272,12 +277,12 @@ def dmg_name(version: str, commit: str) -> str:
     signature is ad hoc, so that a build from CI cannot be taken for a release asset."""
     if _COMMIT.fullmatch(commit) is None:
         raise BuildError(f"{commit!r} is not an abbreviated commit id")
-    return f"Lucille-Host-{version}-{commit}{DMG_SUFFIX}"
+    return f"{DMG_PREFIX}{version}-{commit}{DMG_SUFFIX}"
 
 
 def disk_images(out: Path) -> list[Path]:
     """The disk images this script has made in ``out``."""
-    return sorted(out.glob(f"Lucille-Host-*{DMG_SUFFIX}"))
+    return sorted(out.glob(f"{DMG_PREFIX}*{DMG_SUFFIX}"))
 
 
 def _normal_name(name: str) -> str:
@@ -734,7 +739,8 @@ def plan(out: Path) -> None:
     print(f"app               {out / (pins.app_name + '.app')}")
     print(f"bundle id         {pins.bundle_id}, macOS {pins.minimum_macos} or later, arm64")
     print(f"build backend     {len(constraints)} wheels, by hash, from {BUILD_CONSTRAINTS.name}")
-    print(f"disk image        {out}/Lucille-Host-{version}-<commit>{DMG_SUFFIX}")
+    print(f"disk image        {out}/{DMG_PREFIX}{version}-<commit>{DMG_SUFFIX}")
+    print(f"  volume          {pins.app_name}")
     print(f"Info.plist        written to {plist_path}")
 
 
@@ -801,7 +807,7 @@ def build(out: Path, archive: Path | None) -> Path:
 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        prog="build_app.py", description="Build the Lucille Host app and its disk image."
+        prog="build_app.py", description="Build Loft, the Mac app, and its disk image."
     )
     commands = parser.add_subparsers(dest="command", required=True, metavar="COMMAND")
     plan_parser = commands.add_parser("plan", help="check the pins and write the Info.plist only")

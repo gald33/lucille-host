@@ -1,14 +1,18 @@
-# Lucille Host for Mac
+# Loft, by Lucille
+
+Loft is the Mac app for the host. It lets Lucille use only the folders you choose on this Mac, and only
+for the abilities you turn on. It is a menu bar app. Inside it runs the host program, `lucille-host`,
+which keeps its own name, command line and files.
 
 ## Status: a first build, not a release
 
-This folder builds a first, small version of the Mac app. It is not a release and it is not ready for
+This folder builds a first, small version of Loft. It is not a release and it is not ready for
 anyone who is not developing it. It cannot connect to Lucille, because the host cannot pair yet. Its disk
 image is not notarized, so macOS refuses to open it normally (see [The disk image from CI](#the-disk-image-from-ci)).
 
 ## What this builds
 
-- **`Lucille Host.app`**, a menu bar app for Apple silicon Macs with macOS 15 or later. It has no main
+- **`Loft.app`**, a menu bar app for Apple silicon Macs with macOS 15 or later. It has no main
   window and no Dock icon.
 - Inside it, a Python 3.13 runtime from [python-build-standalone](https://github.com/astral-sh/python-build-standalone),
   pinned in [`runtime.toml`](runtime.toml) by its URL and its sha256. The build refuses any other file.
@@ -18,59 +22,64 @@ image is not notarized, so macOS refuses to open it normally (see [The disk imag
 - The host's wheel is built with the build backend that [`build-constraints.txt`](build-constraints.txt)
   pins by hash (`uv build --build-constraints build-constraints.txt --require-hashes`). Those are the
   versions `pyproject.toml`'s `[build-system]` requires, and a test checks that the two agree.
-- **`Lucille-Host-<version>-<commit>-adhoc-macOS-arm64.dmg`**, a disk image that holds the app and a link
-  to the Applications folder. The name says the signature is ad hoc and names the commit, so the image
-  cannot be taken for a release asset.
+- **`Loft-<version>-<commit>-adhoc-macOS-arm64.dmg`**, a disk image whose volume is named Loft. It holds
+  the app and a link to the Applications folder. The file name says the signature is ad hoc and names
+  the commit, so the image cannot be taken for a release asset.
 
 ## What the app does when it opens
 
-The app has no window to show, so when it opens it says where it is: "Lucille Host is in your menu
-bar", and where to click. It says so again whenever it is opened while it runs, for someone who could
-not find the icon. The note offers **Quit Lucille Host** too, because on a crowded menu bar, or beside
-a notch, macOS hides icons that do not fit, and then the menu cannot be reached.
+The app has no window to show, so when it opens it says where it is: "Loft is in your menu bar". The
+note first says what Loft is for, in the sentence above, and then where to click. It says so again
+whenever it is opened while it runs, for someone who could not find the icon. The note offers **Quit
+Loft** too, because on a crowded menu bar, or beside a notch, macOS hides icons that do not fit, and
+then the menu cannot be reached.
 
-The menu bar item is named "Lucille Host", or "Lucille Host, paused", for VoiceOver.
+The menu bar item is named "Loft", or "Loft, paused", for VoiceOver.
+
+When macOS asks whether Loft may access files in Documents, Desktop, Downloads, or on a removable or
+network volume, its question shows the same sentence on what Loft is for. The `Info.plist` holds it
+under each of the five keys macOS reads for those places.
 
 ## What the menu does
 
 | Item | What it runs |
 |---|---|
-| "Lucille Host *version*" | `--version` |
+| "Loft *version*" | `--version` |
 | "Not connected to Lucille" | Nothing. The host cannot pair yet, so this Mac is never connected. When the host is paused, the line reads "Not connected to Lucille · Paused", from the pause flag the host keeps (see below), a line under it says that Lucille's requests are turned away until you resume, and the icon changes. |
 | Pause Lucille / Resume Lucille | `pause` / `resume` |
 | Abilities | `ops list`. Each ability shows in a few plain words, such as "Check a file's fingerprint", with a checkmark when it is enabled, and a sentence under it says what Lucille gets: "Lucille gets a code that identifies one file's exact contents, not the contents." Choosing one runs `ops enable` or `ops disable`. `host.sleep`, which is for testing, is not listed. Nor is `host.describe`; while it is on, the menu says what it shares once connected. |
 | Add a Folder… | See below. |
 | Folders | `roots list`. Each folder has a **Remove** item, which runs `roots remove <alias>`. |
 | Connect to Lucille (coming soon) | Nothing. It is disabled. |
-| Quit Lucille Host | Quits the app. |
+| Quit Loft | Quits the app. |
 
-**Add a Folder…** opens the standard Open panel, whose button reads "Allow Lucille Host to Use This
-Folder". If the folder chosen is the home folder, holds it, or is the whole disk, the app first says
-which, and what is inside, with **Choose a Smaller Folder** as the default button; that button opens the
-Open panel again. Then the app asks for the name Lucille will see, suggesting one made from the folder's
+**Add a Folder…** opens the standard Open panel, whose button reads "Allow Loft to Use This Folder".
+If the folder chosen is the home folder, holds it, or is the whole disk, the app first says which, and
+what is inside, with **Choose a Smaller Folder** as the default button; that button opens the Open panel
+again. Then the app asks for the name Lucille will see, suggesting one made from the folder's
 name that no other folder uses: written in Latin letters where macOS can, so that `日本語` gives
 `ri-ben-yu`, with `folder-` put first when it starts with a digit (`2026 Taxes` gives
 `folder-2026-taxes`), and `-2`, `-3` added when it is taken. A name the host would refuse is turned into
 one it accepts, and shown again before anything is added.
 
 The same dialog says what macOS may ask next. For a folder in Documents, Desktop or Downloads, or on
-another drive, it says that macOS may ask whether Lucille Host can access it, and to click Allow. For a
+another drive, it says that macOS may ask whether Loft can access it, and to click Allow. For a
 folder in iCloud Drive or another cloud folder, it says that such folders may not work yet.
 
 Then the app runs `roots add <alias> <path>`, with `--allow-home-or-root` only if the user chose Add
 Anyway. If that takes more than a moment (a network drive, or a question from macOS), a small window with
 a **Cancel** button shows; Cancel stops the run. On success the app says that once this Mac is
 connected, Lucille can use the folder for the abilities the user turns on. If the host found no folder
-there but the app can see one, or macOS refuses the app too, the app says that macOS is blocking Lucille
-Host from the folder, and where in System Settings to allow it.
+there but the app can see one, or macOS refuses the app too, the app says that macOS is blocking Loft
+from the folder, and where in System Settings to allow it.
 
 The menu reads the host's state again each time it opens. When the host cannot be read, the menu says
 so ("Couldn't read your folders") instead of showing an empty list, and a short line at the top names the
 problem; choosing it shows the details. When a verb fails, the app says why in a plain sentence for each
 refusal it knows from the host's command line (a name already in use, the 64-folder limit, the host's own
 folder, an unreadable settings file, and the others in `App/HostText.swift`), and shows the host's own
-words as a detail. A refusal it does not know reads "Something went wrong in Lucille Host's helper
-program", with the host's words as the detail.
+words as a detail. A refusal it does not know reads "Something went wrong in Loft's helper program",
+with the host's words as the detail.
 
 Pause, Resume, the ability switches and Remove show the same window with a **Cancel** button when they
 take more than a moment. A run the app gave up on (see below) may still hold the lock the host takes to
@@ -193,7 +202,7 @@ secret. A check that finds a problem fails the build.
 | `links` | Every library a Mach-O file loads is macOS's own (`/usr/lib/`, `/System/Library/`), or resolves to a file that exists inside the bundle. `@loader_path`, `@executable_path` and `@rpath` are resolved as dyld resolves them, `..` included, so a path that climbs out of the bundle, and a library the build removed, both fail. Every run path must resolve inside the bundle. The log shows where each library and run path resolves. No Mach-O file needs a newer macOS than the app's minimum, and no file holds the build folder's path. The app's executable imports nothing on the lists above. |
 | `signature` | The signature is valid after the runs above, on the app and on each Mach-O file in it; every Mach-O file has the hardened runtime, and nothing has entitlements. |
 | `launch` | The app opens the way Finder opens it, and is still running 10 seconds later. |
-| `ui` | Driven through System Events as a user would: the app says where its menu is when it opens, and again when it is opened while it runs; the menu bar item's title or description, which VoiceOver reads as its name, is "Lucille Host" (its tooltip does not count); the menu shows the version, "Not connected to Lucille" and every item, and lists abilities in plain words, each with its sentence on what Lucille gets; Pause Lucille and Resume Lucille change the host's pause flag, the status line and the menu bar item's name; an ability switches on, shows a checkmark, and switches off; Add a Folder… goes through the Open panel and the name dialog, where a typed name the host would refuse comes back corrected, and adds the folder; Remove in the Folders submenu removes it; the home folder brings up the question first, Choose a Smaller Folder goes back to the Open panel, and Add Anyway adds it. Each step is checked against what the host's command line then reports. With `--require-driven`, as CI runs it, a machine where System Events cannot drive the app fails the check. Screenshots are kept as the artifact `lucille-host-macos-screenshots`. |
+| `ui` | Driven through System Events as a user would: the app says what it is for and where its menu is when it opens, and again when it is opened while it runs; the menu bar item's title or description, which VoiceOver reads as its name, is "Loft" (its tooltip does not count); the menu shows the version, "Not connected to Lucille" and every item, and lists abilities in plain words, each with its sentence on what Lucille gets; Pause Lucille and Resume Lucille change the host's pause flag, the status line and the menu bar item's name; an ability switches on, shows a checkmark, and switches off; Add a Folder… goes through the Open panel and the name dialog, where a typed name the host would refuse comes back corrected, and adds the folder; Remove in the Folders submenu removes it; the home folder brings up the question first, Choose a Smaller Folder goes back to the Open panel, and Add Anyway adds it. Each step is checked against what the host's command line then reports. With `--require-driven`, as CI runs it, a machine where System Events cannot drive the app fails the check. Screenshots are kept as the artifact `loft-macos-screenshots`. |
 | `gatekeeper` | Prints `spctl`'s verdict. It is "rejected", as expected for an ad hoc signature, and does not fail the build. |
 | `dmg` | Exactly one disk image was built, its name ends `-adhoc-macOS-arm64.dmg`, and it verifies, mounts, and holds the app, with a valid signature, and a link to `/Applications`. |
 | test suite | The host's whole test suite passes on the trimmed runtime. |
@@ -204,19 +213,20 @@ CI adds its folders under the home folder, where macOS asks nothing. These need 
 none has been done yet:
 
 - **A folder in Documents, Desktop or Downloads.** Whether macOS asks at all after the Open panel,
-  whether its question names Lucille Host rather than `python3`, and whether the folder is added after
-  Allow. After Don't Allow, whether the app says that macOS is blocking it, and whether System Settings,
-  Privacy & Security, Files & Folders then shows a switch under Lucille Host.
+  whether its question names Loft rather than `python3` and shows Loft's sentence on what it is for,
+  and whether the folder is added after Allow. After Don't Allow, whether the app says that macOS is
+  blocking it, and whether System Settings, Privacy & Security, Files & Folders then shows a switch
+  under Loft.
 - **A folder on an external or network drive, and one in iCloud Drive.**
 - **A stalled network drive.** Whether Cancel works, and whether the menu then says a folder check is
   stuck.
-- **VoiceOver.** Whether it reads the menu bar item as "Lucille Host", and "Lucille Host, paused".
+- **VoiceOver.** Whether it reads the menu bar item as "Loft", and "Loft, paused".
 - **A full menu bar, or one beside a notch,** where macOS hides the icon.
 
 ## The disk image from CI
 
 The `macos-app` workflow uploads the disk image as the artifact
-`lucille-host-adhoc-macos-arm64-dmg-<event>-<commit>`, and keeps it for 7 days. It does so only when every
+`loft-adhoc-macos-arm64-dmg-<event>-<commit>`, and keeps it for 7 days. It does so only when every
 check passed.
 
 This workflow's own copy skips the upload for a pull request opened from a fork. That does not stop a
@@ -271,9 +281,10 @@ The design may change each of these.
   first build; the design may change it.
 - **Python lives in `Contents/Resources/python`.** If notarization objects to code there, see "Not done
   yet" for the two ways out.
-- **The bundle identifier `com.lucille-ai.host` is a placeholder.** It must be final before the first
-  signed release, because changing it later makes macOS ask the user again about every folder and
-  Keychain item.
+- **The app is named Loft, with the bundle identifier `com.lucille-ai.loft`.** Only the app has the new
+  name: the host program inside is still `lucille-host`, with its folder at
+  `~/Library/Application Support/lucille-host`. The identifier must not change after the first signed
+  release, because changing it makes macOS ask the user again about every folder and Keychain item.
 - **`CFBundleShortVersionString` holds the version's release numbers** (`0.1.0` for `0.1.0.dev0`), because
   Apple allows only three numbers there. The exact version is in the `LucilleHostVersion` key, and in the
   menu.

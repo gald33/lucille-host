@@ -1,4 +1,4 @@
-"""Checks on a built Lucille Host app. CI runs each one on a macOS runner after build_app.py.
+"""Checks on a built Loft app. CI runs each one on a macOS runner after build_app.py.
 
     uv run --no-project python macos/check_app.py CHECK [--out build/macos]
 
@@ -29,12 +29,12 @@ Each check prints what it saw and exits 1 if anything is wrong:
 - ``launch``: opens the app the way Finder does, checks that it is still running 10 seconds later,
   then stops it.
 - ``ui``: opens the app and drives it as a user would, through System Events: reads the note
-  that says where the menu is, when the app opens and when it is opened again; reads the menu bar
-  item's name and the menu; chooses Pause Lucille, then Resume Lucille, and reads the name again;
-  switches an ability on and off; adds a folder
-  through the Open panel and the name dialog, with a name the app must correct first, and removes
-  it from the Folders submenu; chooses the home folder, which the app asks about first, picks
-  Choose a Smaller Folder once, then adds it. It checks each step against the host's own state.
+  that says what the app is for and where the menu is, when the app opens and when it is opened
+  again; reads the menu bar item's name and the menu; chooses Pause Lucille, then Resume Lucille,
+  and reads the name again; switches an ability on and off; adds a folder through the Open panel
+  and the name dialog, with a name the app must correct first, and removes it from the Folders
+  submenu; chooses the home folder, which the app asks about first, picks Choose a Smaller Folder
+  once, then adds it. It checks each step against the host's own state.
   It uses the real HOME and leaves the host as it found it. Where macOS does not let System Events
   drive other apps, it says so and drives nothing, which is a failure with ``--require-driven``
   (CI passes it). Screenshots go to ``check/screens``.
@@ -148,18 +148,20 @@ FORBIDDEN_LIBRARIES: Final = (
 )
 # The app's words that the ui check looks for, as in App/HostText.swift and App/HostModel.swift
 # (tests/test_macos_build.py checks that they agree): each listed ability's name and what Lucille
-# gets from it, the note the app shows when it opens, the menu's line while paused, the menu bar
-# item's name, and the Open panel's button.
+# gets from it, the note the app shows when it opens and the sentence in it on what the app is for
+# (the same sentence the Info.plist gives macOS), the menu's line while paused, the menu bar item's
+# name, and the Open panel's button.
 ABILITY_TITLES: Final = {"files.sha256": "Check a file's fingerprint"}
 ABILITY_DETAILS: Final = {
     "files.sha256": (
         "Lucille gets a code that identifies one file's exact contents, not the contents."
     )
 }
-WELCOME_TITLE: Final = "Lucille Host is in your menu bar"
+WELCOME_TITLE: Final = "Loft is in your menu bar"
+PURPOSE: Final = build_app.FOLDER_USAGE
 PAUSED_NOTE: Final = "Lucille's requests are turned away until you resume."
-STATUS_ITEM_NAMES: Final = ("Lucille Host", "Lucille Host, paused")
-OPEN_PROMPT: Final = "Allow Lucille Host to Use This Folder"
+STATUS_ITEM_NAMES: Final = ("Loft", "Loft, paused")
+OPEN_PROMPT: Final = "Allow Loft to Use This Folder"
 # Loads the native code of the runtime dependencies, the way the host will.
 NATIVE_PROBE: Final = """\
 import sys
@@ -697,7 +699,7 @@ MENU_ITEMS: Final = (
     "Add a Folder…",
     "Folders",
     "Connect to Lucille (coming soon)",
-    "Quit Lucille Host",
+    "Quit Loft",
 )
 # The menu's status line. Pairing is not built, so the Mac is never connected.
 NOT_CONNECTED: Final = "Not connected to Lucille"
@@ -786,7 +788,7 @@ def _named(item: dict[str, str], name: str) -> bool:
 
 
 def _welcome(checker: Checker, shot: Path, when: str) -> None:
-    """The app shows a note that says where its menu is; read it, and choose OK."""
+    """Read the note that says what the app is for and where its menu is, and choose OK."""
     texts: list[str] = []
 
     def shown() -> bool:
@@ -799,6 +801,11 @@ def _welcome(checker: Checker, shot: Path, when: str) -> None:
     checker.expect(
         found and any("by the clock" in text for text in texts),
         f"{when}, the app says where its menu is",
+        f"{texts}",
+    )
+    checker.expect(
+        found and any(PURPOSE in text for text in texts),
+        f"{when}, the app says what it is for",
         f"{texts}",
     )
     worked, said = _system_events('click button "OK" of window 1')
@@ -850,7 +857,7 @@ def _drive_menu(checker: Checker, screens: Path, flag: Path) -> bool:
     print(f"the Abilities submenu shows: {listed if worked else abilities}")
     _system_events("key code 53")
     checker.expect(
-        shown[:1] == [f"Lucille Host {version}"],
+        shown[:1] == [f"Loft {version}"],
         "the menu's first line names the version",
         f"{shown}",
     )
@@ -1146,10 +1153,10 @@ def _drive_folders(checker: Checker, python: Path, screens: Path) -> None:
 
 def check_ui(app: Path, checker: Checker, work: Path, require_driven: bool = False) -> None:
     """Open the app and drive it the way a user would, through System Events: read the note that
-    says where its menu is, when it opens and when it is opened again; read the menu;
-    choose Pause Lucille and Resume Lucille, and watch the host's pause flag; switch an ability on
-    and off; add a folder through the Open panel and the name dialog, and remove it from the
-    Folders submenu; add the home folder, which the app asks about first. Each step is checked
+    says what it is for and where its menu is, when it opens and when it is opened again; read the
+    menu; choose Pause Lucille and Resume Lucille, and watch the host's pause flag; switch an
+    ability on and off; add a folder through the Open panel and the name dialog, and remove it from
+    the Folders submenu; add the home folder, which the app asks about first. Each step is checked
     against the host's own state. It uses the real HOME, and leaves the host as it found it. Where
     macOS does not let System Events drive other apps (no accessibility permission), it says so
     and drives nothing; with ``require_driven`` that is a failure. Screenshots go to

@@ -38,7 +38,7 @@ struct Ability: Equatable, Identifiable, Sendable {
             return "This Mac lacks a program it needs."
         }
         if state.hasPrefix("in the policy") {
-            return "Not in this version of Lucille Host."
+            return "Not in this version of Loft."
         }
         return state
     }
@@ -108,12 +108,17 @@ enum HostText {
     /// and is described in the menu instead, and `host.sleep`, which is for testing.
     static let unlistedAbilities: Set<String> = ["host.describe", "host.sleep"]
 
+    /// What the app is for, in one sentence, for someone who does not know it.
+    static let appPurpose = "Loft lets Lucille use only the folders you choose on this Mac, and only for the abilities you turn on."
+
     /// What the app says when it opens, and when it is opened again while it runs: it has no
     /// window and no Dock icon, so otherwise nothing would seem to happen.
-    static let welcomeTitle = "Lucille Host is in your menu bar"
+    static let welcomeTitle = "Loft is in your menu bar"
     static let welcomeText = """
+        \(appPurpose)
+
         Click its icon near the top right of your screen, by the clock: a small computer, or a \
-        pause sign while Lucille is paused. Everything Lucille Host does is in that menu.
+        pause sign while Lucille is paused. Everything Loft does is in that menu.
 
         If you can't see the icon, your menu bar may be too full. Quit another app that has an \
         icon there, and it will show.
@@ -121,7 +126,7 @@ enum HostText {
 
     /// The menu bar item's name, which VoiceOver reads.
     static func statusItemName(paused: Bool) -> String {
-        paused ? "Lucille Host, paused" : "Lucille Host"
+        paused ? "Loft, paused" : "Loft"
     }
 
     /// The menu's line while Lucille is paused.
@@ -134,11 +139,11 @@ enum HostText {
     }
 
     /// What the app says when macOS's privacy protection kept the host from a folder.
-    static let blockedByMacOS = "macOS is blocking Lucille Host from this folder. To allow it, open System Settings, choose Privacy & Security, then Files & Folders, and turn on the switch for this folder's location under Lucille Host. Then add the folder again."
+    static let blockedByMacOS = "macOS is blocking Loft from this folder. To allow it, open System Settings, choose Privacy & Security, then Files & Folders, and turn on the switch for this folder's location under Loft. Then add the folder again."
 
     /// What the app says while a run it stopped waiting for has still not ended. It may hold the
     /// host's policy lock, so every change to folders and abilities waits for it.
-    static let stuckRun = "A folder check is still stuck, probably on a network or external drive that stopped answering. Until it ends, Lucille Host can't change its folders or abilities. Reconnect the drive, or restart your Mac, then try again."
+    static let stuckRun = "A folder check is still stuck, probably on a network or external drive that stopped answering. Until it ends, Loft can't change its folders or abilities. Reconnect the drive, or restart your Mac, then try again."
 
     /// "lucille-host 0.1.0" gives "0.1.0".
     static func version(fromVersionOutput text: String) -> String? {
@@ -233,12 +238,12 @@ enum HostText {
         let rules = "Use lowercase letters, digits, - and _, up to \(Alias.maxLength) characters."
         var ask: String?
         if let protected = place.protectedFolder {
-            ask = "macOS may then ask whether Lucille Host can access files in your \(protected) folder. Click Allow, or the folder can't be added."
+            ask = "macOS may then ask whether Loft can access files in your \(protected) folder. Click Allow, or the folder can't be added."
         } else if place.onOtherDrive {
-            ask = "macOS may then ask whether Lucille Host can access files on a removable or network volume. Click Allow, or the folder can't be added."
+            ask = "macOS may then ask whether Loft can access files on a removable or network volume. Click Allow, or the folder can't be added."
         }
         let cloud = place.inCloud
-            ? "This folder is in iCloud Drive or another cloud folder. Folders there may not work with Lucille Host yet."
+            ? "This folder is in iCloud Drive or another cloud folder. Folders there may not work with Loft yet."
             : nil
         return [note, purpose, rules, ask, cloud].compactMap { $0 }.joined(separator: "\n\n")
     }
@@ -273,7 +278,7 @@ enum HostText {
         _ result: CLIResult, during activity: Activity = .other, earlierRunStuck: Bool = false
     ) -> Explanation {
         if result.status == CLIResult.notStarted {
-            return Explanation(message: "Lucille Host is damaged. Download it again.", detail: result.stderr)
+            return Explanation(message: "Loft is damaged. Download it again.", detail: result.stderr)
         }
         if result.status == CLIResult.notFinished || (earlierRunStuck && (result.timedOut || result.cancelled)) {
             return Explanation(message: stuckRun, detail: nil)
@@ -282,9 +287,9 @@ enum HostText {
             let message: String
             switch activity {
             case .addingFolder:
-                message = "Checking this folder took too long. If macOS asked whether Lucille Host can access it, answer, then add the folder again. If it is on a network or external drive, check that it is connected."
+                message = "Checking this folder took too long. If macOS asked whether Loft can access it, answer, then add the folder again. If it is on a network or external drive, check that it is connected."
             case .other:
-                message = "Lucille Host's helper program did not answer in time, so it was stopped."
+                message = "Loft's helper program did not answer in time, so it was stopped."
             }
             return Explanation(message: message, detail: nil)
         }
@@ -294,7 +299,7 @@ enum HostText {
         let reason = reasons(result.stderr)
         guard !reason.isEmpty else {
             return Explanation(
-                message: "Something went wrong in Lucille Host's helper program.",
+                message: "Something went wrong in Loft's helper program.",
                 detail: "It stopped with exit status \(result.status)."
             )
         }
@@ -339,10 +344,10 @@ enum HostText {
         }
         if reason.hasPrefix("the policy holds at most ") {
             let limit = reason.dropFirst("the policy holds at most ".count).prefix { $0.isNumber }
-            return "Lucille Host can use at most \(limit) folders. Remove one before you add another."
+            return "Loft can use at most \(limit) folders. Remove one before you add another."
         }
         if reason.hasSuffix(" is where lucille-host keeps its own files") {
-            return "That folder holds Lucille Host's own settings, so it can't be added."
+            return "That folder holds Loft's own settings, so it can't be added."
         }
         if reason.hasSuffix(" is not a folder") {
             return seenByApp ? blockedByMacOS : "That folder is no longer there."
@@ -351,10 +356,10 @@ enum HostText {
             return blockedByMacOS
         }
         if reason.hasPrefix("the policy file ") && reason.contains(" is invalid: ") {
-            return "Lucille Host's settings file can't be read."
+            return "Loft's settings file can't be read."
         }
         if reason.hasPrefix("cannot lock ") {
-            return "Lucille Host couldn't lock its settings file, so nothing was changed. Try again."
+            return "Loft couldn't lock its settings file, so nothing was changed. Try again."
         }
         if reason.hasPrefix("no folder alias ") {
             return "That folder was already removed."
@@ -363,7 +368,7 @@ enum HostText {
             return "That ability was already off."
         }
         if reason.hasSuffix(" is not in this release's catalog") {
-            return "This version of Lucille Host doesn't have that ability."
+            return "This version of Loft doesn't have that ability."
         }
         if reason.contains(" cannot run here: ") {
             return "This Mac lacks a program that ability needs."
@@ -374,7 +379,7 @@ enum HostText {
         if reason.contains("--allow-home-or-root") {
             return "That folder is your home folder, holds it, or is your whole disk."
         }
-        return "Something went wrong in Lucille Host's helper program."
+        return "Something went wrong in Loft's helper program."
     }
 
     private static func standardized(_ path: String) -> String {

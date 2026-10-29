@@ -76,15 +76,15 @@ jobs:
       - name: "Check: the host's test suite passes on the pruned runtime"
         if: ${{ !cancelled() }}
         run: |
-          copy="$RUNNER_TEMP/pruned/Lucille Host.app"
+          copy="$RUNNER_TEMP/pruned/Loft.app"
           mkdir -p "$RUNNER_TEMP/pruned"
-          ditto "build/macos/Lucille Host.app" "$copy"
+          ditto "build/macos/Loft.app" "$copy"
           python="$copy/Contents/Resources/python/bin/python3"
           export UV_PROJECT_ENVIRONMENT="$RUNNER_TEMP/pruned-venv"
           uv venv --python "$python" "$UV_PROJECT_ENVIRONMENT"
           uv sync --locked --extra conformance --python "$UV_PROJECT_ENVIRONMENT/bin/python"
           uv run --no-sync python -c "import sys; print(sys.version); print(sys.base_prefix)"
-          uv run --no-sync python -c "import sys; assert 'Lucille Host.app' in sys.base_prefix"
+          uv run --no-sync python -c "import sys; assert 'Loft.app' in sys.base_prefix"
           uv run --no-sync pytest -q
       # Only from a build whose every check passed. This copy of the workflow also skips it for a
       # pull request from a fork, but such a pull request runs the fork's own copy of this file,
@@ -95,7 +95,7 @@ jobs:
         if: ${{ success() && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: lucille-host-adhoc-macos-arm64-dmg-${{ github.event_name }}-${{ github.event.pull_request.head.sha || github.sha }}
+          name: loft-adhoc-macos-arm64-dmg-${{ github.event_name }}-${{ github.event.pull_request.head.sha || github.sha }}
           path: build/macos/*-adhoc-macOS-arm64.dmg
           if-no-files-found: error
           retention-days: 7
@@ -103,7 +103,7 @@ jobs:
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: lucille-host-macos-screenshots
+          name: loft-macos-screenshots
           path: build/macos/check/screens/*.png
           if-no-files-found: warn
           retention-days: 7

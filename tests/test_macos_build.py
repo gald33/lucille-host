@@ -37,7 +37,8 @@ def test_the_pins_are_well_formed() -> None:
     assert pins.url.startswith(build_app.PBS_RELEASES)
     assert pins.url.endswith("/" + pins.asset.replace("+", "%2B"))
     assert re.fullmatch(r"[0-9a-f]{64}", pins.sha256)
-    assert pins.app_name == "Lucille Host"
+    assert pins.app_name == "Loft"
+    assert pins.bundle_id == "com.lucille-ai.loft"
     assert pins.minimum_macos == "15.0"
 
 
@@ -54,7 +55,8 @@ def test_the_pins_are_well_formed() -> None:
             'x86_64-apple-darwin-install_only_stripped.tar.gz"\nurl',
         ),
         ('minimum_macos = "15.0"', 'minimum_macos = "12.0"'),
-        ('bundle_id = "com.lucille-ai.host"', 'bundle_id = "Lucille Host"'),
+        ('bundle_id = "com.lucille-ai.loft"', 'bundle_id = "Loft"'),
+        ('name = "Loft"', 'name = "Loft/Loft"'),
         ('category = "public.app-category.utilities"', 'category = "utilities"'),
         ("[app]", '[app]\nextra = "x"'),
         ("[app]", "[apps]"),
@@ -128,6 +130,25 @@ def test_info_plist() -> None:
     for text in usage.values():
         assert not re.search(r"\b(safe|secure|private|protect)", text, re.IGNORECASE)
     assert plistlib.loads(plistlib.dumps(plist)) == plist
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        "NSDocumentsFolderUsageDescription",
+        "NSDesktopFolderUsageDescription",
+        "NSDownloadsFolderUsageDescription",
+        "NSRemovableVolumesUsageDescription",
+        "NSNetworkVolumesUsageDescription",
+    ],
+)
+def test_each_folder_question_says_what_the_app_is_for(key: str) -> None:
+    # macOS shows this text under its question about a protected folder or volume. It names
+    # Lucille and says that the user chooses.
+    text = build_app.info_plist(build_app.load_pins(), "0.1.0")[key]
+    assert isinstance(text, str) and text.strip()
+    assert text.startswith(f"{build_app.load_pins().app_name} lets Lucille ")
+    assert "the folders you choose" in text and "abilities you turn on" in text
 
 
 def test_plan_writes_the_info_plist(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
@@ -411,6 +432,34 @@ def test_the_ui_check_looks_for_the_apps_own_words() -> None:
     assert '"Once this Mac is connected to Lucille, Lucille can use' in text
     source = (build_app.MACOS_DIR / "check_app.py").read_text(encoding="utf-8")
     assert source.count('"Once this Mac is connected to Lucille"') == 2
+    # The welcome note says what the app is for in the sentence macOS's folder questions show.
+    assert f'static let appPurpose = "{check_app.PURPOSE}"' in text
+    assert "        \\(appPurpose)\n\n" in text
+
+
+def test_the_app_and_its_checks_use_the_apps_name() -> None:
+    name = build_app.load_pins().app_name
+    model = (build_app.SWIFT_DIR / "HostModel.swift").read_text(encoding="utf-8")
+    app = (build_app.SWIFT_DIR / "LoftApp.swift").read_text(encoding="utf-8")
+    assert check_app.WELCOME_TITLE == f"{name} is in your menu bar"
+    assert check_app.STATUS_ITEM_NAMES == (name, f"{name}, paused")
+    assert check_app.OPEN_PROMPT == f"Allow {name} to Use This Folder"
+    assert f"Quit {name}" in check_app.MENU_ITEMS
+    assert app.count(f'"Quit {name}"') == 2
+    assert f'version.map {{ "{name} \\($0)" }} ?? "{name}"' in model
+    assert check_app.PURPOSE.startswith(f"{name} lets Lucille ")
+    # The app's earlier name is gone from what the app shows and what checks it. The host
+    # program inside keeps its own name, lucille-host.
+    for path in [
+        *SWIFT_FILES,
+        build_app.MACOS_DIR / "Tests" / "SelfTest.swift",
+        build_app.MACOS_DIR / "build_app.py",
+        build_app.MACOS_DIR / "check_app.py",
+        build_app.MACOS_DIR / "README.md",
+        build_app.PINS_FILE,
+        WORKFLOW,
+    ]:
+        assert "Lucille Host" not in path.read_text(encoding="utf-8"), path
 
 
 def _constraints_with(old: str, new: str) -> str:
@@ -486,9 +535,9 @@ def test_the_wheel_is_built_with_the_hashed_build_backend(tmp_path: Path) -> Non
 
 def test_the_disk_image_name_says_it_is_ad_hoc() -> None:
     name = build_app.dmg_name("0.1.0", "4466aba0c0de")
-    assert name == "Lucille-Host-0.1.0-4466aba0c0de-adhoc-macOS-arm64.dmg"
+    assert name == "Loft-0.1.0-4466aba0c0de-adhoc-macOS-arm64.dmg"
     assert name.endswith(build_app.DMG_SUFFIX)
-    assert name != "Lucille-Host-0.1.0-macOS-arm64.dmg"
+    assert name != "Loft-0.1.0-macOS-arm64.dmg"
     for commit in ("", "HEAD", "4466ABA", "4466ab", "../x"):
         with pytest.raises(build_app.BuildError):
             build_app.dmg_name("0.1.0", commit)
@@ -497,7 +546,7 @@ def test_the_disk_image_name_says_it_is_ad_hoc() -> None:
 def test_only_this_scripts_disk_images_are_found(tmp_path: Path) -> None:
     ours = tmp_path / build_app.dmg_name("0.1.0", "abcdef1")
     ours.write_bytes(b"")
-    (tmp_path / "Lucille-Host-0.1.0-macOS-arm64.dmg").write_bytes(b"")
+    (tmp_path / "Loft-0.1.0-macOS-arm64.dmg").write_bytes(b"")
     (tmp_path / "other.dmg").write_bytes(b"")
     assert build_app.disk_images(tmp_path) == [ours]
 
@@ -520,7 +569,7 @@ def test_the_workflow_uploads_the_disk_image_only_from_a_good_build_of_this_repo
     # The name says the signature is ad hoc, and which event and commit built it, so an artifact
     # from a pull request never has the name of one from a push.
     assert upload["with"]["name"] == (
-        "lucille-host-adhoc-macos-arm64-dmg-${{ github.event_name }}-"
+        "loft-adhoc-macos-arm64-dmg-${{ github.event_name }}-"
         "${{ github.event.pull_request.head.sha || github.sha }}"
     )
 
@@ -645,7 +694,7 @@ def test_the_libraries_and_run_paths_are_read_from_the_load_commands() -> None:
 def _bundle(tmp_path: Path) -> tuple[Path, Path, Path]:
     """A bundle laid out like the app's, with a space in its name: the interpreter, one extension
     module, and one library kept in ``lib/``."""
-    app = tmp_path / "Lucille Host.app"
+    app = tmp_path / "Loft.app"
     python_dir = app / "Contents" / "Resources" / "python"
     dynload = python_dir / "lib" / "python3.13" / "lib-dynload"
     dynload.mkdir(parents=True)
@@ -722,11 +771,11 @@ def test_libraries_that_do_not_resolve_inside_the_bundle_fail(
 
 def test_only_the_title_or_description_names_the_menu_bar_item() -> None:
     # What System Events reported when only the tooltip carried the name.
-    tooltip_only = {"title": "Computer", "description": "status menu", "help": "Lucille Host"}
-    assert not check_app._named(tooltip_only, "Lucille Host")
-    assert check_app._named({**tooltip_only, "title": "Lucille Host"}, "Lucille Host")
-    assert check_app._named({"description": "Lucille Host, paused"}, "Lucille Host, paused")
-    assert not check_app._named({}, "Lucille Host")
+    tooltip_only = {"title": "Computer", "description": "status menu", "help": "Loft"}
+    assert not check_app._named(tooltip_only, "Loft")
+    assert check_app._named({**tooltip_only, "title": "Loft"}, "Loft")
+    assert check_app._named({"description": "Loft, paused"}, "Loft, paused")
+    assert not check_app._named({}, "Loft")
 
 
 @pytest.mark.parametrize(

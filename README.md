@@ -100,7 +100,7 @@ This repository proves only the host's side. The full design is
 | [spec/](spec/) | The protocol between Lucille and the host, `lucille.exec/1`: [PROTOCOL.md](spec/PROTOCOL.md) and its changelog. A draft; no release implements it yet. |
 | `src/lucille_host/spec/` | The protocol's JSON Schemas and golden fixtures, which ship in the wheel. |
 | `tools/guards/` | Checks CI runs on every change. They catch accidental and casual violations; they are not a sandbox or a defence against a determined author, and maintainer review of every pull request is the backstop. [VERIFYING.md](VERIFYING.md) describes each one and what it cannot see. |
-| [macos/](macos/README.md) | A first build of the Mac app: a menu bar app that drives the host's command line, and the scripts that build and check it. Not a release. |
+| [macos/](macos/README.md) | A first build of Loft, the Mac app, which lets Lucille use only the folders you choose: a menu bar app that drives the host's command line, and the scripts that build and check it. Not a release. |
 | [PRIVACY.md](PRIVACY.md) | The claim, and what this project must never claim. |
 | [CLAIMS.md](CLAIMS.md) | Each sentence of the claim, mapped to its code and test. |
 | [THREAT_MODEL.md](THREAT_MODEL.md) | What the host defends against, and what is left. |

@@ -59,7 +59,7 @@ enum Alias {
         let fixed = suggest(forFolderName: name, taken: taken)
         return .offer(
             fixed,
-            because: "Lucille Host changed \u{201C}\(name)\u{201D} to \u{201C}\(fixed)\u{201D}, a name it can use. Add it, or change it."
+            because: "Loft changed \u{201C}\(name)\u{201D} to \u{201C}\(fixed)\u{201D}, a name it can use. Add it, or change it."
         )
     }
 

@@ -1,10 +1,10 @@
 import AppKit
 import SwiftUI
 
-/// Lucille Host's menu bar app. It has no window and no Dock icon (LSUIElement); everything it
-/// does is in this menu.
+/// Loft, the menu bar app that runs the host. It has no window and no Dock icon (LSUIElement);
+/// everything it does is in this menu.
 @main
-struct LucilleHostApp: App {
+struct LoftApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @StateObject private var model = HostModel()
 
@@ -18,9 +18,9 @@ struct LucilleHostApp: App {
     }
 }
 
-/// Says where the menu is when the app opens, and when it is opened again while it runs: it has
-/// no window and no Dock icon, so otherwise nothing would seem to happen. Quit is offered too,
-/// for when the menu bar has no room for the icon.
+/// Says what the app is for and where the menu is when the app opens, and when it is opened again
+/// while it runs: it has no window and no Dock icon, so otherwise nothing would seem to happen.
+/// Quit is offered too, for when the menu bar has no room for the icon.
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var showing = false
@@ -47,7 +47,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         alert.messageText = HostText.welcomeTitle
         alert.informativeText = HostText.welcomeText
         alert.addButton(withTitle: "OK")
-        alert.addButton(withTitle: "Quit Lucille Host")
+        alert.addButton(withTitle: "Quit Loft")
         NSApp.activate()
         if alert.runModal() == .alertSecondButtonReturn {
             NSApplication.shared.terminate(nil)
@@ -122,7 +122,7 @@ struct HostMenu: View {
         Button("Connect to Lucille (coming soon)") {}
             .disabled(true)
         Divider()
-        Button("Quit Lucille Host") { NSApplication.shared.terminate(nil) }
+        Button("Quit Loft") { NSApplication.shared.terminate(nil) }
             .keyboardShortcut("q")
     }
 }
