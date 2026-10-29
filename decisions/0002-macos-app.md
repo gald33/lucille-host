@@ -50,17 +50,26 @@ Not built yet: pairing, running in the background and opening at login, the JSON
 and main windows, updates, **Remove Loft…** (section 17), Developer ID signing and notarization, ripgrep, and
 the release jobs. The first build also departs from this record in these ways, among others;
 `macos/README.md`, under "Choices made for the first build", says why for most of them:
-- the interpreter is the runtime's own `python3`, not renamed and with no identifier of its own (§6), and
-  the runtime ships hash-checked `.pyc` files (§6);
+- the interpreter is the runtime's own `python3`, not renamed, and signed ad hoc with
+  `--prefix com.lucille-ai.loft.` but no identifier of the planned form, `com.lucille-ai.loft.runtime`; the
+  `signature` check prints the identifier it gets (§6). The runtime ships hash-checked `.pyc` files (§6);
 - the command line runs with `PATH=/usr/bin:/bin`, and without `-X utf8` (§6, §9);
 - the app opens from any folder, where the planned app runs only from `/Applications/Loft.app` (§13);
 - the app uses the host's `default` profile, the one a `pipx` install uses, not its own `mac-app` profile
   (§9);
-- there is no `MANIFEST.json`: the host's exact version is in the `Info.plist` key `LucilleHostVersion`, and
-  `CFBundleVersion` repeats the release numbers (§6, §7);
+- there is no `MANIFEST.json`. The build writes `Contents/Resources/build-manifest.json` instead, with the
+  commit, the host's exact version, the host wheel's name and sha256, the runtime's file name, URL and
+  sha256, the name and version of each installed distribution, what the build removed from the runtime, the
+  `swiftc` version and the kind of signature. It lacks the sha256 of every installed wheel that §6 lists. The
+  host's exact version is also in the `Info.plist` key `LucilleHostVersion`, and `CFBundleVersion` repeats
+  the release numbers (§6, §7);
 - the words for each ability and the suggested folder names are in the Swift app, not in the core (§8, §12,
   §13);
-- macOS's folder questions show a sentence on what Loft is for, under five `Info.plist` keys (§12);
+- the `Info.plist` has five folder usage keys, not six (no file providers), each with the sentences on what
+  Loft is for, which macOS is meant to show under its folder questions (§12; not yet tested on a Mac);
+- the app asks about `/` and the Data volume (`/System/Volumes/Data`) as it asks about the home folder, and
+  adds either one after **Add Anyway**, where the planned app refuses both outright (§12). Here the first
+  build allows more than this record;
 - the build scripts and their pins are in `macos/`, not `tools/macos/`, and the checks on the Swift sources
   are in `tests/test_macos_build.py` and `check_app.py links`, not in a `macos_lint` guard (§20);
 - the workflow is `macos-app.yml`, not a job in `ci.yml`, and it uploads the disk image on pushes and on the
@@ -678,8 +687,11 @@ previous folders and operations come back as unchecked boxes (§11.6).
 - **Usage descriptions** for Documents, Desktop, Downloads, removable and network volumes and file providers
   are in the app's `Info.plist`: "Loft runs the operations you turned on, only inside folders you added.
   macOS asks once before it can open this location." The first build has five of these keys, all but file
-  providers, each with the sentence on what Loft is for: "Loft lets Lucille use only the folders you choose
-  on this Mac, and only for the abilities you turn on."
+  providers, each with the sentences on what Loft is for: "Loft lets Lucille use only the folders you choose
+  on this Mac, and only for the abilities you turn on. Lucille can also see which abilities are on, and the
+  names you gave your folders." The second sentence is there because `host.describe` is on by default (§13).
+  Whether macOS shows these words, and under which name, is not yet tested on a Mac (see "Who macOS holds
+  responsible", above).
 - **No Full Disk Access, ever.** It is system-wide and covers far more than the user's folders.
 
 ## 13. Operations
@@ -901,15 +913,17 @@ Connect API key, its id and issuer id, as environment secrets, never repository-
 - the Swift library's tests (Foundation only), driving the **real** Python CLI;
 - the guards (§20).
 
-**On GitHub-hosted macOS, every pull request** (about 10 minutes). The first build's workflow runs part of
-this today: the build with the real pinned runtime, signed ad hoc with the hardened runtime; the host's whole
-test suite on a copy of the trimmed runtime; and the checks in `macos/check_app.py`, among them the app's
-Swift code against the real command line and the menu driven through System Events, with screenshots
-kept (`macos/README.md`, "What CI checks"). The rest of this list is planned:
-- the Swift build, and a bundle assembled with the real pinned runtime, signed ad hoc (§7: whether with the
-  hardened runtime is not decided yet, and the first build carries it; library validation against a Team ID
-  is exercised only on signed candidates);
-- the host's whole test suite against a copy of the bundled runtime;
+**On GitHub-hosted macOS, every pull request** (about 10 minutes).
+
+Built today, by the first build's `macos-app` workflow (`macos/README.md`, "What CI checks"):
+- the Swift build, and a bundle assembled with the real pinned runtime, signed ad hoc with the hardened
+  runtime (§7: whether ad-hoc builds keep the hardened runtime is not decided yet; library validation
+  against a Team ID is exercised only on signed candidates);
+- the host's whole test suite against a copy of the bundled, trimmed runtime;
+- the checks in `macos/check_app.py`, among them the app's Swift code against the real command line, and the
+  menu driven through System Events, with screenshots kept as a CI artifact.
+
+Planned:
 - the conformance suite against the bundled host (a `--host-command` option names it);
 - end to end through the bundle: a local hub on 127.0.0.1, a fake Lucille, pair, typed number, an offered room,
   `files.sha256` on a temporary folder, reply, `kill`, `pause`, `forget`;
@@ -919,7 +933,9 @@ kept (`macos/README.md`, "What CI checks"). The rest of this list is planned:
 - a snapshot of `~/Library` before and after, diffed against an allowlist;
 - crafted scheme URLs (option-shaped codes, a 1 MiB string, paths shaped like folder or operation commands): the
   policy digest is unchanged and no verb but `pair` ran;
-- UI snapshots: each screen state rendered to PNG in light and dark, kept as CI artifacts for review.
+- UI snapshots: each screen state rendered to PNG in light and dark, kept as CI artifacts for review. The
+  first build's screenshots show only the states the `ui` check drives to, in whatever appearance the
+  runner has.
 
 **On the signed build** (§18), on macOS 15, 26 and 27 (`xcode-27`): signing checks, library validation and
 the hardened runtime for the first time, notarization logs, Gatekeeper's view with quarantine, the

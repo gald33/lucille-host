@@ -74,12 +74,14 @@ PBS_RELEASES: Final = "https://github.com/astral-sh/python-build-standalone/rele
 # Folder and file names inside the runtime. The pins allow Python 3.13 only, so these are fixed.
 STDLIB: Final = "lib/python3.13"
 INTERPRETER: Final = "bin/python3"
-# What the bundle's Info.plist says each time macOS asks the user about a protected folder: what
-# the app is for, in the sentence the app opens with (HostText.appPurpose). macOS shows it under its
-# own question, which names the app.
+# What the bundle's Info.plist says for macOS to show when it asks the user about a protected
+# folder: what the app is for, in the sentences the app opens with (HostText.appPurpose). The second
+# sentence is there because host.describe is on by default. macOS is meant to show this under its
+# own question; whether it does, and whether that question names the app or the interpreter, is not
+# yet tested on a Mac (macos/README.md, "What CI does not check").
 FOLDER_USAGE: Final = (
     "Loft lets Lucille use only the folders you choose on this Mac, and only for the abilities "
-    "you turn on."
+    "you turn on. Lucille can also see which abilities are on, and the names you gave your folders."
 )
 # The Info.plist keys that hold FOLDER_USAGE: Documents, Desktop, Downloads, and removable and
 # network volumes, the places macOS asks about before the host may read them.

@@ -143,12 +143,15 @@ def test_info_plist() -> None:
     ],
 )
 def test_each_folder_question_says_what_the_app_is_for(key: str) -> None:
-    # macOS shows this text under its question about a protected folder or volume. It names
-    # Lucille and says that the user chooses.
+    # macOS is meant to show this text under its question about a protected folder or volume (not
+    # yet tested on a Mac). It names Lucille, says that the user chooses, and says what Lucille
+    # sees without being asked: host.describe is on by default.
     text = build_app.info_plist(build_app.load_pins(), "0.1.0")[key]
     assert isinstance(text, str) and text.strip()
     assert text.startswith(f"{build_app.load_pins().app_name} lets Lucille ")
     assert "the folders you choose" in text and "abilities you turn on" in text
+    assert "which abilities are on" in text and "names you gave your folders" in text
+    assert [name for name, op in OPERATIONS.items() if op.default_enabled] == ["host.describe"]
 
 
 def test_plan_writes_the_info_plist(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
@@ -432,7 +435,7 @@ def test_the_ui_check_looks_for_the_apps_own_words() -> None:
     assert '"Once this Mac is connected to Lucille, Lucille can use' in text
     source = (build_app.MACOS_DIR / "check_app.py").read_text(encoding="utf-8")
     assert source.count('"Once this Mac is connected to Lucille"') == 2
-    # The welcome note says what the app is for in the sentence macOS's folder questions show.
+    # The welcome note says what the app is for in the sentences the folder usage keys hold.
     assert f'static let appPurpose = "{check_app.PURPOSE}"' in text
     assert "        \\(appPurpose)\n\n" in text
 

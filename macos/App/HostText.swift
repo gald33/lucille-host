@@ -108,8 +108,9 @@ enum HostText {
     /// and is described in the menu instead, and `host.sleep`, which is for testing.
     static let unlistedAbilities: Set<String> = ["host.describe", "host.sleep"]
 
-    /// What the app is for, in one sentence, for someone who does not know it.
-    static let appPurpose = "Loft lets Lucille use only the folders you choose on this Mac, and only for the abilities you turn on."
+    /// What the app is for, for someone who does not know it. The second sentence is there
+    /// because `host.describe` is on from the start, and the menu has no switch for it.
+    static let appPurpose = "Loft lets Lucille use only the folders you choose on this Mac, and only for the abilities you turn on. Lucille can also see which abilities are on, and the names you gave your folders."
 
     /// What the app says when it opens, and when it is opened again while it runs: it has no
     /// window and no Dock icon, so otherwise nothing would seem to happen.

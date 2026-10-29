@@ -1,8 +1,9 @@
 # Loft, by Lucille
 
 Loft is the Mac app for the host. It lets Lucille use only the folders you choose on this Mac, and only
-for the abilities you turn on. It is a menu bar app. Inside it runs the host program, `lucille-host`,
-which keeps its own name, command line and files.
+for the abilities you turn on. Lucille can also see which abilities are on, and the names you gave your
+folders. It is a menu bar app. Inside it runs the host program, `lucille-host`, which keeps its own name,
+command line and files.
 
 ## Status: a first build, not a release
 
@@ -25,6 +26,11 @@ build is, and what is planned after it.
 - The host's wheel is built with the build backend that [`build-constraints.txt`](build-constraints.txt)
   pins by hash (`uv build --build-constraints build-constraints.txt --require-hashes`). Those are the
   versions `pyproject.toml`'s `[build-system]` requires, and a test checks that the two agree.
+- Inside the app, `Contents/Resources/build-manifest.json`, which records what went into it: the commit,
+  the host's exact version, the host wheel's name and sha256, the runtime's file name, URL and sha256, the
+  name and version of each installed distribution, what the build removed from the runtime, the `swiftc`
+  version and the kind of signature. It does not hold a sha256 for each installed wheel. The `dmg` check
+  prints it.
 - **`Loft-<version>-<commit>-adhoc-macOS-arm64.dmg`**, a disk image whose volume is named Loft. It holds
   the app and a link to the Applications folder. The file name says the signature is ad hoc and names
   the commit, so the image cannot be taken for a release asset.
@@ -32,16 +38,17 @@ build is, and what is planned after it.
 ## What the app does when it opens
 
 The app has no window to show, so when it opens it says where it is: "Loft is in your menu bar". The
-note first says what Loft is for, in the sentence above, and then where to click. It says so again
-whenever it is opened while it runs, for someone who could not find the icon. The note offers **Quit
-Loft** too, because on a crowded menu bar, or beside a notch, macOS hides icons that do not fit, and
-then the menu cannot be reached.
+note first says what Loft is for, in the two sentences this page opens with, and then where to click. It
+says so again whenever it is opened while it runs, for someone who could not find the icon. The note
+offers **Quit Loft** too, because on a crowded menu bar, or beside a notch, macOS hides icons that do not
+fit, and then the menu cannot be reached.
 
 The menu bar item is named "Loft", or "Loft, paused", for VoiceOver.
 
-When macOS asks whether Loft may access files in Documents, Desktop, Downloads, or on a removable or
-network volume, its question shows the same sentence on what Loft is for. The `Info.plist` holds it
-under each of the five keys macOS reads for those places.
+The `Info.plist` holds the same sentences under each of the five keys macOS reads before it asks about
+Documents, Desktop, Downloads, and removable and network volumes. macOS is meant to show them under its
+question. Whether it does, and whether that question names Loft at all, is not tested yet (see
+[What CI does not check](#what-ci-does-not-check)).
 
 ## What the menu does
 
@@ -203,7 +210,7 @@ secret. A check that finds a problem fails the build.
 | `swift` | The app's own Swift code that runs the command line and reads its output works against the real command line, through the same calls the menu makes: the folder name suggestions and corrections, the plain sentence for each refusal, the time limit and Cancel. |
 | `relocate` | A copy of the app in another folder, with a space in its path, passes `host` and `swift`. |
 | `links` | Every library a Mach-O file loads is macOS's own (`/usr/lib/`, `/System/Library/`), or resolves to a file that exists inside the bundle. `@loader_path`, `@executable_path` and `@rpath` are resolved as dyld resolves them, `..` included, so a path that climbs out of the bundle, and a library the build removed, both fail. Every run path must resolve inside the bundle. The log shows where each library and run path resolves. No Mach-O file needs a newer macOS than the app's minimum, and no file holds the build folder's path. The app's executable imports nothing on the lists above. |
-| `signature` | The signature is valid after the runs above, on the app and on each Mach-O file in it; every Mach-O file has the hardened runtime, and nothing has entitlements. |
+| `signature` | The signature is valid after the runs above, on the app and on each Mach-O file in it; every Mach-O file has the hardened runtime, and nothing has entitlements. The log shows each Mach-O file's signing identifier. |
 | `launch` | The app opens the way Finder opens it, and is still running 10 seconds later. |
 | `ui` | Driven through System Events as a user would: the app says what it is for and where its menu is when it opens, and again when it is opened while it runs; the menu bar item's title or description, which VoiceOver reads as its name, is "Loft" (its tooltip does not count); the menu shows the version, "Not connected to Lucille" and every item, and lists abilities in plain words, each with its sentence on what Lucille gets; Pause Lucille and Resume Lucille change the host's pause flag, the status line and the menu bar item's name; an ability switches on, shows a checkmark, and switches off; Add a Folder… goes through the Open panel and the name dialog, where a typed name the host would refuse comes back corrected, and adds the folder; Remove in the Folders submenu removes it; the home folder brings up the question first, Choose a Smaller Folder goes back to the Open panel, and Add Anyway adds it. Each step is checked against what the host's command line then reports. With `--require-driven`, as CI runs it, a machine where System Events cannot drive the app fails the check. Screenshots are kept as the artifact `loft-macos-screenshots`. |
 | `gatekeeper` | Prints `spctl`'s verdict. It is "rejected", as expected for an ad hoc signature, and does not fail the build. |
@@ -278,10 +285,12 @@ anyone to work around the warning.
 
 The design ([decisions/0002-macos-app.md](../decisions/0002-macos-app.md)) may change each of these.
 
-- **The app runs the runtime's own `python3`.** The design renames it `lucille-host-runtime`, with its own
-  signing identifier, so that macOS's prompts and Activity Monitor name it. A small native launcher that
-  embeds Python, so that the bundle holds no general-purpose interpreter, is an option it has not decided.
-  Chosen for the first build; the design may change it.
+- **The app runs the runtime's own `python3`.** The design renames it `lucille-host-runtime`, signed with
+  the identifier `com.lucille-ai.loft.runtime`, so that macOS's prompts and Activity Monitor name it. The
+  first build keeps the name `python3`, and signs it with `--prefix com.lucille-ai.loft.` but no identifier
+  of its own choosing; the `signature` check prints the identifier it gets. A small native launcher that
+  embeds Python, so that the bundle holds no general-purpose interpreter, is an option the design has not
+  decided. Chosen for the first build; the design may change it.
 - **Python lives in `Contents/Resources/python`.** If notarization objects to code there, see "Not done
   yet" for the two ways out.
 - **The app is named Loft, with the bundle identifier `com.lucille-ai.loft`.** Only the app has the new
@@ -289,8 +298,8 @@ The design ([decisions/0002-macos-app.md](../decisions/0002-macos-app.md)) may c
   `~/Library/Application Support/lucille-host`. The identifier must not change after the first signed
   release, because changing it makes macOS ask the user again about every folder and Keychain item.
 - **`CFBundleShortVersionString` holds the version's release numbers** (`0.1.0` for `0.1.0.dev0`), because
-  Apple allows only three numbers there. The exact version is in the `LucilleHostVersion` key, and in the
-  menu.
+  Apple allows only three numbers there. The exact version is in the `LucilleHostVersion` key, in
+  `build-manifest.json`, and in the menu.
 - **macOS 15 or later, Apple silicon only.**
 - **The app reads the host's text output and the pause flag.** The design adds a versioned JSON output
   to the host's command line, and an event stream from the running host; until then, `App/HostText.swift` follows the text, and
@@ -300,7 +309,7 @@ The design ([decisions/0002-macos-app.md](../decisions/0002-macos-app.md)) may c
   operation the app neither names nor leaves out of the menu.
 - **The app asks about a broad folder before the user names it**, when it can tell from the path (the home
   folder, a folder above it, or `/`). The host still decides; when it refuses a folder the app did not
-  recognise, the app asks then.
+  recognise, such as the Data volume (`/System/Volumes/Data`), the app asks then.
 - **`.pyc` files are hash-checked**, so a copied app with new file times still uses them, and Python
   never needs to write one.
 - **`PATH` is `/usr/bin:/bin`** for the host's command line.
@@ -314,6 +323,10 @@ These depart from the design's screens. Each was chosen for the first build; the
 - **What macOS may ask is said in the name dialog**, just before the run that makes macOS ask, not in a
   screen before the Open panel.
 - **There is no Open Privacy Settings button** (see "Not done yet").
+- **The whole disk can be added after Add Anyway.** The app asks about `/` and the Data volume
+  (`/System/Volumes/Data`) as it asks about the home folder, and adds either one if the user chooses Add
+  Anyway. The design refuses both in the app, and leaves them to the command line's flag, so here the
+  first build allows more than the design.
 - **The pause icon replaces the app's icon**, a pause sign in place of the computer, where the design adds
   a pause badge to the app's icon.
 - **Pausing shows no note.** The design confirms Pause with "Paused. Lucille's requests will be turned
