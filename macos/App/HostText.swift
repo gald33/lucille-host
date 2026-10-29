@@ -110,9 +110,10 @@ enum HostText {
 
     /// The app's name, from its Info.plist, where build_app.py puts the name macos/runtime.toml
     /// holds, so that a new name needs no change here. Code run outside the app, such as the
-    /// self-test, finds no name there and uses this fallback, which tests/test_macos_build.py keeps
-    /// equal to the name in runtime.toml.
-    static let appName = Bundle.main.object(forInfoDictionaryKey: "CFBundleDisplayName") as? String ?? "Capsule"
+    /// self-test, finds no name there and uses "the app". That fallback is deliberately not the
+    /// app's name: if the app ever stopped reading its Info.plist, the `ui` check, which looks for
+    /// the name from runtime.toml, would fail instead of passing on the fallback.
+    static let appName = Bundle.main.object(forInfoDictionaryKey: "CFBundleDisplayName") as? String ?? "the app"
 
     /// What the app is for, for someone who does not know it. The second sentence is there
     /// because `host.describe` is on from the start, and the menu has no switch for it.

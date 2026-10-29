@@ -293,13 +293,16 @@ The design ([decisions/0002-macos-app.md](../decisions/0002-macos-app.md)) may c
   design has not decided. Chosen for the first build; the design may change it.
 - **Python lives in `Contents/Resources/python`.** If notarization objects to code there, see "Not done
   yet" for the two ways out.
-- **The app's working name is Capsule, with the bundle identifier `com.lucille-ai.capsule`.** Both are
-  set once, in `runtime.toml`: `build_app.py` writes them into `Info.plist`, the Swift code reads the name
-  back from there (`HostText.appName`), and `check_app.py` reads it from `runtime.toml`. The name may
-  change before the first signed build. Only the app has the name: the host program inside is still
-  `lucille-host`, with its folder at `~/Library/Application Support/lucille-host`. The identifier must not
-  change after the first signed release, because changing it makes macOS ask the user again about every
-  folder and Keychain item.
+- **The app's working name is Capsule, with the bundle identifier `com.lucille-ai.capsule`.** The code
+  takes both from `runtime.toml`: `build_app.py` writes them into `Info.plist`, the Swift code reads the
+  name back from there (`HostText.appName`), and `check_app.py` reads it from `runtime.toml`. Outside the
+  app, as in the self-test, the Swift code says "the app" instead, so the `ui` check fails if the app
+  stops reading its name. A new name also changes five lines of the workflow (the app's paths and the
+  artifacts' names) and the values `tests/test_macos_build.py` pins; those tests fail until all of them
+  agree with `runtime.toml`. The name may change before the first signed build. Only the app has the
+  name: the host program inside is still `lucille-host`, with its folder at
+  `~/Library/Application Support/lucille-host`. The identifier must not change after the first signed
+  release, because changing it makes macOS ask the user again about every folder and Keychain item.
 - **`CFBundleShortVersionString` holds the version's release numbers** (`0.1.0` for `0.1.0.dev0`), because
   Apple allows only three numbers there. The exact version is in the `LucilleHostVersion` key, in
   `build-manifest.json`, and in the menu.

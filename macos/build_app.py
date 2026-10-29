@@ -38,6 +38,7 @@ usage error.
 from __future__ import annotations
 
 import argparse
+import glob
 import hashlib
 import json
 import os
@@ -114,6 +115,9 @@ _ASSET = re.compile(
     r"install_only(?:_stripped)?\.tar\.gz"
 )
 _SHA256 = re.compile(r"[0-9a-f]{64}")
+# The app's name becomes a file name, a volume name and part of a glob pattern, so it is only
+# letters and digits, with single spaces between words.
+_APP_NAME = re.compile(r"[A-Za-z0-9]+(?: [A-Za-z0-9]+)*")
 _BUNDLE_ID = re.compile(r"[a-z][a-z0-9-]*(?:\.[a-z][a-z0-9-]*){2,}")
 _MACOS_VERSION = re.compile(r"(?P<major>\d+)\.\d+")
 _VERSION_LINE = re.compile(r'^__version__ = "([^"\n]+)"$', re.MULTILINE)
@@ -196,8 +200,8 @@ def parse_pins(text: str) -> Pins:
     if _SHA256.fullmatch(python["sha256"]) is None:
         raise PinError("[python] sha256 must be 64 lower-case hexadecimal digits")
 
-    if "/" in app["name"] or app["name"].strip() != app["name"]:
-        raise PinError("[app] name must be a plain name")
+    if _APP_NAME.fullmatch(app["name"]) is None:
+        raise PinError("[app] name must be letters and digits, with single spaces between words")
     if _BUNDLE_ID.fullmatch(app["bundle_id"]) is None:
         raise PinError("[app] bundle_id must be a lower-case reverse-DNS name")
     macos = _MACOS_VERSION.fullmatch(app["minimum_macos"])
@@ -287,7 +291,7 @@ def dmg_name(app_name: str, version: str, commit: str) -> str:
 
 def disk_images(out: Path, app_name: str) -> list[Path]:
     """The disk images this script has made in ``out``."""
-    return sorted(out.glob(f"{app_name}-*{DMG_SUFFIX}"))
+    return sorted(out.glob(f"{glob.escape(app_name)}-*{DMG_SUFFIX}"))
 
 
 def _normal_name(name: str) -> str:

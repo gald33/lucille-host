@@ -58,6 +58,12 @@ def test_the_pins_are_well_formed() -> None:
         ('bundle_id = "com.lucille-ai.capsule"', 'bundle_id = "Capsule"'),
         ('name = "Capsule"', 'name = "Capsule/Capsule"'),
         ('name = "Capsule"', 'name = " Capsule"'),
+        ('name = "Capsule"', 'name = "Capsule  Two"'),
+        ('name = "Capsule"', 'name = "C*"'),
+        ('name = "Capsule"', 'name = "Cap?ule"'),
+        ('name = "Capsule"', 'name = "Cap[s]ule"'),
+        ('name = "Capsule"', 'name = "Capsule:"'),
+        ('name = "Capsule"', 'name = ""'),
         ('category = "public.app-category.utilities"', 'category = "utilities"'),
         ("[app]", '[app]\nextra = "x"'),
         ("[app]", "[apps]"),
@@ -465,21 +471,27 @@ def test_the_app_and_its_checks_use_the_apps_name() -> None:
     assert 'version.map { "\\(HostText.appName) \\($0)" } ?? HostText.appName' in model
     assert check_app.PURPOSE == build_app.folder_usage(name)
     assert check_app.PURPOSE.startswith(f"{name} lets Lucille ")
-    # The Swift code reads the name from the bundle's Info.plist, and spells it only once, as the
-    # fallback for code run outside the app (the self-test), which must be the same name.
-    fallback = (
+    # The Swift code reads the name from the bundle's Info.plist and never spells it. Code run
+    # outside the app (the self-test) gets a fallback that is not the name, so the ui check, which
+    # looks for the name, fails if the app stops reading it from Info.plist.
+    fallback = "the app"
+    assert fallback != name
+    assert (
         'static let appName = Bundle.main.object(forInfoDictionaryKey: "CFBundleDisplayName")'
-        f' as? String ?? "{name}"'
-    )
-    assert fallback in text
+        f' as? String ?? "{fallback}"'
+    ) in text
+    assert build_app.info_plist(build_app.load_pins(), "0.1.0")["CFBundleDisplayName"] == name
+    # Every line of the workflow that spells the name.
     workflow = WORKFLOW.read_text(encoding="utf-8")
+    assert f'copy="$RUNNER_TEMP/pruned/{name}.app"' in workflow
     assert f'ditto "build/macos/{name}.app"' in workflow
     assert f"assert '{name}.app' in sys.base_prefix" in workflow
+    assert f"name: {name.lower()}-adhoc-macos-arm64-dmg-" in workflow
     assert f"name: {name.lower()}-macos-screenshots" in workflow
+    assert len(re.findall(rf"\b{re.escape(name)}\b", workflow, re.IGNORECASE)) == 5
     for path in [*SWIFT_FILES, build_app.MACOS_DIR / "Tests" / "SelfTest.swift"]:
         source = path.read_text(encoding="utf-8")
-        expected = 1 if path.name == "HostText.swift" else 0
-        assert len(re.findall(rf"\b{re.escape(name)}\b", source)) == expected, path
+        assert not re.search(rf"\b{re.escape(name)}\b", source), path
     # The app's earlier names are gone from what the app shows and what checks it. The host
     # program inside keeps its own name, lucille-host.
     for path in [
@@ -584,6 +596,18 @@ def test_only_this_scripts_disk_images_are_found(tmp_path: Path) -> None:
     (tmp_path / build_app.dmg_name("Other", "0.1.0", "abcdef1")).write_bytes(b"")
     (tmp_path / "other.dmg").write_bytes(b"")
     assert build_app.disk_images(tmp_path, "Capsule") == [ours]
+
+
+def test_the_disk_image_glob_takes_the_name_literally(tmp_path: Path) -> None:
+    # build() deletes every image disk_images() returns, so a name that is also a pattern must
+    # match its own images only.
+    other = tmp_path / build_app.dmg_name("Capsule", "0.1.0", "abcdef1")
+    other.write_bytes(b"")
+    assert build_app.disk_images(tmp_path, "C*") == []
+    assert build_app.disk_images(tmp_path, "Cap?ule") == []
+    ours = tmp_path / build_app.dmg_name("Cap[s]ule", "0.1.0", "abcdef1")
+    ours.write_bytes(b"")
+    assert build_app.disk_images(tmp_path, "Cap[s]ule") == [ours]
 
 
 def _steps() -> list[dict[str, object]]:
@@ -729,7 +753,7 @@ def test_the_libraries_and_run_paths_are_read_from_the_load_commands() -> None:
 def _bundle(tmp_path: Path) -> tuple[Path, Path, Path]:
     """A bundle laid out like the app's, with a space in its name: the interpreter, one extension
     module, and one library kept in ``lib/``."""
-    app = tmp_path / "Capsule.app"
+    app = tmp_path / "Example App.app"
     python_dir = app / "Contents" / "Resources" / "python"
     dynload = python_dir / "lib" / "python3.13" / "lib-dynload"
     dynload.mkdir(parents=True)
