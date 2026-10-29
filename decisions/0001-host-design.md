@@ -2,8 +2,13 @@
 
 Author: lucille-host maintainers. First written 2026-10-15; revised 2026-10-19 and 2026-10-20; rewritten
 for this public repository 2026-10-27; the protocol it describes was written out as
-[spec/PROTOCOL.md](../spec/PROTOCOL.md) on 2026-10-28. Status: **draft.** Only the package skeleton, the
-guards, CI and the protocol spec (its prose, schemas and fixtures) are built.
+[spec/PROTOCOL.md](../spec/PROTOCOL.md) on 2026-10-28. Status: **draft.** Built so far: the package
+skeleton, the guards, CI, the protocol spec (its prose, schemas and fixtures), and, on 2026-10-29: "The
+closed operation set" without `files.search` or limits tightened in the policy; "Execution rules";
+"Local policy and upgrades", except reloading on a local signal; "Audit log"; and, of "Pause, kill and
+shutdown", `pause`, `resume`, `kill` and drain. Not built: pairing, the read loop (and with it the
+envelope checks, dedupe, expiry, restarts and reply posting), what happens on removal on the Lucille
+side, `status`, `log` and `forget`, and the conformance suite.
 
 This record describes the program in this repository, and it governs the host's code. A pull request that
 changes the design updates this record in the same pull request.
@@ -277,8 +282,8 @@ decides it (spec/PROTOCOL.md §11, and its section 17):
 - `status` is `done` when the operation ran. A non-zero exit is data.
 - `status` is `refused`, with a code, when it never started: `unknown_op`, `not_enabled`,
   `bad_request`, `bad_args`, `path_outside_root`, `expired`, `paused` or `host_too_old`.
-- `status` is `failed`, with a code, when it started and did not finish: `timeout`, `killed_locally` or
-  `interrupted`.
+- `status` is `failed`, with a code, when the host decided to run it and it did not finish: `timeout`,
+  `killed_locally` or `interrupted`.
 - The underlying error text never crosses the wire.
 - `stdout` and `stderr` are decoded from the child's bytes as UTF-8 with `errors="replace"`, and U+0000
   is removed, before capping. A fixture covers non-UTF-8 and NUL output. Lucille rejects any string
@@ -322,7 +327,8 @@ is Lucille policy as of 2026-10-27; not proven by this repository.
 **The release defines the operations.**
 - Each operation is a reviewed catalog entry in `src/lucille_host/ops/`: the executable, an argv
   template per OS, a typed parameter schema, and limits. A new operation means a new public release.
-- The local policy file only enables entries, maps folder aliases to paths, and tightens limits.
+- The local policy file only enables entries, maps folder aliases to paths, and tightens limits
+  (tightening limits is not built yet).
 - User-written command templates are rejected. A template such as `["/bin/sh", "-c", "{x}"]` would turn
   the host into a remote shell, which is what this design exists not to be.
 - Ops are namespaced: `host.*` and `files.*` first, later `git.*`.
@@ -360,9 +366,35 @@ policy changed. A plain hash would let anyone holding it confirm a guessed folde
 - **User values come after `--`.**
 - **Paths.**
   - Absolute paths and `..` are refused.
-  - Each path must resolve, by realpath, inside its root. A symlink escape fails with
-    `path_outside_root`.
-  - A root equal to `$HOME` or `/` needs an explicit flag.
+  - Each path must resolve inside its root, walked one component at a time beneath a descriptor on
+    the root's real path, following symbolic links as the kernel would (`containment.py`), never by
+    `realpath` on the joined path, which skips a component it cannot `lstat` past PATH_MAX. A symlink
+    escape fails with `path_outside_root`, and so does a link the walk cannot check.
+  - No path goes through Linux's `/proc`, and a root on it holds nothing: a link there
+    (`<pid>/fd/0`, `<pid>/root`) takes the kernel to an object its text does not name, and `self`,
+    `<pid>/cwd` or a process not yet started mean the host when the host checks and the child when
+    it opens the path, so no lookup the host makes can stand in for the child's. On Linux, where
+    the mount table lists no `/proc` (not mounted, or covered), every path is refused. After the
+    walk the host also looks the whole path up itself and refuses unless that finds the object the
+    walk ended on (or nothing, where the walk found nothing).
+  - A path naming something other than a file or a folder (a FIFO, a socket, a device) fails with
+    `path_outside_root`: opening a FIFO blocks, or takes data another program was waiting for.
+  - The host's own files (its config and state folders, for every profile, and everything in them) are
+    outside every root. They are compared by device and inode, with links in them followed and not, so
+    a second mount of one of its folders, a hard link to one of its files, or a folder a link in them
+    points to is caught: a path reaching one fails with `path_outside_root`,
+    and a root inside one cannot be added. A hard link to an earlier version of a file the host has
+    since replaced is not caught.
+    Otherwise a root holding `~/.config` would let Lucille hash `policy.toml` and confirm a guessed
+    folder path, which the policy digest's key exists to prevent.
+  - A file operand of `-` is passed as `./-`: most programs read standard input for `-`, even after
+    `--`.
+  - A root that is `$HOME`, holds it (`/home`, `/Users`, macOS's `/System/Volumes/Data`), or is `/`
+    needs an explicit flag. `policy.holds` decides "holds it" by path, by device and inode, through
+    any other mount of the same filesystem that Linux's mount table lists, and through macOS's Data
+    volume; `roots add` also looks below the folder for `$HOME`'s own path (only then, since a stalled
+    mount there would hang every policy load). A folder reaching `$HOME` any other way (another
+    filesystem's view of it, a mount this process cannot see) is not recognised.
 - **Child processes.**
   - stdin is `/dev/null`.
   - The environment is built from an allowlist (a fixed `PATH`, `LANG`, `LC_ALL`), never copied from
@@ -394,20 +426,28 @@ policy changed. A plain hash would let anyone holding it confirm a guessed folde
 - Each line is written before the host acts on what it records:
   - **received:** job id, hub sequence number, op, and args as received;
   - **decision:** run, or refused with its code;
-  - **execution:** binary path and its sha256, resolved argv, exit code, duration, output sizes;
-  - **sent:** the sha256 and size of the exact bytes posted.
+  - **start:** binary path and its sha256, and resolved argv, before the process starts, so that a crash
+    mid-run still leaves a record of what ran;
+  - **execution:** how it ended, exit code, duration, output sizes, with the binary, its sha256 and the
+    argv again;
+  - **sent:** the sha256 and size of the exact bytes about to be posted.
 - Output bodies are kept only when the user sets `log_results = true`.
 - Files rotate by size and are never edited. No key is ever written.
 - The log is user-writable. It records; it proves nothing against someone with the user's privileges.
 
 ## Pause, kill and shutdown
 
-- **`pause`** writes a flag file. While it is set, the host starts nothing.
+- **`pause`** writes a flag file. While it is set, the host starts nothing: the flag is read when a
+  request is decided and again just before its process starts, and a pause that lands in between
+  turns the decision into `failed` with `interrupted`.
   - If it is online, it replies `refused` with `paused` to each new request, so the job fails fast.
   - If it is offline, nothing happens and the requests expire.
 - **`kill`** (or a second Ctrl-C) also sets the flag. It kills the in-flight process group, and replies
   `failed` with `killed_locally`.
-- **The first SIGTERM or Ctrl-C drains.** The running op finishes and replies, and nothing new starts.
+- **The first SIGTERM, SIGHUP or Ctrl-C drains** (a signal ignored when the host started, as SIGHUP is
+  under `nohup`, stays ignored). The running op finishes and replies, and nothing new starts. Only a
+  running host enforces a time limit or a kill: if the host is killed or crashes while an op runs, the
+  op keeps running without either (THREAT_MODEL.md, "Known gaps").
 - **Removal on the Lucille side** ends the pair there (Lucille policy as of 2026-10-27; not proven by
   this repository).
   - If Lucille's forget reached the hub, the host learns it on its next resolve, forgets its own copy,
@@ -612,7 +652,7 @@ template test, which needs that hub's injected clock. It may spawn only the loca
 | Intercepted or phished pairing code | the code must name Lucille's hub and carry no token; nothing else is accepted except a loopback hub the local config names (for conformance); the SAS is compared and confirmed on both screens (Lucille's screen: Lucille policy as of 2026-10-27; not proven by this repository) | a user who confirms without comparing |
 | Someone else's pairing code (an attacker pairing the computer to themselves) | the hub check; the local SAS gate; only `host.describe` enabled after pairing | a user who confirms a mismatched SAS, then enables ops |
 | Leaked `pair:<name>` key, offered work-room key, or pair secret | Only two places hold the pair, and both hold it with the `pair:<name>` key: the host's store (local, owner-only, same-user malware is out of scope) and Lucille's database (encrypted with Lucille's master key: Lucille policy as of 2026-10-27; not proven by this repository). Signing requests with a key pinned at pairing would not help, because every leak path found exposes that key with the pair. The response is to remove the computer, or `forget`, and pair again. v0.1 has no heal verb. This analysis was written for `pair:<name>`'s derived key. That key opens nothing shared (sb `docs/sharing.md:526-528`). The offered work rooms' keys sit in each side's share store as well as in the pair room's offer records, and of a share store, "A copy of it opens every room in it" (`:533-536`). That every leak path exposes those keys with the pair was not re-checked for the offered rooms. spec/PROTOCOL.md §18 states what a room's key opens (every message still on the hub in that room; epoch rotation does not bound it), and §19 that nothing in v1 detects a leak of a room's key alone | the holder can read and forge traffic, and ask for enabled ops until then |
-| Malicious payload (metacharacters, traversal, flag or env injection) | schemas, argv only, `--`, realpath, the built environment, conformance | none known |
+| Malicious payload (metacharacters, traversal, flag or env injection) | schemas, argv only, `--`, paths resolved one name at a time beneath their folder, the built environment, conformance | none known |
 | Malicious release, or compromised maintainer account | protected tags, the `pypi` environment, which needs the repository owner's approval, attestations (they prove where a release was built, not what it does), a public diff of the catalog and `CLAIMS.md`, exact pins in the lock CI uses (see "Packaging"), no auto-update | a validly attested malicious release from an account that holds both tag and environment rights |
 | Compromised dependency, including `agent-switchboard` | minimal dependencies, exactly pinned in the lock CI uses (an install with `pipx` or `uv tool` resolves the declared ranges; see "Packaging"); Switchboard's own provenance checked | dependency code runs with the host's privileges |
 | Same-user malware | out of scope, and stated | it can read the store, edit site-packages and rewrite the log |

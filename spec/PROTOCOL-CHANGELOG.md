@@ -47,8 +47,11 @@ The first version.
   decoding, redaction or capping touches.
 - **Rules.** The refusal order (`host_too_old` before the envelope check); which reply decides a job; the
   named rules `strings`, `integers`, `request-size`, `stream-size` and `not-after-range`; how size is
-  measured; decoding, redaction and capping; `not_after`, TTLs and expiry; dedupe, restarts and transport
-  failures; pause, kill, timeout and drain.
+  measured; decoding, redaction and capping, and the host's rule `raw-ceiling` (at most 4 MiB of each
+  stream's raw output is kept, and what is not kept sets the truncation flag); containment, which keeps
+  paths out of the host's own folders and Linux's `/proc`, and off FIFOs, sockets and devices; `not_after`, TTLs and expiry;
+  dedupe, restarts and transport failures; pause (read again just before a start), kill, timeout and
+  drain.
 - **Files.** JSON Schemas (draft 2020-12) for the request, the reply and the `host.describe` document, closed
   at every level; golden fixtures for requests, replies and decoding. Both ship in the wheel under
   `lucille_host/spec/v1/`.

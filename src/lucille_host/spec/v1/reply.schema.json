@@ -49,7 +49,7 @@
       "pattern": "^[0-9][0-9A-Za-z.+_-]{0,31}$"
     },
     "status": {
-      "description": "done: the operation ran. refused: it never started. failed: it started and did not finish.",
+      "description": "done: the operation ran. refused: it never started. failed: the host decided to run it, and it did not finish.",
       "type": "string",
       "enum": [
         "done",
@@ -85,7 +85,7 @@
       "pattern": "^[^\\u0000]*$"
     },
     "truncated": {
-      "description": "True only when capping dropped the end of that stream (PROTOCOL.md section 13); removing U+0000 and redaction do not set it. Always false for host.describe, whose document is never capped.",
+      "description": "True only when capping dropped the end of that stream, or output the host did not keep counts as dropped by capping (rule raw-ceiling) (PROTOCOL.md section 13); removing U+0000 and redaction do not set it. Always false for host.describe, whose document is never capped.",
       "type": "boolean"
     },
     "exit_code": {
@@ -199,7 +199,7 @@
       }
     },
     "reply.failed": {
-      "description": "The operation started and did not finish. Each stream comes with its truncation flag or not at all.",
+      "description": "The host decided to run the operation, and it did not finish. Each stream comes with its truncation flag or not at all.",
       "type": "object",
       "additionalProperties": false,
       "required": [

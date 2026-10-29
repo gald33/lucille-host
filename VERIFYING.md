@@ -8,7 +8,8 @@ release follows it once, on a clean machine, and reports each step they could no
 
 **What to read.**
 - `src/lucille_host/ops/` is the complete list of operations Lucille can ask the host to run. In
-  `0.1.0.dev0` it is empty.
+  `0.1.0.dev0` it holds `host.describe`, `host.sleep` and `files.sha256`; `lucille-host ops list` prints
+  them. `src/lucille_host/_exec.py` is the one place a process starts.
 - [CLAIMS.md](CLAIMS.md) maps each sentence of the privacy claim to the code and test behind it.
 - [decisions/0001-host-design.md](decisions/0001-host-design.md) is the design.
 - [spec/PROTOCOL.md](spec/PROTOCOL.md) is the protocol between Lucille and the host, `lucille.exec/1`:

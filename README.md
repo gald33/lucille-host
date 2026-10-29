@@ -2,9 +2,10 @@
 
 ## Status: no release yet
 
-There is no release. This repository holds a skeleton, version `0.1.0.dev0`: the package layout, the
-guards, CI, and the draft protocol spec ([spec/PROTOCOL.md](spec/PROTOCOL.md)). The skeleton prints its
-version and does nothing else. None of the behaviour described on this page is built yet.
+There is no release. This repository holds version `0.1.0.dev0`: the guards, CI, the draft protocol spec
+([spec/PROTOCOL.md](spec/PROTOCOL.md)), and the parts that run an operation once a request has reached the
+host: the catalog, the executor, the local policy, the audit log, and `pause`, `resume` and `kill`. It
+cannot pair with Lucille or read a request yet, so nothing can ask it to run anything. Do not install it.
 
 ## What it will be
 
