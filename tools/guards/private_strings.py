@@ -8,12 +8,18 @@ on the one CI step that runs it.
 The list: one case-sensitive literal substring per line. Leading and trailing whitespace is not
 part of an entry; blank lines and lines starting with ``#`` are ignored.
 
-What is checked: every file git tracks under ROOT (outside a git work tree, every file under ROOT,
-skipping ``.git``, ``.venv``, ``__pycache__`` and other build caches), its path and each line of
-its text. Text is read as UTF-8, with any byte that is not UTF-8 replaced, so a line in another
-encoding is still checked wherever its bytes are ASCII. A symbolic link is checked by the path it
-holds, which is what git stores and publishes for it, not by the file it points to. Files holding
-a NUL byte (UTF-16 text among them) are treated as binary and their contents are skipped.
+What is checked: every path git tracks under ROOT, a gitlink to another repository included
+(outside a git work tree, every file under ROOT, skipping ``.git``, ``.venv``, ``__pycache__`` and
+other build caches), and the contents of every such file, whatever bytes it holds:
+
+- each line of its text, read as UTF-8 with any byte that is not UTF-8 replaced, so a line in
+  another encoding is still checked wherever its bytes are ASCII, and a NUL byte does not stop it;
+- its raw bytes again, for each entry encoded as UTF-16 (little- and big-endian), which the UTF-8
+  reading cannot see. Such a hit names no line.
+
+A symbolic link is checked by the path it holds, which is what git stores and publishes for it,
+not by the file it points to. A gitlink is checked by its path only: its contents are another
+repository's.
 
 What is printed on a hit: the file, the line, and the number of the list entry that matched.
 Never the entry and never the line: a CI log is public, and printing either would publish the
@@ -41,7 +47,7 @@ from pathlib import Path
 if __package__ in (None, ""):  # run as a script: make ``tools.guards`` importable
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from tools.guards._common import REPO_ROOT, Violation, repo_files  # noqa: E402
+from tools.guards._common import REPO_ROOT, Violation, repo_files, tracked_paths  # noqa: E402
 
 LIST_VARIABLE = "LUCILLE_HOST_PRIVATE_STRINGS"
 FORK_VARIABLE = "IS_FORK_PR"
@@ -79,15 +85,20 @@ def check(root: Path, entries: Sequence[Entry]) -> list[Violation]:
     path is withheld too, and the file is named by its position in the sorted file list.
     """
     found: list[Violation] = []
-    for index, rel in enumerate(tracked_files(root), start=1):
+    wide = [(entry, _utf16_forms(entry.text)) for entry in entries]
+    for index, rel in enumerate(tracked_paths(root), start=1):
         path_hits = [entry for entry in entries if entry.text in rel]
         shown = f"<checked file #{index}, path withheld>" if path_hits else rel
         for entry in path_hits:
             message = f"the file's path matches list entry {entry.number}"
             found.append(Violation(shown, 0, "private-string", message))
         path = root / rel
-        data = os.fsencode(os.readlink(path)) if path.is_symlink() else path.read_bytes()
-        if b"\0" in data:
+        if path.is_symlink():
+            data = os.fsencode(os.readlink(path))
+        elif path.is_file():
+            data = path.read_bytes()
+        else:
+            # A gitlink (another repository) or a path missing from the work tree: its path only.
             continue
         lines = data.decode("utf-8", "replace").split("\n")
         for line_number, line in enumerate(lines, start=1):
@@ -95,7 +106,16 @@ def check(root: Path, entries: Sequence[Entry]) -> list[Violation]:
                 if entry.text in line:
                     message = f"matches list entry {entry.number}"
                     found.append(Violation(shown, line_number, "private-string", message))
+        for entry, forms in wide:
+            if any(form in data for form in forms):
+                message = f"matches list entry {entry.number} in UTF-16"
+                found.append(Violation(shown, 0, "private-string", message))
     return sorted(found)
+
+
+def _utf16_forms(text: str) -> tuple[bytes, ...]:
+    """The entry as UTF-16, little- and big-endian, with no byte-order mark."""
+    return (text.encode("utf-16-le"), text.encode("utf-16-be"))
 
 
 def run(root: Path, environ: Mapping[str, str]) -> int:

@@ -64,7 +64,9 @@ Everywhere (every Python file in the repository: source, tests and tools):
   (``pytest.mark.asyncio`` is ``asyncio``). A test that must replace a member of a watched module
   patches it by its dotted path, as a string (``monkeypatch.setattr("os.getuid", fake)``), which
   this rule allows;
-- [dunder] no attribute that leads from an object to modules or code by the object graph:
+- [dunder] no attribute that leads from an object to modules or code by the object graph (an
+  attribute a ``match`` class pattern reads, ``case C(__globals__=g)``, or a ``__match_args__``
+  entry names, counts as an attribute read):
   ``__dict__``, ``__globals__``, ``__builtins__``, ``__self__``, ``__class__``, ``__bases__``,
   ``__base__``, ``__mro__``, ``__subclasses__``, ``__getattribute__``, ``__code__``,
   ``__closure__``, ``__func__``, ``__loader__``, ``__spec__``, ``__import__``, the frame
@@ -80,9 +82,11 @@ Everywhere (every Python file in the repository: source, tests and tools):
   attributes. It is reported under the rule of the member it names;
 - [star-import] no ``from <module> import *`` from a module this lint watches, which would hide
   the names above (in ``src/lucille_host/``, from any module: see below);
-- [parse] a file that does not parse is a finding, and so is a name that stands for more names
-  through re-exported modules (see "How names are resolved") than the lint follows: the lint
-  fails closed;
+- [parse] a file that does not parse is a finding; so is a name the file's imports bind to two
+  different things (``import os as x`` here, ``import json as x`` there), because names are
+  resolved without regard to scope and a use could mean either; and so is a name that stands for
+  more names through re-exported modules (see "How names are resolved") than the lint follows: the
+  lint fails closed;
 - [symlink] no symbolic link anywhere in the repository, tracked or untracked and not ignored by
   git, whatever it points to. Python and the wheel build follow a link and this lint does not, so
   the code behind it would be checked under the rules of the place it really is, not the place it
@@ -264,6 +268,7 @@ from tools.guards._common import (  # noqa: E402
     absolute_module,
     anchored,
     dotted_name,
+    import_alias_conflicts,
     import_aliases,
     matches,
     module_exports,
@@ -1380,6 +1385,7 @@ def check_source(
                     )
 
     constants = _program_constants(tree, import_aliases(tree, package_of(rel)))
+    found.extend(import_alias_conflicts(tree, package_of(rel), rel))
     refs = references(tree, rel)
     imported = _imported_modules(tree)
     if zone in ("runtime", "exec"):

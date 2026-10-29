@@ -21,14 +21,16 @@ brackets.
   name the wrapper binds in a way this lint does not classify (inside an ``if`` or a ``try``, say).
   The wrapper module used as a value counts too.
 - [register] **No register, anywhere.** No reference to anything named ``register``, as a name or
-  as an attribute, called or not, and no string ``"register"`` passed to ``getattr``,
+  as an attribute (one a ``match`` class pattern reads, or a ``__match_args__`` entry names,
+  included), called or not, and no string ``"register"`` passed to ``getattr``,
   ``setattr``, ``delattr``, ``hasattr``, ``operator.attrgetter`` or ``operator.methodcaller``, or
   used as a key of a ``**{...}`` literal. This is deliberately broad: it also catches unrelated
   calls such as ``atexit.register``, and code that needs one of those must find another way. A
   ``register`` call is how a Switchboard client announces itself on a hub, which the host never
   does.
-- [invite] **No invites, anywhere.** No identifier, attribute, import, keyword argument,
-  parameter or ``except ... as`` name whose name contains ``invite`` (in any case), no such string
+- [invite] **No invites, anywhere.** No identifier, attribute (one a ``match`` class pattern reads
+  included), import, keyword argument, parameter or ``except ... as`` name whose name contains
+  ``invite`` (in any case), no such string
   in the places above, and no string literal containing the prefix of a Switchboard invite code.
   Function and class names are not checked, so a test may be named for what it checks. A test
   that must replace an invite entry point to prove it is never called patches it by its dotted
@@ -107,6 +109,7 @@ from tools.guards._common import (  # noqa: E402
     Violation,
     absolute_module,
     anchored,
+    import_alias_conflicts,
     matches,
     own_modules,
     package_of,
@@ -547,6 +550,7 @@ def check_source(
                         )
                     )
 
+    found.extend(import_alias_conflicts(tree, package_of(rel), rel))
     refs = references(tree, rel)
     for line, text in _strings_as_attributes(tree, refs):
         for rule, message in _named_by_string(text):
