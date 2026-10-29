@@ -74,6 +74,10 @@ protection below is built yet. Each protection not yet built is one the first re
   any other way is not recognised: through another filesystem (a FUSE or overlay view of it, say), a
   mount this process cannot see, or, on macOS, anything but the Data volume. A stalled network mount
   where that path would be below a folder hangs `roots add`; interrupt it.
+- An escape from an enabled folder is defined by real path (spec/PROTOCOL.md §10). A bind mount, or a
+  hard link to a file, made inside an enabled folder has a real path inside it, so it can reach a file
+  outside it, and the host allows that (its own files aside, below). Only the local user can set either
+  up.
 - The host's own files are recognised by device and inode, so a second mount of one of its folders or
   a hard link to one of its files is refused too. A hard link made to an earlier version of a file the
   host has since replaced (it replaces the policy file whole on each change) is not.
