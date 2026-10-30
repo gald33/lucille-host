@@ -24,6 +24,10 @@ Python, and without Homebrew. Mac first; nothing here may block a Windows or Lin
   the identifiers cannot (§7); it is checked first ("Not decided yet"). Where no name is needed, this record
   says "the app". Only what a user sees and the app's identifiers carry the name: the package, the command
   (`lucille-host`), its folders and profiles, and this repository keep theirs.
+- **"Proposed, pending the maintainer's decision"** marks a part of this design that is not decided. Nothing
+  builds on it until it is decided. Two parts carry it: the typed gate (§11.2) and the Connect flow (§11.4).
+  Until they are decided, 0001's pairing gate stands: the host shows the SAS, and the user types `y` if it
+  matches Lucille's page.
 
 ## What is built today
 
@@ -217,7 +221,7 @@ from a SwiftPM-built executable and a runtime tree (§6).
 
 ## 5. Which Macs
 
-**What we chose** (decided on 2026-10-29). Apple silicon only, macOS 15 or later (`LSMinimumSystemVersion`
+**What we chose** (decided by the maintainer on 2026-10-29). Apple silicon only, macOS 15 or later (`LSMinimumSystemVersion`
 15.0, `arm64` only). That covers every M-series Mac and the MacBook Neo, whose A18 Pro chip is Apple silicon
 but not M-series (Apple launched it on 2026-03-04 with macOS 26; not yet tested on one). CI builds on macOS 15 and runs the built app
 on macOS 15, 26 and 27; the first build's workflow runs on macOS 15 only. GitHub's hosted macOS 27 image
@@ -363,8 +367,11 @@ Capsule.app/Contents/
   `spec/CLI.md`; the schemas and golden fixtures ship in the wheel, beside the protocol's. Readers ignore an
   unknown `type`, so the contract can grow.
 - **The app never parses human text and never writes the host's files.** Every change goes through a verb.
-- **Secrets never go on a command line.** A pairing code goes to `pair --code-stdin` on standard input. The
-  typed number goes to `pair confirm` on standard input.
+  The first build is the exception for now: until the JSON contract exists, it reads the verbs' human output
+  ("What is built today"; `macos/README.md`, "Choices made for the first build").
+- **Secrets never go on a command line.** A pairing code goes to `pair --code-stdin` on standard input. With the typed gate
+  (§11.2, proposed, pending the maintainer's decision), the typed number goes to `pair confirm` on standard
+  input.
 - **URLs come from the core.** Lucille's web origin, the releases page and the hub are constants in the core,
   beside the hub's. The Swift source holds no `https://` literal.
 - **Copy that every shell needs comes from the core:** each operation's plain-language summary and what it
@@ -414,7 +421,7 @@ login ─► Capsule (menu bar; an "Open at Login" item)
   after a crash loop stops, and after `run` exits 20, 23 or 25, and the icon's state says which.
 - **Start.** The app starts `run` only when the computer is paired and its local gate is open. Before that,
   nothing runs in the background.
-- **Open at login: on by default, with a switch** (decided on 2026-10-29). The app registers itself as a
+- **Open at login: on by default, with a switch** (decided by the maintainer on 2026-10-29). The app registers itself as a
   login item (`SMAppService.mainApp`) when onboarding finishes, and unregisters whenever the pair ends. The
   finish screen announces macOS's notice. A switch in Settings turns it off. The command line is unchanged:
   nothing starts `lucille-host run` at login.
@@ -500,9 +507,12 @@ This changes 0001's "Local policy and upgrades".
 So a "paste a code" app, published, would be a ready-made tool for a scam: a page makes a code, tells the user
 to paste it, and shows the matching number. The design answers that in three parts: the computer's gate is
 typed (§11.2), the final form redeems only a code the computer asked for (§11.4), and the paste form is never
-published (§3.2, §18).
+published (§3.2, §18). §11.2 and §11.4 are proposed, pending the maintainer's decision.
 
 ### 11.2 The computer's gate is the typed one
+
+**Proposed, pending the maintainer's decision.** Nothing builds on this until it is decided; 0001's gate stands
+meanwhile.
 
 This changes 0001's "The host's gate", for every shell, the command line included.
 - **The user types Lucille's number into the computer.** The host never shows its own SAS before its gate
@@ -548,6 +558,9 @@ connected."). The two terminal messages of 0001 stay distinct: "This code may ha
 Remove this computer in Lucille and start again" and "The code expired. Click Add computer again."
 
 ### 11.4 The final form: Connect from the computer
+
+**Proposed, pending the maintainer's decision.** Nothing builds on this until it is decided. It also needs a
+connect page on Lucille's side.
 
 The host redeems only a code that answers a Connect request it made. That is OAuth's `state` rule (RFC 8252
 §8.9) applied to a pairing code, and it lives in the Python core, so the command line and any future shell get
@@ -988,7 +1001,7 @@ in 10 minutes or less.
 
 ## 21. What changes in existing documents
 
-- **0001 "Pairing"**: the host's gate is the typed number (§11.2); `pair` reads the code on standard input,
+- **0001 "Pairing"**: if decided, the host's gate is the typed number (§11.2, proposed); `pair` reads the code on standard input,
   refuses while a pair is held, and, from the Connect release, refuses a code without its own nonce (§11.4); a
   new pair starts from the fresh policy (§11.6).
 - **0001 "Local policy and upgrades"**: reload on change, and idle instead of exit (§10).
