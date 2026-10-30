@@ -484,11 +484,7 @@ def _pair(args: argparse.Namespace, dirs: paths.Dirs) -> str:
         ) from None
     shown = session.show(name)
     if shown is None:
-        raise link.Stopped(
-            "refused",
-            f"pair {name} has no local gate record, so it cannot be confirmed here: run "
-            "`lucille-host pair reject` and start again in Lucille",
-        )
+        raise session.no_gate(name)
     sas, found = shown
     _say(f"sas_pending: {session.pending(name, sas, found)}")
     if args.code_stdin:

@@ -68,6 +68,7 @@ from __future__ import annotations
 
 import contextlib
 import datetime
+import math
 import time
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
@@ -204,6 +205,9 @@ class Pair:
     checked: bool
     # The configuration of pair:<name>, to read the library's notes there.
     room: Any = field(repr=False, compare=False)
+    # When the pair room could not be read because the hub refused (a 429), how long it asked
+    # the host to wait before it tries again, in seconds; else None.
+    retry_after: float | None = None
 
 
 @dataclass(frozen=True)
@@ -322,10 +326,17 @@ def _skewed(exc: BaseException | None) -> bool:
     return False
 
 
+# The longest wait a hub's ``retry_after`` sets. A larger value, or one that is not a finite number,
+# is the hub's to send, not the host's to obey for longer than this.
+RETRY_AFTER_MAX: Final = 300.0
+
+
 def _hub_error(exc: BaseException) -> HubError:
     if isinstance(exc, client.SwitchboardError):
         retry = exc.payload.get("retry_after") if exc.status == 429 else None
-        after = float(retry) if isinstance(retry, int | float) and retry >= 0 else None
+        after = None
+        if isinstance(retry, int | float) and not isinstance(retry, bool) and math.isfinite(retry):
+            after = min(max(float(retry), 0.0), RETRY_AFTER_MAX)
         return HubError(
             f"the hub answered {exc.status or 'with an error'}",
             status=exc.status,
@@ -747,7 +758,9 @@ class Link:
     def resolve(self, name: str) -> Pair:
         """Read the pair room once: confirm the pair if Lucille collected the answer, send an
         answer that has not reached the hub, and follow a move. A pair room that cannot be read
-        gives ``checked=False`` and what this computer last saw."""
+        gives ``checked=False``, what this computer last saw, and the hub's ``retry_after`` when
+        it gave one: 2.6.0 returns that failure (``Resolution.hub_error``) rather than raising
+        it."""
         try:
             resolution = pairing.resolve(name, None, **self._pairing())
         except pairing.PairingError as exc:
@@ -757,6 +770,7 @@ class Link:
         except pairing.hub_errors() as exc:
             raise _hub_error(exc) from None
         record = resolution.record
+        failed = resolution.hub_error
         return Pair(
             name=resolution.name,
             sas_known=bool(record.confirmed and record.sas),
@@ -764,6 +778,7 @@ class Link:
             workspace=resolution.config.workspace,
             checked=resolution.checked,
             room=resolution.config,
+            retry_after=None if failed is None else _hub_error(failed).retry_after,
         )
 
     def sas(self, name: str) -> str | None:

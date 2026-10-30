@@ -1,7 +1,9 @@
 """``lucille-host run``: listening for Lucille's requests in the work rooms, and answering them.
 
 spec/PROTOCOL.md sections 5, 7, 9 and 10 to 16. The host is reachable whenever ``run`` runs, and
-only then; nothing starts it at login. The threads:
+only then; nothing starts it at login. A profile runs one ``run`` at a time: it holds
+``state/.run.lock`` (``os.lockf``) for as long as it runs, and a second ``run`` of the profile
+refuses, changing nothing, since two would each answer every request. The threads:
 
 - **Main.** Takes the signals (the first SIGTERM, SIGHUP or Ctrl-C drains), and makes every
   pairing and sharing call, through the :class:`link.Session` that keeps the pair and takes the
@@ -13,18 +15,18 @@ only then; nothing starts it at login. The threads:
 - **The pair reader.** One long-poll on the ``pair`` channel of pair:<name>, at the generation
   the last resolve found, from sequence number 0 at each new generation. A library note there
   is only a wake for main (spec/PROTOCOL.md section 5); anything else is logged and ignored.
-- **A room reader per work room** the session judged usable: accepted, passing checks 3 and 4,
-  and named by its list as the current pair's. Before every read it checks the room again, with
-  no hub call, and stops, telling main, when the room fails. Its read is a peek past the room's
-  cursor, ``since`` always given, waiting up to 25 s for 200 messages at most. A message the
-  room's key cannot open, or whose body is not JSON or nests more than 64 levels deep
-  (``_switchboard.NEST_MOST``), fails the whole peek: the reader then reads the channel's
-  newest 1000 messages, hands on those above the cursor up to the first unopenable one, logs
-  that one and moves the cursor to it; with none above the cursor in that window it logs
-  ``read_stuck``, and tries again later without moving. After a page is handled, the cursor
-  moves to the lowest last sequence number among the channels whose page came back full, or else
-  to the highest returned (:func:`next_cursor`). The readers and the pair reader each long-poll
-  at the same time.
+- **A room reader per work room** the session judged usable: accepted, passing checks 3 and 4, and
+  named by its list as the current pair's. Before every read it checks the room again, with no hub
+  call, and stops when the room fails, telling main unless the records gave the room up (below).
+  Its read is a peek past the room's cursor, ``since`` always given, waiting up to 25 s for 200
+  messages at most. A message the room's key cannot open, or whose body is not JSON or nests more
+  than 64 levels deep (``_switchboard.NEST_MOST``), fails the whole peek: the reader then reads the
+  channel's newest 1000 messages, hands on those above the cursor up to the first unopenable one,
+  logs that one and moves the cursor to it; with none above the cursor in that window it logs
+  ``read_stuck``, and tries again later without moving. After a page is handled, the cursor moves
+  to the lowest last sequence number among the channels whose page came back full, or else to the
+  highest returned (:func:`next_cursor`). The readers and the pair reader each long-poll at the
+  same time.
 - **The worker.** One request at a time, in the order they were read, so in sequence order within
   a room: the messages that get no reply are logged (``envelope.ignored``); a job id already in
   the journal gets nothing (dedupe, across rooms); the journal entry is written; steps 2 to 4 of
@@ -43,8 +45,21 @@ audit log and the room record; then queued requests and replies from the room ar
 running child of a request from it is killed with no reply (the context's ``stop``), its reader
 stops, and its journal entries are marked; the session then leaves the room. When the pair ends
 (``run`` then stops, exiting 0), every room ``run`` still reads is abandoned this way too: the
-session has left the rooms it held already, and when another command forgot the pair (``lucille-host
-forget`` while ``run`` runs) the rooms were left there, and only their work here is left to stop.
+session has left the rooms it held already, and when another command forgot the pair
+(``lucille-host forget`` while ``run`` runs) that command left them.
+
+**Another command's abandon** does not wait for main. ``forget`` marks every room abandoned in the
+room record first, and then, still holding the record lock, leaves them and tells Lucille: hub
+calls, each of which can take up to the client's timeout. Main waits for that lock at its next
+step. So the other threads read the room record and the gate's record themselves, with no lock and
+no hub call: the worker before each request it takes, each time it polls a running child
+(``_exec.POLL_S``, 0.05 s) and before it queues a reply, the readers before each read, and the
+poster before each post. A room the records give up (marked abandoned, no longer held, or the gate
+record not the one the session serves) is halted there and then, as above but for the leave:
+nothing more starts from it, and a running child of a request from it is killed with no reply.
+``run`` itself stops at its first step after the other command is done, by the pair's gate record,
+whether or not Lucille was told, and touches nothing of what the profile holds, which may already
+be a new pair's. Until that step, a drain and ``state/status.json`` wait for main as well.
 
 **After a restart**, before a room is read, the journal's entries for it with no reply sent are
 taken up: a decision to run gets ``failed interrupted``, never a second run; a refusal is posted
@@ -70,13 +85,15 @@ folders and its keyring item.
 from __future__ import annotations
 
 import collections
+import contextlib
+import errno
 import hashlib
 import json
 import os
 import secrets
 import threading
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Final
@@ -98,14 +115,17 @@ from lucille_host.controls import Controls
 from lucille_host.journal import Entry, Journal
 
 __all__ = [
+    "ALREADY_RUNNING",
     "FLUSH",
     "PAGE",
     "RECOVER",
+    "RUN_LOCK",
     "Backoff",
     "Cursors",
     "Failed",
     "Runner",
     "next_cursor",
+    "one_run",
     "run",
     "wake_gap",
 ]
@@ -129,13 +149,53 @@ STATUS_EVERY: Final = 60.0
 # At the end, how long main waits for a reader still in its last read.
 READER_GRACE: Final = 1.0
 
+# In the state folder: held by ``run`` for as long as it runs.
+RUN_LOCK: Final = ".run.lock"
+ALREADY_RUNNING: Final = (
+    "`lucille-host run` is already running for this profile, and a profile runs one at a time: "
+    "two would each answer Lucille's requests. Stop that one first"
+)
+
 _PAIR: Final = _switchboard.PAIR_CHANNEL
 _EXEC: Final = _switchboard.EXEC_CHANNEL
 _ENDED: Final = frozenset({"ended", "none"})
+# The run locks this process holds, by real path. ``lockf`` belongs to the process: a second
+# ``run`` here would take the lock again, and closing its descriptor would release the first's.
+_HELD: set[str] = set()
+_HELD_GUARD = threading.Lock()
 
 
 class Failed(RuntimeError):
     """``run`` stopped because one of its threads met something it cannot go on from."""
+
+
+@contextlib.contextmanager
+def one_run(state_dir: Path) -> Iterator[None]:
+    """Hold the profile's run lock until the block ends; raise :class:`Failed`, holding nothing,
+    when another ``run`` of the profile holds it, in this process or another, or it cannot be
+    taken here."""
+    path = os.path.realpath(paths.ensure_dir(state_dir) / RUN_LOCK)
+    with _HELD_GUARD:
+        if path in _HELD:
+            raise Failed(ALREADY_RUNNING)
+        descriptor = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+        try:
+            os.lockf(descriptor, os.F_TLOCK, 0)
+        except OSError as exc:
+            os.close(descriptor)
+            if exc.errno in (errno.EACCES, errno.EAGAIN):
+                raise Failed(ALREADY_RUNNING) from None
+            raise Failed(
+                f"cannot lock {path} ({exc.strerror}), so `run` cannot make sure it is the only "
+                "one of this profile"
+            ) from exc
+        _HELD.add(path)
+    try:
+        yield
+    finally:
+        with _HELD_GUARD:
+            _HELD.discard(path)
+            os.close(descriptor)
 
 
 def next_cursor(
@@ -276,6 +336,17 @@ class _Reply:
     next_try: float = 0.0
 
 
+def _workspace_of(record: rooms.Record, name: str) -> str | None:
+    """The workspace of room ``name`` by the room record: held, or left."""
+    held = record.held.get(name)
+    if held is not None:
+        return held.workspace
+    for workspace, left in record.left.items():
+        if left.room == name:
+            return workspace
+    return None
+
+
 def _before_unreadable(
     rows: list[_switchboard.Message], cursor: int
 ) -> tuple[list[_switchboard.Message], int | None]:
@@ -374,7 +445,12 @@ class Runner:
     def run(self) -> str:
         """Run until drained, or until the pair ends; returns what to print. Raises
         :class:`link.Stopped` when the pair cannot be used here (at start, or later for any
-        reason but its end), :class:`Failed`, and the local policy's error."""
+        reason but its end), :class:`Failed` (another ``run`` of the profile runs, among other
+        reasons), and the local policy's error."""
+        with one_run(self.dirs.state):
+            return self._run()
+
+    def _run(self) -> str:
         restore = None
         if threading.current_thread() is threading.main_thread():
             restore = self.controls.install_handlers()
@@ -394,9 +470,9 @@ class Runner:
             self._abandoned_at_start()
             self._worker.start()
             self._poster.start()
-            self._reconcile(force=True)
-            self._write_status(running=True)
             try:
+                self._reconcile(force=True)
+                self._write_status(running=True)
                 self._main_loop()
             except link.Stopped as exc:
                 if exc.state not in _ENDED:
@@ -542,13 +618,30 @@ class Runner:
 
     def _stop_room(self, name: str) -> None:
         """The session abandons room ``name`` (it has recorded that already): start nothing more
-        from it, kill what runs from it with no reply, stop reading it. The session leaves it
-        once this returns."""
+        from it, kill what runs from it with no reply, stop reading it (:meth:`_halt`), and wait
+        for the child to end. The session leaves it once this returns."""
+        self._halt(name)
+        deadline = time.monotonic() + KILL_WAIT
+        with self._cv:
+            while (
+                self._current is not None
+                and self._current.room.name == name
+                and time.monotonic() < deadline
+            ):
+                self._cv.wait(0.05)
+
+    def _halt(self, name: str, workspace: str | None = None) -> None:
+        """Start nothing more from room ``name``, and stop reading it: its queued pages and
+        replies are dropped, and its journal entries marked, so that nothing is posted for them.
+        From here on the context's ``stop`` of a request from it answers yes, so a child running
+        from it is killed at its next poll, with no reply; this does not wait for that. Any
+        thread may call it, again too: the second call drops and marks only what came since."""
         with self._cv:
             self._abandoned.add(name)
             room = self._rooms.get(name)
             if room is not None:
                 room.stop.set()
+                workspace = room.workspace
             kept: collections.deque[_Batch | _Afresh] = collections.deque()
             for item in self._work:
                 if item.room.name == name:
@@ -559,24 +652,41 @@ class Runner:
             dropped = [reply for reply in self._replies if reply.room == name]
             self._replies = [reply for reply in self._replies if reply.room != name]
             self._cv.notify_all()
-        workspace = room.workspace if room is not None else None
         if workspace is None:
-            held = rooms.load(self.dirs.rooms_file).held.get(name)
-            workspace = held.workspace if held is not None else None
+            workspace = _workspace_of(rooms.load(self.dirs.rooms_file), name)
         marked = []
         if workspace is not None:
             marked = self.journal.abandon_room(workspace)
             self.cursors.drop(workspace)
         for job_id in sorted({reply.job_id for reply in dropped} | set(marked)):
             self.audit.write("reply", event="not_posted", job_id=job_id, room=name, why="abandoned")
-        deadline = time.monotonic() + KILL_WAIT
-        with self._cv:
-            while (
-                self._current is not None
-                and self._current.room.name == name
-                and time.monotonic() < deadline
-            ):
-                self._cv.wait(0.05)
+
+    def _given_up(self, found: gate.Gate | None, record: rooms.Record, name: str) -> bool:
+        """Whether, by the gate's record and the room record as read, room ``name`` is no longer
+        this run's to use: the gate record is not the one the session serves (another command
+        forgot the pair), or the room is no longer held, or is marked abandoned (by this run's
+        session, or by another command)."""
+        held = record.held.get(name)
+        return not self.session.serves(found) or held is None or held.abandoned is not None
+
+    def _halted(self, room: _Room) -> bool:
+        """Whether nothing more may be done for ``room``: abandoned here, or given up by the
+        records as they are now (:meth:`_given_up`), which halts it here at once
+        (:meth:`_halt`). The records are read with no lock, so that a command holding the record
+        lock (``forget``, while it leaves the rooms it has marked and tells Lucille) holds none
+        of this up; one that cannot be read tells nothing, and main judges it. No hub call; any
+        thread may call it."""
+        if room.name in self._abandoned:
+            return True
+        try:
+            found = gate.load(self.dirs.gate_file)
+            record = rooms.load(self.dirs.rooms_file)
+        except state.StateError:
+            return False
+        if not self._given_up(found, record, room.name):
+            return False
+        self._halt(room.name, room.workspace)
+        return True
 
     def _drain(self) -> None:
         """Stop reading; let the worker finish what runs; give the poster :data:`FLUSH` s."""
@@ -716,7 +826,8 @@ class Runner:
     def _check(self, name: str) -> _switchboard.Room | None:
         """Room ``name``, if it may be read or posted in now: held and not abandoned, the gate
         open and a touch run since the pair was made, checks 3 and 4 passed, and its list naming
-        the pair. No hub call; any thread may call it."""
+        the pair. A room the records give up (:meth:`_given_up`) is halted here at once. No hub
+        call and no lock; any thread may call it."""
         if name in self._abandoned:
             return None
         try:
@@ -724,14 +835,13 @@ class Runner:
             record = rooms.load(self.dirs.rooms_file)
         except state.StateError:
             return None
-        held = record.held.get(name)
-        if (
-            found is None
-            or found.opened_at is None
-            or found.touched_at is None
-            or held is None
-            or held.abandoned is not None
-        ):
+        if self._given_up(found, record, name):
+            # Another command forgot the pair or abandoned the room, or this run's session did:
+            # halted here at once, whatever main is waiting for.
+            self._halt(name)
+            return None
+        held = record.held[name]
+        if found is None or found.opened_at is None or found.touched_at is None:
             return None
         try:
             view = self.link.room(name)
@@ -760,7 +870,8 @@ class Runner:
                 view = self._check(room.name)
                 if view is None or view.workspace != room.workspace:
                     room.stop.set()
-                    self._event("room", room.name)
+                    if room.name not in self._abandoned:
+                        self._event("room", room.name)
                     return
                 if client is None:
                     client = self.link.room_client(view)
@@ -839,7 +950,7 @@ class Runner:
     def _handle(self, batch: _Batch) -> bool:
         room = batch.room
         for message in batch.messages:
-            if room.name in self._abandoned or not self._message(room, message, batch.cursor):
+            if self._halted(room) or not self._message(room, message, batch.cursor):
                 return False
         if batch.unreadable is not None:
             self.audit.write("unreadable", room=room.name, seq=batch.unreadable)
@@ -858,31 +969,33 @@ class Runner:
             return True
         body = message.body
         job_id = body["job_id"]
-        if self.journal.seen(job_id):
+        entry = None
+        if not self.journal.seen(job_id):
+            if self.controls.draining.is_set():
+                return False
+            received_at = self.link.now()
+            # None when the job id was taken between the two reads: a duplicate as well.
+            entry = self.journal.received(
+                job_id,
+                room=room.workspace,
+                seq=message.seq,
+                received_at=received_at,
+                not_after=envelope.valid_not_after(body, received_at),
+                body=body,
+            )
+        if entry is None:
             self.audit.write(
                 "ignored", room=room.name, seq=message.seq, job_id=job_id, why="duplicate"
             )
             self.cursors.set(room.workspace, min(message.seq, page_cursor))
             return True
-        if self.controls.draining.is_set():
-            return False
-        received_at = self.link.now()
-        not_after = envelope.valid_not_after(body, received_at)
-        entry = self.journal.received(
-            job_id,
-            room=room.workspace,
-            seq=message.seq,
-            received_at=received_at,
-            not_after=not_after,
-            body=body,
-        )
         if not self._decide(room, job_id, body, entry):
             return False
         self.cursors.set(room.workspace, min(message.seq, page_cursor))
         return True
 
     def _afresh(self, item: _Afresh) -> bool:
-        if item.room.name in self._abandoned or self.controls.draining.is_set():
+        if self._halted(item.room) or self.controls.draining.is_set():
             return False
         return self._decide(item.room, item.job_id, item.entry.body, item.entry)
 
@@ -898,7 +1011,7 @@ class Runner:
             controls=self.controls,
             audit=self.audit,
             own_dirs=tuple(str(own) for own in self.dirs.own),
-            stop=lambda: room.name in self._abandoned,
+            stop=lambda: self._halted(room),
         )
 
     def _decide(self, room: _Room, job_id: str, body: dict[str, Any], entry: Entry) -> bool:
@@ -943,8 +1056,9 @@ class Runner:
     ) -> None:
         if restarted:
             self.audit.sent(job_id, hashlib.sha256(data).hexdigest(), len(data))
+        halted = self._halted(room)
         with self._cv:
-            if room.name not in self._abandoned:
+            if not halted and room.name not in self._abandoned:
                 self._replies.append(_Reply(job_id, room.name, room.workspace, data, basis))
                 self._cv.notify_all()
                 return
@@ -975,9 +1089,12 @@ class Runner:
                 client.close()
 
     def _drop(self, reply: _Reply, why: str, **fields: Any) -> None:
+        """Drop a reply waiting to be posted, and log it; nothing, when it is gone already (a
+        room halted meanwhile dropped and logged it)."""
         with self._cv:
-            if reply in self._replies:
-                self._replies.remove(reply)
+            if reply not in self._replies:
+                return
+            self._replies.remove(reply)
             self._cv.notify_all()
         self.audit.write(
             "reply", event="not_posted", job_id=reply.job_id, room=reply.room, why=why, **fields

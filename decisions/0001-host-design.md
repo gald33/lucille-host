@@ -542,9 +542,22 @@ one (`waiting`, `sas_pending`, `confirmed`, `leaked`, `expired`, ...).
   last saw: whether it runs, its last contact with the hub, and the clock skew, which shows as its own
   state past ±300 s.
 - `log` prints the last lines of the audit log, oldest first, across its rotated files.
+- `run` holds `state/.run.lock` (`os.lockf`, taken without waiting) for as long as it runs: a second `run`
+  of the profile, in another shell or the same process, refuses at once (exit 1) and changes nothing,
+  since two would each read and answer every request. `run` refuses a pair with no gate record, which
+  can never be confirmed on the host, as `pair status` and `pair confirm` do.
 - `forget` leaves the pair's work rooms, then calls `pairing.forget`, which deletes the pair from the
-  store and then tells Lucille, best effort. It prints whether Lucille was told. A `run` going at the time
-  stops once it finds the pair gone, and kills, with no reply, a request it is running.
+  store and then tells Lucille, best effort. It prints whether Lucille was told. It marks every room
+  abandoned in the room record before the first leave, and holds the record lock until it is done,
+  through hub calls that can each take up to the client's timeout. A `run` going at the time does not
+  wait for that lock to stop its work in those rooms: its worker, readers and poster read the room
+  record and the gate's record themselves, with no lock, before each request, read and post and every
+  0.05 s while a child runs. So a request running from a marked room is killed then, with no reply, and
+  nothing more starts from it. `run` itself stops at its first step once `forget` is done (until then a
+  drain waits too), by the gate's record: `run` notes which record it started with (the pair's name, and
+  when the record was made), and a record that is gone, names another pair, or was made for another
+  pairing under the same name stops it, whether or not Lucille was told. Stopping so, it touches nothing
+  of what the profile holds, which may already be a new pair's.
 - `--profile <name>` selects a separate config dir, state dir and store, so that two computers can be
   simulated on one machine.
 
@@ -693,7 +706,7 @@ template test, which needs that hub's injected clock. It may spawn only the loca
 | Nothing Lucille sends can widen what the host permits | Conformance tries each of these: an unknown op, a not-enabled op, extra keys (`exe`, `argv`, `env`, `cwd`, `timeout`), policy- and update-shaped fields, traversal, an absolute path, a symlink escape, a file named `--version`, and oversize args. Each is refused with the right code, the policy digest is unchanged, and the spawn count is 0. `caps` above the host's own are not refused, but the effective cap never exceeds the host's own |
 | No shell; one spawn site; children get a built environment and no key | The AST lint. A fixture that dumps its environment shows only allowlisted keys |
 | Nothing runs before the local SAS confirmation | A fake Lucille offers a room and posts a request before the user confirms the SAS: no touch, no accept, no spawn, no reply; `pair confirm` before the host has shown the SAS confirms nothing; once the SAS is shown and confirmed, the request runs. At `pair`'s prompt on a terminal, a `y` typed before the question is discarded. `pair confirm` after the code has expired still opens the gate. `n`, `pair reject` and the deadline each forget the pair, and a confirmation made in time is never expired by `run` or `pair status` judging the gate beside it |
-| One run per job id, never after `not_after` | A duplicated request runs once. An expired request is refused with no spawn. A restart between a decision to run and sent gives `failed interrupted`, with no second run; a refusal not yet sent is re-posted unchanged |
+| One run per job id, never after `not_after` | A duplicated request runs once. A second `run` of the profile refuses while one runs, and two processes writing the journal at once never both take a job id. An expired request is refused with no spawn. A restart between a decision to run and sent gives `failed interrupted`, with no second run; a refusal not yet sent is re-posted unchanged |
 | Only `lucille.exec`, in a room Lucille offered over the host's pair and the host accepted, is acted on | A request on `pair`, in `pair:<name>` on any channel, or in a room not offered over the host's pair or not accepted, is ignored. A `swbp1/paired`, `moved` or `ended` note only triggers a resolve, and a `swbp1/shared` note only a share read |
 | No request is skipped | A test fills `lucille.exec` past one page: none skipped. A heal mid-stream does not move the work room, but counts as a suspected leak (spec/PROTOCOL.md §9): the request in flight in the old room is killed with no reply, the host leaves that room, and a request Lucille posts in the replacement room before the host accepts it still runs |
 | The host never invites anyone into its pair's rooms, and offers no room of its own | No invite or `share_new` call exists, and no verb makes one (lint plus test). It only accepts Lucille's offers. 2.6.0's accept writes the host's record back to Lucille carrying that same room's offer, the sharer's "accepted" (sb `sharing.py:1546-1550`), so no test asserts that the host writes no offer record |
@@ -740,7 +753,11 @@ each could be made another way in a later pull request that updates this list.
   and written whole, so that `run` and another command (`forget`, say) never change it at once. Without it,
   `forget` could write over a room `run` had just recorded, and that room and its keys would stay in the
   share store after the pair was gone. `run` holds it through each step of its session, hub calls
-  included, so a command waits for that step to end.
+  included, so a command waits for that step to end; and `run`'s main thread waits for a command's
+  (`forget`'s leaves and its note to Lucille). Its other threads never take it: they only read the room
+  record and the gate's record, each written whole, to stop the work of a room another command marked.
+- **Two more**: `.run.lock`, held by `run` for as long as it runs, so that a profile runs one `run`; and
+  `.journal.lock`, held around each read and each read-modify-write of the journal.
 - **Keyring writes are throttled, not measured.** A save that changes only when the pair or a room was
   last read or used is skipped while the item was written less than an hour ago; every other change, and
   every delete, is written before the call returns. In a simulated day of 5-minute touches and a room
@@ -761,12 +778,15 @@ each could be made another way in a later pull request that updates this list.
 - **The gate's record** is `state/pair.json`: the pair's name, the hub its code named (check 3 compares
   against it), when the record was made, when the SAS was first shown on the host and the deadline that
   sets, when the gate opened, and when the first touch after that ran. It holds no SAS, no code and no
-  key. It is written before the code is answered and deleted whenever the pair is forgotten. A record
-  that is missing, or names another pair, keeps the gate shut. Once the code is answered, the record is
-  changed, and its deadline judged, only under the record lock (`state/.record.lock`) that `run` holds
+  key. It is written before the code is answered and deleted whenever the pair is forgotten: only the
+  record of the pair forgotten, made when that pair was, so a record another pairing wrote since stays. A
+  record that is missing, or names another pair, keeps the gate shut. The record is written, changed,
+  deleted and its deadline judged only under the record lock (`state/.record.lock`) that `run` holds
   through each step and forgetting holds throughout: so a `pair confirm` made in time is never expired by
-  a `run` or a `pair status` that read the record before it, and no showing or confirmation writes a
-  record back for a pair being forgotten.
+  a `run` or a `pair status` that read the record before it, no showing or confirmation writes a record
+  back for a pair being forgotten, and `pair reject` (or `n`) beside a `pair confirm` either finds the gate
+  open, and refuses, or forgets the pair before the confirm finds it gone. Forgetting leaves the work
+  rooms only while the record of rooms names that pair, or a pair no longer held.
 - **The policy is reset right before a new code is answered,** once its hub and token checks pass: a
   policy that is not the fresh one moves to `config/policy.previous.toml`. A fresh or missing one is never
   set aside over an earlier one. Before the answer, not after, so that a stop between the two never leaves
@@ -810,16 +830,23 @@ each could be made another way in a later pull request that updates this list.
   interrupted among them, unjudged: it was accepted over the pair as it stood before the move.
 - **Resolves back off** after a failure: the hub's `retry_after` on a 429, otherwise 1 s doubling to 30 s
   plus up to a quarter more, drawn from `secrets`; a resolve that could not read the pair room counts as
-  a failure. A hub error another part of the host meets asks for a resolve only when none ran in the last
-  30 s.
+  a failure. 2.6.0 does not raise when the hub turns away its read of the pair room: `pairing.resolve`
+  returns what the computer last saw, unchecked, with the hub's error in `Resolution.hub_error`
+  (sb `pairing.py:2278-2290`), and the host takes `retry_after` from that error. `pair`, waiting for
+  Lucille, waits that long too, when it is longer than its own 5 s. A hub error another part of the host
+  meets asks for a resolve only when none ran in the last 30 s.
 
 **The read loop and replies.**
 - **The journal** is `state/journal.json` (`journal.py`): for each job id, its room, sequence number,
   receipt time, prune time, the request's body (kept only up to 16 KiB, and only until it is decided), the
   decision, the refusal's bytes (until they are sent), whether the reply was sent, and whether its room was
   abandoned. The entry is written before the request is decided, the decision right after the audit log's
-  `decision` line and before anything runs, and `sent` once the hub accepted the post. A change to an
-  entry another thread's write has pruned changes nothing: past its prune time the request is settled. A request received
+  `decision` line and before anything runs, and `sent` once the hub accepted the post. Writing the entry
+  takes the job id: the look for an entry and the write are one step, so a job id another thread or
+  process took first is a duplicate. Each read and each read-modify-write holds `.journal.lock`
+  (`os.lockf` beside a thread lock), so neither another thread nor another process writes in between.
+  A change to an entry another write has pruned changes nothing: past its prune time the request is
+  settled. A request received
   and not decided before a restart is decided afresh from that body: the range of its `not_after` from the
   time it was first received, its expiry at the time of the new decision.
 - **Cursors** are kept per room workspace in `state/cursors.json`, each written after its message's audit
@@ -840,7 +867,9 @@ each could be made another way in a later pull request that updates this list.
   otherwise.
 - **Abandoning a room** waits up to 10 s for the killed child of a request from it to end, so that the
   leave comes after the kill. When the pair ends while `run` runs, every room it still reads is abandoned
-  so, including when another command forgot the pair.
+  so, including when another command forgot the pair. A room another command marked abandoned is
+  stopped in `run` as soon as one of its threads reads the mark, without the leave, which is that
+  command's.
 - **Draining** drops the pages queued, lets the running operation finish, and gives the reply thread 30 s;
   what it has not posted by then is left to the next start.
 - **A thread of `run` that meets an error it does not expect stops `run`,** which exits 1.

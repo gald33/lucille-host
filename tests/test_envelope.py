@@ -6,13 +6,18 @@ request fixtures, as ``tests/test_catalog.py`` holds steps 5 to 9 to them.
 
 from __future__ import annotations
 
+import json
+import threading
+import uuid
 from pathlib import Path
 from typing import Any
 
 import pytest
 
-from lucille_host import envelope, spec, state
+from lucille_host import envelope, journal, spec, state
 from lucille_host.journal import Journal
+from tests import _elsewhere
+from tests._host import lock_held
 
 EARLY = {"host_too_old", "bad_request", "expired"}
 FIXTURES = spec.fixture_paths("request")
@@ -204,6 +209,56 @@ def test_the_journal_records_each_step(tmp_path: Path) -> None:
     assert entry is not None and entry.body is None
     assert journal.abandon_room("w") == [big]
     assert journal.pending() == []
+
+
+def test_the_journal_takes_a_job_id_once(tmp_path: Path) -> None:
+    taking = Journal(tmp_path / "journal.json", clock=lambda: 100.0)
+    job = "00000000-0000-4000-8000-000000000001"
+    first = taking.received(job, room="w", seq=1, received_at=100.0, not_after=None, body={})
+    assert first is not None
+    # The same job id again, from any room: a duplicate, and the first entry stays as it was.
+    again = taking.received(job, room="v", seq=9, received_at=101.0, not_after=None, body={})
+    assert again is None
+    assert taking.get(job) == first
+
+
+def test_two_processes_never_take_one_job_id(tmp_path: Path) -> None:
+    # Each process takes every job id it can, at the same time as the other. A journal whose
+    # look and write are two steps, or whose lock keeps out only the threads of one process,
+    # lets both take some.
+    path = tmp_path / "journal.json"
+    jobs = [str(uuid.UUID(int=n, version=4)) for n in range(1, 151)]
+    racers = [_elsewhere.start("journal", str(path), *jobs) for _ in range(2)]
+    for racer in racers:
+        assert racer.stdin is not None
+        racer.stdin.write("go\n")
+        racer.stdin.flush()
+    taken: list[list[str]] = []
+    for racer in racers:
+        out, err = racer.communicate(timeout=120)
+        assert racer.returncode == 0, err
+        taken.append(json.loads(out))
+    first, second = taken
+    assert set(first).isdisjoint(second)
+    assert sorted(first + second) == sorted(jobs)
+    kept = Journal(path, clock=lambda: 100.0)
+    assert all(kept.seen(job) for job in jobs)
+
+
+def test_the_journal_waits_for_another_process(tmp_path: Path) -> None:
+    taking = Journal(tmp_path / "journal.json", clock=lambda: 100.0)
+    done = threading.Event()
+
+    def take() -> None:
+        taking.received("job", room="w", seq=1, received_at=100.0, not_after=None, body={})
+        done.set()
+
+    with lock_held(tmp_path / journal.LOCK):
+        thread = threading.Thread(target=take, daemon=True)
+        thread.start()
+        assert not done.wait(0.5), "the journal was written while another process held its lock"
+    assert done.wait(10)
+    assert taking.seen("job")
 
 
 def test_the_journal_fails_closed(tmp_path: Path) -> None:

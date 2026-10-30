@@ -21,11 +21,13 @@ import pytest
 from switchboard import pairing, writekey
 from switchboard.testing import hub
 
-from lucille_host import __version__, _switchboard, audit, link, loop, paths, rooms, state
+from lucille_host import __version__, _switchboard, audit, gate, link, loop, paths, rooms, state
 from lucille_host.audit import AuditLog
 from lucille_host.cli import main
+from lucille_host.controls import Controls
+from tests import _elsewhere
 from tests._cli import HostCli, collecting
-from tests._host import HostEnv
+from tests._host import HostEnv, lock_free, lock_held
 from tests._run import RunHost, body, fast, until
 
 pytestmark = pytest.mark.filterwarnings(
@@ -389,7 +391,8 @@ def test_status_never_shows_sas(cli: HostCli) -> None:
     outputs.append(cli.run("status").text)
     assert (
         f"pair: expired: pair {lucille.name}: the SAS was not confirmed before "
-        f"{link.iso(found.deadline)}; the next `lucille-host pair status` or `run` forgets it"
+        f"{link.iso(found.deadline)}; the next `lucille-host pair status`, `lucille-host pair "
+        "confirm` or `run` forgets it"
     ) in outputs[-1]
     assert cli.held() == [lucille.name]
     assert cli.run("pair", "status").rc == 1
@@ -588,7 +591,9 @@ def test_forget_while_run_runs_stops_it(host: RunHost, command: Commands) -> Non
     ran = command("forget")
     assert ran.rc == 0 and ran.out.endswith("; Lucille was told\n"), ran.text
     said = host.wait(30)
-    assert said == "none: the pair is gone from this computer (unknown); run stopped"
+    assert said == (
+        f"none: pair {host.name} is gone from this computer: another command forgot it; run stopped"
+    )
     # The request it was running is killed, with no reply, well before its 60 s.
     (execution,) = host.events("execution", job_id=sent["job_id"])
     assert (execution["ended"], execution["abandoned"]) == ("killed", True)
@@ -597,3 +602,255 @@ def test_forget_while_run_runs_stops_it(host: RunHost, command: Commands) -> Non
     assert host.lucille.replies("work-1") == []
     entry = host.journal().get(sent["job_id"])
     assert entry is not None and entry.abandoned
+
+
+def _in_files(
+    host_env: HostEnv, h: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> RunHost:
+    """A :class:`RunHost` whose profile keeps its pair in files, which another process can
+    read (``tests/_elsewhere.py``)."""
+    fast(monkeypatch)
+    host = RunHost(h, host_env, tmp_path, config=state.HostConfig(store="file"))
+    state.save_host_config(host.dirs, host.config)
+    return host
+
+
+def _marked(host: RunHost, room: str) -> bool:
+    """Whether the room record marks ``room`` abandoned, or has it left."""
+    record = host.record()
+    held = record.held.get(room)
+    if held is not None:
+        return held.abandoned is not None
+    return any(left.room == room for left in record.left.values())
+
+
+# How long each hub request of `forget` takes to fail, in the tests where it runs in another
+# process with a hub that does not answer (which holds a request until the client's timeout).
+SLOW = 3.0
+
+
+def test_forget_in_another_process_stops_run_when_lucille_is_not_told(
+    host_env: HostEnv, h: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # `forget` runs in another process, with the hub out of reach: Lucille is not told, so no
+    # note of the library's wakes `run`, and the next resolve due is a day away. `run` still
+    # finds its pair gone at its next step, by the gate's record, and kills what it runs.
+    host = _in_files(host_env, h, tmp_path, monkeypatch)
+    host.enable("host.sleep")
+    host.start()
+    host.offer("work-1")
+    sent = body(op="host.sleep", args={"n": 60})
+    host.request("work-1", sent)
+    until(lambda: host.events("start", job_id=sent["job_id"]), what="the child started")
+    started = time.monotonic()
+    forget = _elsewhere.start("forget")
+    out, err = forget.communicate(timeout=60)
+    assert forget.returncode == 0, out + err
+    assert out.startswith(f"forgotten: pair {host.name} is forgotten on this computer"), out + err
+    assert "Lucille was not told" in out
+    said = host.wait(20)
+    assert said == (
+        f"none: pair {host.name} is gone from this computer: another command forgot it; run stopped"
+    )
+    # The request it was running is killed, with no reply, well before its 60 s.
+    (execution,) = host.events("execution", job_id=sent["job_id"])
+    assert (execution["ended"], execution["abandoned"]) == ("killed", True)
+    assert time.monotonic() - started < 20
+    assert host.events("sent", job_id=sent["job_id"]) == []
+    assert host.lucille.replies("work-1") == []
+    entry = host.journal().get(sent["job_id"])
+    assert entry is not None and entry.abandoned
+    assert host.opened.names() == [] and host.gate() is None
+
+
+def test_forget_in_another_process_kills_at_once_while_it_waits_for_the_hub(
+    host_env: HostEnv, h: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # `forget`, in another process, marks the room abandoned first, then leaves it and tells
+    # Lucille with the record lock held, through a hub that takes SLOW s to fail each request.
+    # `run`'s main thread waits for that lock; the request it runs is killed all the same, as
+    # soon as the room is marked, with no reply: while `forget` still waits for the hub.
+    host = _in_files(host_env, h, tmp_path, monkeypatch)
+    host.enable("host.sleep")
+    host.start()
+    room = host.offer("work-1")
+    sent = body(op="host.sleep", args={"n": 60})
+    host.request("work-1", sent)
+    until(lambda: host.events("start", job_id=sent["job_id"]), what="the child started")
+    forget = _elsewhere.start("forget", str(SLOW))
+    try:
+        until(lambda: _marked(host, room), timeout=30, what="forget marking the room")
+        marked = time.monotonic()
+        (execution,) = until(
+            lambda: host.events("execution", job_id=sent["job_id"]),
+            timeout=60,
+            what="the child ending",
+        )
+        killed = time.monotonic()
+        # `forget` deletes the gate's record last, once it is done with the hub.
+        forgetting = host.gate() is not None
+    finally:
+        out, err = forget.communicate(timeout=120)
+    assert forgetting, "the child was killed only once forget was done with the hub"
+    assert killed - marked < SLOW / 2
+    assert (execution["ended"], execution["abandoned"]) == ("killed", True)
+    assert forget.returncode == 0, out + err
+    assert "Lucille was not told" in out
+    said = host.wait(20)
+    assert said == (
+        f"none: pair {host.name} is gone from this computer: another command forgot it; run stopped"
+    )
+    assert host.events("sent", job_id=sent["job_id"]) == []
+    assert host.lucille.replies("work-1") == []
+    entry = host.journal().get(sent["job_id"])
+    assert entry is not None and entry.abandoned
+    assert host.opened.names() == [] and host.gate() is None
+
+
+def test_a_request_queued_from_a_room_forget_marks_in_another_process_never_starts(
+    host_env: HostEnv, h: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Two requests, read in one page. The worker answers the first; before it takes the second,
+    # `forget`, in another process, marks the room abandoned, then waits on a hub that takes
+    # SLOW s to fail each request, the record lock held. The second request is neither decided
+    # nor started: the worker reads the mark before each request it takes, and waits for no
+    # lock.
+    host = _in_files(host_env, h, tmp_path, monkeypatch)
+    host.enable("host.sleep")
+    first = body()
+    second = body(op="host.sleep", args={"n": 60})
+    # Posted before `run` takes the room, so that its first read hands both to the worker.
+    host.lucille.offer("work-1")
+    host.request("work-1", first)
+    host.request("work-1", second)
+    # The worker is held between the two, once the first is answered, as its cursor moves.
+    between = threading.Event()
+    move = loop.Cursors.set
+
+    def held(cursors: loop.Cursors, workspace: str, seq: int) -> None:
+        if not between.is_set():
+            between.set()
+            until(lambda: _marked(host, "room-1"), timeout=30, what="forget marking the room")
+        move(cursors, workspace, seq)
+
+    monkeypatch.setattr(loop.Cursors, "set", held)
+    host.start()
+    assert between.wait(20), "the worker never answered the first request"
+    host.reply("work-1", first["job_id"])
+    forget = _elsewhere.start("forget", str(SLOW))
+    try:
+        said = host.wait(120)
+    finally:
+        out, err = forget.communicate(timeout=120)
+    assert forget.returncode == 0, out + err
+    assert said == (
+        f"none: pair {host.name} is gone from this computer: another command forgot it; run stopped"
+    )
+    assert host.events("decision", job_id=second["job_id"]) == []
+    assert host.events("start", job_id=second["job_id"]) == []
+    replied = [row["body"]["job_id"] for row in host.lucille.replies("work-1")]
+    assert replied == [first["job_id"]]
+
+
+def _second_run(host: RunHost) -> tuple[BaseException | str | None, list[str]]:
+    """Another ``run`` of the profile, on a thread: what it raised or returned within 10 s (None
+    if it was still running then, and was drained), and what it said."""
+    said: list[str] = []
+    controls = Controls(host.dirs.state)
+    runner = loop.Runner(host.dirs, host.session(), controls=controls, say=said.append)
+    outcome: list[BaseException | str] = []
+
+    def second() -> None:
+        try:
+            outcome.append(runner.run())
+        except BaseException as exc:  # noqa: BLE001 - handed to the test thread
+            outcome.append(exc)
+
+    thread = threading.Thread(target=second, daemon=True)
+    thread.start()
+    thread.join(10)
+    if thread.is_alive():
+        controls.draining.set()
+        thread.join(30)
+        return None, said
+    return outcome[0], said
+
+
+def test_a_profile_runs_one_run_at_a_time(host: RunHost) -> None:
+    # Two runs of one profile would each read every request, and each answer it.
+    lock = host.dirs.state / loop.RUN_LOCK
+    host.start()
+    until(lambda: host.dirs.status_file.exists(), what="the run started")
+    assert not lock_free(lock), "another process could take the run lock"
+    # A second `run` of the profile, in the same process, is refused before it does anything.
+    refused, said = _second_run(host)
+    assert isinstance(refused, loop.Failed), refused
+    assert str(refused) == loop.ALREADY_RUNNING
+    assert said == []
+    # The first goes on, and holds the lock until it stops.
+    assert host.running
+    assert host.offer("work-1") == "room-1"
+    assert not lock_free(lock)
+    host.stop()
+    assert lock_free(lock)
+    # Then another `run` may start.
+    host.start()
+    until(lambda: host.reading() == ["room-1"], what="the next run reading its room")
+    host.stop()
+
+
+def test_a_run_refuses_while_another_process_holds_the_lock(host: RunHost) -> None:
+    lock = host.dirs.state / loop.RUN_LOCK
+    lines = len(host.audit())
+    with lock_held(lock):
+        refused, said = _second_run(host)
+    assert isinstance(refused, loop.Failed), refused
+    assert str(refused) == loop.ALREADY_RUNNING
+    # It did nothing: said nothing, wrote no status and no log line, held no lock.
+    assert said == []
+    assert not host.dirs.status_file.exists()
+    assert len(host.audit()) == lines
+    assert lock_free(lock)
+
+
+def test_run_refused_says_why(
+    host: RunHost, command: Commands, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The command, run on a thread, so that a `run` that does not refuse is drained and fails
+    # the test, rather than running for ever.
+    made: list[Controls] = []
+
+    class Kept(Controls):
+        def __init__(self, *args: Any, **options: Any) -> None:
+            super().__init__(*args, **options)
+            made.append(self)
+
+    monkeypatch.setattr("lucille_host.cli.Controls", Kept)
+    outcome: list[Ran] = []
+    with lock_held(host.dirs.state / loop.RUN_LOCK):
+        thread = threading.Thread(target=lambda: outcome.append(command("run")), daemon=True)
+        thread.start()
+        thread.join(10)
+        if thread.is_alive():
+            for controls in made:
+                controls.draining.set()
+            thread.join(30)
+    assert len(outcome) == 1
+    (ran,) = outcome
+    assert ran.rc == 1, ran
+    assert ran.err == f"lucille-host: {loop.ALREADY_RUNNING}\n"
+    assert ran.out == ""
+
+
+def test_run_of_a_pair_with_no_gate_record_stops_at_once(host: RunHost) -> None:
+    # Such a pair can never be confirmed here, so `run` says so and stops, rather than telling
+    # the user that `pair status` shows a SAS it refuses to show.
+    gate.remove(host.dirs.gate_file)
+    host.start()
+    with pytest.raises(link.Stopped) as stopped:
+        host.wait(10)
+    assert stopped.value.state == "refused"
+    assert "has no local gate record" in str(stopped.value)
+    assert host.said == []
+    assert not host.dirs.status_file.exists()
+    assert host.opened.names() == [host.name]

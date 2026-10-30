@@ -174,7 +174,10 @@ def test_end_to_end_pair_run_forget(flow: Flow, host_env: HostEnv) -> None:
     assert f"running: pair {lucille.name}; Ctrl-C stops once the running operation ends" in (
         transcript
     )
-    assert "none: the pair is gone from this computer (unknown); run stopped" in transcript
+    assert (
+        f"none: pair {lucille.name} is gone from this computer: another command forgot it; "
+        "run stopped"
+    ) in transcript
     with pytest.raises(pairing.PairingError) as ended:
         lucille.resolve()
     assert ended.value.state == "ended_by_peer"

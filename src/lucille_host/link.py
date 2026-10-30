@@ -29,7 +29,14 @@ What ``lucille-host pair`` and its sub-verbs do, made of the calls in ``_switchb
 - **Forgetting** (``lucille-host forget``, :meth:`Session.forget`). Every work room held is left
   first, then the pair is forgotten here and Lucille is told, best effort; the gate's record and how
   far each room was read go too. The journal of requests stays: a job id is answered once per
-  profile, whatever pair it came over.
+  profile, whatever pair it came over. All of it is done under the record lock, and touches only
+  what is that pair's: a gate record that names another pair stays, and so does a record of rooms
+  that names another pair held here. The rooms are marked abandoned in their record before any hub
+  call, and a ``run`` going at the time stops its work in them on its next look at that record,
+  without waiting for the lock (``loop.py``). It finds at its next step, once the command is done,
+  that its pair's gate record is gone (or names another pair, or another pairing under the same
+  name), whether or not Lucille was told, and stops there, touching nothing (:meth:`Session.start`
+  notes which record it serves, :meth:`Session.serves`).
 
 Once the gate is open, the same :class:`Session` keeps the pair and takes the work rooms Lucille
 offers over it (spec/PROTOCOL.md sections 6, 7 and 9). It is driven by events, one at a time:
@@ -41,9 +48,10 @@ then due. The rules:
   error, every :data:`RESOLVE_EVERY` seconds while Lucille has not collected the answer, and at
   least every :data:`RESOLVE_AT_LEAST` seconds; and after a touch, when the store keeps a
   generation of pair:<name> other than the one followed (another command followed a move first).
-  A resolve that fails is tried again after a back-off. Once the gate is open, a touch follows
-  every resolve the host makes, except one made because a touch failed: the next touch then comes
-  on the rhythm.
+  A resolve that fails is tried again after a back-off: the hub's ``retry_after`` when it gave
+  one, which for a read of the pair room the library returns (``Pair.retry_after``) rather than
+  raises. Once the gate is open, a touch follows every resolve the host makes, except one made
+  because a touch failed: the next touch then comes on the rhythm.
 - **Touching** (reading the pair's offers). Nothing before the gate opens. Then: when it opens, at
   start, on a ``shared`` note, after a resolve, on a wake, and :data:`TOUCH_EVERY` seconds after
   the last touch.
@@ -153,6 +161,8 @@ _NO_GATE: Final = (
     "pair {name} has no local gate record, so it cannot be confirmed here: run "
     "`lucille-host pair reject` and start again in Lucille"
 )
+# What is said of a pair another command forgot while this one worked on it.
+_GONE: Final = "pair {name} is gone from this computer: another command forgot it"
 
 # What a step may have to do, as flags set by events and cleared when done: a burst of events is
 # one of each.
@@ -230,6 +240,10 @@ class Session:
         # The pair as the last resolve that read its room found it.
         self.pair: _switchboard.Pair | None = None
         self._name: str | None = None
+        # Once :meth:`start` has run: when the gate record of the pair this session serves was
+        # made. Another command that forgets the pair deletes that record, and a new pairing
+        # writes another, so the record tells whether the pair served is still this profile's.
+        self._made: float | None = None
         self._wanted: set[str] = set()
         self._cause = ""
         self._last_resolve: float | None = None
@@ -302,15 +316,61 @@ class Session:
     def _record_lock(self) -> contextlib.AbstractContextManager[None]:
         return store.file_lock(paths.ensure_dir(self.dirs.state) / RECORD_LOCK)
 
+    def _serving(self, name: str) -> gate.Gate | None:
+        """The gate of pair ``name``, read now; None when its record is missing or names another
+        pair. Once :meth:`start` has run, the record must be the one the session started with:
+        one that is gone, names another pair, or was made for another pairing under the same
+        name means another command forgot the pair this session serves, and perhaps paired
+        again. That raises :class:`Stopped` (``none``), and nothing the profile holds now is
+        touched: it may be another pair's."""
+        found = gate.load(self.dirs.gate_file)
+        if self._made is None:
+            return found if found is not None and found.pair == name else None
+        if found is None or found.pair != name or not self.serves(found):
+            raise Stopped("none", _GONE.format(name=name))
+        return found
+
+    def serves(self, found: gate.Gate | None) -> bool:
+        """Whether ``found``, a gate record as read now, is the one this session serves since
+        :meth:`start`: the same pair, made at the same time. False before :meth:`start`. It
+        takes no lock and makes no hub call, so that ``run``'s other threads can ask while a
+        command holds the record lock."""
+        return (
+            self._made is not None
+            and found is not None
+            and (found.pair, found.created_at) == (self._name, self._made)
+        )
+
+    def no_gate(self, name: str) -> Stopped:
+        """Why pair ``name`` cannot be confirmed when it has no gate record: it is gone (another
+        command forgot it), or it is held with no record (``pair reject`` forgets it)."""
+        if name not in self.held():
+            return Stopped("none", _GONE.format(name=name))
+        return Stopped("refused", _NO_GATE.format(name=name))
+
+    def _remove_gate(self, found: gate.Gate) -> None:
+        """Delete the gate's record if it is still ``found``: the same pair, made at the same
+        time. A record another pairing wrote since is not this one to delete. Under the record
+        lock."""
+        now = gate.load(self.dirs.gate_file)
+        if now is not None and (now.pair, now.created_at) == (found.pair, found.created_at):
+            gate.remove(self.dirs.gate_file)
+
     def _forget(self, name: str, why: str) -> _switchboard.Told:
-        """Leave every work room held, then forget the pair here and tell Lucille best effort;
-        then delete the gate's record. A room that cannot be left keeps the pair: the rooms of a
-        pair that is over must not stay in the share store with their keys."""
-        self.audit.write("pair", event="forget", pair=name, why=why)
+        """Leave every work room held over the pair, then forget the pair here and tell Lucille
+        best effort; then delete the gate's record. A room that cannot be left keeps the pair:
+        the rooms of a pair that is over must not stay in the share store with their keys.
+
+        All of it under the record lock, and only what is this pair's: a gate record, or a record
+        of rooms, that names another pair is left as it is, and a session whose own pair another
+        command forgot already forgets nothing (:meth:`_serving`)."""
         with self._record_lock():
+            found = self._serving(name)
+            self.audit.write("pair", event="forget", pair=name, why=why)
             self._leave_all(name)
             told = self.link.forget(name)
-            gate.remove(self.dirs.gate_file)
+            if found is not None:
+                self._remove_gate(found)
         self.audit.write("pair", event="forgotten", pair=name, why=why, told=told.told)
         return told
 
@@ -364,8 +424,12 @@ class Session:
         return code
 
     def accept(self, code: _switchboard.Code) -> str:
-        """Write the gate's record, then answer the code. Returns the pair's name."""
-        self._save(gate.Gate(pair=code.name, hub=code.url, created_at=self.link.now()))
+        """Write the gate's record, then answer the code. Returns the pair's name. The record is
+        written, and deleted when the code is not answered, under the record lock, and only the
+        record this call wrote is deleted."""
+        saved = gate.Gate(pair=code.name, hub=code.url, created_at=self.link.now())
+        with self._record_lock():
+            self._save(saved)
         try:
             name = self.link.accept(code)
         except _switchboard.PairFailed as exc:
@@ -376,14 +440,16 @@ class Session:
                     "pair", event="accepted", pair=code.name, sent=False, skewed=exc.skewed
                 )
                 return code.name
-            gate.remove(self.dirs.gate_file)
+            with self._record_lock():
+                self._remove_gate(saved)
             word = outcome(exc.state)
             if word == "error":
                 raise Stopped("error", f"the code was not answered ({exc.state})") from None
             self.link.forget(code.name)
             raise Stopped(word, f"{_STOPPED_MESSAGES[word]} ({exc.state})") from None
         except _switchboard.HubError as exc:
-            gate.remove(self.dirs.gate_file)
+            with self._record_lock():
+                self._remove_gate(saved)
             raise Stopped(
                 "error", f"{exc}: nothing was answered, and the code can be tried again"
             ) from None
@@ -399,11 +465,15 @@ class Session:
             while True:
                 try:
                     pair = self.resolve(name)
-                except _switchboard.HubError:
-                    time.sleep(RESOLVE_EVERY)
+                except _switchboard.HubError as exc:
+                    time.sleep(max(RESOLVE_EVERY, exc.retry_after or 0.0))
                     continue
                 if pair.sas_known:
                     return
+                if not pair.checked and pair.retry_after is not None:
+                    # The hub refused to read the pair room for now, and said for how long.
+                    time.sleep(max(RESOLVE_EVERY, pair.retry_after))
+                    continue
                 if reader is None or pair.workspace != workspace:
                     if reader is not None:
                         reader.close()
@@ -444,7 +514,7 @@ class Session:
         with self._record_lock():
             found = self.gate(name)
             if found is None:
-                raise Stopped("refused", _NO_GATE.format(name=name))
+                raise self.no_gate(name)
             if found.opened_at is not None:
                 return f"pair {name} is already confirmed"
             if found.shown_at is None:
@@ -520,25 +590,27 @@ class Session:
                     f"pair {name}: Lucille has not collected this computer's answer yet"
                 )
             if found is None:
-                raise Stopped("refused", _NO_GATE.format(name=name))
+                raise self.no_gate(name)
             if gate.past_deadline(found, self.link.now()):
                 raise self._expired(name)
             shown = self.show(name)
             if shown is None:
-                raise Stopped("refused", _NO_GATE.format(name=name))
+                raise self.no_gate(name)
             return "sas_pending", self.pending(name, *shown)
 
     def reject(self) -> _switchboard.Told:
         """``pair reject``, and ``n`` at ``pair``'s prompt: forget a pair whose gate has not
-        opened, and tell Lucille."""
+        opened, and tell Lucille. Decided under the record lock, so that a ``pair confirm`` in
+        another shell either opens the gate first, and the pair is kept, or finds it gone."""
         name = self._require()
-        found = self.gate(name)
-        if found is not None and found.opened_at is not None:
-            raise Stopped(
-                "refused",
-                f"pair {name} is confirmed on this computer; `lucille-host forget` ends it",
-            )
-        return self._forget(name, why="rejected")
+        with self._record_lock():
+            found = self.gate(name)
+            if found is not None and found.opened_at is not None:
+                raise Stopped(
+                    "refused",
+                    f"pair {name} is confirmed on this computer; `lucille-host forget` ends it",
+                )
+            return self._forget(name, why="rejected")
 
     def pair_state(self) -> tuple[str, str]:
         """``lucille-host status``: where the pair is, from this computer's store and the gate's
@@ -571,7 +643,7 @@ class Session:
         if gate.past_deadline(found, self.link.now()):
             return "expired", (
                 f"pair {name}: the SAS was not confirmed before {iso(found.deadline)}; the next "
-                "`lucille-host pair status` or `run` forgets it"
+                "`lucille-host pair status`, `lucille-host pair confirm` or `run` forgets it"
             )
         return "sas_pending", (
             f"pair {name}: `lucille-host pair status` shows the SAS to compare with Lucille's "
@@ -588,8 +660,16 @@ class Session:
 
     def start(self) -> None:
         """At start: resolve the pair; once its gate is open, finish an accept that a stop
-        interrupted, leave what is owed, judge every room held, touch, and consider the offers."""
-        self._name = self._require()
+        interrupted, leave what is owed, judge every room held, touch, and consider the offers.
+        A pair with no gate record, which can never be confirmed here, is refused, as ``pair
+        status`` and ``pair confirm`` refuse it. From here on the session serves the pair whose
+        record it found: once another command forgets that pair, each step stops
+        (:meth:`_serving`)."""
+        name = self._require()
+        found = self.gate(name)
+        if found is None:
+            raise Stopped("refused", _NO_GATE.format(name=name))
+        self._name, self._made = name, found.created_at
         self._want_resolve("start")
         self._wanted |= {_TOUCH, _JUDGE, _CONSIDER}
         self.step()
@@ -648,7 +728,7 @@ class Session:
     def _step(self) -> None:
         name = self._name or self._require()
         self._name = name
-        found = self.gate(name)
+        found = self._serving(name)
         opened = found is not None and found.opened_at is not None
         if opened and not self._was_open:
             self._wanted |= {_TOUCH, _JUDGE, _CONSIDER}
@@ -705,7 +785,7 @@ class Session:
             self._back_off(now, exc.retry_after)
             return
         if not pair.checked:
-            self._back_off(now, None)
+            self._back_off(now, pair.retry_after)
             return
         self._failures, self._retry_at = 0, 0.0
         self.pair = pair
@@ -859,10 +939,10 @@ class Session:
         checks 3 and 4, and its list names the pair, which is judged only once a touch has run
         since the pair was made. A room that fails is left here."""
         name = self._name or self._require()
-        found = self.gate(name)
-        if found is None or found.opened_at is None:
-            return None
         with self._record_lock():
+            found = self._serving(name)
+            if found is None or found.opened_at is None:
+                return None
             record = self._bound(name, found)
             view = self._check(name, record, room)
             self._digest(name, record)
@@ -872,10 +952,10 @@ class Session:
         """Every room the host may read and post in now, each checked as :meth:`check_room`
         checks it."""
         name = self._name or self._require()
-        found = self.gate(name)
-        if found is None or found.opened_at is None:
-            return []
         with self._record_lock():
+            found = self._serving(name)
+            if found is None or found.opened_at is None:
+                return []
             record = self._bound(name, found)
             views = [self._check(name, record, room) for room in record.in_use()]
             self._digest(name, record)
@@ -933,13 +1013,19 @@ class Session:
         self._drop(name, record, room, why)
 
     def _drop(self, name: str, record: rooms.Record, room: str, why: str) -> None:
+        self._leave(name, record, room, self._mark(record, room, why))
+
+    def _mark(self, record: rooms.Record, room: str, why: str) -> str:
+        """Mark the room abandoned in its record, unless it is already, and then stop what it was
+        doing; returns why it is abandoned. ``run`` reads the mark with no lock, whichever command
+        made it, and stops its work in the room there and then (``loop.py``)."""
         held = record.held[room]
         if held.abandoned is None:
             held.abandoned = why
             self._keep(record)
             if self.stop_room is not None:
                 self.stop_room(room)
-        self._leave(name, record, room, held.abandoned)
+        return held.abandoned
 
     def _leave(self, name: str, record: rooms.Record, room: str, why: str) -> bool:
         """Leave the room; whether it is gone from the share store. A room that could not be
@@ -973,11 +1059,24 @@ class Session:
 
     def _leave_all(self, name: str) -> None:
         """Before a pair is forgotten: leave every room held, the one an interrupted accept may
-        have kept included. Raises :class:`Stopped` if one cannot be left."""
+        have kept included. Raises :class:`Stopped` if one cannot be left. A record of rooms that
+        names another pair this profile holds is that pair's, made since: nothing in it is left.
+        (Rooms recorded under a pair no longer held are left with this one: their keys must not
+        stay behind either.)"""
         record = rooms.load(self.dirs.rooms_file)
+        if record.pair is not None and record.pair != name and record.pair in self.held():
+            self._notes.clear()
+            return
         self._adopt_accepting(record)
-        for room in sorted(record.held):
-            self._abandon(name, record, room, rooms.PAIR_OVER)
+        # Every room is marked abandoned before the first leave, which is a hub call: a `run`
+        # beside this stops its work in each of them at once, not after the leaves.
+        marked: dict[str, str] = {}
+        for room, held in sorted(record.held.items()):
+            if held.abandoned is None:
+                self.audit.write("room", event="abandoned", room=room, why=rooms.PAIR_OVER)
+            marked[room] = self._mark(record, room, rooms.PAIR_OVER)
+        for room, why in marked.items():
+            self._leave(name, record, room, why)
         self._notes.clear()
         if record.held:
             raise Stopped(
@@ -1005,8 +1104,8 @@ class Session:
     def consider_offers(self) -> None:
         """Consider the offers written down, by checks 1, 2 and 5; accept one that passes."""
         name = self._name or self._require()
-        found = self.gate(name)
         with self._record_lock():
+            found = self._serving(name)
             if found is not None and found.opened_at is not None:
                 record = self._bound(name, found)
             else:

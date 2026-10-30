@@ -21,12 +21,12 @@ from typing import Any
 
 import httpx
 import pytest
-from switchboard import pairing, sharing, writekey
+from switchboard import client, pairing, sharing, writekey
 from switchboard.testing import hub
 
 from lucille_host import _switchboard, gate, link, rooms, state
 from tests import _audit_hook
-from tests._host import HostEnv
+from tests._host import HostEnv, lock_held
 from tests._lucille import FakeLucille
 
 pytestmark = pytest.mark.filterwarnings(
@@ -348,6 +348,41 @@ def test_a_failed_resolve_is_tried_again_after_a_back_off(
     h.advance(1)
     s.step()
     assert spy.calls["touch"] == 1
+
+
+def test_a_resolve_the_hub_turns_away_waits_its_retry_after(
+    host: Host, h: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The library does not raise when the hub turns away its read of the pair room: it returns
+    # what this computer last saw, unchecked, with the hub's error beside it. That error's
+    # retry_after is the hub's word on when to ask again.
+    s = host.s
+    s.start()
+    spy = Spy(monkeypatch)
+    busy = [True]
+    real = client.Client.board_list
+
+    def board_list(listing: client.Client, *args: Any, **options: Any) -> Any:
+        if busy[0]:
+            raise client.SwitchboardError(
+                "busy", status=429, payload={"error": "busy", "retry_after": 12}
+            )
+        return real(listing, *args, **options)
+
+    monkeypatch.setattr(client.Client, "board_list", board_list)
+    s.note(_switchboard.TAG_PAIRED)
+    s.step()
+    (turned_away,) = spy.returned["resolve"]
+    assert not turned_away.checked and turned_away.retry_after == 12.0
+    assert s.due() == h.now + 12, "the hub's retry_after"
+    h.advance(11)
+    s.step()
+    assert spy.calls["resolve"] == 1
+    busy[0] = False
+    h.advance(1)
+    s.step()
+    assert spy.calls["resolve"] == 2
+    assert spy.returned["resolve"][1].checked and spy.returned["resolve"][1].retry_after is None
 
 
 def test_resolves_at_least_daily(host: Host, h: Any, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1111,7 +1146,7 @@ def test_a_confirm_beside_forgetting_waits_for_it(
 ) -> None:
     # `forget` is between forgetting the pair and removing the gate's record when `pair confirm`
     # reads that record. Before, the confirm opened the gate of a pair already forgotten and said
-    # so; now it waits, and finds no record.
+    # so; now it waits, finds no record, and says the pair is gone (not that it needs a reject).
     host = _host(h, host_env, tmp_path, open_gate=False)
     _shown(host)
     other = _switchboard.open_link(
@@ -1130,7 +1165,7 @@ def test_a_confirm_beside_forgetting_waits_for_it(
     monkeypatch.setattr(_switchboard.Link, "forget", slow_forget)
     turns.run(forgetting.forget, lambda: host.s.open_gate(host.name))
     assert isinstance(turns.outcomes["first"], _switchboard.Told)
-    assert turns.outcomes["second"] == "refused"
+    assert turns.outcomes["second"] == "none"
     assert host.opened.names() == [] and host.gate() is None
 
 
@@ -1260,6 +1295,49 @@ def test_forget_leaves_rooms_first(host: Host, monkeypatch: pytest.MonkeyPatch) 
     assert [gone.room for gone in record.left.values()] == [room]
 
 
+def test_forget_marks_every_room_abandoned_before_it_leaves_one(
+    host: Host, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A leave is a hub call, which can take up to the client's timeout, and a `run` beside this
+    # stops its work in a room once the room record marks it abandoned. So each room is marked,
+    # and stopped, before the first leave, not one leave after the other.
+    room = _taken_at_start(host, "work-1")
+    # Two rooms held: a stop came between the accept of a newer room and its checks.
+    accept = _switchboard.Link.accept_room
+
+    def stop_after(opened: _switchboard.Link, *args: Any) -> _switchboard.RoomTaken:
+        accept(opened, *args)
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(_switchboard.Link, "accept_room", stop_after)
+    host.lucille.offer("work-2")
+    host.s.note(SHARED)
+    with pytest.raises(KeyboardInterrupt):
+        host.s.step()
+    monkeypatch.setattr(_switchboard.Link, "accept_room", accept)
+    accepting = host.record().accepting
+    assert accepting is not None
+    both = sorted([room, accepting.room])
+    stopped = len(host.stopped)
+    seen: list[tuple[list[str], dict[str, str | None]]] = []
+    leave = _switchboard.Link.leave_room
+
+    def watched(opened: _switchboard.Link, name: str) -> _switchboard.RoomLeft:
+        marks = {held: kept.abandoned for held, kept in host.record().held.items()}
+        seen.append((host.stopped[stopped:], marks))
+        return leave(opened, name)
+
+    monkeypatch.setattr(_switchboard.Link, "leave_room", watched)
+    assert host.restart().forget().told
+    assert len(seen) == 2
+    assert seen[0] == (both, dict.fromkeys(both, rooms.PAIR_OVER))
+    assert host.held() == [] and host.store_rooms() == []
+    order = [(e["event"], e.get("room")) for e in host.events("room")][-4:]
+    assert order == [("abandoned", both[0]), ("abandoned", both[1])] + [
+        ("left", name) for name in both
+    ]
+
+
 def test_forget_and_run_never_change_the_room_record_at_once(
     host: Host, h: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1313,6 +1391,169 @@ def test_forget_and_run_never_change_the_room_record_at_once(
     assert host.opened.names() == []
     assert host.store_rooms() == [], "a room of the pair that is over kept its keys here"
     assert host.record().held == {}
+
+
+@pytest.mark.parametrize("again", ["second", "lucille"], ids=["another name", "the same name"])
+def test_a_run_whose_pair_another_command_forgot_touches_no_other_pair(
+    again: str, host: Host, h: Any
+) -> None:
+    # `run` serves the pair. Another command forgets it, pairs again (under another name, or
+    # under the same one), confirms, and takes a room, all before `run`'s next step. Before,
+    # that step resolved the old pair, found it unknown and forgot it again, which deleted the
+    # new pair's gate record (or, under the same name, served the new pair as its own).
+    old = host.s
+    old.start()
+    _taken(host, "work-1")
+    other = link.Session(host.env.dirs, host.opened, say=lambda _: None)
+    other.stop_room = host.stopped.append
+    assert other.forget().told
+    # A minute later (the gate's record says when it was made; the test hub's clock stands still).
+    h.advance(60)
+    lucille = FakeLucille(h, host.folder / "lucille-2", url=_switchboard.LUCILLE_HUB)
+    host.name = _confirm(other, lucille, host.config, again)
+    host.session, host.lucille = other, lucille
+    other.start()
+    room = _taken(host, "work-2")
+    before = (host.gate(), host.record(), host.store_rooms(), host.opened.names())
+    assert before[0] is not None and before[0].opened_at is not None
+    assert before[2] == [room] and before[3] == [host.name]
+    lines = len(host.audit())
+    # Each way the old `run` acts finds its pair gone, and stops there.
+    old.note(_switchboard.TAG_ENDED)
+    for action in (old.step, lambda: old.check_room(room), old.usable, old.consider_offers):
+        with pytest.raises(link.Stopped) as stopped:
+            action()
+        assert stopped.value.state == "none"
+        assert str(stopped.value) == (
+            "pair lucille is gone from this computer: another command forgot it"
+        )
+    assert (host.gate(), host.record(), host.store_rooms(), host.opened.names()) == before
+    assert host.audit()[lines:] == []
+    # The new pair goes on as it was.
+    assert other.check_room(room) is not None
+
+
+def test_a_command_that_finds_its_pair_gone_leaves_another_pairs_state(
+    host: Host, h: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # `pair status` takes the pair held, and resolves it. Meanwhile another command forgets
+    # that pair, pairs again under another name, confirms, and takes a room. The resolve then
+    # finds the first pair gone. Before, `pair status` forgot it again: it left the new pair's
+    # room and deleted its gate record.
+    stale = _switchboard.open_link(
+        host.env.dirs, host.config, client_class=h.client_class(), clock=lambda: h.now
+    )
+    status = link.Session(host.env.dirs, stale, say=lambda _: None)
+    other = host.s
+    real = _switchboard.Link.resolve
+    made: list[str] = []
+
+    def resolve(opened: _switchboard.Link, name: str) -> _switchboard.Pair:
+        if opened is stale and not made:
+            assert other.forget().told
+            lucille = FakeLucille(h, host.folder / "lucille-2", url=_switchboard.LUCILLE_HUB)
+            host.name = _confirm(other, lucille, host.config, "second")
+            host.lucille = lucille
+            other.start()
+            made.append(_taken(host, "work-2"))
+        return real(opened, name)
+
+    monkeypatch.setattr(_switchboard.Link, "resolve", resolve)
+    with pytest.raises(link.Stopped):
+        status.status()
+    (room,) = made
+    found = host.gate()
+    assert found is not None and found.pair == "second" and found.opened_at is not None
+    assert host.held() == [room] and host.store_rooms() == [room]
+    assert host.record().held[room].abandoned is None
+    assert host.opened.names() == ["second"]
+    assert other.check_room(room) is not None
+
+
+def test_a_reject_beside_a_confirm_waits_for_it(
+    host_env: HostEnv, h: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # `pair confirm` is about to write that the gate opened when `pair reject` (or `n` at
+    # `pair`'s prompt) runs. Before, the reject read the gate still shut and forgot a pair the
+    # confirm then reported confirmed; now it waits, finds the gate open, and refuses.
+    host = _host(h, host_env, tmp_path, open_gate=False)
+    _shown(host)
+    turns = _Turns()
+    _held_in_save(turns, monkeypatch, "opened_at")
+    rejecting = link.Session(host.env.dirs, host.opened, say=lambda _: None)
+    turns.run(lambda: host.s.open_gate(host.name), rejecting.reject)
+    assert turns.outcomes["first"] == f"pair {host.name} is confirmed on this computer"
+    assert turns.outcomes["second"] == "refused"
+    assert host.opened.names() == [host.name]
+    found = host.gate()
+    assert found is not None and found.opened_at is not None
+
+
+def _waits_for(lock: Path, action: Callable[[], Any]) -> Any:
+    """Run ``action`` while another process holds ``lock``: it must not finish until the lock
+    is let go. Returns what it returned."""
+    done = threading.Event()
+    outcome: list[Any] = []
+
+    def body() -> None:
+        try:
+            outcome.append(action())
+        except link.Stopped as exc:
+            outcome.append(exc.state)
+        done.set()
+
+    with lock_held(lock):
+        thread = threading.Thread(target=body, daemon=True)
+        thread.start()
+        assert not done.wait(0.5), "it did not wait for the other process"
+    assert done.wait(10)
+    return outcome[0]
+
+
+def test_the_record_lock_keeps_another_process_out(
+    host_env: HostEnv, h: Any, tmp_path: Path
+) -> None:
+    # The record lock is an os.lockf lock beside a thread lock: another process (a `pair
+    # confirm`, a `forget`, a `run` in another shell) holding it keeps out each change of the
+    # gate's record and each step, not only the threads of this process.
+    host = _host(h, host_env, tmp_path, open_gate=False)
+    s = host.s
+    s.start()
+    lock = host.env.dirs.state / link.RECORD_LOCK
+    shown = _waits_for(lock, lambda: s.show(host.name))
+    assert shown is not None and shown[0] == host.lucille.sas()
+    confirmed = _waits_for(lock, lambda: s.open_gate(host.name))
+    assert confirmed == f"pair {host.name} is confirmed on this computer"
+    host.lucille.offer("work-1")
+    s.note(SHARED)
+    _waits_for(lock, s.step)
+    assert host.held() == ["room-1"]
+    assert _waits_for(lock, lambda: s.check_room("room-1")) is not None
+    assert _waits_for(lock, link.Session(host.env.dirs, host.opened, say=print).reject) == (
+        "refused"
+    )
+    told = _waits_for(lock, s.forget)
+    assert isinstance(told, _switchboard.Told) and told.told
+    assert host.opened.names() == [] and host.gate() is None
+
+
+def test_run_refuses_a_pair_with_no_gate_record(
+    host: Host, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Such a pair can never be confirmed here (`pair status` and `pair confirm` refuse it), so
+    # `run` refuses it too, rather than waiting for ever on a gate nothing can open.
+    gate.remove(host.env.dirs.gate_file)
+    spy = Spy(monkeypatch)
+    s = host.restart()
+    with pytest.raises(link.Stopped) as stopped:
+        s.start()
+    assert stopped.value.state == "refused"
+    assert str(stopped.value) == (
+        f"pair {host.name} has no local gate record, so it cannot be confirmed here: run "
+        "`lucille-host pair reject` and start again in Lucille"
+    )
+    assert sum(spy.calls.values()) == 0
+    assert host.opened.names() == [host.name]
 
 
 def test_keyring_writes_bounded_over_a_day(host: Host, h: Any) -> None:

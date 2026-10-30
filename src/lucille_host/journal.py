@@ -18,24 +18,33 @@ never derived from the audit log, which rotates. Each entry, by ``job_id``, hold
 
 The entry is written before the request is decided (before the audit log's ``decision`` line), the
 decision right after that line and before anything runs, and ``sent`` once the hub has accepted the
-reply. Every write replaces the file whole (``state.write_json``) and first drops the entries past
-their prune time; a change to an entry another write has pruned already changes nothing. One lock
-serializes the threads that write it.
+reply. Writing the entry also takes the job id: when the profile has an entry for it already,
+nothing is written, and the request is a duplicate. Every write replaces the file whole
+(``state.write_json``) and first drops the entries past their prune time; a change to an entry
+another write has pruned already changes nothing.
+
+Every read, and every read-modify-write, holds ``.journal.lock`` in the same folder: an
+``os.lockf`` lock beside a re-entrant thread lock (``store.file_lock``), so that neither another
+thread nor another process writes between the read and the write. ``run`` is the only writer, and a
+profile runs one ``run`` at a time (``loop.py``); the lock keeps dedupe whole even if a second
+process writes the journal.
 """
 
 from __future__ import annotations
 
-import threading
+import contextlib
 from collections.abc import Callable
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any, Final
 
-from lucille_host import envelope, state
+from lucille_host import envelope, state, store
 
-__all__ = ["DECISIONS", "Entry", "Journal"]
+__all__ = ["DECISIONS", "LOCK", "Entry", "Journal"]
 
 VERSION: Final = 1
+# Beside the journal: held around each read and each read-modify-write of it.
+LOCK: Final = ".journal.lock"
 DECISIONS: Final = ("run", "refused")
 _KEYS: Final = frozenset(
     {
@@ -105,7 +114,9 @@ class Journal:
     def __init__(self, path: Path, *, clock: Callable[[], float]) -> None:
         self.path = path
         self._clock = clock
-        self._lock = threading.Lock()
+
+    def _lock(self) -> contextlib.AbstractContextManager[None]:
+        return store.file_lock(self.path.parent / LOCK)
 
     def _load(self) -> dict[str, Entry]:
         data = state.read_json(self.path)
@@ -133,7 +144,7 @@ class Journal:
         )
 
     def _change(self, job_id: str, **fields: Any) -> None:
-        with self._lock:
+        with self._lock():
             entries = self._load()
             entry = entries.get(job_id)
             if entry is None:
@@ -144,7 +155,7 @@ class Journal:
             self._save(entries)
 
     def get(self, job_id: str) -> Entry | None:
-        with self._lock:
+        with self._lock():
             return self._load().get(job_id)
 
     def seen(self, job_id: str) -> bool:
@@ -160,8 +171,11 @@ class Journal:
         received_at: float,
         not_after: int | None,
         body: Any,
-    ) -> Entry:
-        """Write the entry of a request about to be decided."""
+    ) -> Entry | None:
+        """Write the entry of a request about to be decided, and return it; None, writing
+        nothing, when the profile has an entry for ``job_id`` already (a duplicate). The look and
+        the write are one step under the journal's lock, so that no two threads or processes
+        both take one job id."""
         kept = body if envelope.size(body) <= envelope.REQUEST_LIMIT else None
         entry = Entry(
             room=room,
@@ -171,8 +185,10 @@ class Journal:
             prune_at=envelope.prune_at(not_after, received_at),
             body=kept,
         )
-        with self._lock:
+        with self._lock():
             entries = self._load()
+            if job_id in entries:
+                return None
             entries[job_id] = entry
             self._save(entries)
         return entry
@@ -191,7 +207,7 @@ class Journal:
     def abandon_room(self, room: str) -> list[str]:
         """Mark abandoned every entry read in workspace ``room`` whose reply was not sent:
         nothing more is posted for them. Returns the job ids marked."""
-        with self._lock:
+        with self._lock():
             entries = self._load()
             marked = [
                 job_id
@@ -207,7 +223,7 @@ class Journal:
     def pending(self, room: str | None = None) -> list[tuple[str, Entry]]:
         """Entries with no reply sent and a room not abandoned, in ``seq`` order: all of them,
         or those read in workspace ``room``."""
-        with self._lock:
+        with self._lock():
             entries = self._load()
         found = [
             (job_id, entry)

@@ -14,6 +14,7 @@ import re
 import select
 import termios
 import threading
+import time
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -21,10 +22,10 @@ from typing import Any
 import httpx
 import pytest
 from keyring.backends.fail import Keyring as FailKeyring
-from switchboard import pairing
+from switchboard import client, pairing
 from switchboard.testing import hub
 
-from lucille_host import _switchboard, gate, link, paths, policy
+from lucille_host import _switchboard, gate, link, paths, policy, state
 from lucille_host.cli import main
 from tests import _audit_hook
 from tests._cli import HostCli, collecting, until
@@ -525,16 +526,21 @@ class _User:
 
 
 class _Terminal:
-    """``pair``'s stdin as a terminal (a pseudo-terminal), where the user typed ``ahead`` while
-    ``pair`` waited, before it asked anything, and types ``answer`` once it asks."""
+    """``pair``'s stdin as a terminal (a pseudo-terminal), where the user typed ``ahead`` before
+    ``pair`` started (or :meth:`type` while it ran), before it asked anything, and types
+    ``answer`` once it asks."""
 
     def __init__(self, ahead: str, answer: str) -> None:
         self.master, slave = os.openpty()
         self.file = open(slave, encoding="utf-8")  # closed by close()
         self.answer = answer
         self.asked = 0
-        os.write(self.master, ahead.encode())
-        # What was typed is on the terminal, a whole line of it at least, before `pair` starts.
+        if ahead:
+            self.type(ahead)
+
+    def type(self, text: str) -> None:
+        os.write(self.master, text.encode())
+        # What was typed is on the terminal, a whole line of it at least, before this returns.
         assert select.select([self.file], [], [], 10)[0]
 
     def isatty(self) -> bool:
@@ -629,6 +635,87 @@ def test_what_was_typed_before_the_question_is_discarded(cli: HostCli) -> None:
     )
     assert "confirmed" not in ran.out
     assert cli.held() == [] and cli.gate() is None
+
+
+def test_a_y_typed_while_pair_waits_for_lucille_is_discarded(cli: HostCli) -> None:
+    # `pair` has answered the code and waits for Lucille to collect the answer: no SAS is shown
+    # yet. A `y` typed now is discarded right before the question, not only what was typed
+    # before `pair` started.
+    lucille = cli.lucille()
+    code = lucille.start()
+    terminal = _Terminal(ahead="", answer="n\n")
+    try:
+        running = cli.start("pair", code, stdin=terminal)
+        until(lambda: cli.listens > 0)
+        assert cli.gate() is not None and cli.gate().shown_at is None
+        terminal.type("y\n")
+        assert lucille.collect().state == "paired"
+        ran = running.wait(30)
+    finally:
+        terminal.close()
+    assert terminal.asked == 1
+    assert ran.rc == 1, ran.text
+    assert ran.err == (
+        "Does Lucille's page show the same SAS? Type y if it does, n if not: "
+        f"rejected: pair {lucille.name} is forgotten on this computer; start again in Lucille. "
+        "Lucille was told\n"
+    )
+    assert "confirmed" not in ran.out
+    assert cli.held() == [] and cli.gate() is None
+
+
+def test_y_for_a_pair_another_command_forgot_says_it_is_gone(cli: HostCli) -> None:
+    # The SAS is shown, and while the question waits, `forget` runs in another shell. The `y`
+    # then finds no gate record: the pair is gone, not waiting for `pair reject`.
+    lucille = cli.lucille()
+    code = lucille.start()
+
+    def forgotten_first(_: int) -> str:
+        config = state.load_host_config(cli.dirs)
+        link.open_session(cli.dirs, config, say=print, warn=print).forget()
+        return "y\n"
+
+    with collecting(lucille):
+        ran = cli.start("pair", code, stdin=_User(cli, forgotten_first)).wait()
+    assert ran.rc == 1, ran.text
+    assert ran.err == (
+        f"none: pair {lucille.name} is gone from this computer: another command forgot it\n"
+    )
+    assert cli.held() == [] and cli.gate() is None
+
+
+def test_pair_waits_as_long_as_the_hub_asks(cli: HostCli, monkeypatch: pytest.MonkeyPatch) -> None:
+    # While `pair` waits for Lucille, the hub turns away its reads of the pair room (a 429),
+    # saying when to ask again. The library returns that as an unchecked resolve, not an error;
+    # `pair` still waits as long as the hub asked, rather than its own 5 s (0.2 s here).
+    lucille = cli.lucille()
+    code = lucille.start()
+    busy = [True]
+
+    class Busy(cli.client_class):  # type: ignore[misc,name-defined]
+        def board_list(self, *args: Any, **options: Any) -> Any:
+            if busy[0]:
+                raise client.SwitchboardError(
+                    "busy", status=429, payload={"error": "busy", "retry_after": 0.7}
+                )
+            return super().board_list(*args, **options)
+
+    cli.client_class = Busy
+    waited: list[float] = []
+    real = time.sleep
+
+    def sleep(seconds: float) -> None:
+        if seconds >= 0.7:
+            waited.append(seconds)
+            busy[0] = False
+        real(min(seconds, 0.05))
+
+    monkeypatch.setattr("time.sleep", sleep)
+    with collecting(lucille):
+        ran = cli.run("pair", "--code-stdin", stdin=code + "\n", timeout=20)
+    assert ran.rc == 0, ran.text
+    assert waited[:1] == [0.7]
+    assert ran.out.splitlines()[-1].startswith(f"sas_pending: pair {lucille.name}: the SAS is ")
 
 
 def test_no_question_where_what_was_typed_cannot_be_discarded(
@@ -1096,8 +1183,7 @@ def test_gate_answers_and_record(tmp_path: Path) -> None:
     for bad in (
         {**data, "shown_at": None},
         {**data, "deadline": True},
-        {**data, "tries": 0},
-        {**{k: v for k, v in data.items() if k != "shown_at"}, "sas_at": 100.0},
+        {k: v for k, v in data.items() if k != "touched_at"},
         {**data, "shown_at": None, "deadline": None, "opened_at": 200.0},
         {**data, "extra": 1},
         {**data, "v": 2},
@@ -1115,3 +1201,23 @@ def test_dirs_name_the_new_files(home: Path) -> None:
     dirs = paths.dirs()
     assert dirs.gate_file == dirs.state / "pair.json"
     assert dirs.previous_policy_file == dirs.config / "policy.previous.toml"
+
+
+@pytest.mark.parametrize(
+    ("said", "waits"),
+    [
+        (0.7, 0.7),
+        (0, 0.0),
+        (-5, 0.0),
+        (1e9, _switchboard.RETRY_AFTER_MAX),
+        (float("inf"), None),
+        (float("nan"), None),
+        (True, None),
+        ("30", None),
+    ],
+)
+def test_the_hubs_retry_after_is_bounded(said: object, waits: float | None) -> None:
+    # A hub that asks for a wait longer than RETRY_AFTER_MAX, or for one that is not a finite
+    # number, does not stall pair or run for longer.
+    error = client.SwitchboardError("busy", status=429, payload={"retry_after": said})
+    assert _switchboard._hub_error(error).retry_after == waits

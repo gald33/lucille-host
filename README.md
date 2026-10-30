@@ -77,9 +77,11 @@ can install.
 ## How it will work, in short
 
 1. **Pairing.** Lucille shows you a one-time Switchboard pairing code (`swbp1_...`).
-   `lucille-host pair <code>` accepts it. You compare a short code on both screens and confirm on the
-   computer (`y` at the prompt, or `lucille-host pair confirm`). Until you confirm, the host takes no work
-   room, posts nothing and runs nothing.
+   `lucille-host pair <code>` accepts it. On Linux that puts the code on the command line, where other
+   local users can read it while `pair` runs; `lucille-host pair --code-stdin`, which reads the code from
+   stdin, keeps it from them. You compare a short code on both screens and confirm on the computer (`y`
+   at the prompt, or `lucille-host pair confirm`). Until you confirm, the host takes no work room, posts
+   nothing and runs nothing.
 2. **Work.** While `lucille-host run` runs, Lucille offers the host a work room over the pair and posts a
    request there. The host checks the request against your local policy, runs the operation or refuses
    it, and posts its reply.
