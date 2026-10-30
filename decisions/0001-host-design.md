@@ -144,22 +144,30 @@ The host:
      `yes` confirms, `n` or `no` rejects, and any other answer is asked again. The end of stdin, or
      Ctrl-C, leaves the answer to `pair confirm` or `pair reject`. With `--code-stdin`, `pair` stops once
      the SAS is shown (`sas_pending`, with the deadline).
+   - **What was typed before the question does not count.** When stdin is a terminal, `pair` discards
+     whatever was typed there before it asks (`termios.tcflush`), so a `y` typed while it waited for
+     Lucille, before anyone could compare, answers nothing; where that cannot be done, it asks nothing,
+     and leaves the answer to `pair confirm` or `pair reject`. Input that is not a terminal (a pipe, a
+     file) is read as given: whoever wrote it chose the answer.
 3. **The host's gate.**
    - Until the user confirms locally, the host touches nothing, accepts nothing, posts nothing and runs
      nothing.
    - The gate opens only on a SAS the host has shown. Until a command has shown it, the gate stays shut
      and has no deadline: `run` resolves the pair but shows no SAS, and `pair confirm` refuses a SAS the
-     host has not shown.
+     host has not shown (`sas_ready`).
    - The gate's deadline counts from when the SAS is first shown on the host, by `pair` or `pair status`.
      It is 24 h, chosen to match the deadline of Lucille's own gate (that deadline is Lucille policy as of
      2026-10-27; not proven by this repository).
    - `lucille-host pair confirm` and `pair reject` answer later, after the interactive `pair` has exited.
      `pair status` reports `none`, `waiting`, `sas_pending` or `confirmed`, and in `sas_pending` shows the
-     SAS again, with the deadline.
-   - `n`, `pair reject`, or the deadline passing forgets the pair.
+     SAS again, with the deadline. A pair with no gate record cannot be confirmed on the host: `pair`,
+     `pair status` and `pair confirm` each refuse it (`refused`), showing no SAS.
+   - `n`, `pair reject`, or the deadline passing with the gate still shut forgets the pair. A gate opened
+     in time has no deadline.
    - The host writes no copy of the SAS of its own: neither the gate's record nor the audit log holds it
      (the pair record the library keeps in the store does). `lucille-host status` sends the user to
-     `pair status` rather than showing it.
+     `pair status` rather than showing it, and says `sas_ready` while the SAS has reached the host and no
+     command has shown it.
    - Lucille has its own gate on the same comparison, and sends no request before it opens (Lucille
      policy as of 2026-10-27; not proven by this repository). The host's gate does not depend on it:
      nothing runs on the host before the host's own gate opens.
@@ -684,7 +692,7 @@ template test, which needs that hub's injected clock. It may spawn only the loca
 |---|---|
 | Nothing Lucille sends can widen what the host permits | Conformance tries each of these: an unknown op, a not-enabled op, extra keys (`exe`, `argv`, `env`, `cwd`, `timeout`), policy- and update-shaped fields, traversal, an absolute path, a symlink escape, a file named `--version`, and oversize args. Each is refused with the right code, the policy digest is unchanged, and the spawn count is 0. `caps` above the host's own are not refused, but the effective cap never exceeds the host's own |
 | No shell; one spawn site; children get a built environment and no key | The AST lint. A fixture that dumps its environment shows only allowlisted keys |
-| Nothing runs before the local SAS confirmation | A fake Lucille offers a room and posts a request before the user confirms the SAS: no touch, no accept, no spawn, no reply; a `y` before the host has shown the SAS confirms nothing; once the SAS is shown and confirmed, the request runs. `pair confirm` after the code has expired still opens the gate. `n`, `pair reject` and the deadline each forget the pair |
+| Nothing runs before the local SAS confirmation | A fake Lucille offers a room and posts a request before the user confirms the SAS: no touch, no accept, no spawn, no reply; `pair confirm` before the host has shown the SAS confirms nothing; once the SAS is shown and confirmed, the request runs. At `pair`'s prompt on a terminal, a `y` typed before the question is discarded. `pair confirm` after the code has expired still opens the gate. `n`, `pair reject` and the deadline each forget the pair, and a confirmation made in time is never expired by `run` or `pair status` judging the gate beside it |
 | One run per job id, never after `not_after` | A duplicated request runs once. An expired request is refused with no spawn. A restart between a decision to run and sent gives `failed interrupted`, with no second run; a refusal not yet sent is re-posted unchanged |
 | Only `lucille.exec`, in a room Lucille offered over the host's pair and the host accepted, is acted on | A request on `pair`, in `pair:<name>` on any channel, or in a room not offered over the host's pair or not accepted, is ignored. A `swbp1/paired`, `moved` or `ended` note only triggers a resolve, and a `swbp1/shared` note only a share read |
 | No request is skipped | A test fills `lucille.exec` past one page: none skipped. A heal mid-stream does not move the work room, but counts as a suspected leak (spec/PROTOCOL.md §9): the request in flight in the old room is killed with no reply, the host leaves that room, and a request Lucille posts in the replacement room before the host accepts it still runs |
@@ -702,7 +710,7 @@ template test, which needs that hub's injected clock. It may spawn only the loca
 |---|---|---|
 | Compromised or prompt-injected Lucille backend | the release catalog, enabled ops and roots; v0.1 is read-only; only `host.describe` is on after pairing; `pause` and `kill` work offline | anything enabled ops can read under enabled roots, while the host runs |
 | Intercepted or phished pairing code | the code must name Lucille's hub and carry no token; nothing else is accepted except a loopback hub the local config names (for conformance); the SAS is compared and confirmed on both screens: the host shows it and asks for `y` if Lucille's page shows the same (Lucille's screen and its own confirmation: Lucille policy as of 2026-10-27; not proven by this repository) | a user who confirms without comparing |
-| Someone else's pairing code (an attacker pairing the computer to themselves) | the hub check; the local SAS gate; only `host.describe` enabled after pairing | a user who confirms a mismatched SAS, then enables ops |
+| Someone else's pairing code (an attacker pairing the computer to themselves) | the hub check; the local SAS gate, which catches this only when the user compares against Lucille's own page; only `host.describe` enabled after pairing | a user who confirms the SAS the attacker shows (it matches the host's), or confirms without comparing, then enables ops |
 | Leaked `pair:<name>` key, offered work-room key, or pair secret | Only two places hold the pair, and both hold it with the `pair:<name>` key: the host's store (local, owner-only, same-user malware is out of scope) and Lucille's database (encrypted with Lucille's master key: Lucille policy as of 2026-10-27; not proven by this repository). Signing requests with a key pinned at pairing would not help, because every leak path found exposes that key with the pair. The response is to remove the computer, or `forget`, and pair again. v0.1 has no heal verb. This analysis was written for `pair:<name>`'s derived key. That key opens nothing shared (sb `docs/sharing.md:526-528`). The offered work rooms' keys sit in each side's share store as well as in the pair room's offer records, and of a share store, "A copy of it opens every room in it" (`:533-536`). That every leak path exposes those keys with the pair was not re-checked for the offered rooms. spec/PROTOCOL.md §18 states what a room's key opens (every message still on the hub in that room; epoch rotation does not bound it), and §19 that nothing in v1 detects a leak of a room's key alone | the holder can read and forge traffic, and ask for enabled ops until then |
 | Malicious payload (metacharacters, traversal, flag or env injection) | schemas, argv only, `--`, paths resolved one name at a time beneath their folder, the built environment, conformance | none known |
 | Malicious release, or compromised maintainer account | protected tags, the `pypi` environment, which needs the repository owner's approval, attestations (they prove where a release was built, not what it does), a public diff of the catalog and `CLAIMS.md`, exact pins in the lock CI uses (see "Packaging"), no auto-update | a validly attested malicious release from an account that holds both tag and environment rights |
@@ -754,14 +762,19 @@ each could be made another way in a later pull request that updates this list.
   against it), when the record was made, when the SAS was first shown on the host and the deadline that
   sets, when the gate opened, and when the first touch after that ran. It holds no SAS, no code and no
   key. It is written before the code is answered and deleted whenever the pair is forgotten. A record
-  that is missing, or names another pair, keeps the gate shut.
+  that is missing, or names another pair, keeps the gate shut. Once the code is answered, the record is
+  changed, and its deadline judged, only under the record lock (`state/.record.lock`) that `run` holds
+  through each step and forgetting holds throughout: so a `pair confirm` made in time is never expired by
+  a `run` or a `pair status` that read the record before it, and no showing or confirmation writes a
+  record back for a pair being forgotten.
 - **The policy is reset right before a new code is answered,** once its hub and token checks pass: a
   policy that is not the fresh one moves to `config/policy.previous.toml`. A fresh or missing one is never
   set aside over an earlier one. Before the answer, not after, so that a stop between the two never leaves
   the old folders enabled for the new pair; a code the library then refuses has still reset the policy.
-- **Exit codes:** 0 when `pair` stops at `sas_pending` (with `--code-stdin`, or when stdin ends) or the
-  gate opens, and when `run` is drained or the pair ends; 1 for every refusal and every pairing that ends
-  early, `n` at `pair`'s prompt among them (`rejected`), with the state word first on stderr.
+- **Exit codes:** 0 when `pair` stops at `sas_pending` (with `--code-stdin`, when stdin ends, or when
+  what was typed ahead at the terminal cannot be discarded) or the gate opens, and when `run` is drained
+  or the pair ends; 1 for every refusal and every pairing that ends early, `n` at `pair`'s prompt among
+  them (`rejected`), with the state word first on stderr.
 - **The startup checks** (not root, no `SWITCHBOARD_*` variable, a keyring backend that stores, a private
   runtime folder) run for the pairing verbs, `run`, `status` and `forget`; the other verbs touch no store
   and no hub.
@@ -790,9 +803,11 @@ each could be made another way in a later pull request that updates this list.
   name up as a held room, then a room left, then an offer, so an offer named like a room left reads `left`
   while it is still pending.
 - **A move of pair:<name> is found by its generation,** compared with the one the record holds, never by
-  the library's `moved_from`, which only the resolve that made the move sees. The rooms are abandoned
-  before the new generation is recorded, the room of an accept a stop interrupted among them, unjudged: it
-  was accepted over the pair as it stood before the move.
+  the library's `moved_from`, which only the resolve that made the move sees. A touch that read the pair
+  room compares the generation the store keeps too, and asks for a resolve when it differs: a move
+  another command followed first (`pair status` resolves) leaves that touch nothing to move and no note
+  to write. The rooms are abandoned before the new generation is recorded, the room of an accept a stop
+  interrupted among them, unjudged: it was accepted over the pair as it stood before the move.
 - **Resolves back off** after a failure: the hub's `retry_after` on a 429, otherwise 1 s doubling to 30 s
   plus up to a quarter more, drawn from `secrets`; a resolve that could not read the pair room counts as
   a failure. A hub error another part of the host meets asks for a resolve only when none ran in the last
@@ -830,8 +845,9 @@ each could be made another way in a later pull request that updates this list.
   what it has not posted by then is left to the next start.
 - **A thread of `run` that meets an error it does not expect stops `run`,** which exits 1.
 
-**Output.** Text only. The state words (`accepted`, `waiting`, `sas_pending`, `confirmed`, `leaked`,
-`expired`) are the ones a machine-readable form, not built here, would use.
+**Output.** Text only. The state words (`accepted`, `waiting`, `sas_ready`, `sas_pending`, `confirmed`,
+`leaked`, `expired`) are the ones a machine-readable form, not built here, would use. `sas_ready` is a SAS
+that has reached the host and that no command has shown; `sas_pending`, one shown and not yet confirmed.
 
 ## Not decided yet
 

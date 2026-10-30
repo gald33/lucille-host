@@ -21,8 +21,11 @@ What ``lucille-host pair`` and its sub-verbs do, made of the calls in ``_switchb
   ``y`` if Lucille's page shows the same (:meth:`Session.show`, :meth:`Session.open_gate`).
   ``pair status`` reports ``none``, ``waiting``, ``sas_pending`` (showing the SAS again, with the
   deadline) or ``confirmed``; ``pair confirm`` is the ``y`` given later; ``n``, ``pair reject`` and
-  the deadline forget the pair. ``lucille-host status`` reports the same words from what this
-  computer holds, with no hub call and without the SAS (:meth:`Session.pair_state`).
+  the deadline forget the pair. A pair with no gate record is refused (``refused``), and ``pair
+  confirm`` refuses a SAS no command has shown (``sas_ready``). ``lucille-host status`` reports
+  these words from what this computer holds, with no hub call and without the SAS
+  (:meth:`Session.pair_state`). Once the code is answered, the gate's record is changed, and its
+  deadline judged, only under the record lock, which ``run`` holds through each step.
 - **Forgetting** (``lucille-host forget``, :meth:`Session.forget`). Every work room held is left
   first, then the pair is forgotten here and Lucille is told, best effort; the gate's record and how
   far each room was read go too. The journal of requests stays: a job id is answered once per
@@ -36,9 +39,11 @@ then due. The rules:
 
 - **Resolving.** At start, on the library's ``paired``, ``moved`` and ``ended`` notes, after a hub
   error, every :data:`RESOLVE_EVERY` seconds while Lucille has not collected the answer, and at
-  least every :data:`RESOLVE_AT_LEAST` seconds. A resolve that fails is tried again after a
-  back-off. Once the gate is open, a touch follows every resolve the host makes, except one made
-  because a touch failed: the next touch then comes on the rhythm.
+  least every :data:`RESOLVE_AT_LEAST` seconds; and after a touch, when the store keeps a
+  generation of pair:<name> other than the one followed (another command followed a move first).
+  A resolve that fails is tried again after a back-off. Once the gate is open, a touch follows
+  every resolve the host makes, except one made because a touch failed: the next touch then comes
+  on the rhythm.
 - **Touching** (reading the pair's offers). Nothing before the gate opens. Then: when it opens, at
   start, on a ``shared`` note, after a resolve, on a wake, and :data:`TOUCH_EVERY` seconds after
   the last touch.
@@ -142,6 +147,12 @@ _STOPPED_MESSAGES: Final = {
     "ended": "the pair was ended (by Lucille, or on this computer); this computer's copy is gone",
     "none": "the pair is gone from this computer",
 }
+
+# What the pairing verbs say of a pair with no gate record, which cannot be confirmed here.
+_NO_GATE: Final = (
+    "pair {name} has no local gate record, so it cannot be confirmed here: run "
+    "`lucille-host pair reject` and start again in Lucille"
+)
 
 # What a step may have to do, as flags set by events and cleared when done: a burst of events is
 # one of each.
@@ -252,17 +263,21 @@ class Session:
     def show(self, name: str) -> tuple[str, gate.Gate] | None:
         """The SAS to show the user, and the gate once it is recorded as shown: the deadline
         starts the first time. None when there is no SAS to show yet (Lucille has not collected
-        the answer), or no gate record to note it in, since such a pair cannot be confirmed."""
-        found = self.gate(name)
-        sas = self.link.sas(name)
-        if found is None or sas is None:
-            return None
-        if found.shown_at is None:
-            found = self._save(gate.shown(found, self.link.now()))
-            self.audit.write(
-                "pair", event="sas_shown", pair=name, deadline=iso(found.deadline or 0)
-            )
-        return sas, found
+        the answer), or no gate record to note it in, since such a pair cannot be confirmed.
+
+        Held under the record lock, as every later change to the gate's record is, so that no
+        command forgetting the pair removes the record between this read and this write."""
+        with self._record_lock():
+            found = self.gate(name)
+            sas = self.link.sas(name)
+            if found is None or sas is None:
+                return None
+            if found.shown_at is None:
+                found = self._save(gate.shown(found, self.link.now()))
+                self.audit.write(
+                    "pair", event="sas_shown", pair=name, deadline=iso(found.deadline or 0)
+                )
+            return sas, found
 
     # --- the pair ------------------------------------------------------------------------
 
@@ -421,28 +436,29 @@ class Session:
     def open_gate(self, name: str) -> str:
         """``y``: the user says Lucille's page shows the SAS this computer showed. Opens the
         gate; past the deadline, forgets the pair and raises :class:`Stopped`. Returns what to
-        print."""
-        found = self.gate(name)
-        if found is None:
-            raise Stopped(
-                "refused",
-                f"pair {name} has no local gate record, so it cannot be confirmed here: run "
-                "`lucille-host pair reject` and start again in Lucille",
-            )
-        if found.opened_at is not None:
-            return f"pair {name} is already confirmed"
-        if found.shown_at is None:
-            raise Stopped(
-                "sas_pending",
-                f"pair {name}: this computer has not shown the SAS yet, so there is nothing to "
-                "confirm; `lucille-host pair status` shows it",
-            )
-        now = self.link.now()
-        if gate.past_deadline(found, now):
-            raise self._expired(name)
-        self._save(replace(found, opened_at=now))
-        self.audit.write("pair", event="gate_opened", pair=name)
-        return f"pair {name} is confirmed on this computer"
+        print.
+
+        Held under the record lock, which ``run`` holds through each step, so that a deadline is
+        judged on the record as this writes it, and no command forgetting the pair removes the
+        record between this read and this write."""
+        with self._record_lock():
+            found = self.gate(name)
+            if found is None:
+                raise Stopped("refused", _NO_GATE.format(name=name))
+            if found.opened_at is not None:
+                return f"pair {name} is already confirmed"
+            if found.shown_at is None:
+                raise Stopped(
+                    "sas_ready",
+                    f"pair {name}: this computer has not shown the SAS yet, so there is nothing "
+                    "to confirm; `lucille-host pair status` shows it",
+                )
+            now = self.link.now()
+            if gate.past_deadline(found, now):
+                raise self._expired(name)
+            self._save(replace(found, opened_at=now))
+            self.audit.write("pair", event="gate_opened", pair=name)
+            return f"pair {name} is confirmed on this computer"
 
     def _expired(self, name: str) -> Stopped:
         told = self._forget(name, why="deadline")
@@ -480,8 +496,11 @@ class Session:
         return self.open_gate(name)
 
     def status(self) -> tuple[str, str]:
-        """``pair status``: resolve once, and say where the pair is. While the gate is shut and
-        the SAS is known, it shows the SAS, which starts the deadline the first time."""
+        """``pair status``: resolve once, and say where the pair is: ``none``, ``waiting``,
+        ``sas_pending`` or ``confirmed``. While the gate is shut and the SAS is known, it shows
+        the SAS, which starts the deadline the first time. A pair with no gate record, which
+        cannot be confirmed here, raises :class:`Stopped` (``refused``), as ``pair confirm``
+        does; so does one past its deadline (``expired``), which is forgotten."""
         name = self.current()
         if name is None:
             return "none", "this computer holds no pair"
@@ -489,20 +508,25 @@ class Session:
             pair: _switchboard.Pair | None = self.resolve(name)
         except _switchboard.HubError:
             pair = None
-        found = self.gate(name)
-        if found is not None and found.opened_at is not None:
-            return "confirmed", f"pair {name}"
-        if not (pair.sas_known if pair is not None else self.link.sas(name) is not None):
-            return "waiting", f"pair {name}: Lucille has not collected this computer's answer yet"
-        if found is not None and gate.past_deadline(found, self.link.now()):
-            raise self._expired(name)
-        shown = self.show(name)
-        if shown is None:
-            return "sas_pending", (
-                f"pair {name} has no local gate record, so it cannot be confirmed here: run "
-                "`lucille-host pair reject` and start again in Lucille"
-            )
-        return "sas_pending", self.pending(name, *shown)
+        known = pair.sas_known if pair is not None else self.link.sas(name) is not None
+        # Judged on the record as it stands under the lock: a `pair confirm` or a `run` step in
+        # another process changes it only under that lock.
+        with self._record_lock():
+            found = self.gate(name)
+            if found is not None and found.opened_at is not None:
+                return "confirmed", f"pair {name}"
+            if not known:
+                return "waiting", (
+                    f"pair {name}: Lucille has not collected this computer's answer yet"
+                )
+            if found is None:
+                raise Stopped("refused", _NO_GATE.format(name=name))
+            if gate.past_deadline(found, self.link.now()):
+                raise self._expired(name)
+            shown = self.show(name)
+            if shown is None:
+                raise Stopped("refused", _NO_GATE.format(name=name))
+            return "sas_pending", self.pending(name, *shown)
 
     def reject(self) -> _switchboard.Told:
         """``pair reject``, and ``n`` at ``pair``'s prompt: forget a pair whose gate has not
@@ -519,7 +543,9 @@ class Session:
     def pair_state(self) -> tuple[str, str]:
         """``lucille-host status``: where the pair is, from this computer's store and the gate's
         record alone, with no hub call. The words are ``pair status``'s (``none``, ``waiting``,
-        ``sas_pending`` with the deadline, ``confirmed``), and ``expired`` for a SAS not
+        ``sas_pending`` with the deadline, ``confirmed``), and three more: ``sas_ready`` while
+        the SAS has reached this computer and no command has shown it, ``refused`` for a pair
+        with no gate record, which cannot be confirmed here, and ``expired`` for a SAS not
         confirmed by the deadline, which the next command that resolves the pair forgets. It
         never shows the SAS, and so never starts the deadline: ``pair status`` does both."""
         try:
@@ -536,19 +562,20 @@ class Session:
         if kept is None or not kept.sas_known:
             return "waiting", f"pair {name}: Lucille has not collected this computer's answer yet"
         if found is None:
-            return "sas_pending", (
-                f"pair {name} has no local gate record, so it cannot be confirmed here: run "
-                "`lucille-host pair reject` and start again in Lucille"
+            return "refused", _NO_GATE.format(name=name)
+        if found.shown_at is None or found.deadline is None:
+            return "sas_ready", (
+                f"pair {name}: the SAS has reached this computer, and no command has shown it "
+                "yet: `lucille-host pair status` shows it to compare with Lucille's page"
             )
-        if found.deadline is not None and gate.past_deadline(found, self.link.now()):
+        if gate.past_deadline(found, self.link.now()):
             return "expired", (
                 f"pair {name}: the SAS was not confirmed before {iso(found.deadline)}; the next "
                 "`lucille-host pair status` or `run` forgets it"
             )
-        before = f" before {iso(found.deadline)}" if found.deadline is not None else ""
         return "sas_pending", (
             f"pair {name}: `lucille-host pair status` shows the SAS to compare with Lucille's "
-            f"page, and `lucille-host pair confirm` confirms it{before}"
+            f"page, and `lucille-host pair confirm` confirms it before {iso(found.deadline)}"
         )
 
     def _require(self) -> str:
@@ -746,6 +773,12 @@ class Session:
         found = self.gate(name)
         if found is not None and found.touched_at is None:
             self._save(replace(found, touched_at=now))
+        # A move of pair:<name> that another command followed first (`pair status` resolves
+        # too) is already in the store: this touch then moves nothing, and no note says so. The
+        # generation the store keeps does.
+        kept = self.link.kept(name)
+        if kept is None or kept.generation != record.generation:
+            self._want_resolve("moved")
         self._wanted.add(_JUDGE)
         if self._retry:
             self._retry = False

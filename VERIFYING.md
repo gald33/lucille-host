@@ -113,9 +113,9 @@ enforces.
        `__future__`, `argparse`, `base64`, `binascii`, `collections`, `contextlib`, `copy`,
        `dataclasses`, `datetime`, `enum`, `errno`, `functools`, `hashlib`, `hmac`, `io`, `itertools`,
        `json`, `logging`, `math`, `os`, `pathlib`, `re`, `secrets`, `shutil`, `signal`, `stat`, `sys`,
-       `tempfile`, `textwrap`, `threading`, `time`, `tomllib`, `types`, `typing`, `keyring`,
-       `switchboard` and `lucille_host` itself. `src/lucille_host/_exec.py` may also import
-       `subprocess`. An import anywhere in a file counts. A submodule comes with its module
+       `tempfile`, `termios`, `textwrap`, `threading`, `time`, `tomllib`, `types`, `typing`,
+       `keyring`, `switchboard` and `lucille_host` itself. `src/lucille_host/_exec.py` may also
+       import `subprocess`. An import anywhere in a file counts. A submodule comes with its module
        (`os.path`, `logging.handlers`), and what the rules above refuse stays refused inside an
        allowed module (`os.system`, `logging.config`). A module an allowed module re-exports is
        checked as itself, by the same list: `from logging.handlers import socket` imports `socket`,

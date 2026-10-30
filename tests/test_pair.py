@@ -11,6 +11,8 @@ import dataclasses
 import json
 import os
 import re
+import select
+import termios
 import threading
 from collections.abc import Iterator
 from pathlib import Path
@@ -522,6 +524,37 @@ class _User:
         return False
 
 
+class _Terminal:
+    """``pair``'s stdin as a terminal (a pseudo-terminal), where the user typed ``ahead`` while
+    ``pair`` waited, before it asked anything, and types ``answer`` once it asks."""
+
+    def __init__(self, ahead: str, answer: str) -> None:
+        self.master, slave = os.openpty()
+        self.file = open(slave, encoding="utf-8")  # closed by close()
+        self.answer = answer
+        self.asked = 0
+        os.write(self.master, ahead.encode())
+        # What was typed is on the terminal, a whole line of it at least, before `pair` starts.
+        assert select.select([self.file], [], [], 10)[0]
+
+    def isatty(self) -> bool:
+        return self.file.isatty()
+
+    def fileno(self) -> int:
+        return self.file.fileno()
+
+    def readline(self) -> str:
+        self.asked += 1
+        if self.asked > 1:
+            return ""  # stdin ends rather than leave a second question waiting for ever
+        os.write(self.master, self.answer.encode())
+        return self.file.readline()
+
+    def close(self) -> None:
+        self.file.close()
+        os.close(self.master)
+
+
 def _events(cli: HostCli, event: str) -> list[dict[str, Any]]:
     lines = [json.loads(line) for line in cli.audit().splitlines()]
     return [line for line in lines if line.get("event") == event]
@@ -573,6 +606,53 @@ def test_other_answers_are_asked_again(cli: HostCli) -> None:
     assert ran.err.splitlines() == [asked_again] * 3
     confirmed = f"confirmed: pair {lucille.name} is confirmed on this computer"
     assert ran.out.splitlines()[-1] == confirmed
+
+
+def test_what_was_typed_before_the_question_is_discarded(cli: HostCli) -> None:
+    # A `y` typed while `pair` waits for Lucille, a whole line and a part of one, was typed before
+    # the SAS was shown: it answers nothing. The answer typed once asked is the one taken.
+    lucille = cli.lucille()
+    code = lucille.start()
+    terminal = _Terminal(ahead="y\ny", answer="n\n")
+    try:
+        with collecting(lucille):
+            ran = cli.start("pair", code, stdin=terminal).wait()
+    finally:
+        terminal.close()
+    assert terminal.asked == 1
+    assert ran.rc == 1, ran.text
+    # Asked once, on the terminal, and answered by what was typed after.
+    assert ran.err == (
+        "Does Lucille's page show the same SAS? Type y if it does, n if not: "
+        f"rejected: pair {lucille.name} is forgotten on this computer; start again in Lucille. "
+        "Lucille was told\n"
+    )
+    assert "confirmed" not in ran.out
+    assert cli.held() == [] and cli.gate() is None
+
+
+def test_no_question_where_what_was_typed_cannot_be_discarded(
+    cli: HostCli, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def fails(*_: Any) -> None:
+        raise termios.error(5, "Input/output error")
+
+    monkeypatch.setattr("termios.tcflush", fails)
+    lucille = cli.lucille()
+    code = lucille.start()
+    terminal = _Terminal(ahead="y\n", answer="y\n")
+    try:
+        with collecting(lucille):
+            ran = cli.start("pair", code, stdin=terminal).wait()
+    finally:
+        terminal.close()
+    # Nothing is asked, so nothing typed is taken: `pair confirm` answers later.
+    assert terminal.asked == 0
+    assert ran.rc == 0, ran.text
+    assert ran.out.splitlines()[-1].startswith(f"sas_pending: pair {lucille.name} is not ")
+    found = cli.gate()
+    assert found is not None and found.shown_at is not None and found.opened_at is None
+    assert cli.run("pair", "confirm").rc == 0
 
 
 @pytest.mark.parametrize("no", ["n", "No"])
@@ -685,7 +765,7 @@ def test_confirm_before_the_sas_is_shown_is_refused(cli: HostCli) -> None:
     ran = cli.run("pair", "confirm")
     assert ran.rc == 1
     assert ran.err == (
-        f"sas_pending: pair {lucille.name}: this computer has not shown the SAS yet, so there is "
+        f"sas_ready: pair {lucille.name}: this computer has not shown the SAS yet, so there is "
         "nothing to confirm; `lucille-host pair status` shows it\n"
     )
     found = cli.gate()
@@ -804,8 +884,12 @@ def test_a_pair_with_no_gate_record_is_never_confirmed(cli: HostCli) -> None:
     ran = running.wait(15)
     assert ran.rc == 1 and ran.err.startswith("refused: ") and "no local gate record" in ran.err
     assert "sas_pending" not in ran.out and lucille.sas() not in ran.text
+    # `pair status` calls it what `pair` and `pair confirm` call it: no SAS is shown.
     ran = cli.run("pair", "status")
-    assert ran.rc == 0 and "no local gate record" in ran.out
+    assert ran.rc == 1 and ran.err.startswith("refused: ") and "no local gate record" in ran.err
+    assert ran.out == "" and lucille.sas() not in ran.text
+    ran = cli.run("status")
+    assert ran.rc == 0 and f"pair: refused: pair {lucille.name} has no local gate" in ran.out
     assert lucille.sas() not in ran.text
     ran = cli.run("pair", "confirm")
     assert ran.rc == 1 and ran.err.startswith("refused: ") and "no local gate record" in ran.err
@@ -991,6 +1075,9 @@ def test_gate_answers_and_record(tmp_path: Path) -> None:
     assert not gate.past_deadline(record, 10.0**12)
     assert not gate.past_deadline(shown, 100.0 + gate.WINDOW)
     assert gate.past_deadline(shown, 100.0 + gate.WINDOW + 1)
+    # A gate opened in time is past no deadline, whenever it is read.
+    opened = dataclasses.replace(shown, opened_at=100.0 + gate.WINDOW)
+    assert not gate.past_deadline(opened, 100.0 + gate.WINDOW + 1)
     path = tmp_path / "pair.json"
     gate.save(path, shown)
     assert gate.load(path) == shown

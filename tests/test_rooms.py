@@ -953,6 +953,32 @@ def test_an_interrupted_accept_is_abandoned_on_a_move_found_at_start(
     assert not [e for e in host.events("room") if e["event"] == "accepted" and e["room"] != room]
 
 
+def test_a_move_another_command_followed_is_found_by_the_next_touch(
+    host: Host, h: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    room = _taken_at_start(host, "work-1")
+    first = host.record().generation
+    running = host.s
+    # Lucille heals pair:<name>, and its note never reaches `run`. `pair status`, run in another
+    # shell, resolves the confirmed pair and follows the move itself: the store holds the new
+    # generation, so no touch of `run`'s moves anything, and no note says it moved.
+    host.lucille.heal()
+    other = link.Session(host.env.dirs, host.opened, say=lambda _: None)
+    assert other.status()[0] == "confirmed"
+    kept = host.opened.kept(host.name)
+    assert kept is not None and kept.generation != first
+    spy = Spy(monkeypatch)
+    # The next touch, on the rhythm, finds it by the generation: the room is abandoned there.
+    h.advance(link.TOUCH_EVERY)
+    running.step()
+    assert (spy.calls["touch"], spy.calls["resolve"]) == (1, 1)
+    assert host.record().generation == kept.generation
+    assert host.held() == [] and host.stopped == [room]
+    whys = {gone.room: gone.why for gone in host.record().left.values()}
+    assert whys == {room: rooms.MOVED}
+    assert running.usable() == []
+
+
 def test_lapse_handled_as_heal(host: Host, h: Any) -> None:
     room = _taken_at_start(host, "work-1")
     first = host.record().generation
@@ -965,7 +991,7 @@ def test_lapse_handled_as_heal(host: Host, h: Any) -> None:
         host.name, None, store=host.opened.pairs, connect=host.opened.connect, now=h.now
     )
     assert after.moved_from is None and after.record.moved_reason == "lapsed"
-    # The running session sees the move by its generation.
+    # A new run sees the move by its generation, at start.
     host.session = running = host.restart()
     running.start()
     assert host.record().generation == after.generation != first
@@ -1004,6 +1030,170 @@ def test_the_gate_deadline_forgets_the_pair(
     assert stopped.value.state == "expired"
     assert host.opened.names() == [] and host.gate() is None
     assert spy.calls["touch"] == 0
+
+
+def _shown(host: Host) -> gate.Gate:
+    """The SAS shown, as `pair status` shows it, and not confirmed yet."""
+    shown = host.s.show(host.name)
+    assert shown is not None
+    return shown[1]
+
+
+def test_a_confirm_while_a_step_resolves_is_kept_past_the_deadline(
+    host_env: HostEnv, h: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    host = _host(h, host_env, tmp_path, open_gate=False)
+    running = host.s
+    running.start()
+    found = _shown(host)
+    assert found.deadline is not None
+    h.advance(found.deadline - h.now - 1)
+    # While a step of `run` resolves, the user confirms, a second before the deadline; the
+    # resolve returns two seconds later. The step then reads an open gate past the deadline.
+    real = _switchboard.Link.resolve
+    confirmed: list[str] = []
+
+    def slow(opened: _switchboard.Link, name: str) -> _switchboard.Pair:
+        if not confirmed:
+            other = link.Session(host.env.dirs, host.opened, say=lambda _: None)
+            confirmed.append(other.open_gate(name))
+            h.advance(2)
+        return real(opened, name)
+
+    monkeypatch.setattr(_switchboard.Link, "resolve", slow)
+    running.note(_switchboard.TAG_PAIRED)
+    running.step()
+    assert confirmed == [f"pair {host.name} is confirmed on this computer"]
+    assert host.opened.names() == [host.name]
+    opened = host.gate()
+    assert opened is not None and opened.opened_at == found.deadline - 1
+    assert not [e for e in host.events("pair") if e["event"] == "forgotten"]
+
+
+class _Turns:
+    """Two commands at once: ``first`` is held where ``pause`` says, then ``second`` runs while
+    it is held, for as long as it can before it must wait for ``first``."""
+
+    def __init__(self) -> None:
+        self.paused, self.resume = threading.Event(), threading.Event()
+        self.outcomes: dict[str, Any] = {}
+
+    def hold(self) -> None:
+        """Called where ``first`` is to be held, the first time only."""
+        if not self.paused.is_set():
+            self.paused.set()
+            assert self.resume.wait(10)
+
+    def _call(self, key: str, action: Callable[[], Any]) -> threading.Thread:
+        def body() -> None:
+            try:
+                self.outcomes[key] = action()
+            except link.Stopped as exc:
+                self.outcomes[key] = exc.state
+
+        thread = threading.Thread(target=body, daemon=True)
+        thread.start()
+        return thread
+
+    def run(self, first: Callable[[], Any], second: Callable[[], Any]) -> None:
+        held = self._call("first", first)
+        assert self.paused.wait(10)
+        other = self._call("second", second)
+        other.join(1)  # it waits for `first`, or runs meanwhile
+        self.resume.set()
+        held.join(10)
+        other.join(10)
+        assert not held.is_alive() and not other.is_alive()
+
+
+def test_a_confirm_beside_forgetting_waits_for_it(
+    host_env: HostEnv, h: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # `forget` is between forgetting the pair and removing the gate's record when `pair confirm`
+    # reads that record. Before, the confirm opened the gate of a pair already forgotten and said
+    # so; now it waits, and finds no record.
+    host = _host(h, host_env, tmp_path, open_gate=False)
+    _shown(host)
+    other = _switchboard.open_link(
+        host.env.dirs, host.config, client_class=h.client_class(), clock=lambda: h.now
+    )
+    forgetting = link.Session(host.env.dirs, other, say=lambda _: None)
+    turns = _Turns()
+    real = _switchboard.Link.forget
+
+    def slow_forget(opened: _switchboard.Link, name: str) -> _switchboard.Told:
+        told = real(opened, name)
+        if opened is other:
+            turns.hold()
+        return told
+
+    monkeypatch.setattr(_switchboard.Link, "forget", slow_forget)
+    turns.run(forgetting.forget, lambda: host.s.open_gate(host.name))
+    assert isinstance(turns.outcomes["first"], _switchboard.Told)
+    assert turns.outcomes["second"] == "refused"
+    assert host.opened.names() == [] and host.gate() is None
+
+
+def _held_in_save(turns: _Turns, monkeypatch: pytest.MonkeyPatch, field: str) -> None:
+    """Hold the first write of the gate's record that sets ``field``, before it is written."""
+    real = gate.save
+
+    def slow_save(path: Path, record: gate.Gate) -> None:
+        if getattr(record, field) is not None:
+            turns.hold()
+        real(path, record)
+
+    monkeypatch.setattr("lucille_host.gate.save", slow_save)
+
+
+def test_showing_the_sas_beside_forgetting_leaves_no_record(
+    host_env: HostEnv, h: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # `pair status` has read the gate's record and is about to note that it showed the SAS when
+    # `forget` runs. Before, `forget` removed the record first, and the note then wrote one back
+    # for a pair that was gone.
+    host = _host(h, host_env, tmp_path, open_gate=False)
+    turns = _Turns()
+    _held_in_save(turns, monkeypatch, "shown_at")
+    forgetting = link.Session(host.env.dirs, host.opened, say=lambda _: None)
+    turns.run(lambda: host.s.show(host.name), forgetting.forget)
+    assert turns.outcomes["first"] is not None
+    assert host.opened.names() == []
+    assert not host.env.dirs.gate_file.exists()
+
+
+@pytest.mark.parametrize("judge", ["run", "pair status"])
+def test_a_confirm_in_time_is_never_expired_beside_it(
+    judge: str, host_env: HostEnv, h: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # `pair confirm` opens the gate a second before the deadline, and is about to write that
+    # when the deadline passes and `run`, or `pair status`, judges the gate. Before, either read
+    # the gate still shut, past its deadline, and forgot the pair the user had just confirmed.
+    host = _host(h, host_env, tmp_path, open_gate=False)
+    running = host.s
+    running.start()
+    found = _shown(host)
+    assert found.deadline is not None
+    h.advance(found.deadline - h.now - 1)
+    turns = _Turns()
+    _held_in_save(turns, monkeypatch, "opened_at")
+    confirming = link.Session(host.env.dirs, host.opened, say=lambda _: None)
+
+    def judged() -> Any:
+        h.advance(2)
+        if judge == "run":
+            running.note(_switchboard.TAG_PAIRED)
+            return running.step()
+        return link.Session(host.env.dirs, host.opened, say=lambda _: None).status()
+
+    turns.run(lambda: confirming.open_gate(host.name), judged)
+    assert turns.outcomes["first"] == f"pair {host.name} is confirmed on this computer"
+    assert turns.outcomes["second"] == (
+        None if judge == "run" else ("confirmed", f"pair {host.name}")
+    )
+    assert host.opened.names() == [host.name]
+    opened = host.gate()
+    assert opened is not None and opened.opened_at is not None
 
 
 def test_ended_by_peer_deletes_local_copy(host: Host, monkeypatch: pytest.MonkeyPatch) -> None:

@@ -13,7 +13,7 @@ Until it opens, the host touches nothing, posts nothing, accepts nothing and run
 - The gate opens only on a SAS this computer has shown. While it has not shown one, the gate stays
   shut and has no deadline.
 - The deadline is :data:`WINDOW` after the SAS is first shown on this computer, whichever command
-  showed it. Past it, the pair is forgotten.
+  showed it. Past it, a pair whose gate is still shut is forgotten; an open gate keeps no deadline.
 
 The gate's record is ``state/pair.json``. The host writes it before it answers a code, and deletes
 it whenever the pair is forgotten. A record that is missing, or names another pair, keeps the gate
@@ -107,7 +107,9 @@ def shown(gate: Gate, now: float) -> Gate:
 
 
 def past_deadline(gate: Gate, now: float) -> bool:
-    return gate.deadline is not None and now > gate.deadline
+    """Whether the gate is still shut past its deadline. An open gate is past no deadline: the
+    user confirmed in time, whenever the deadline is read."""
+    return gate.opened_at is None and gate.deadline is not None and now > gate.deadline
 
 
 def answer(entry: str) -> bool | None:

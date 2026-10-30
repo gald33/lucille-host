@@ -6,7 +6,8 @@ verbs:
 - ``pair [CODE]``: answer the pairing code Lucille shows, wait for Lucille to collect the answer,
   then show the pair's SAS and ask for ``y`` if Lucille's page shows the same (``link.py``,
   ``gate.py``): ``y`` confirms, ``n`` forgets the pair, and the end of stdin leaves the answer to
-  ``pair confirm`` or ``pair reject``. The code is read from stdin when it is not given, and only
+  ``pair confirm`` or ``pair reject``. What was typed at a terminal before the question is
+  discarded, unanswered. The code is read from stdin when it is not given, and only
   from stdin with ``--code-stdin``, which also stops once the SAS is shown (``sas_pending``).
   ``--hub`` names a loopback hub to accept codes for, and ``--store-file`` keeps the pair in files
   rather than the OS keyring; both are saved for the profile. ``pair`` refuses while a pair is
@@ -46,6 +47,7 @@ import argparse
 import contextlib
 import os
 import sys
+import termios
 from collections.abc import Callable, Iterator, Sequence
 from dataclasses import replace
 from types import MappingProxyType
@@ -373,16 +375,34 @@ def _pair_action(args: argparse.Namespace, dirs: paths.Dirs) -> str:
     return f"confirmed: {session.confirm()}"
 
 
+def _discard_typed_ahead() -> bool:
+    """Discard what was typed on the terminal before the SAS was shown: a ``y`` typed while
+    ``pair`` waited for Lucille was typed before anyone could compare. Whether that was done,
+    or there was nothing to do (stdin is not a terminal, and what it holds is read as given)."""
+    if not sys.stdin.isatty():
+        return True
+    try:
+        termios.tcflush(sys.stdin.fileno(), termios.TCIFLUSH)
+    except (termios.error, OSError):
+        return False
+    return True
+
+
 def _ask(session: link.Session, name: str, deadline: float | None) -> str:
-    """Ask whether Lucille's page shows the same SAS until ``y``, ``n``, or the end of stdin."""
+    """Ask whether Lucille's page shows the same SAS until ``y``, ``n``, or the end of stdin.
+    Nothing typed on the terminal before the question counts; where that cannot be made sure
+    of, nothing is asked, and ``pair confirm`` or ``pair reject`` answers later."""
+    before = f" before {link.iso(deadline)}" if deadline is not None else ""
+    later = (
+        f"sas_pending: pair {name} is not confirmed yet: `lucille-host pair confirm` "
+        f"confirms it{before}, and `lucille-host pair reject` rejects it"
+    )
+    if not _discard_typed_ahead():
+        return later
     while True:
         entry = _read_line("Does Lucille's page show the same SAS? Type y if it does, n if not: ")
         if not entry:
-            before = f" before {link.iso(deadline)}" if deadline is not None else ""
-            return (
-                f"sas_pending: pair {name} is not confirmed yet: `lucille-host pair confirm` "
-                f"confirms it{before}, and `lucille-host pair reject` rejects it"
-            )
+            return later
         said = gate.answer(entry)
         if said is True:
             return f"confirmed: {session.open_gate(name)}"

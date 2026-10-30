@@ -46,6 +46,7 @@ SCANNED: frozenset[str] = frozenset(
         "subprocess",
         "sys",
         "tempfile",
+        "termios",
         "textwrap",
         "threading",
         "time",

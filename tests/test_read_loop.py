@@ -955,7 +955,7 @@ def test_nothing_before_local_confirm(
         # gate stays shut.
         with pytest.raises(link.Stopped) as unshown:
             host.session().open_gate(host.name)
-        assert unshown.value.state == "sas_pending"
+        assert unshown.value.state == "sas_ready"
         found = host.gate()
         assert found is not None and (found.shown_at, found.opened_at) == (None, None)
         time.sleep(QUIET)

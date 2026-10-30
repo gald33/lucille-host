@@ -399,6 +399,27 @@ def test_status_never_shows_sas(cli: HostCli) -> None:
         assert sas not in text and sas.replace("-", "") not in text
 
 
+def test_status_shows_no_sas_the_host_has_not_shown(cli: HostCli) -> None:
+    # The SAS has reached the host (`pair confirm` resolved, and refused: nothing had shown it),
+    # and no command has shown it. `status` says so, shows none, and starts no deadline.
+    lucille = cli.lucille()
+    cli.interrupted(lucille.start())
+    assert lucille.collect().state == "paired"
+    ran = cli.run("pair", "confirm")
+    assert ran.rc == 1 and ran.err.startswith("sas_ready: "), ran.text
+    ran = cli.run("status")
+    assert ran.rc == 0, ran.text
+    assert _line(ran.out, "pair") == (
+        f"pair: sas_ready: pair {lucille.name}: the SAS has reached this computer, and no command "
+        "has shown it yet: `lucille-host pair status` shows it to compare with Lucille's page"
+    )
+    sas = lucille.sas()
+    assert sas not in ran.text and sas.replace("-", "") not in ran.text
+    found = cli.gate()
+    assert found is not None and (found.shown_at, found.deadline) == (None, None)
+    assert '"sas_shown"' not in cli.audit()
+
+
 # --- log ------------------------------------------------------------------------------------------
 
 
