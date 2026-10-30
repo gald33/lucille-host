@@ -25,9 +25,17 @@ RUNTIME_MODULES = (
     "lucille_host",
     "lucille_host.__main__",
     "lucille_host._exec",
+    "lucille_host._output",
     "lucille_host._switchboard",
+    "lucille_host.audit",
     "lucille_host.cli",
+    "lucille_host.containment",
+    "lucille_host.controls",
+    "lucille_host.jobs",
+    "lucille_host.mounts",
     "lucille_host.ops",
+    "lucille_host.paths",
+    "lucille_host.policy",
     "lucille_host.spec",
 )
 SERVER_PACKAGES = ("fastapi", "uvicorn")

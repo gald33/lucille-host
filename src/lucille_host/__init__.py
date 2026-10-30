@@ -1,7 +1,8 @@
 """lucille-host: will run a closed set of named operations for a paired Lucille account.
 
-This release is a skeleton. It pairs with nothing and runs nothing: ``lucille-host`` prints its
-version and exits.
+This version has the catalog, the executor, the local policy, the audit log and the local
+controls, with the CLI verbs that change them. It cannot pair with Lucille or read a request yet,
+so nothing can ask it to run anything.
 """
 
 from __future__ import annotations

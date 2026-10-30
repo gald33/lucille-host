@@ -20,8 +20,8 @@ Useful things to include:
 
 ## Supported versions
 
-No release exists yet. Version `0.1.0.dev0` is a skeleton and is not meant to be installed. Which
-versions get fixes will be stated here with the first release.
+No release exists yet. Version `0.1.0.dev0` cannot pair with Lucille and is not meant to be installed.
+Which versions get fixes will be stated here with the first release.
 
 ## What counts
 

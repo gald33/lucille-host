@@ -472,9 +472,9 @@ A request goes from Lucille to the host. Its body is exactly:
 
 **Operations and their arguments.** Each operation's `args` schema is part of this spec, and so binds Lucille
 as well as the host. Each is a closed object (`additionalProperties: false`), and the request schema picks it
-by `op`. The host's catalog entry for each operation must take exactly the parameter schema stated here; a
-test of the catalog will assert that when the catalog is written. Adding an operation is a minor change
-([§21](#21-versioning)).
+by `op`. The host's catalog entry for each operation must take exactly the parameter schema stated here;
+`tests/test_catalog.py` (`test_catalog_params_equal_spec_args`) asserts it. Adding an operation is a minor
+change ([§21](#21-versioning)).
 
 | `op` | `args` | Notes |
 |---|---|---|
@@ -489,8 +489,11 @@ test of the catalog will assert that when the catalog is written. Adding an oper
   range, a malformed alias, a path too long or empty) is refused `bad_args`.
 - **Paths and roots.** The schema checks a path's type, length and characters. Containment is the host's
   check, decided before anything runs, and every escape gets the one code `path_outside_root`: an absolute
-  path, a path with a `..` segment, a path whose realpath is outside the root, and a `root` alias the
-  host's local policy does not hold. A root equal to `$HOME` or `/` needs an explicit local flag.
+  path, a path with a `..` segment, a path whose realpath is outside the root, a path into the host's own
+  configuration or state folders, a path through Linux's `/proc`, a path naming something other than a
+  file or a folder (a FIFO, a socket or a device), and a `root` alias the host's local policy does not hold. A root that is `$HOME`, holds it,
+  or is `/` needs an explicit local flag; a host may not recognise every way a folder can hold `$HOME`
+  (through another filesystem's view of it, say).
 
 **Messages the host does not answer.** A reply must name a `job_id`, so the host posts nothing for a body that
 is not a JSON object, has no `dir: "request"`, or has no well-formed `job_id`. It logs such a message
@@ -517,7 +520,13 @@ The first counting reply for a job decides it, and a later one is never applied
 - `done`: the operation ran. A non-zero exit is data, not a failure.
 - `refused`: it never started. `code` is one of `unknown_op`, `not_enabled`, `bad_request`, `bad_args`,
   `path_outside_root`, `expired`, `paused`, `host_too_old`.
-- `failed`: it started and did not finish. `code` is one of `timeout`, `killed_locally`, `interrupted`.
+- `failed`: the host decided to run it, and it did not finish. `code` is one of `timeout` (it ran past its
+  time limit), `killed_locally` (the user killed it) and `interrupted` (the host did not carry out its
+  decision: a restart came between the decision and the reply, [§15](#15-dedupe-restarts-and-transport-failures),
+  the user paused the host or it began to drain between the decision and the start, or the process it
+  decided to run could not be started: its executable or its folder went away in between, say, or
+  starting it failed). So `interrupted` does not say whether the operation ran: after a restart it may
+  have.
 
 These lists are closed. A receiver refuses a reply with any other status or code.
 
@@ -546,7 +555,7 @@ These lists are closed. A receiver refuses a reply with any other status or code
   or, for `host.describe`, its document (below), which is neither.
 - `stdout_truncated`, `stderr_truncated`: true when capping dropped the end of that stream's output
   ([§13](#13-strings-numbers-sizes-and-output)), and false otherwise. Removing U+0000 and redaction do not set
-  it.
+  it. Output the host did not keep (rule `raw-ceiling`) counts as dropped by capping, and sets it.
 
 **Error text never crosses the wire.** A refused reply carries a code and nothing else. The host's own
 exception or error text never appears in any reply, under any status. (A child's own `stderr` is output, not
@@ -599,8 +608,8 @@ The numbered order governs. A request that passes all nine runs.
 
 ## 13. Strings, numbers, sizes and output
 
-These are the rules a JSON Schema cannot express. Each has a name, which the fixtures use
-([§20](#20-fixtures)).
+These are the rules a JSON Schema cannot express. Each has a name. The fixtures use the names of the rules
+a message can break ([§20](#20-fixtures)); `raw-ceiling` binds only what the host keeps of a child's output.
 
 **strings.** No string anywhere in a message, `args` included, holds U+0000 or an unpaired surrogate.
 - In a request, either makes the request `bad_request`. This request-wide check runs before any check of an
@@ -648,6 +657,15 @@ prefixes. It is a convenience, not a guarantee, and nothing may claim that secre
 Capping drops whole characters from
 the end of the stream until its JSON-encoded string fits the cap, and then sets that stream's truncation
 flag. Only capping sets it ([§11](#11-replies)).
+
+**raw-ceiling.** The host keeps at most the first 4 MiB (4194304 bytes) of each stream's raw output. It reads
+and drops the rest, so that a child never blocks on a full pipe and the host's memory stays bounded. It may
+also stop reading a stream before its end once the operation's process group is gone and the stream stays
+open for 2 s more (a process that left the group still holds it). Either way, the steps above run on what
+the host kept, as if the stream had ended there, and that stream's truncation flag is set: what the host did
+not keep counts as dropped by capping. So output that a later part of the stream would have reached (after
+a long run of U+0000, say, or a long redacted block) is not in the reply, and the flag says the stream was
+cut short.
 
 **No paths in replies.** No reply contains the realpath of a root or the user's `$HOME`. `host.describe`
 returns folder aliases, never paths.
@@ -745,8 +763,9 @@ offers and applies nothing. Pairing's own `confirmed` flag counts for nothing he
 when the pair is collected, before anyone compares the SAS.
 
 **Pause.** While the host's pause flag is set, it starts nothing. If it is online, it replies `refused` with
-`paused` to each new request, so the job fails fast. If it is offline, nothing happens and the requests
-expire. Nothing Lucille sends can unpause a host.
+`paused` to each new request, so the job fails fast. It reads the flag again just before it starts a process
+it decided to run, and a pause set in between turns that decision into `failed` with `interrupted`. If it is
+offline, nothing happens and the requests expire. Nothing Lucille sends can unpause a host.
 
 **Kill and timeout.**
 - `lucille-host kill`, or a second Ctrl-C, kills the process group of the operation in flight, and the host
@@ -755,8 +774,10 @@ expire. Nothing Lucille sends can unpause a host.
 - A child that runs past its catalog timeout (30 s by default, 300 s at most; `host.sleep` allows `n` + 30 s)
   has its process group killed, and the host replies `failed` with `timeout`.
 
-**Drain.** The first SIGTERM or Ctrl-C drains: the running operation finishes and its reply is posted, and
-nothing new starts.
+**Drain.** The first SIGTERM, SIGHUP or Ctrl-C drains: the running operation finishes and its reply is
+posted, and nothing new starts. An operation decided but not yet started is not started: `failed` with
+`interrupted`. A signal the host was started with ignored (SIGHUP under `nohup`) stays ignored. Only a
+running host enforces a time limit or a kill.
 
 ## 17. What a reply may do on Lucille's side
 
