@@ -66,9 +66,15 @@ backstop ([VERIFYING.md](VERIFYING.md) says what each guard cannot see).
   [VERIFYING.md](VERIFYING.md) name these blind spots; review covers the rest.
 
 **C3.** "Nothing Lucille sends can add an operation, add a folder, or loosen a limit."
-- Code: the local policy file, changed only by local CLI verbs; the JSON Schemas in `spec/`, with
-  `additionalProperties: false` at every level (both not written yet).
-- Tests: invariant "Nothing Lucille sends can widen what the host permits" (pending, conformance:
+- Code: the local policy file, changed only by local CLI verbs (not written yet); the protocol, which
+  has no field that maps onto local policy ([spec/PROTOCOL.md](spec/PROTOCOL.md) §3 and §10), and whose
+  JSON Schemas in `src/lucille_host/spec/v1/` set `additionalProperties: false` at every level. The host
+  does not check messages against the spec yet.
+- Tests: `tests/spec/test_schemas.py` (every object in every schema is closed) and
+  `tests/spec/test_fixtures.py` (requests carrying `argv`, `exe`, `env`, `cwd`, `timeout` or
+  policy-shaped keys are invalid and expect `bad_request`; request `caps` above the host's own leave the
+  host's own in force). These test the spec, not the host. Invariant "Nothing Lucille sends can widen
+  what the host permits" (pending, conformance:
   policy- and update-shaped fields are refused and the policy digest is unchanged; `caps` above the
   host's own never raise the effective cap); `test_upgrade_disables_changed_entry` (pending); invariant
   "An upgrade never runs a changed op under old consent" (pending).
@@ -92,10 +98,12 @@ of its keys and none of your environment variables."
 ## Paragraph 2: what stays on your computer
 
 **C5.** "Any file no enabled operation reads stays on your computer."
-- Code: the reply is built only from an operation's output and the fields of `host.describe` (the reply
-  schema in `spec/`, not written yet); `src/lucille_host/ops/`.
+- Code: the reply is built only from an operation's output and the fields of `host.describe`: the reply
+  schema, `src/lucille_host/spec/v1/reply.schema.json`, allows three closed shapes and no other field
+  (the code that builds replies is not written yet); `src/lucille_host/ops/`.
 - Tests: invariant "Nothing Lucille sends can widen what the host permits" (pending: a refused request
-  spawns nothing); the reply schema's fixtures (pending).
+  spawns nothing); `tests/spec/test_fixtures.py` (a reply carrying any other field, such as error text,
+  is invalid; this tests the spec, not the host).
 - Partly proven by review only. No test can show that no other code path sends a file. A reader checks
   that by reading `src/lucille_host/`, which the guards keep small: one spawn site and one Switchboard
   module.
@@ -109,9 +117,12 @@ reads."
 **C7.** "What leaves it: each request Lucille makes (which operation, and its inputs, such as a file name or
 a search pattern), and what an enabled operation returns, up to 64 KiB of output and 64 KiB of errors."
 - Code: the output caps in `src/lucille_host/_exec.py` (not written yet); the request and reply schemas in
-  `spec/` (not written yet).
-- Tests: `test_exec_caps` (pending: 1 MiB of output comes back truncated and flagged); invariant "Output
-  is bounded, decodable and path-free" (pending: the serialized reply stays under 256 KiB).
+  `src/lucille_host/spec/v1/`, and the rule `stream-size` in [spec/PROTOCOL.md](spec/PROTOCOL.md) §13:
+  each stream's JSON-encoded string is at most 64 KiB, which holds at most 64 KiB of output.
+- Tests: `tests/spec/test_schemas.py` and `tests/spec/test_fixtures.py` (a stream at the cap is valid, one
+  byte over it is not; these test the spec, not the host); `test_exec_caps` (pending: 1 MiB of output
+  comes back truncated and flagged); invariant "Output is bounded, decodable and path-free" (pending:
+  the serialized reply stays under 256 KiB).
 
 **C8.** "`files.search` returns lines of the files it searches."
 - Code: the `files.search` catalog entry (not written yet).
@@ -145,7 +156,9 @@ Lucille's backend."
 **C11.** "The hub, and the network in front of it, can see your computer's network address, when it
 connects, and roughly how large each message is; they cannot read the messages."
 - Host part. Code: every job meaning is inside the sealed body, with message type `note` and no thread
-  (the spec, not written yet). Tests: the spec's golden fixtures (pending).
+  ([spec/PROTOCOL.md](spec/PROTOCOL.md) §5; the host's read loop and the code that posts replies are not
+  written yet). Tests: pending. The golden fixtures in `src/lucille_host/spec/v1/fixtures/` cover message
+  bodies only, not the Switchboard message around them.
 - Not proven here: sealing and size padding are agent-switchboard 2.6.0's (its `switchboard/crypto.py`).
   This repository pins that release exactly; it does not test it.
 
@@ -232,4 +245,5 @@ These existing tests back the design rather than one sentence of the claim.
 | `tests/guards/test_workflow_lint.py` | Invariant "Every release comes from a hosted runner and environment `pypi`" (the hosted-runner half; that a release publishes from environment `pypi` is checked by the provenance step in [VERIFYING.md](VERIFYING.md), not by this test). |
 | `tests/test_import_graph.py` | The runtime imports no hub server. (That the base install has none is `pyproject.toml`'s dependency list: the server comes only with the `[conformance]` extra.) The README's "opens no listening port" also needs the pending socket test. |
 | `tests/test_cli.py` | `lucille-host` and `lucille-host --version` print the version, and the version has one source. |
+| `tests/spec/` | The protocol spec, [spec/PROTOCOL.md](spec/PROTOCOL.md): every object in its schemas is closed and every value bounded; each fixture validates, or fails, as labelled, and each request fixture expects the reply the spec's refusal order gives, and the fixtures for each place in each pattern are the ones `tools/spec/gen_fixtures.py` writes; check 3 of the accept policy compares hub URLs as strings with every trailing `/` removed, which is how the pinned agent-switchboard keeps both a pairing code's hub and an offered room's, shown by running the library; the wheel ships the schemas and fixtures, and an installed copy loads them. These test the spec, not the host, which does not check messages against it yet. |
 | `tests/test_skeleton.py` | What `0.1.0.dev0` promises: the operation set is empty and read-only, `_exec.run` starts nothing, the Switchboard calls `_switchboard.py` names exist in the pinned library, and the conformance suite with no scenarios exits 1 rather than reporting a pass. |

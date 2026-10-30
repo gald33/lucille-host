@@ -1,0 +1,25 @@
+{
+  "description": "An unknown op with arguments no op takes: unknown_op is checked first.",
+  "valid": false,
+  "schema_valid": false,
+  "expect": {
+    "reply": {
+      "status": "refused",
+      "code": "unknown_op"
+    }
+  },
+  "body": {
+    "v": "lucille.exec/1",
+    "dir": "request",
+    "job_id": "00000000-0000-4000-8000-000000000029",
+    "op": "files.delete",
+    "args": {
+      "anything": [
+        1,
+        2,
+        3
+      ]
+    },
+    "not_after": 1767229200
+  }
+}

@@ -1,0 +1,14 @@
+{
+  "description": "A failed reply without policy_digest.",
+  "valid": false,
+  "schema_valid": false,
+  "body": {
+    "v": "lucille.exec/1",
+    "dir": "reply",
+    "job_id": "00000000-0000-4000-8000-000000000220",
+    "status": "failed",
+    "code": "interrupted",
+    "duration_ms": 0,
+    "host_version": "0.1.0"
+  }
+}

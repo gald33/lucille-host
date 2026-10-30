@@ -1,0 +1,22 @@
+{
+  "description": "not_after 4294967296, one above the most the schema allows, received 86400 s before it, so only that bound refuses it.",
+  "valid": false,
+  "schema_valid": false,
+  "host_state": {
+    "received_at": 4294880896
+  },
+  "expect": {
+    "reply": {
+      "status": "refused",
+      "code": "bad_request"
+    }
+  },
+  "body": {
+    "v": "lucille.exec/1",
+    "dir": "request",
+    "job_id": "00000000-0000-4000-8000-000000000134",
+    "op": "host.describe",
+    "args": {},
+    "not_after": 4294967296
+  }
+}

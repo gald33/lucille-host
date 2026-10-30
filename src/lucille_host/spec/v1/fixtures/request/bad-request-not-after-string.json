@@ -1,0 +1,19 @@
+{
+  "description": "not_after as a date string.",
+  "valid": false,
+  "schema_valid": false,
+  "expect": {
+    "reply": {
+      "status": "refused",
+      "code": "bad_request"
+    }
+  },
+  "body": {
+    "v": "lucille.exec/1",
+    "dir": "request",
+    "job_id": "00000000-0000-4000-8000-000000000050",
+    "op": "host.describe",
+    "args": {},
+    "not_after": "2026-01-01T01:00:00Z"
+  }
+}

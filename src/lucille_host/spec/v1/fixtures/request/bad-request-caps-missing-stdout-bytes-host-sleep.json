@@ -1,0 +1,24 @@
+{
+  "description": "host.sleep with caps that have no stdout_bytes: both keys are required.",
+  "valid": false,
+  "schema_valid": false,
+  "expect": {
+    "reply": {
+      "status": "refused",
+      "code": "bad_request"
+    }
+  },
+  "body": {
+    "v": "lucille.exec/1",
+    "dir": "request",
+    "job_id": "00000000-0000-4000-8000-000000000703",
+    "op": "host.sleep",
+    "args": {
+      "n": 1
+    },
+    "not_after": 1767229200,
+    "caps": {
+      "stderr_bytes": 4096
+    }
+  }
+}

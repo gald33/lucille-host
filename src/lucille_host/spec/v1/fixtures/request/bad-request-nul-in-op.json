@@ -1,0 +1,19 @@
+{
+  "description": "A string holding U+0000, in op. The op is then malformed too, so this is bad_request with or without the strings rule; bad-request-nul-in-args isolates that rule.",
+  "valid": false,
+  "schema_valid": false,
+  "expect": {
+    "reply": {
+      "status": "refused",
+      "code": "bad_request"
+    }
+  },
+  "body": {
+    "v": "lucille.exec/1",
+    "dir": "request",
+    "job_id": "00000000-0000-4000-8000-000000000064",
+    "op": "host.describe\u0000",
+    "args": {},
+    "not_after": 1767229200
+  }
+}

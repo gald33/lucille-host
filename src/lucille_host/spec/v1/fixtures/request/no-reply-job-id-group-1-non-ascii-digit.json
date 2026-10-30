@@ -1,0 +1,16 @@
+{
+  "description": "A job_id, '\u06610000000-0000-4000-8000-000000001011', with a non-ASCII digit (U+0661) in its first group: not lowercase hex. The host posts nothing.",
+  "valid": false,
+  "schema_valid": false,
+  "expect": {
+    "reply": null
+  },
+  "body": {
+    "v": "lucille.exec/1",
+    "dir": "request",
+    "job_id": "\u06610000000-0000-4000-8000-000000001011",
+    "op": "host.describe",
+    "args": {},
+    "not_after": 1767229200
+  }
+}

@@ -1,0 +1,20 @@
+{
+  "description": "No string in a reply holds an unpaired surrogate. The schema cannot see it.",
+  "valid": false,
+  "schema_valid": true,
+  "prose_rule": "strings",
+  "body": {
+    "v": "lucille.exec/1",
+    "dir": "reply",
+    "job_id": "00000000-0000-4000-8000-000000000120",
+    "status": "done",
+    "exit_code": 0,
+    "stdout": "",
+    "stderr": "bad \udc80 byte",
+    "stdout_truncated": false,
+    "stderr_truncated": false,
+    "duration_ms": 12,
+    "policy_digest": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    "host_version": "0.1.0"
+  }
+}

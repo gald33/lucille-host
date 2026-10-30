@@ -1,0 +1,21 @@
+{
+  "description": "files.sha256 of notes..txt: '..' inside a name is not a '..' segment, so the path stays inside its root and the request runs.",
+  "valid": true,
+  "schema_valid": true,
+  "expect": {
+    "reply": {
+      "status": "done"
+    }
+  },
+  "body": {
+    "v": "lucille.exec/1",
+    "dir": "request",
+    "job_id": "00000000-0000-4000-8000-000000000711",
+    "op": "files.sha256",
+    "args": {
+      "root": "docs",
+      "path": "notes..txt"
+    },
+    "not_after": 1767229200
+  }
+}

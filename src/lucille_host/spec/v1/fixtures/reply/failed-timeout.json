@@ -1,0 +1,20 @@
+{
+  "description": "failed timeout, with what the child wrote before its process group was killed.",
+  "valid": true,
+  "schema_valid": true,
+  "body": {
+    "v": "lucille.exec/1",
+    "dir": "reply",
+    "job_id": "00000000-0000-4000-8000-000000000099",
+    "status": "failed",
+    "code": "timeout",
+    "exit_code": -9,
+    "stdout": "partial\n",
+    "stdout_truncated": false,
+    "stderr": "",
+    "stderr_truncated": false,
+    "duration_ms": 30000,
+    "policy_digest": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    "host_version": "0.1.0"
+  }
+}

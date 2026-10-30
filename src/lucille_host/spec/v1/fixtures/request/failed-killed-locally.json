@@ -1,0 +1,24 @@
+{
+  "description": "The user runs `lucille-host kill` while the operation runs.",
+  "valid": true,
+  "schema_valid": true,
+  "host_state": {
+    "event": "killed_locally"
+  },
+  "expect": {
+    "reply": {
+      "status": "failed",
+      "code": "killed_locally"
+    }
+  },
+  "body": {
+    "v": "lucille.exec/1",
+    "dir": "request",
+    "job_id": "00000000-0000-4000-8000-000000000023",
+    "op": "host.sleep",
+    "args": {
+      "n": 60
+    },
+    "not_after": 1767229200
+  }
+}

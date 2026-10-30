@@ -1,0 +1,21 @@
+{
+  "description": "A files.sha256 request without v.",
+  "valid": false,
+  "schema_valid": false,
+  "expect": {
+    "reply": {
+      "status": "refused",
+      "code": "bad_request"
+    }
+  },
+  "body": {
+    "dir": "request",
+    "job_id": "00000000-0000-4000-8000-000000000192",
+    "op": "files.sha256",
+    "args": {
+      "root": "docs",
+      "path": "notes/todo.txt"
+    },
+    "not_after": 1767229200
+  }
+}

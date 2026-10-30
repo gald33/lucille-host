@@ -1,0 +1,88 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/gald33/lucille-host/blob/main/src/lucille_host/spec/v1/host.describe.schema.json",
+  "title": "lucille.exec/1 host.describe document",
+  "description": "What host.describe returns, JSON-encoded in the stdout of a done reply with exit_code 0 and an empty stderr.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "host_version",
+    "protocol",
+    "os_family",
+    "catalog_version",
+    "enabled_ops",
+    "root_aliases",
+    "policy_digest"
+  ],
+  "properties": {
+    "host_version": {
+      "$ref": "#/$defs/host_version"
+    },
+    "protocol": {
+      "const": "lucille.exec/1"
+    },
+    "os_family": {
+      "type": "string",
+      "enum": [
+        "linux",
+        "macos"
+      ]
+    },
+    "catalog_version": {
+      "description": "Identifies the release's catalog; it changes whenever any entry does.",
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64,
+      "pattern": "^[0-9A-Za-z][0-9A-Za-z.+_-]{0,63}$"
+    },
+    "enabled_ops": {
+      "type": "array",
+      "maxItems": 64,
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/op_name"
+      }
+    },
+    "root_aliases": {
+      "type": "array",
+      "maxItems": 64,
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/root"
+      }
+    },
+    "policy_digest": {
+      "$ref": "#/$defs/policy_digest"
+    }
+  },
+  "$defs": {
+    "op_name": {
+      "description": "An operation name: namespaced, lowercase, at most 64 characters.",
+      "type": "string",
+      "minLength": 3,
+      "maxLength": 64,
+      "pattern": "^[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*)+$"
+    },
+    "root": {
+      "description": "A folder alias from the host's local policy. Never a path.",
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 32,
+      "pattern": "^[a-z][a-z0-9_-]{0,31}$"
+    },
+    "policy_digest": {
+      "description": "HMAC-SHA256 of the host's canonical local policy, as 64 lowercase hex digits.",
+      "type": "string",
+      "minLength": 64,
+      "maxLength": 64,
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "host_version": {
+      "description": "The host release's version string.",
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 32,
+      "pattern": "^[0-9][0-9A-Za-z.+_-]{0,31}$"
+    }
+  }
+}

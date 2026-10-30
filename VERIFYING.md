@@ -11,6 +11,9 @@ release follows it once, on a clean machine, and reports each step they could no
   `0.1.0.dev0` it is empty.
 - [CLAIMS.md](CLAIMS.md) maps each sentence of the privacy claim to the code and test behind it.
 - [decisions/0001-host-design.md](decisions/0001-host-design.md) is the design.
+- [spec/PROTOCOL.md](spec/PROTOCOL.md) is the protocol between Lucille and the host, `lucille.exec/1`:
+  every message Lucille can send, every reply the host can give, and the rules each side follows. Its
+  JSON Schemas and golden fixtures are in `src/lucille_host/spec/v1/`, and ship in the wheel.
 
 **What CI runs.** The workflow `ci` (`.github/workflows/ci.yml`) runs on every push to `main` and on every
 pull request.
@@ -259,6 +262,34 @@ Python process, with the `[conformance]` extra installed so that `fastapi` and `
 imported, and fails if either was. It also checks that its list of modules covers every module file in
 the runtime package, and that the package holds no symbolic link, which its walk would not follow.
 The hub server lives only in the `[conformance]` extra.
+
+**The spec's tests.** `tests/spec/` tests the protocol spec, not the host, which does not check messages
+against it yet.
+- `test_schemas.py` walks every subschema of every schema, and fails on an object without
+  `additionalProperties: false`, a value without a bound, or a pattern that reads differently in
+  ECMA-262 (the regular expressions JSON Schema uses) and in Python. It also checks that the largest
+  `host.describe` document stays under 8 KiB, and that every character a pattern of that document admits
+  is written as one byte, so that the size cannot drift with a pattern.
+- `test_fixtures.py` checks that each golden fixture validates, or fails, as labelled, both against the
+  schema and against the rules the spec states that a schema cannot express, and that each request
+  fixture expects the reply the spec's refusal order gives.
+- `test_generated_fixtures.py` checks that `tools/spec/gen_fixtures.py`, which writes the fixtures for
+  each place in each pattern (spec section 20), writes exactly the committed files; that each of those
+  files still shows its one fault, and no other (with a value the pattern accepts in that place, the
+  body is valid); and that, for each pattern but the one that refuses only U+0000, the other fixtures hold
+  each kind of character each class allows, and each counted range at its least and its most. After a change to a schema, `uv run python
+  tools/spec/gen_fixtures.py` writes them again.
+- `test_accept_policy.py` checks the spec's reading of check 3 of the accept policy (hub URLs compared as
+  strings with every trailing `/` removed from each, and nothing else normalised) against the pinned
+  agent-switchboard, which keeps a pairing code's URL and an offered room's that way. It decodes codes,
+  and it pairs, offers and accepts rooms on the library's in-process test hub, which needs the
+  `conformance` extra: one whose URL ends in `/` or `//`, and one minted from another spelling of the
+  hub's URL (case, a port, a query, a fragment), which the library keeps as written.
+- `test_packaged.py` builds the sdist and the wheel with `uv build`, installs the wheel into a fresh
+  virtual environment, loads the schemas and fixtures from there, and checks them against the source
+  tree. It needs `uv` on `PATH` and the build backend, which uv fetches or takes from its cache. It
+  builds from the working tree, so every file there that `.gitignore` does not exclude goes into the
+  sdist: keep any other virtual environment outside the checkout, or name it `.venv*` or `venv`.
 
 **Run it yourself.**
 

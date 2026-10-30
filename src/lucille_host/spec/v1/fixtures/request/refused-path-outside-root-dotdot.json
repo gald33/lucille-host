@@ -1,0 +1,22 @@
+{
+  "description": "A path with a '..' segment is refused path_outside_root.",
+  "valid": true,
+  "schema_valid": true,
+  "expect": {
+    "reply": {
+      "status": "refused",
+      "code": "path_outside_root"
+    }
+  },
+  "body": {
+    "v": "lucille.exec/1",
+    "dir": "request",
+    "job_id": "00000000-0000-4000-8000-000000000014",
+    "op": "files.sha256",
+    "args": {
+      "root": "docs",
+      "path": "notes/../../secrets.txt"
+    },
+    "not_after": 1767229200
+  }
+}

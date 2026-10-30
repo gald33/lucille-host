@@ -1,0 +1,23 @@
+{
+  "description": "An extra top-level key, 'exe', is refused and never interpreted.",
+  "valid": false,
+  "schema_valid": false,
+  "expect": {
+    "reply": {
+      "status": "refused",
+      "code": "bad_request"
+    }
+  },
+  "body": {
+    "v": "lucille.exec/1",
+    "dir": "request",
+    "job_id": "00000000-0000-4000-8000-000000000039",
+    "op": "files.sha256",
+    "args": {
+      "root": "docs",
+      "path": "notes/todo.txt"
+    },
+    "not_after": 1767229200,
+    "exe": "/bin/sh"
+  }
+}

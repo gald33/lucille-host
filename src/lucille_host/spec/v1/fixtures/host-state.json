@@ -1,0 +1,21 @@
+{
+  "received_at": 1767225600,
+  "host_version": "0.1.0",
+  "enabled_ops": [
+    "host.describe",
+    "host.sleep",
+    "files.sha256",
+    "files.search"
+  ],
+  "roots": [
+    "docs"
+  ],
+  "resolves_outside_root": [],
+  "paused": false,
+  "seen_job_ids": [],
+  "caps": {
+    "stdout_bytes": 65536,
+    "stderr_bytes": 65536
+  },
+  "event": null
+}

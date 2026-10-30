@@ -1,0 +1,19 @@
+{
+  "description": "Output that was not UTF-8, decoded with U+FFFD and with U+0000 removed.",
+  "valid": true,
+  "schema_valid": true,
+  "body": {
+    "v": "lucille.exec/1",
+    "dir": "reply",
+    "job_id": "00000000-0000-4000-8000-000000000090",
+    "status": "done",
+    "exit_code": 0,
+    "stdout": "caf\ufffd\ufffdbin\n",
+    "stderr": "ab\n",
+    "stdout_truncated": false,
+    "stderr_truncated": false,
+    "duration_ms": 12,
+    "policy_digest": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    "host_version": "0.1.0"
+  }
+}

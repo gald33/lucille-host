@@ -1,0 +1,23 @@
+{
+  "description": "A host whose version, 1.2-3.4.5, holds a numeric triple but does not start with one: older than every min_host_version, 0.0.0 included.",
+  "valid": true,
+  "schema_valid": true,
+  "host_state": {
+    "host_version": "1.2-3.4.5"
+  },
+  "expect": {
+    "reply": {
+      "status": "refused",
+      "code": "host_too_old"
+    }
+  },
+  "body": {
+    "v": "lucille.exec/1",
+    "dir": "request",
+    "job_id": "00000000-0000-4000-8000-000000000262",
+    "op": "host.describe",
+    "args": {},
+    "not_after": 1767229200,
+    "min_host_version": "0.0.0"
+  }
+}

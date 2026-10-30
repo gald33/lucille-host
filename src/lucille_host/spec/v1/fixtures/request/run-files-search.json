@@ -1,0 +1,23 @@
+{
+  "description": "files.search with every argument present.",
+  "valid": true,
+  "schema_valid": true,
+  "expect": {
+    "reply": {
+      "status": "done"
+    }
+  },
+  "body": {
+    "v": "lucille.exec/1",
+    "dir": "request",
+    "job_id": "00000000-0000-4000-8000-000000000004",
+    "op": "files.search",
+    "args": {
+      "root": "docs",
+      "pattern": "TODO",
+      "fixed_strings": true,
+      "max_count": 20
+    },
+    "not_after": 1767229200
+  }
+}

@@ -1,0 +1,14 @@
+{
+  "description": "A job_id, '00000000-\u0661000-4000-8000-000000001110', with a non-ASCII digit (U+0661) in its second group: not lowercase hex.",
+  "valid": false,
+  "schema_valid": false,
+  "body": {
+    "v": "lucille.exec/1",
+    "dir": "reply",
+    "job_id": "00000000-\u0661000-4000-8000-000000001110",
+    "status": "refused",
+    "code": "paused",
+    "policy_digest": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    "host_version": "0.1.0"
+  }
+}

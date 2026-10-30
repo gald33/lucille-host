@@ -1,0 +1,23 @@
+{
+  "description": "An unknown envelope key in a request already past its not_after: bad_request is checked first.",
+  "valid": false,
+  "schema_valid": false,
+  "host_state": {
+    "received_at": 1767229260
+  },
+  "expect": {
+    "reply": {
+      "status": "refused",
+      "code": "bad_request"
+    }
+  },
+  "body": {
+    "v": "lucille.exec/1",
+    "dir": "request",
+    "job_id": "00000000-0000-4000-8000-000000000130",
+    "op": "host.describe",
+    "args": {},
+    "not_after": 1767229200,
+    "priority": 1
+  }
+}

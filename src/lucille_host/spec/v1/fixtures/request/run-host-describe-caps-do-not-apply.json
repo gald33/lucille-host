@@ -1,0 +1,26 @@
+{
+  "description": "A request's caps do not apply to host.describe: it runs no child, and its document is never cut short. Only the host's own bound (rule stream-size) applies, and the document's schema keeps it far below that. Here a stdout cap of 100 bytes is below the size of any describe document.",
+  "valid": true,
+  "schema_valid": true,
+  "expect": {
+    "reply": {
+      "status": "done"
+    },
+    "effective_caps": {
+      "stdout_bytes": 65536,
+      "stderr_bytes": 65536
+    }
+  },
+  "body": {
+    "v": "lucille.exec/1",
+    "dir": "request",
+    "job_id": "00000000-0000-4000-8000-000000000128",
+    "op": "host.describe",
+    "args": {},
+    "not_after": 1767229200,
+    "caps": {
+      "stdout_bytes": 100,
+      "stderr_bytes": 2
+    }
+  }
+}

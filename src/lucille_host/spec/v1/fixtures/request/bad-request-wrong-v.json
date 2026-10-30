@@ -1,0 +1,19 @@
+{
+  "description": "A v other than lucille.exec/1.",
+  "valid": false,
+  "schema_valid": false,
+  "expect": {
+    "reply": {
+      "status": "refused",
+      "code": "bad_request"
+    }
+  },
+  "body": {
+    "v": "lucille.exec/2",
+    "dir": "request",
+    "job_id": "00000000-0000-4000-8000-000000000044",
+    "op": "host.describe",
+    "args": {},
+    "not_after": 1767229200
+  }
+}

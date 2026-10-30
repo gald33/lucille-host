@@ -1,0 +1,15 @@
+{
+  "description": "paused is a refused code, not a failed one.",
+  "valid": false,
+  "schema_valid": false,
+  "body": {
+    "v": "lucille.exec/1",
+    "dir": "reply",
+    "job_id": "00000000-0000-4000-8000-000000000106",
+    "status": "failed",
+    "code": "paused",
+    "duration_ms": 0,
+    "policy_digest": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    "host_version": "0.1.0"
+  }
+}

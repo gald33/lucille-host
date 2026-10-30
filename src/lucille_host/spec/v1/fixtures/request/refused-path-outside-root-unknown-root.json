@@ -1,0 +1,24 @@
+{
+  "description": "A well-formed root alias the local policy does not hold is refused path_outside_root.",
+  "valid": true,
+  "schema_valid": true,
+  "expect": {
+    "reply": {
+      "status": "refused",
+      "code": "path_outside_root"
+    }
+  },
+  "body": {
+    "v": "lucille.exec/1",
+    "dir": "request",
+    "job_id": "00000000-0000-4000-8000-000000000016",
+    "op": "files.search",
+    "args": {
+      "root": "photos",
+      "pattern": "x",
+      "fixed_strings": false,
+      "max_count": 1
+    },
+    "not_after": 1767229200
+  }
+}

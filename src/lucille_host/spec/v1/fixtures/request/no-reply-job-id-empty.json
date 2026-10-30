@@ -1,0 +1,16 @@
+{
+  "description": "An empty job_id. The host posts nothing.",
+  "valid": false,
+  "schema_valid": false,
+  "expect": {
+    "reply": null
+  },
+  "body": {
+    "v": "lucille.exec/1",
+    "dir": "request",
+    "job_id": "",
+    "op": "host.describe",
+    "args": {},
+    "not_after": 1767229200
+  }
+}

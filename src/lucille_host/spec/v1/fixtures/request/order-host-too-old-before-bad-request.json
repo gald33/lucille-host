@@ -1,0 +1,21 @@
+{
+  "description": "A key the v1 envelope does not have, as a later minor version might add, with a min_host_version newer than the host: host_too_old is checked before the envelope.",
+  "valid": false,
+  "schema_valid": false,
+  "expect": {
+    "reply": {
+      "status": "refused",
+      "code": "host_too_old"
+    }
+  },
+  "body": {
+    "v": "lucille.exec/1",
+    "dir": "request",
+    "job_id": "00000000-0000-4000-8000-000000000031",
+    "op": "host.describe",
+    "args": {},
+    "not_after": 1767229200,
+    "priority": 1,
+    "min_host_version": "9.0.0"
+  }
+}

@@ -1,0 +1,12 @@
+{
+  "description": "A body that is not a JSON object.",
+  "valid": false,
+  "schema_valid": false,
+  "expect": {
+    "reply": null
+  },
+  "body": [
+    "lucille.exec/1",
+    "request"
+  ]
+}

@@ -58,6 +58,7 @@ Issues = "https://github.com/gald33/lucille-host/issues"
 
 [dependency-groups]
 dev = [
+    "jsonschema>=4.23",
     "pytest>=8.3",
     "pyyaml>=6.0.2",
     "ruff>=0.15",

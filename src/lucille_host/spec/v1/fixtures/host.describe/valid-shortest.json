@@ -1,0 +1,14 @@
+{
+  "description": "The shortest document the schema allows: both lists empty, a host_version and a catalog_version of one character, and the shorter os_family.",
+  "valid": true,
+  "schema_valid": true,
+  "body": {
+    "host_version": "1",
+    "protocol": "lucille.exec/1",
+    "os_family": "linux",
+    "catalog_version": "1",
+    "enabled_ops": [],
+    "root_aliases": [],
+    "policy_digest": "0000000000000000000000000000000000000000000000000000000000000000"
+  }
+}

@@ -1,0 +1,28 @@
+{
+  "description": "Paused and not enabled: paused is checked first.",
+  "valid": true,
+  "schema_valid": true,
+  "host_state": {
+    "paused": true,
+    "enabled_ops": [
+      "host.describe"
+    ]
+  },
+  "expect": {
+    "reply": {
+      "status": "refused",
+      "code": "paused"
+    }
+  },
+  "body": {
+    "v": "lucille.exec/1",
+    "dir": "request",
+    "job_id": "00000000-0000-4000-8000-000000000025",
+    "op": "files.sha256",
+    "args": {
+      "root": "docs",
+      "path": "notes/todo.txt"
+    },
+    "not_after": 1767229200
+  }
+}

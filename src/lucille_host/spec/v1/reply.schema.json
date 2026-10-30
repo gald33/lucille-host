@@ -1,0 +1,274 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/gald33/lucille-host/blob/main/src/lucille_host/spec/v1/reply.schema.json",
+  "title": "lucille.exec/1 reply",
+  "description": "A reply to a request (one per job_id, except as PROTOCOL.md section 11 allows): the sealed body of one Switchboard message of type note, with no thread, on the channel lucille.exec of the request's work room. One branch per status; each is a closed object. spec/PROTOCOL.md holds the rules this schema cannot express.",
+  "oneOf": [
+    {
+      "$ref": "#/$defs/reply.done"
+    },
+    {
+      "$ref": "#/$defs/reply.refused"
+    },
+    {
+      "$ref": "#/$defs/reply.failed"
+    }
+  ],
+  "$defs": {
+    "v": {
+      "description": "The protocol and its major version.",
+      "const": "lucille.exec/1"
+    },
+    "dir": {
+      "description": "Which way the message travels.",
+      "type": "string",
+      "enum": [
+        "request",
+        "reply"
+      ]
+    },
+    "job_id": {
+      "description": "Lucille's id for the job: a lowercase UUID in 8-4-4-4-12 form.",
+      "type": "string",
+      "minLength": 36,
+      "maxLength": 36,
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    },
+    "policy_digest": {
+      "description": "HMAC-SHA256 of the host's canonical local policy, as 64 lowercase hex digits.",
+      "type": "string",
+      "minLength": 64,
+      "maxLength": 64,
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "host_version": {
+      "description": "The host release's version string.",
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 32,
+      "pattern": "^[0-9][0-9A-Za-z.+_-]{0,31}$"
+    },
+    "status": {
+      "description": "done: the operation ran. refused: it never started. failed: it started and did not finish.",
+      "type": "string",
+      "enum": [
+        "done",
+        "refused",
+        "failed"
+      ]
+    },
+    "refused_code": {
+      "type": "string",
+      "enum": [
+        "unknown_op",
+        "not_enabled",
+        "bad_request",
+        "bad_args",
+        "path_outside_root",
+        "expired",
+        "paused",
+        "host_too_old"
+      ]
+    },
+    "failed_code": {
+      "type": "string",
+      "enum": [
+        "timeout",
+        "killed_locally",
+        "interrupted"
+      ]
+    },
+    "stream": {
+      "description": "One output stream: a child's output, decoded and capped as PROTOCOL.md says, or the document host.describe returns in stdout. Its JSON-encoded string is at most 65536 bytes (rule stream-size); 65534 characters is the most any such string can hold.",
+      "type": "string",
+      "maxLength": 65534,
+      "pattern": "^[^\\u0000]*$"
+    },
+    "truncated": {
+      "description": "True only when capping dropped the end of that stream (PROTOCOL.md section 13); removing U+0000 and redaction do not set it. Always false for host.describe, whose document is never capped.",
+      "type": "boolean"
+    },
+    "exit_code": {
+      "description": "The exit status the OS reported; negative when the child was killed by that signal.",
+      "type": "integer",
+      "minimum": -255,
+      "maximum": 255
+    },
+    "duration_ms": {
+      "description": "How long the operation ran, in milliseconds.",
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 2147483647
+    },
+    "reply.done": {
+      "description": "The operation ran. A non-zero exit_code is data, not a failure.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "v",
+        "dir",
+        "job_id",
+        "status",
+        "exit_code",
+        "stdout",
+        "stderr",
+        "stdout_truncated",
+        "stderr_truncated",
+        "duration_ms",
+        "policy_digest",
+        "host_version"
+      ],
+      "properties": {
+        "v": {
+          "$ref": "#/$defs/v"
+        },
+        "dir": {
+          "$ref": "#/$defs/dir",
+          "const": "reply"
+        },
+        "job_id": {
+          "$ref": "#/$defs/job_id"
+        },
+        "status": {
+          "$ref": "#/$defs/status",
+          "const": "done"
+        },
+        "exit_code": {
+          "$ref": "#/$defs/exit_code"
+        },
+        "stdout": {
+          "$ref": "#/$defs/stream"
+        },
+        "stderr": {
+          "$ref": "#/$defs/stream"
+        },
+        "stdout_truncated": {
+          "$ref": "#/$defs/truncated"
+        },
+        "stderr_truncated": {
+          "$ref": "#/$defs/truncated"
+        },
+        "duration_ms": {
+          "$ref": "#/$defs/duration_ms"
+        },
+        "policy_digest": {
+          "$ref": "#/$defs/policy_digest"
+        },
+        "host_version": {
+          "$ref": "#/$defs/host_version"
+        }
+      }
+    },
+    "reply.refused": {
+      "description": "The operation never started. A code only: no output, no exit code.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "v",
+        "dir",
+        "job_id",
+        "status",
+        "code",
+        "policy_digest",
+        "host_version"
+      ],
+      "properties": {
+        "v": {
+          "$ref": "#/$defs/v"
+        },
+        "dir": {
+          "$ref": "#/$defs/dir",
+          "const": "reply"
+        },
+        "job_id": {
+          "$ref": "#/$defs/job_id"
+        },
+        "status": {
+          "$ref": "#/$defs/status",
+          "const": "refused"
+        },
+        "code": {
+          "$ref": "#/$defs/refused_code"
+        },
+        "policy_digest": {
+          "$ref": "#/$defs/policy_digest"
+        },
+        "host_version": {
+          "$ref": "#/$defs/host_version"
+        }
+      }
+    },
+    "reply.failed": {
+      "description": "The operation started and did not finish. Each stream comes with its truncation flag or not at all.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "v",
+        "dir",
+        "job_id",
+        "status",
+        "code",
+        "duration_ms",
+        "policy_digest",
+        "host_version"
+      ],
+      "properties": {
+        "v": {
+          "$ref": "#/$defs/v"
+        },
+        "dir": {
+          "$ref": "#/$defs/dir",
+          "const": "reply"
+        },
+        "job_id": {
+          "$ref": "#/$defs/job_id"
+        },
+        "status": {
+          "$ref": "#/$defs/status",
+          "const": "failed"
+        },
+        "code": {
+          "$ref": "#/$defs/failed_code"
+        },
+        "exit_code": {
+          "$ref": "#/$defs/exit_code"
+        },
+        "stdout": {
+          "$ref": "#/$defs/stream"
+        },
+        "stderr": {
+          "$ref": "#/$defs/stream"
+        },
+        "stdout_truncated": {
+          "$ref": "#/$defs/truncated"
+        },
+        "stderr_truncated": {
+          "$ref": "#/$defs/truncated"
+        },
+        "duration_ms": {
+          "$ref": "#/$defs/duration_ms"
+        },
+        "policy_digest": {
+          "$ref": "#/$defs/policy_digest"
+        },
+        "host_version": {
+          "$ref": "#/$defs/host_version"
+        }
+      },
+      "dependentRequired": {
+        "stdout": [
+          "stdout_truncated"
+        ],
+        "stdout_truncated": [
+          "stdout"
+        ],
+        "stderr": [
+          "stderr_truncated"
+        ],
+        "stderr_truncated": [
+          "stderr"
+        ]
+      }
+    }
+  }
+}

@@ -1,0 +1,25 @@
+{
+  "description": "Paused and an unknown op: paused is checked first.",
+  "valid": false,
+  "schema_valid": false,
+  "host_state": {
+    "paused": true
+  },
+  "expect": {
+    "reply": {
+      "status": "refused",
+      "code": "paused"
+    }
+  },
+  "body": {
+    "v": "lucille.exec/1",
+    "dir": "request",
+    "job_id": "00000000-0000-4000-8000-000000000028",
+    "op": "files.delete",
+    "args": {
+      "root": "docs",
+      "path": "a.txt"
+    },
+    "not_after": 1767229200
+  }
+}

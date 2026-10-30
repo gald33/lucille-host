@@ -1,0 +1,18 @@
+{
+  "description": "A request with no not_after.",
+  "valid": false,
+  "schema_valid": false,
+  "expect": {
+    "reply": {
+      "status": "refused",
+      "code": "bad_request"
+    }
+  },
+  "body": {
+    "v": "lucille.exec/1",
+    "dir": "request",
+    "job_id": "00000000-0000-4000-8000-000000000049",
+    "op": "host.describe",
+    "args": {}
+  }
+}

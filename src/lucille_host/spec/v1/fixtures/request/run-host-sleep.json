@@ -1,0 +1,20 @@
+{
+  "description": "host.sleep with n at its lower bound.",
+  "valid": true,
+  "schema_valid": true,
+  "expect": {
+    "reply": {
+      "status": "done"
+    }
+  },
+  "body": {
+    "v": "lucille.exec/1",
+    "dir": "request",
+    "job_id": "00000000-0000-4000-8000-000000000002",
+    "op": "host.sleep",
+    "args": {
+      "n": 1
+    },
+    "not_after": 1767229200
+  }
+}

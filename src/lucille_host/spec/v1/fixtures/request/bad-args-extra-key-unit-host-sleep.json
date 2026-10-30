@@ -1,0 +1,22 @@
+{
+  "description": "host.sleep with an argument it does not take.",
+  "valid": false,
+  "schema_valid": false,
+  "expect": {
+    "reply": {
+      "status": "refused",
+      "code": "bad_args"
+    }
+  },
+  "body": {
+    "v": "lucille.exec/1",
+    "dir": "request",
+    "job_id": "00000000-0000-4000-8000-000000000152",
+    "op": "host.sleep",
+    "args": {
+      "n": 1,
+      "unit": "ms"
+    },
+    "not_after": 1767229200
+  }
+}

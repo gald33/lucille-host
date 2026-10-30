@@ -1,0 +1,29 @@
+{
+  "description": "Request caps above the host's own are not refused; the host's own caps apply.",
+  "valid": true,
+  "schema_valid": true,
+  "expect": {
+    "reply": {
+      "status": "done"
+    },
+    "effective_caps": {
+      "stdout_bytes": 65536,
+      "stderr_bytes": 65536
+    }
+  },
+  "body": {
+    "v": "lucille.exec/1",
+    "dir": "request",
+    "job_id": "00000000-0000-4000-8000-000000000005",
+    "op": "files.sha256",
+    "args": {
+      "root": "docs",
+      "path": "notes/todo.txt"
+    },
+    "not_after": 1767229200,
+    "caps": {
+      "stdout_bytes": 1048576,
+      "stderr_bytes": 2147483647
+    }
+  }
+}
