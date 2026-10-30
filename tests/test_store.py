@@ -8,9 +8,13 @@ test hub, with a fake Lucille on the other side.
 from __future__ import annotations
 
 import contextlib
+import errno
 import json
 import stat
+import subprocess
+import sys
 import threading
+import time
 from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
@@ -23,6 +27,7 @@ from switchboard import pairing, sharing
 from switchboard.testing import hub
 
 from lucille_host import _switchboard, state, store
+from lucille_host import link as link_module
 from tests import _audit_hook
 from tests._host import HostEnv, lock_free, lock_held
 from tests._keyring import MemoryKeyring
@@ -84,12 +89,28 @@ def test_no_write_under_home_switchboard(
     assert _audit_hook.spawns(events) == []
 
 
+# keyrings.alt's backend that writes secrets unencrypted to a file of its own, as it is named
+# there (keyrings.alt 5.0.2, ``keyrings/alt/file.py``), where keyring would select it when
+# installed; it is not installed here.
+Plaintext = type(
+    "PlaintextKeyring", (MemoryKeyring,), {"__module__": "keyrings.alt.file", "priority": 0.5}
+)
+
+
+def _chain_with_plaintext() -> ChainerBackend:
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr("keyring.backend.get_all_keyring", lambda: [MemoryKeyring(), Plaintext()])
+        return ChainerBackend()
+
+
 @pytest.mark.parametrize(
     "backend",
     [
         pytest.param(FailKeyring, id="fail"),
         pytest.param(NullKeyring, id="null"),
         pytest.param(ChainerBackend, id="empty-chain"),
+        pytest.param(Plaintext, id="plaintext"),
+        pytest.param(_chain_with_plaintext, id="chain-with-plaintext"),
     ],
 )
 def test_refuses_insecure_keyring_backend(
@@ -113,6 +134,64 @@ def test_a_keyring_that_stores_is_accepted(
     assert _switchboard.open_link(host_env.dirs, KEYRING).warning is None
     monkeypatch.setattr("keyring.backend.get_all_keyring", lambda: [MemoryKeyring()])
     store.check_backend(ChainerBackend())
+
+
+@pytest.mark.parametrize("config", [KEYRING, FILE], ids=["keyring", "file"])
+def test_a_store_failure_is_not_a_hub_error(
+    config: state.HostConfig,
+    host_env: HostEnv,
+    h: Any,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A full disk, or a store that cannot be written, under either store: never read as the hub
+    # out of reach, which the host waits out. Before, the file store's plain OSError was one of
+    # the hub's errors to the host.
+    link = _switchboard.open_link(host_env.dirs, config, client_class=h.client_class())
+    name = _pair(link, FakeLucille(h, tmp_path), h)
+    session = link_module.Session(host_env.dirs, link, say=lambda _: None)
+
+    def full(*_: Any, **__: Any) -> None:
+        raise OSError(errno.ENOSPC, "No space left on device")
+
+    if config.store == "file":
+        monkeypatch.setattr(pairing.PairStore, "save", full)
+    else:
+        # A keyring backend can raise one too: the session bus's socket, say.
+        read = host_env.keyring.get_password
+        monkeypatch.setattr(host_env.keyring, "get_password", full)
+    h.advance(10)
+    with pytest.raises(store.StoreError) as failed:
+        link.resolve(name)
+    assert not isinstance(failed.value, _switchboard.HubError)
+    with pytest.raises(store.StoreError):
+        session.resolve(name)
+    if config.store == "keyring":
+        # And a write: forgetting the pair here deletes its record first.
+        monkeypatch.setattr(host_env.keyring, "get_password", read)
+        monkeypatch.setattr(host_env.keyring, "set_password", full)
+        with pytest.raises(store.StoreError):
+            link.forget(name)
+
+
+def test_a_share_store_the_library_cannot_read_is_a_refusal(
+    host_env: HostEnv, h: Any, tmp_path: Path
+) -> None:
+    # The host reads the library's notes from its share store around each sharing call; a file
+    # store holding something else is refused by the call, as the library refuses it, never
+    # raised as the library's own error.
+    link = _switchboard.open_link(host_env.dirs, FILE, client_class=h.client_class())
+    name = _pair(link, FakeLucille(h, tmp_path), h)
+    (host_env.dirs.store_files / "shared_rooms.json").write_text("{not json")
+    for call in (
+        lambda: link.touch(name),
+        lambda: link.accept_room(name, "work-1", "room-1"),
+        lambda: link.leave_room("room-1"),
+    ):
+        with pytest.raises(_switchboard.RoomError) as refused:
+            call()
+        assert refused.value.state == "store"
+    assert link.notes() == ()
 
 
 def test_store_file_warns_weaker(
@@ -270,6 +349,78 @@ def _held_in_a_thread(
     threading.Thread(target=hold, daemon=True).start()
     assert holding.wait(10)
     return release
+
+
+# A command that holds the pair store's lock, then waits for the item's: what `pair status`
+# does while it resolves the pair.
+_WAITS_FOR_THE_ITEM = (
+    "import os, sys\n"
+    "pairs = os.open(sys.argv[1], os.O_RDWR | os.O_CREAT, 0o600)\n"
+    "os.lockf(pairs, os.F_LOCK, 0)\n"
+    "print('held', flush=True)\n"
+    "item = os.open(sys.argv[2], os.O_RDWR | os.O_CREAT, 0o600)\n"
+    "try:\n"
+    "    os.lockf(item, os.F_LOCK, 0)\n"
+    "except OSError as exc:\n"
+    "    print('refused', exc.errno, flush=True)\n"
+    "else:\n"
+    "    print('took it', flush=True)\n"
+)
+
+
+def test_a_deadlock_the_kernel_sees_between_threads_is_waited_out(
+    memory_keyring: MemoryKeyring, tmp_path: Path
+) -> None:
+    # One thread of `run` is inside the item's lock; another wants the pair store's lock, which
+    # a command holds while it waits for the item's. The kernel sees two processes each waiting
+    # for the other, and refuses the second request with EDEADLK. It is no deadlock: the thread
+    # inside lets go without waiting on anything. Before, the refusal stopped `run`.
+    folder = tmp_path / "state"
+    item = store.Item(folder, "default")
+    entered, release = threading.Event(), threading.Event()
+
+    def slow(doc: dict[str, Any]) -> None:
+        entered.set()
+        release.wait(10)
+
+    inside = threading.Thread(target=item.change, args=(slow,), daemon=True)
+    inside.start()
+    assert entered.wait(10)
+    command = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            _WAITS_FOR_THE_ITEM,
+            str(folder / store.PAIRS_LOCK),
+            str(folder / store.ITEM_LOCK),
+        ],
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    assert command.stdout is not None
+    try:
+        assert command.stdout.readline() == "held\n"
+        time.sleep(0.3)  # the command waits for the item's lock now
+        outcome: list[Any] = []
+
+        def take() -> None:
+            try:
+                with item.pairs_lock():
+                    outcome.append("taken")
+            except OSError as exc:
+                outcome.append(exc)
+
+        taker = threading.Thread(target=take, daemon=True)
+        taker.start()
+        time.sleep(0.3)
+        release.set()
+        inside.join(10)
+        taker.join(10)
+        assert command.stdout.readline() == "took it\n"
+        assert outcome == ["taken"]
+    finally:
+        release.set()
+        command.wait(10)
 
 
 def test_store_lock_excludes_threads_and_processes(

@@ -169,9 +169,9 @@ enforces.
      agent-switchboard 2.6.0's `switchboard/client.py`, which the runtime imports, imports
      `subprocess` and can run `git` to derive an agent id; keyring imports the backend that an
      environment variable, its configuration file or an installed entry point names, when the host
-     first asks it for a password. Whether the host's own calls ever reach Switchboard's `git` path
-     is not checked yet; the design's invariant "The host's stores and Switchboard footprint are its
-     own" (no subprocess from pairing) is the pending test for it;
+     first asks it for a password. Tests with an audit hook find that the host's pairing and sharing
+     calls, and `run`, start no process on the paths they take, against Switchboard's in-process hub
+     ([CLAIMS.md](CLAIMS.md), C1); a path no test takes is not checked;
    - files it does not parse: configuration, data and shell scripts.
 
    Review covers the rest.
@@ -340,8 +340,8 @@ installed with it, not one that happens to be first on your `PATH`.
 
 ## 4. Watch (needs a release)
 
-`lucille-host log` and `lucille-host status` show every request received, every local decision, and a
-fingerprint of everything sent.
+`lucille-host log` shows every request received, every local decision, and a fingerprint of everything
+sent. `lucille-host status` shows the pair, its work rooms, and when the host last reached the hub.
 
 ## What verification cannot establish
 

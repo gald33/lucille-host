@@ -39,6 +39,8 @@ def test_switchboard_surface_names_exist_in_the_pinned_library() -> None:
         (client.Client, "inbox"),
         (client.Client, "post"),
         (client.Client, "read_channels"),
+        (client.Client, "close"),
+        (crypto.WorkspaceCipher, "blind_channel"),
         (signing.SigningIdentity, "generate"),
     ]:
         assert callable(getattr(owner, method)), f"{owner.__name__}.{method}"

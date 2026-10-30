@@ -3,9 +3,10 @@
 ## Status: no release yet
 
 There is no release. This repository holds version `0.1.0.dev0`: the guards, CI, the draft protocol spec
-([spec/PROTOCOL.md](spec/PROTOCOL.md)), and the parts that run an operation once a request has reached the
-host: the catalog, the executor, the local policy, the audit log, and `pause`, `resume` and `kill`. It
-cannot pair with Lucille or read a request yet, so nothing can ask it to run anything. Do not install it.
+([spec/PROTOCOL.md](spec/PROTOCOL.md)), the catalog, the executor, the local policy, the audit log,
+`pause`, `resume` and `kill`, and the parts that reach Lucille: `pair`, `run`, `status`, `log` and
+`forget`. Those are tested against Switchboard's in-process hub and a stand-in for Lucille, not against
+Lucille itself. Do not install it.
 
 ## What it will be
 
@@ -31,10 +32,11 @@ The source is public so that anyone can check that the program does what it clai
 
 ## What lucille-host claims
 
-The text below is the claim the first release must meet. The same text is in [PRIVACY.md](PRIVACY.md),
-and `lucille-host status` will print it. [CLAIMS.md](CLAIMS.md) maps each sentence to the code and test
-behind it, or marks it "Lucille policy as of <date>; not proven by this repository". Until a release
-exists, none of it describes a program you can install.
+The text below is the claim the first release must meet. The same text is in [PRIVACY.md](PRIVACY.md).
+`lucille-host status` is meant to print it from the first release on; the development version's does not.
+[CLAIMS.md](CLAIMS.md) maps each sentence to the code and test behind it, or marks it "Lucille policy as
+of <date>; not proven by this repository". Until a release exists, none of it describes a program you
+can install.
 
 > lucille-host does only what you switch on, on your computer. It can run only the operations built into
 > this release (listed in `src/lucille_host/ops/` and by `lucille-host ops list`), and only on folders
@@ -76,13 +78,16 @@ exists, none of it describes a program you can install.
 
 1. **Pairing.** Lucille shows you a one-time Switchboard pairing code (`swbp1_...`).
    `lucille-host pair <code>` accepts it. You compare a short code on both screens and confirm on the
-   computer. Until you confirm, the host posts nothing and runs nothing.
-2. **Work.** Lucille offers the host a work room over the pair and posts a request there. The host checks
-   the request against your local policy, runs the operation or refuses it, and posts one reply.
+   computer (`y` at the prompt, or `lucille-host pair confirm`). Until you confirm, the host takes no work
+   room, posts nothing and runs nothing.
+2. **Work.** While `lucille-host run` runs, Lucille offers the host a work room over the pair and posts a
+   request there. The host checks the request against your local policy, runs the operation or refuses
+   it, and posts its reply.
 3. **Control.** `lucille-host pause`, `kill` and `forget` work on the computer, even offline. Nothing
-   Lucille sends can unpause the host or widen its policy.
+   Lucille sends can unpause the host or widen its policy. `lucille-host status` and `log` show what the
+   host holds and what it did.
 
-None of these verbs exists in `0.1.0.dev0`.
+`0.1.0.dev0` has these verbs, but no release exists yet.
 
 What Lucille does in these steps is Lucille policy as of 2026-10-27; not proven by this repository.
 This repository proves only the host's side. The full design is
@@ -92,9 +97,9 @@ This repository proves only the host's side. The full design is
 
 | Path | What it is |
 |---|---|
-| `src/lucille_host/` | The program. In `0.1.0.dev0` it only prints its version. |
-| `src/lucille_host/ops/` | The complete list of operations a release can run. Empty in `0.1.0.dev0`. |
-| `src/lucille_host/_exec.py` | The only place in the runtime (the program without its conformance suite) allowed to start a process. It starts none yet. |
+| `src/lucille_host/` | The program: the `lucille-host` command and everything it runs. |
+| `src/lucille_host/ops/` | The complete list of operations a release can run: `host.describe`, `host.sleep` and `files.sha256` in `0.1.0.dev0`. |
+| `src/lucille_host/_exec.py` | The only place in the runtime (the program without its conformance suite) allowed to start a process. |
 | `src/lucille_host/_switchboard.py` | The only module in the runtime allowed to import or use `switchboard`. |
 | `src/lucille_host/conformance/` | A test suite that plays a hostile Lucille against the installed program. No scenarios yet. |
 | [spec/](spec/) | The protocol between Lucille and the host, `lucille.exec/1`: [PROTOCOL.md](spec/PROTOCOL.md) and its changelog. A draft; no release implements it yet. |

@@ -1,9 +1,9 @@
 """Deciding and running one request whose envelope is already checked, and building its reply.
 
-The refusal order is spec/PROTOCOL.md section 12. The read loop (a later release) runs its first
-four steps (dedupe, ``host_too_old``, ``bad_request``, ``expired``), which need the envelope, the
-dedupe file and the clock. This module runs the other five, which need the catalog, the local
-policy and the controls, in the spec's order:
+The refusal order is spec/PROTOCOL.md section 12. The read loop (``loop.py``) runs its first four
+steps (dedupe, ``host_too_old``, ``bad_request``, ``expired``; ``envelope.py`` and
+``journal.py``), which need the envelope, the journal and the clock. This module runs the other
+five, which need the catalog, the local policy and the controls, in the spec's order:
 
 5. ``paused``; 6. ``unknown_op``; 7. ``not_enabled``; 8. ``bad_args``; 9. ``path_outside_root``.
 
@@ -17,7 +17,9 @@ is a path naming something other than a file or a folder, and a path into the ho
 before the act it records: ``received`` before deciding, ``decision`` before running or replying,
 ``start`` before the child starts, ``execution`` before the reply is built, and ``sent`` before the
 bytes are handed back to be posted. A refusal the read loop already decided is passed in as
-``earlier_code``.
+``earlier_code``. The read loop's ``decided`` hook is called right after the ``decision`` line and
+before anything runs, with the decision and, for a refusal, the reply's bytes, so that its journal
+holds them before the host acts.
 
 While the host drains (the first SIGTERM, SIGHUP or Ctrl-C), :func:`process` starts nothing: it
 raises :class:`Draining` before it records anything, and the read loop stops reading. The pause flag
@@ -25,13 +27,18 @@ and the drain are read again just before the child starts, after the ``start`` l
 hashed: a pause or a drain that lands after the decision to run stops the start, and the reply is
 ``failed interrupted``, as for a child that could not be started. One that lands after that re-read
 cannot stop the start; ``kill`` stops the child from its first poll, and a drain lets it finish.
+
+A request's room can be abandoned while it is decided or runs (spec/PROTOCOL.md section 9): the
+read loop sets the context's ``stop``. A child not started yet is not started, and a running one has
+its process group killed; either way :func:`process` raises :class:`Abandoned` after the
+``execution`` line, with no ``sent`` line and no reply, and a user's kill request is left as it was.
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any, Final
 
@@ -44,6 +51,7 @@ from lucille_host.policy import Effective
 
 __all__ = [
     "PROTOCOL",
+    "Abandoned",
     "Context",
     "Draining",
     "Job",
@@ -85,6 +93,9 @@ class Context:
     own_dirs: tuple[str, ...]
     stdout_cap: int = _output.STREAM_CAP
     stderr_cap: int = _output.STREAM_CAP
+    # True once the request's room is abandoned: nothing more starts, a running child is killed,
+    # and no reply is built.
+    stop: Callable[[], bool] | None = None
 
 
 @dataclass(frozen=True)
@@ -114,6 +125,11 @@ class Outcome:
 
 class Draining(Exception):
     """The host is draining: it starts nothing new, and records nothing for a request it got."""
+
+
+class Abandoned(Exception):
+    """The request's room was abandoned: what it was to run did not start, or was killed, and
+    no reply is built."""
 
 
 class _StoppedBeforeStart(Exception):
@@ -178,6 +194,10 @@ def _caps(job: Job, ctx: Context) -> tuple[int, int]:
     return stdout_cap, stderr_cap
 
 
+def _never() -> bool:
+    return False
+
+
 def execute(ready: Ready, ctx: Context) -> Outcome:
     """Run a job that passed every check.
 
@@ -185,9 +205,11 @@ def execute(ready: Ready, ctx: Context) -> Outcome:
     returning. A child the host decided on and then did not start is ``failed interrupted``: the
     host did not carry out its decision. That is a child that could not be started (its executable
     or its folder went away in between, say), or one a pause or a drain that landed after the
-    decision stopped.
+    decision stopped. Raises :class:`Abandoned` when the room was abandoned before the start or
+    while the child ran.
     """
     job_id = ready.job.job_id
+    stop = ctx.stop if ctx.stop is not None else _never
     if ready.argv is None:
         document = json.dumps(describe_document(ctx), ensure_ascii=True, separators=(",", ":"))
         ctx.audit.execution(job_id, op=ready.operation.name, child=False, stdout_size=len(document))
@@ -211,6 +233,8 @@ def execute(ready: Ready, ctx: Context) -> Outcome:
     )
 
     def started(executable_sha256: str) -> None:
+        if stop():
+            raise _StoppedBeforeStart("abandoned")
         if ctx.controls.draining.is_set():
             raise _StoppedBeforeStart("draining")
         if ctx.controls.paused():
@@ -223,17 +247,22 @@ def execute(ready: Ready, ctx: Context) -> Outcome:
             argv=list(command.argv),
         )
 
+    def kill_requested() -> bool:
+        return ctx.controls.kill_requested() or stop()
+
     try:
-        result = _exec.run(
-            command, kill_requested=ctx.controls.kill_requested, before_start=started
-        )
+        result = _exec.run(command, kill_requested=kill_requested, before_start=started)
     except _exec.NotStarted as exc:
         ctx.audit.execution(job_id, op=ready.operation.name, started=False, errno=exc.errno)
         return Outcome(status="failed", code="interrupted", duration_ms=0)
     except _StoppedBeforeStart as stopped:
         ctx.audit.execution(job_id, op=ready.operation.name, started=False, stopped=stopped.reason)
+        if stopped.reason == "abandoned":
+            raise Abandoned from None
         return Outcome(status="failed", code="interrupted", duration_ms=0)
-    if result.ended == "killed":
+    # Killed because the room was abandoned: no reply, and a user's kill request stays as it was.
+    abandoned = result.ended == "killed" and stop()
+    if result.ended == "killed" and not abandoned:
         ctx.controls.kill_done()
     fields: dict[str, Any] = {
         "op": ready.operation.name,
@@ -247,10 +276,14 @@ def execute(ready: Ready, ctx: Context) -> Outcome:
         "stdout_bytes": result.stdout_bytes,
         "stderr_bytes": result.stderr_bytes,
     }
+    if abandoned:
+        fields["abandoned"] = True
     if ctx.policy.log_results:
         fields["stdout"] = result.stdout
         fields["stderr"] = result.stderr
     ctx.audit.execution(job_id, **fields)
+    if abandoned:
+        raise Abandoned
     streams = {
         "exit_code": result.exit_code,
         "stdout": result.stdout,
@@ -298,21 +331,36 @@ def encode(body: Mapping[str, Any]) -> bytes:
     return json.dumps(body, ensure_ascii=True, separators=(",", ":")).encode("ascii")
 
 
-def process(job: Job, ctx: Context, *, earlier_code: str | None = None) -> bytes:
+def process(
+    job: Job,
+    ctx: Context,
+    *,
+    earlier_code: str | None = None,
+    decided: Callable[[str, str | None, bytes | None], None] | None = None,
+) -> bytes:
     """Decide one request, run it if it passes, and return the bytes of its reply.
 
-    Raises :class:`Draining`, having recorded nothing, while the host drains.
+    ``decided(decision, code, data)`` is called right after the ``decision`` line: ``("refused",
+    code, the reply's bytes)`` or ``("run", None, None)``, before anything runs. Raises
+    :class:`Draining`, having recorded nothing, while the host drains, and :class:`Abandoned`
+    when the request's room was abandoned before its reply was built.
     """
     if ctx.controls.draining.is_set():
         raise Draining
     ctx.audit.received(job.job_id, job.seq, job.op, job.args)
-    decided = earlier_code if earlier_code is not None else check(job, ctx)
-    if isinstance(decided, str):
-        ctx.audit.decision(job.job_id, "refused", decided)
-        outcome = Outcome(status="refused", code=decided)
+    verdict = earlier_code if earlier_code is not None else check(job, ctx)
+    if isinstance(verdict, str):
+        ctx.audit.decision(job.job_id, "refused", verdict)
+        data = encode(
+            reply_body(job.job_id, Outcome(status="refused", code=verdict), ctx.policy_digest)
+        )
+        if decided is not None:
+            decided("refused", verdict, data)
     else:
         ctx.audit.decision(job.job_id, "run")
-        outcome = execute(decided, ctx)
-    data = encode(reply_body(job.job_id, outcome, ctx.policy_digest))
+        if decided is not None:
+            decided("run", None, None)
+        outcome = execute(verdict, ctx)
+        data = encode(reply_body(job.job_id, outcome, ctx.policy_digest))
     ctx.audit.sent(job.job_id, hashlib.sha256(data).hexdigest(), len(data))
     return data

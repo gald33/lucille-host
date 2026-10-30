@@ -96,11 +96,13 @@ def test_client_refused_without_private_runtime_dir(host_env: HostEnv, h: Any) -
     pairing.accept(lucille.start(), None, **calls)
     assert recorder.built and linked.pairs.names() != []
 
-    # It is checked again for each client: a folder that is no longer private is refused.
+    # It is checked again for each client: a folder that is no longer private, to the group or
+    # to anyone, is refused.
     built = len(recorder.built)
-    os.chmod(dirs.runtime, 0o755)
-    with pytest.raises(state.Unprepared, match="not a private folder"):
-        link.connect(config, agent_id="lucille-host")
+    for mode in (0o755, 0o750, 0o770, 0o705, 0o701, 0o710):
+        os.chmod(dirs.runtime, mode)
+        with pytest.raises(state.Unprepared, match="not a private folder"):
+            link.connect(config, agent_id="lucille-host")
     os.chmod(dirs.runtime, 0o700)
     os.rename(dirs.runtime, dirs.state / "elsewhere")
     os.symlink(dirs.state / "elsewhere", dirs.runtime)

@@ -1,8 +1,8 @@
 """The local policy: which catalog operations are enabled, and which folders they may work in.
 
 One TOML file per profile, ``policy.toml`` in the config directory, read with ``tomllib``. Only the
-local CLI verbs change it (``ops enable|disable``, ``roots add|remove``); no protocol message has a
-field that maps onto it. The file looks like this::
+local CLI verbs change it (``ops enable|disable``, ``roots add|remove``, and ``pair``, below); no
+protocol message has a field that maps onto it. The file looks like this::
 
     version = 1
     log_results = false
@@ -25,6 +25,12 @@ field that maps onto it. The file looks like this::
 - Anything else makes the file invalid, and an invalid file stops the host: it fails closed.
 - With no file at all the policy is the fresh one: only ``host.describe`` is enabled, and no folder
   is held.
+- A new pair starts from the fresh policy. When ``lucille-host pair`` takes a new code, it moves the
+  policy file to ``policy.previous.toml`` beside it, unless that policy is the fresh one, and writes
+  the fresh policy in its place (:func:`archive`). Nothing reads the earlier policy but
+  ``lucille-host policy previous``, which lists it; to use any of it again, the user enables it
+  again. Because a fresh policy is never moved, trying a pairing twice keeps the earlier policy the
+  first try found.
 
 The policy digest is HMAC-SHA256 of the canonical effective policy under a random key kept in the
 state directory, which never leaves the computer. The user can match a result to a policy, and
@@ -56,6 +62,7 @@ __all__ = [
     "Policy",
     "PolicyError",
     "Root",
+    "archive",
     "digest",
     "digest_key",
     "effective",
@@ -334,6 +341,24 @@ def save(path: Path, policy: Policy) -> None:
         Path(temp).unlink(missing_ok=True)
         raise
     _sync_dir(path.parent)
+
+
+def archive(path: Path, previous: Path) -> bool:
+    """Before a new pair: move the policy in ``path`` to ``previous`` and write the fresh policy in
+    its place. Returns whether it moved one.
+
+    Nothing is moved when there is no policy file, or when it holds the fresh policy, so an earlier
+    ``previous`` is never replaced by a fresh one. A file that is invalid is moved as it is: the new
+    pair still starts from the fresh policy."""
+    try:
+        if load(path) == fresh():
+            return False
+    except PolicyError:
+        pass
+    os.replace(path, previous)
+    _sync_dir(path.parent)
+    save(path, fresh())
+    return True
 
 
 def _sync_dir(path: Path) -> None:

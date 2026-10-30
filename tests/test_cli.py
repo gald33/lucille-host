@@ -1,7 +1,9 @@
-"""The ``lucille-host`` command prints its version, and the version has one source."""
+"""The ``lucille-host`` command prints its version, the version has one source, and each verb runs
+only its own handler."""
 
 from __future__ import annotations
 
+import argparse
 import subprocess
 import sys
 import tomllib
@@ -10,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from lucille_host import __version__
+from lucille_host import __version__, cli, paths
 from lucille_host.cli import main
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -64,3 +66,33 @@ def test_version_has_a_single_source() -> None:
     assert "version" not in project
     assert "version" in project["dynamic"]
     assert metadata.version("lucille-host") == __version__
+
+
+class _ParsedAs:
+    """A parser that reads any command line as one verb, with no handler of its own."""
+
+    def __init__(self, verb: str) -> None:
+        self.verb = verb
+
+    def parse_args(self, argv: object) -> argparse.Namespace:
+        return argparse.Namespace(verb=self.verb, profile="default")
+
+
+def test_dispatch_is_explicit(
+    home: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Every verb the parser takes has a handler of its own.
+    verbs = next(action for action in cli.build_parser()._actions if action.dest == "verb")
+    assert set(verbs.choices) == set(cli.VERBS)
+    # A verb with no handler is refused, and is never run as another verb: the controls'
+    # fallback was once `kill`.
+    state = paths.dirs().state
+    for verb in ("unpair", "begin", "start", "kill-everything"):
+        monkeypatch.setattr("lucille_host.cli.build_parser", lambda verb=verb: _ParsedAs(verb))
+        assert main([verb]) == 1
+        assert "not a verb this release has" in capsys.readouterr().err
+        assert not (state / "paused").exists()
+        assert not (state / "kill-request").exists()
+    with pytest.raises(Exception, match="not a control"):
+        cli._controls("forget", paths.dirs())
+    assert not (state / "kill-request").exists()

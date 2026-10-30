@@ -70,7 +70,8 @@ The first version.
   at every level; golden fixtures for requests, replies, `host.describe` documents and decoding. Both ship
   in the wheel under `lucille_host/spec/v1/`.
 - **Not specified in v1.** Detecting a leak of a room's key alone; re-finding an offer a crash hid; how a
-  receiver treats a body with a duplicate key ([PROTOCOL.md §19](PROTOCOL.md#19-not-specified-in-v1)).
+  receiver treats a body with a duplicate key; a bound on how deeply a body nests
+  ([PROTOCOL.md §19](PROTOCOL.md#19-not-specified-in-v1)).
 - **Revised in the draft, after review.**
   - Check 3 of the accept policy compares the two hub URLs as strings once every `/` at the end of each
     is removed ([PROTOCOL.md §6](PROTOCOL.md#6-offers-and-the-hosts-accept-policy)). That is exactly how
@@ -112,4 +113,21 @@ The first version.
     `sharing.py:1175-1186`, in §5; `ShareStore`'s owner-only text at `:263-273` and the `Store`
     interface's request to keep the store encrypted at rest at `:237-240`, in §18), and §10 gives `1.2`
     and `1.2-beta` as host versions that do not start with a numeric triple.
+- **Revised in the draft, with the host's pairing and read loop.**
+  - No re-accept ([PROTOCOL.md §6](PROTOCOL.md#6-offers-and-the-hosts-accept-policy)). The text said the
+    host never accepts again a room it has left. Through the sharing calls the host uses, a pending offer
+    shows no workspace, so the host can tell a room it left only once it has accepted it: it then leaves the
+    room at once and never uses it, as it does a room that fails check 3 or 4. Lucille therefore sees an
+    "accepted" record for such a room, and then the host's `left` record.
+  - An accept that fails without refusing the offer, because the hub or the pair room could not be read, is
+    tried again after the next touch that reads the pair room
+    ([PROTOCOL.md §6](PROTOCOL.md#6-offers-and-the-hosts-accept-policy)). The text listed no such time, and
+    the library reports an offer once, so such an offer waited for an unrelated event.
+  - The host reads the library's notes from its own share store after every sharing call, a refused one
+    included, so that an offer noted inside an accept that then refused is not lost
+    ([PROTOCOL.md §6](PROTOCOL.md#6-offers-and-the-hosts-accept-policy) and
+    [§19](PROTOCOL.md#19-not-specified-in-v1)).
+  - A deeply nested body is a point v1 leaves open; meanwhile the host reads a body nested more than 64
+    levels deep as one it cannot open, and posts nothing for it
+    ([PROTOCOL.md §19](PROTOCOL.md#19-not-specified-in-v1)).
 - First accepted by: no host release yet. Lucille: not yet.

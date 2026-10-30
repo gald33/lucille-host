@@ -11,7 +11,11 @@
   item, and never across a call to the hub. Each is an ``os.lockf`` lock, which keeps other
   processes out, beside a ``threading.RLock``, which keeps the other threads of this one out:
   ``lockf`` belongs to the process, not the thread. There is one lock object per file per process,
-  because closing any descriptor of a file releases the process's lock on it.
+  because closing any descriptor of a file releases the process's lock on it. Since the kernel sees
+  processes, not threads, it can report a deadlock (``EDEADLK``) that is none: one thread of
+  ``run`` inside the item's lock, another waiting for the pair store's lock, which a command holds
+  while it waits for the item's lock. The thread inside lets go without waiting on anything, since
+  no lock is ever taken while the item's lock is held, so the host asks again after a pause.
 - Saves that change nothing but when the pair or a room was last read or used (the stamps listed
   in :data:`PAIR_STAMPS` and :data:`ROOM_STAMPS`) are skipped while the item was written less
   than :data:`STAMP_EVERY` seconds ago. Switchboard saves the pair on every resolve and touch, and
@@ -19,17 +23,24 @@
   day. Those stamps only decide whether a pair has gone unread for days, and what is shown about
   a room, so an hour's delay changes neither. Every other change, and every delete, is written
   before the call returns, as Switchboard's store contract asks.
-- The host refuses a keyring backend it can recognise as storing nothing: keyring's ``fail`` and
-  ``null`` backends, and a chain of backends with nothing in it.
+- The host refuses a keyring backend it can recognise as storing nothing, or as storing what it is
+  given in the clear: keyring's ``fail`` and ``null`` backends, a chain of backends with nothing
+  in it, and a backend whose class is named ``PlaintextKeyring``, as ``keyrings.alt`` names the
+  one that writes secrets unencrypted to a file of its own, outside the host's folders
+  (``keyrings/alt/file.py`` in keyrings.alt 5.0.2). That one is known by its class's name, so it
+  is never imported. A chain that holds any of them is refused too. keyrings.alt's other
+  backends encrypt, or hand the secret to another store, and are not refused.
 
-A keyring failure is a :class:`StoreError`, an ``OSError``, which is what Switchboard's stores
-raise for a storage failure. No error message holds anything read from the item.
+A keyring failure, a backend's own ``OSError`` included, is a :class:`StoreError`, an ``OSError``,
+which is what Switchboard's stores raise for a storage failure; the wrapper never reads one as the
+hub's (``_switchboard.py``). No error message holds anything read from the item.
 """
 
 from __future__ import annotations
 
 import contextlib
 import copy
+import errno
 import json
 import os
 import threading
@@ -55,6 +66,7 @@ __all__ = [
     "Item",
     "StoreError",
     "check_backend",
+    "file_lock",
     "stamps_only",
 ]
 
@@ -67,6 +79,10 @@ ROOM_STAMPS: Final = ("last_used_at", "refreshed_at", "refresh_tried_at")
 PAIRS_LOCK: Final = ".pairs.lock"
 ROOMS_LOCK: Final = ".rooms.lock"
 ITEM_LOCK: Final = ".store.lock"
+# After the kernel reports a deadlock on a lock file that is none, the host waits this long before
+# it asks again, doubling up to the most.
+DEADLOCK_PAUSE: Final = 0.01
+DEADLOCK_PAUSE_MOST: Final = 0.5
 TABLES: Final = ("records", "pending", "verdicts")
 
 T = TypeVar("T")
@@ -77,30 +93,34 @@ class StoreError(OSError):
 
 
 class InsecureKeyring(state.Refused):
-    """The keyring backend in use stores nothing."""
+    """The keyring backend in use stores nothing, or stores in the clear."""
 
 
-def _stores_nothing(backend: object) -> str | None:
-    """Why ``backend`` cannot keep a secret, or None when it is not one this module knows."""
+def _unfit(backend: object) -> str | None:
+    """Why ``backend`` cannot keep a secret as the pair secret must be kept, or None when it is not
+    one this module knows."""
     if isinstance(backend, FailKeyring):
         return "has no keyring to store in"
     if isinstance(backend, NullKeyring):
         return "stores nothing"
+    if type(backend).__name__ == "PlaintextKeyring":
+        return "keeps secrets unencrypted in a file"
     if isinstance(backend, ChainerBackend):
         members = list(backend.backends)
         if not members:
             return "chains no keyring"
         for member in members:
-            reason = _stores_nothing(member)
+            reason = _unfit(member)
             if reason is not None:
                 return f"chains one that {reason}"
     return None
 
 
 def check_backend(backend: object | None = None) -> None:
-    """Refuse the keyring backend in use (or ``backend``) when it stores nothing."""
+    """Refuse the keyring backend in use (or ``backend``) when it stores nothing, or stores in the
+    clear."""
     current = keyring.get_keyring() if backend is None else backend
-    reason = _stores_nothing(current)
+    reason = _unfit(current)
     if reason is not None:
         raise InsecureKeyring(
             f"the keyring backend here ({type(current).__name__}) {reason}, so lucille-host "
@@ -118,13 +138,26 @@ class _FileLock:
         self._depth = 0
         self._descriptor: int | None = None
 
+    def _lock(self, descriptor: int) -> None:
+        pause = DEADLOCK_PAUSE
+        while True:
+            try:
+                os.lockf(descriptor, os.F_LOCK, 0)
+                return
+            except OSError as exc:
+                if exc.errno != errno.EDEADLK:
+                    raise
+            # Not a real deadlock (the module docstring says why): ask again.
+            time.sleep(pause)
+            pause = min(pause * 2, DEADLOCK_PAUSE_MOST)
+
     @contextlib.contextmanager
     def held(self) -> Iterator[None]:
         with self._guard:
             if self._depth == 0:
                 descriptor = os.open(self._path, os.O_RDWR | os.O_CREAT, 0o600)
                 try:
-                    os.lockf(descriptor, os.F_LOCK, 0)
+                    self._lock(descriptor)
                 except OSError as exc:
                     os.close(descriptor)
                     raise StoreError(exc.errno, f"{self._path} cannot be locked") from exc
@@ -150,6 +183,12 @@ def _lock_for(path: Path) -> _FileLock:
         if lock is None:
             lock = _LOCKS[key] = _FileLock(Path(key))
         return lock
+
+
+def file_lock(path: Path) -> contextlib.AbstractContextManager[None]:
+    """A lock on ``path`` of the kind the store's own are (``os.lockf`` beside a re-entrant thread
+    lock), for another file of the host's own that two processes may change at once."""
+    return _lock_for(path).held()
 
 
 def _empty() -> dict[str, Any]:
@@ -221,7 +260,7 @@ class Item:
     def _load(self) -> dict[str, Any]:
         try:
             raw = keyring.get_password(self.service, self.username)
-        except KeyringError as exc:
+        except (KeyringError, OSError) as exc:
             raise StoreError(f"the keyring could not be read ({type(exc).__name__})") from exc
         if raw is None:
             return _empty()
@@ -258,5 +297,5 @@ class Item:
         text = json.dumps(after, sort_keys=True, separators=(",", ":"))
         try:
             keyring.set_password(self.service, self.username, text)
-        except KeyringError as exc:
+        except (KeyringError, OSError) as exc:
             raise StoreError(f"the keyring could not be written ({type(exc).__name__})") from exc

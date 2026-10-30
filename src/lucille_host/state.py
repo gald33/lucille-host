@@ -48,6 +48,7 @@ __all__ = [
     "load_host_config",
     "prepare_runtime",
     "read_json",
+    "remove_file",
     "save_host_config",
     "startup_checks",
     "valid_loopback_hub",
@@ -95,6 +96,16 @@ def write_json(path: Path, value: Any) -> None:
         Path(temp).unlink(missing_ok=True)
         raise
     _sync_dir(path.parent)
+
+
+def remove_file(path: Path) -> bool:
+    """Delete ``path`` and sync its folder; whether there was a file to delete."""
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        return False
+    _sync_dir(path.parent)
+    return True
 
 
 def read_json(path: Path) -> Any:
