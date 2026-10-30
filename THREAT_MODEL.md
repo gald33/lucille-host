@@ -24,7 +24,15 @@ protection below is built yet. Each protection not yet built is one the first re
   dependencies, among them agent-switchboard 2.6.x and keyring. CI runs against the exact versions
   pinned in `uv.lock`. The package itself declares ranges (`agent-switchboard==2.6.*`, `keyring>=25`),
   and `pipx` or `uv tool` resolve those on the day they run, without reading the lock. How a release
-  carries exact pins to your install is not decided yet.
+  carries exact pins to your install is not decided yet. The disk image of Capsule, the Mac app, is one
+  way: its build installs the lock's exact pins, by hash. It is built in `macos/`, and not released yet.
+- **For Capsule, also what builds it.** The app embeds a CPython runtime from python-build-standalone,
+  pinned by sha256 in `macos/runtime.toml`. Its host wheel is built with a build backend pinned by hash in
+  `macos/build-constraints.txt`. uv builds that wheel, and writes from `uv.lock` the list of hashes that
+  pip checks as it installs the dependencies. The workflow pins uv by version, not by hash, and the
+  `setup-uv` action, pinned by commit, downloads it. The app is compiled and signed on GitHub's hosted
+  `macos-15` runner, with that image's Xcode toolchain. Whoever controls the runtime's releases, uv's
+  releases, or the runner image and its toolchain, could change what the app runs.
 - **Not Lucille's backend.** The host treats every request as possibly hostile. Lucille's backend is
   bounded only by what you enable, on the folders you add.
 
@@ -39,7 +47,7 @@ protection below is built yet. Each protection not yet built is one the first re
 | A malicious payload: shell metacharacters, path traversal, flag or environment injection | Argument schemas; argv only, never a shell; user values after `--`; paths resolved one name at a time beneath their folder, never through `/proc`, never into the host's own files, and never to a FIFO, socket or device; an environment built from an allowlist; the conformance suite. | None known. |
 | A malicious release, or a compromised maintainer account | Protected release tags; a `pypi` environment that needs the repository owner's approval; PEP 740 attestations (they prove where a release was built, not what it does); a public diff of the catalog and of `CLAIMS.md`; exact pins in the lock CI uses; no auto-update. | A validly attested malicious release from an account that holds both tag and environment rights. |
 | A malicious or careless pull request | The guards in CI, which catch accidental and casual violations in the forms they list ([VERIFYING.md](VERIFYING.md) says what each cannot see); a maintainer's review of every pull request before it merges. | A change crafted to get past both the guards and review. |
-| A compromised dependency, `agent-switchboard` included | Few dependencies, pinned exactly in the lock CI uses; Switchboard's own release provenance checked. | Dependency code runs with the host's privileges. An install with `pipx` or `uv tool` resolves the declared ranges on the day it runs, so it can get versions CI never ran. |
+| A compromised dependency, `agent-switchboard` included | Few dependencies, pinned exactly in the lock CI uses; Switchboard's own release provenance checked. For Capsule, the Mac app: the same pins, installed by hash from the list uv writes from the lock; uv pinned by version; the embedded Python runtime pinned by sha256; the build backend pinned by hash. | Dependency code runs with the host's privileges. An install with `pipx` or `uv tool` resolves the declared ranges on the day it runs, so it can get versions CI never ran. Capsule runs the embedded runtime, and code the runner's toolchain compiled, with the host's privileges. |
 | Malware running as your user | Out of scope, and stated. | It can read the host's stores, edit the installed package and rewrite the log. |
 | Another local user planting a signer socket for the Switchboard client | A private `XDG_RUNTIME_DIR` for the host's process, set before it builds any Switchboard client, pairing's included. That is the measure that covers every client: none finds a socket at its signer path. A freshly generated signing identity is also set on the clients built for `pair:<name>` and for each accepted room. | Not tested across users. The planned conformance test runs as one user. |
 | Hazards in the external programs an operation runs (config files, flags) | Each catalog entry is reviewed; executables by absolute path; the environment allowlist; `rg --no-config`. | Each new operation widens this surface. |
@@ -92,4 +100,4 @@ protection below is built yet. Each protection not yet built is one the first re
 - A process an operation starts that leaves the operation's process group (by calling `setpgid` or
   `setsid` itself) is not killed with the operation. The v0.1 operations start no such process.
 - Exact dependency pins reach CI through `uv.lock`, but not yet a user's install (see "Who the host
-  trusts").
+  trusts"). Capsule's build installs them, by hash, but no Mac release exists yet.
