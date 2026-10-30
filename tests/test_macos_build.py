@@ -908,3 +908,56 @@ def test_only_the_title_or_description_names_the_menu_bar_item() -> None:
 def test_the_menu_bar_items_width_is_read(said: str, width: float) -> None:
     assert check_app._width({"width": said}) == width
     assert check_app._width({}) == 0.0
+
+
+class _Hdiutil:
+    """A stand-in for subprocess.run that answers each hdiutil call from a script."""
+
+    def __init__(self, answers: list[tuple[int, str]]) -> None:
+        self.answers = answers
+        self.calls: list[list[str]] = []
+
+    def __call__(self, argv: list[str], **_: object) -> object:
+        import subprocess
+
+        self.calls.append(argv)
+        code, stderr = self.answers[len(self.calls) - 1]
+        return subprocess.CompletedProcess(argv, code, stdout="", stderr=stderr)
+
+
+@pytest.mark.parametrize("busy", build_app.HDIUTIL_BUSY)
+def test_hdiutil_tries_again_while_the_machine_is_busy(
+    busy: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    waits: list[float] = []
+    fake = _Hdiutil([(1, f"hdiutil: verify failed - {busy}\n"), (1, busy), (0, "")])
+    monkeypatch.setattr("subprocess.run", fake)
+    done = build_app.hdiutil(["verify", "x.dmg"], sleep=waits.append)
+    assert done.returncode == 0
+    assert fake.calls == [["hdiutil", "verify", "x.dmg"]] * 3
+    assert waits == [5, 10]
+
+
+def test_hdiutil_returns_any_other_failure_at_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    waits: list[float] = []
+    fake = _Hdiutil([(1, "hdiutil: attach failed - no mountable file systems\n")])
+    monkeypatch.setattr("subprocess.run", fake)
+    done = build_app.hdiutil(["attach", "x.dmg"], sleep=waits.append)
+    assert done.returncode == 1 and len(fake.calls) == 1 and waits == []
+
+
+def test_hdiutil_gives_up_after_its_last_try(monkeypatch: pytest.MonkeyPatch) -> None:
+    waits: list[float] = []
+    busy = build_app.HDIUTIL_BUSY[1]
+    fake = _Hdiutil([(1, busy)] * build_app.HDIUTIL_TRIES)
+    monkeypatch.setattr("subprocess.run", fake)
+    done = build_app.hdiutil(["create", "x.dmg"], sleep=waits.append)
+    assert done.returncode == 1 and busy in done.stderr
+    assert len(fake.calls) == build_app.HDIUTIL_TRIES
+    assert waits == [5 * n for n in range(1, build_app.HDIUTIL_TRIES)]
+
+
+def test_every_hdiutil_call_goes_through_the_retry() -> None:
+    for script in ("build_app.py", "check_app.py"):
+        source = (build_app.MACOS_DIR / script).read_text(encoding="utf-8")
+        assert '["hdiutil"' not in source.replace('argv = ["hdiutil", *args]', ""), script

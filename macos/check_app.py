@@ -1359,28 +1359,14 @@ def check_dmg(dmgs: Sequence[Path], checker: Checker) -> None:
         f"its name, {dmg.name}, says that it is signed ad hoc",
     )
     print(f"{dmg.name}: {dmg.stat().st_size} bytes, sha256 {build_app.sha256_of(dmg)}")
-    done = subprocess.run(
-        ["hdiutil", "verify", str(dmg)], capture_output=True, text=True, check=False
-    )
+    done = build_app.hdiutil(["verify", str(dmg)])
     checker.expect(done.returncode == 0, "hdiutil verify passes", _shown(done))
     name = build_app.load_pins().app_name
     with tempfile.TemporaryDirectory(prefix="lucille-host-dmg-") as tmp:
         mount = Path(tmp) / "mount"
         mount.mkdir()
-        done = subprocess.run(
-            [
-                "hdiutil",
-                "attach",
-                "-nobrowse",
-                "-readonly",
-                "-noautoopen",
-                "-mountpoint",
-                str(mount),
-                str(dmg),
-            ],
-            capture_output=True,
-            text=True,
-            check=False,
+        done = build_app.hdiutil(
+            ["attach", "-nobrowse", "-readonly", "-noautoopen", "-mountpoint", str(mount), str(dmg)]
         )
         if not checker.expect(done.returncode == 0, "the image mounts", _shown(done)):
             return
@@ -1408,13 +1394,7 @@ def check_dmg(dmgs: Sequence[Path], checker: Checker) -> None:
                 print(json.dumps(json.loads(manifest.read_text(encoding="utf-8")), indent=2))
         finally:
             for extra in ([], ["-force"]):
-                detached = subprocess.run(
-                    ["hdiutil", "detach", *extra, str(mount)],
-                    capture_output=True,
-                    text=True,
-                    check=False,
-                )
-                if detached.returncode == 0:
+                if build_app.hdiutil(["detach", *extra, str(mount)]).returncode == 0:
                     break
 
 

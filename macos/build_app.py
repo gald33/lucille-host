@@ -451,6 +451,30 @@ def _run(argv: list[str], *, cwd: Path | None = None, env: Mapping[str, str] | N
     subprocess.run(argv, check=True, cwd=cwd, env=None if env is None else dict(env))
 
 
+# hdiutil fails now and then on a busy machine, while the disk-image helper is still at work on
+# an earlier call: "Resource busy" or "Resource temporarily unavailable" (EAGAIN). Both pass if
+# the same call is made again a few seconds later.
+HDIUTIL_BUSY: Final = ("Resource busy", "Resource temporarily unavailable")
+HDIUTIL_TRIES: Final = 4
+
+
+def hdiutil(args: Sequence[str], *, sleep: Any = time.sleep) -> subprocess.CompletedProcess[str]:
+    """Run ``hdiutil`` with ``args`` and return how it ended, output captured as text. A call
+    that fails because the machine is busy is made again, up to ``HDIUTIL_TRIES`` times in all,
+    waiting 5, 10 and 15 s between them; any other failure is returned at once."""
+    argv = ["hdiutil", *args]
+    for attempt in range(1, HDIUTIL_TRIES + 1):
+        print("+ " + shlex.join(argv), flush=True)
+        done = subprocess.run(argv, capture_output=True, text=True, check=False)
+        busy = done.returncode != 0 and any(word in done.stderr for word in HDIUTIL_BUSY)
+        if not busy or attempt == HDIUTIL_TRIES:
+            return done
+        said = done.stderr.strip()
+        print(f"hdiutil is busy; trying again (try {attempt} of {HDIUTIL_TRIES}): {said}")
+        sleep(5 * attempt)
+    raise AssertionError("unreachable")
+
+
 def _output(argv: list[str]) -> str:
     done = subprocess.run(argv, check=True, capture_output=True, text=True)
     return done.stdout.strip()
@@ -708,8 +732,7 @@ def make_dmg(app: Path, dmg: Path, volume: str, work: Path) -> None:
     (staging / "Applications").symlink_to("/Applications")
     if dmg.exists():
         dmg.unlink()
-    argv = [
-        "hdiutil",
+    create = [
         "create",
         "-volname",
         volume,
@@ -720,15 +743,11 @@ def make_dmg(app: Path, dmg: Path, volume: str, work: Path) -> None:
         "-ov",
         str(dmg),
     ]
-    # hdiutil create sometimes fails with "Resource busy" on a busy machine; try again.
-    for attempt in range(1, 4):
-        print("+ " + shlex.join(argv), flush=True)
-        if subprocess.run(argv, check=False).returncode == 0:
-            break
-        if attempt == 3:
-            raise BuildError("hdiutil create failed three times")
-        time.sleep(5 * attempt)
-    _run(["hdiutil", "verify", str(dmg)])
+    for args, what in ((create, "create"), (["verify", str(dmg)], "verify")):
+        done = hdiutil(args)
+        print(done.stdout, end="", flush=True)
+        if done.returncode != 0:
+            raise BuildError(f"hdiutil {what} failed: {done.stderr.strip()}")
 
 
 def plan(out: Path) -> None:
