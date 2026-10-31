@@ -71,7 +71,7 @@ class Dirs:
 
     @property
     def previous_policy_file(self) -> Path:
-        """The policy the profile had before its latest pairing, kept for ``policy previous``."""
+        """The last policy a pairing set aside, kept for ``policy previous``."""
         return self.config / "policy.previous.toml"
 
     @property

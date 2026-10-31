@@ -7,8 +7,11 @@ side: a profile paired through the ``pair`` verbs (``tests/_cli.py``), or paired
 
 from __future__ import annotations
 
+import errno
 import json
+import os
 import re
+import signal
 import threading
 import time
 from collections.abc import Iterator
@@ -28,7 +31,7 @@ from lucille_host.controls import Controls
 from tests import _elsewhere
 from tests._cli import HostCli, collecting
 from tests._host import HostEnv, lock_free, lock_held
-from tests._run import RunHost, body, fast, until
+from tests._run import RunHost, body, fast, nothing, until
 
 pytestmark = pytest.mark.filterwarnings(
     "ignore:Using `httpx` with `starlette.testclient` is deprecated"
@@ -536,6 +539,14 @@ def test_forget_verb_leaves_rooms_first(
     ran = command("forget")
     assert ran.rc == 1 and ran.err.startswith("error: "), ran.err
     assert host.opened.names() == [host.name] and host.gate() is not None
+    # With the pair held, `status` says the room's leave is tried again (by `run`, or `forget`),
+    # and never that this computer holds no work room.
+    ran = command("status")
+    (line,) = [line for line in ran.lines if line.startswith("work room: ")]
+    assert line.startswith(f"work room: {room} ("), line
+    assert line.endswith(
+        "abandoned (pair over): nothing is taken from it, and its leave is tried again)"
+    ), line
     monkeypatch.setattr(_switchboard.Link, "leave_room", real)
     # Then: every room left before the pair is forgotten, and the pair's room files go with it.
     held: list[list[str]] = []
@@ -580,6 +591,79 @@ def test_forget_verb_leaves_rooms_first(
     ]
 
 
+def test_forget_verb_leaves_the_rooms_of_a_pair_the_library_dropped(
+    host: RunHost, command: Commands, monkeypatch: pytest.MonkeyPatch, host_env: HostEnv
+) -> None:
+    # `pair status` finds the pair ended from this side, the library drops it, and its work room
+    # cannot be left then. Before, the command said the pair was kept, to try again, while no
+    # command could leave the room any more: `forget` found no pair. Now it says the pair is gone
+    # and that `forget` leaves the room, `status` says so of the room, and `forget` does, with no
+    # pair held.
+    host.start()
+    room = host.offer("work-1")
+    job_id = host.request("work-1")
+    host.reply("work-1", job_id)
+    host.stop()
+    config = host.lucille.room_config("work-1")
+    kept = host.opened.pairs.get(host.name)
+    assert kept is not None
+    host.opened.forget(host.name)  # publishes this side's end in the pair room
+    host.opened.pairs.save(kept)  # this computer's copy, as if that forget never finished
+    real = _switchboard.Link.leave_room
+
+    def cannot(opened: _switchboard.Link, name: str) -> _switchboard.RoomLeft:
+        raise _switchboard.RoomError("store", "the share store could not be written")
+
+    monkeypatch.setattr(_switchboard.Link, "leave_room", cannot)
+    ran = command("pair", "status")
+    assert ran.rc == 1 and ran.err == (
+        f"error: pair {host.name} is gone from this computer, and a work room held over it could "
+        "not be left: its keys stay in the share store until `lucille-host forget` leaves it\n"
+    )
+    assert host.opened.names() == [] and host.gate() is None
+    (stored,) = host_env.keyring.items.values()
+    assert config.key in stored
+    ran = command("status")
+    assert ran.rc == 0 and _line(ran.out, "pair") == "pair: none: this computer holds no pair"
+    (line,) = [line for line in ran.lines if line.startswith("work room: ")]
+    assert line.startswith(f"work room: {room} ("), line
+    assert line.endswith(
+        "abandoned (pair over): nothing is taken from it, and `lucille-host forget` leaves it)"
+    ), line
+    monkeypatch.setattr(_switchboard.Link, "leave_room", real)
+    ran = command("forget")
+    assert ran.rc == 0, ran.err
+    assert ran.out == (
+        f"left: pair {host.name} was gone from this computer already, and the work rooms still "
+        "held over it are left now\n"
+    )
+    (stored,) = host_env.keyring.items.values()
+    assert config.key not in stored and config.write_key not in stored
+    record = host.record()
+    assert record == rooms.Record(left=record.left, named=record.named)
+    assert [gone.room for gone in record.left.values()] == [room]
+    assert not host.dirs.cursors_file.exists()
+    ran = command("forget")
+    assert ran.rc == 1 and ran.err == "none: this computer holds no pair\n"
+
+
+def test_forget_verb_with_nothing_left_of_a_dropped_pair_says_no_pair_is_held(
+    host: RunHost, command: Commands
+) -> None:
+    # The library dropped a pair that held no work room, and no accept was interrupted: the room
+    # record still names the pair, from `run`. `forget` has no room to leave, and says that no
+    # pair is held, not that it left the rooms still held over the pair.
+    host.start()
+    host.stop()
+    record = host.record()
+    assert record.pair == host.name and record.held == {} and record.accepting is None
+    with host.opened.pairs.lock():
+        host.opened.pairs.delete(host.name)  # the library's drop, and nothing after it
+    ran = command("forget")
+    assert ran.rc == 1 and ran.err == "none: this computer holds no pair\n", (ran.out, ran.err)
+    assert ran.out == ""
+
+
 def test_forget_while_run_runs_stops_it(host: RunHost, command: Commands) -> None:
     host.enable("host.sleep")
     host.start()
@@ -605,12 +689,19 @@ def test_forget_while_run_runs_stops_it(host: RunHost, command: Commands) -> Non
 
 
 def _in_files(
-    host_env: HostEnv, h: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    host_env: HostEnv,
+    h: Any,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    open_gate: bool = True,
 ) -> RunHost:
     """A :class:`RunHost` whose profile keeps its pair in files, which another process can
     read (``tests/_elsewhere.py``)."""
     fast(monkeypatch)
-    host = RunHost(h, host_env, tmp_path, config=state.HostConfig(store="file"))
+    host = RunHost(
+        h, host_env, tmp_path, open_gate=open_gate, config=state.HostConfig(store="file")
+    )
     state.save_host_config(host.dirs, host.config)
     return host
 
@@ -704,6 +795,115 @@ def test_forget_in_another_process_kills_at_once_while_it_waits_for_the_hub(
     assert host.lucille.replies("work-1") == []
     entry = host.journal().get(sent["job_id"])
     assert entry is not None and entry.abandoned
+    assert host.opened.names() == [] and host.gate() is None
+
+
+@pytest.mark.parametrize("argv", [("forget",), ("pair", "reject")], ids=["forget", "reject"])
+def test_a_command_another_forget_beat_says_the_pair_is_gone(
+    host_env: HostEnv,
+    h: Any,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    command: Commands,
+    argv: tuple[str, ...],
+) -> None:
+    # The command finds the pair held; then, before it has the record lock, `forget` in another
+    # process forgets it, Lucille not told. Before, this command went on to forget a pair that was
+    # gone, and said that Lucille was not told because the hub could not be reached: false, since
+    # it never tried. It now says the pair is gone, as with no pair at all, and does nothing more.
+    host = _in_files(host_env, h, tmp_path, monkeypatch, open_gate=argv == ("forget",))
+    found = link.Session._require
+    elsewhere: list[tuple[int | None, str]] = []
+
+    def then_forgotten_elsewhere(session: link.Session) -> str:
+        name = found(session)
+        forget = _elsewhere.start("forget")
+        out, err = forget.communicate(timeout=60)
+        elsewhere.append((forget.returncode, out + err))
+        return name
+
+    monkeypatch.setattr(link.Session, "_require", then_forgotten_elsewhere)
+    ran = command(*argv)
+    ((code, said),) = elsewhere
+    assert code == 0 and said.startswith(f"forgotten: pair {host.name} "), said
+    assert ran.rc == 1, ran
+    # After the warning every command gives under --store-file.
+    assert ran.err.splitlines()[-1] == (
+        f"none: pair {host.name} is gone from this computer: another command forgot it"
+    )
+    assert "Lucille was not told" not in ran.err
+    assert ran.out == ""
+    # Only the other process forgot it.
+    assert [line["pair"] for line in host.events("pair", event="forget")] == [host.name]
+    assert host.opened.names() == [] and host.gate() is None
+
+
+def test_a_stop_signal_while_run_waits_for_forget_in_another_process(
+    host_env: HostEnv, h: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # `run` on the main thread, with its own handlers, as `lucille-host run` runs. `forget`, in
+    # another process, holds the record lock through a hub that takes SLOW s to fail each request,
+    # and `run`'s main thread waits for it. A SIGTERM then does not end that wait: the request
+    # `run` runs is killed as soon as `forget` marks its room, as without the signal, and `run`
+    # stops once `forget` is done, its pair gone. Before, the wait raised, and `run` stopped with
+    # an error.
+    assert threading.current_thread() is threading.main_thread()
+    host = _in_files(host_env, h, tmp_path, monkeypatch)
+    host.enable("host.sleep")
+    runner = loop.Runner(host.dirs, host.session(), controls=host.controls, say=host.said.append)
+    host.runner = runner
+    sent = body(op="host.sleep", args={"n": 60})
+    main = threading.main_thread().ident
+    assert main is not None
+    stops = (signal.SIGTERM, signal.SIGHUP, signal.SIGINT)
+    # Each from a handler that does nothing, so that one the test process inherited ignored is
+    # handled here too, and one that comes once `run` has returned cannot end the test process.
+    inherited = {stop: signal.signal(stop, nothing) for stop in stops}
+    seen: dict[str, Any] = {}
+
+    def driver() -> None:
+        try:
+            room = host.offer("work-1")
+            host.request("work-1", sent)
+            until(lambda: host.events("start", job_id=sent["job_id"]), what="the child started")
+            seen["forget"] = _elsewhere.start("forget", str(SLOW))
+            until(lambda: _marked(host, room), timeout=30, what="forget marking the room")
+            time.sleep(0.3)  # main waits for the record lock at its next step
+            signal.pthread_kill(main, signal.SIGTERM)
+            # `forget` deletes the gate's record last, once it is done with the hub.
+            seen["while_forgetting"] = host.gate() is not None
+            until(
+                lambda: host.events("execution", job_id=sent["job_id"]),
+                timeout=60,
+                what="the child ending",
+            )
+            seen["killed_while_forgetting"] = host.gate() is not None
+        except BaseException as exc:  # noqa: BLE001 - handed to the test thread
+            seen["trouble"] = exc
+            host.controls.draining.set()
+
+    thread = threading.Thread(target=driver, daemon=True)
+    thread.start()
+    try:
+        said = runner.run()
+    finally:
+        thread.join(30)
+        for stop, handler in inherited.items():
+            signal.signal(stop, handler)
+        forget = seen.get("forget")
+        out, err = forget.communicate(timeout=120) if forget is not None else ("", "")
+    assert "trouble" not in seen, seen
+    assert seen["while_forgetting"], "forget was done before the signal came"
+    assert seen["killed_while_forgetting"], "the child was killed only once forget was done"
+    assert forget is not None and forget.returncode == 0, out + err
+    assert said == (
+        f"none: pair {host.name} is gone from this computer: another command forgot it; run stopped"
+    )
+    assert host.controls.draining.is_set()
+    (execution,) = host.events("execution", job_id=sent["job_id"])
+    assert (execution["ended"], execution["abandoned"]) == ("killed", True)
+    assert host.events("sent", job_id=sent["job_id"]) == []
+    assert host.lucille.replies("work-1") == []
     assert host.opened.names() == [] and host.gate() is None
 
 
@@ -811,6 +1011,33 @@ def test_a_run_refuses_while_another_process_holds_the_lock(host: RunHost) -> No
     assert not host.dirs.status_file.exists()
     assert len(host.audit()) == lines
     assert lock_free(lock)
+
+
+def test_a_run_refuses_where_the_run_lock_cannot_be_taken(
+    host: RunHost, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Where the filesystem cannot lock (ENOLCK, on a network mount with no lock service, say),
+    # `run` cannot make sure that no other `run` of the profile answers Lucille's requests: it
+    # says so, naming itself, and does nothing.
+    real = os.lockf
+
+    def cannot_lock(descriptor: int, command: int, length: int) -> None:
+        if command == os.F_TLOCK:
+            raise OSError(errno.ENOLCK, os.strerror(errno.ENOLCK))
+        real(descriptor, command, length)
+
+    lines = len(host.audit())
+    monkeypatch.setattr("os.lockf", cannot_lock)
+    refused, said = _second_run(host)
+    lock = os.path.realpath(host.dirs.state / loop.RUN_LOCK)
+    assert isinstance(refused, loop.Failed), refused
+    assert str(refused) == (
+        f"cannot lock {lock} ({os.strerror(errno.ENOLCK)}), so `run` cannot make sure it is the "
+        "only one of this profile"
+    )
+    assert said == []
+    assert not host.dirs.status_file.exists()
+    assert len(host.audit()) == lines
 
 
 def test_run_refused_says_why(

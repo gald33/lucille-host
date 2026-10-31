@@ -11,8 +11,9 @@ verbs:
   from stdin with ``--code-stdin``, which also stops once the SAS is shown (``sas_pending``).
   ``--hub`` names a loopback hub to accept codes for, and ``--store-file`` keeps the pair in files
   rather than the OS keyring; both are saved for the profile. ``pair`` refuses while a pair is
-  held, and resets the policy to the fresh one before it answers a new code, keeping the earlier
-  one aside;
+  held, and while another ``pair`` of the profile runs: it holds ``state/.pair.lock``, taken
+  without waiting, until it returns. It resets the policy to the fresh one before it answers a new
+  code, keeping the earlier one aside;
 - ``pair status``, ``pair confirm`` and ``pair reject``: where the pair is (showing the SAS again
   while it waits to be confirmed), the ``y`` given later, and forgetting a pair that has not been
   confirmed;
@@ -23,10 +24,14 @@ verbs:
   of the hub and the clock, read from the profile's files with no hub call (``report.py``);
 - ``log [--limit N]``: the last lines of the audit log, oldest first, across its rotated files;
 - ``forget``: leave the pair's work rooms, forget the pair here, and tell Lucille if the hub can
-  be reached; it says whether Lucille was told;
+  be reached; it says whether Lucille was told. When another command forgot the pair while this
+  one waited for the record lock, it says the pair is gone (``none``), as with no pair at all.
+  With no pair held, it leaves the work rooms still held over a pair already gone from this
+  computer, and tells Lucille nothing (``left``);
 - ``ops list|enable|disable``: which catalog operations the local policy enables;
 - ``roots list|add|remove``: which folders the operations may work in, by alias;
-- ``policy previous``: the operations and folders of the policy a new pair set aside;
+- ``policy previous``: the operations and folders of the last policy a pairing set aside (a
+  pairing sets aside only a policy that is not the fresh one);
 - ``pause``, ``resume`` and ``kill``: the local controls.
 
 Each verb is dispatched by name; one with no handler is refused, never run as another verb.
@@ -72,6 +77,13 @@ from lucille_host.ops import OPERATIONS
 
 # The words ``pair`` takes in place of a code.
 PAIR_ACTIONS: Final = ("status", "confirm", "reject")
+# In the state folder: held by ``pair [CODE]`` until it returns.
+PAIR_LOCK: Final = ".pair.lock"
+ALREADY_PAIRING: Final = (
+    "another `lucille-host pair` is running for this profile, and a profile answers one pairing "
+    "code at a time: two could each answer one, and the profile keeps one pair. Let that one "
+    "end first"
+)
 # How many lines ``log`` prints unless told otherwise.
 LOG_LINES: Final = 20
 
@@ -191,14 +203,16 @@ def build_parser() -> argparse.ArgumentParser:
         description=(
             "Leaves every work room held over the pair, then deletes this computer's half of the "
             "pair and tells Lucille, best effort; it says whether Lucille was told. If it was not, "
-            "Lucille keeps its half until the computer is removed there."
+            "Lucille keeps its half until the computer is removed there. With no pair held, it "
+            "leaves the work rooms still held over a pair already gone from this computer, and "
+            "tells Lucille nothing."
         ),
     )
 
-    policy_verb = verbs.add_parser("policy", help="show the policy a new pair set aside")
+    policy_verb = verbs.add_parser("policy", help="show the last policy a pairing set aside")
     policy_verbs = policy_verb.add_subparsers(dest="policy_verb", metavar="ACTION", required=True)
     policy_verbs.add_parser(
-        "previous", help="list the operations and folders of the policy before the latest pair"
+        "previous", help="list the operations and folders of the last policy a pairing set aside"
     )
 
     verbs.add_parser("pause", help="start nothing until resume; refuse new requests")
@@ -234,7 +248,7 @@ def _policy_lock(dirs: paths.Dirs) -> Iterator[None]:
     descriptor = os.open(lock, os.O_RDWR | os.O_CREAT, 0o600)
     try:
         try:
-            os.lockf(descriptor, os.F_LOCK, 0)
+            host_state.wait_for_lock(descriptor)
         except OSError as exc:
             raise _Refused(
                 f"cannot lock {lock} ({exc.strerror}), so the policy was not changed"
@@ -336,7 +350,7 @@ def _policy_previous(args: argparse.Namespace, dirs: paths.Dirs) -> str:
         previous = policy.load(path)
     except policy.PolicyError as exc:
         raise _Refused(f"the earlier policy {path} is invalid: {exc}") from exc
-    lines = [f"the policy set aside by the latest pairing ({path}); nothing uses it:"]
+    lines = [f"the last policy a pairing set aside ({path}); nothing uses it:"]
     lines.append("operations:")
     lines += [f"  {name}" for name in sorted(previous.enabled)] or ["  (none)"]
     lines.append("folders:")
@@ -429,6 +443,18 @@ def _pair(args: argparse.Namespace, dirs: paths.Dirs) -> str:
         wanted = host_state.HostConfig(hub=args.hub, store="file" if args.store_file else "keyring")
     except ValueError as exc:
         raise _Refused(str(exc)) from exc
+    host_state.startup_checks()
+    # One `pair` of the profile at a time, from before it looks for a pair held until it returns,
+    # its question included: two at once could each answer a code. `pair status`, `pair confirm`
+    # and `pair reject` take no such lock, so that the SAS can be confirmed in another shell.
+    lock = paths.ensure_dir(dirs.state) / PAIR_LOCK
+    with loop.one_at_a_time(lock, ALREADY_PAIRING, "`pair`"):
+        return _answer(args, dirs, wanted)
+
+
+def _answer(args: argparse.Namespace, dirs: paths.Dirs, wanted: host_state.HostConfig) -> str:
+    """``pair [CODE]``, under the profile's pair lock: answer a code, wait for Lucille to collect
+    the answer, show the SAS and ask about it."""
     current = host_state.load_host_config(dirs)
     try:
         session = link.open_session(dirs, current, say=_say, warn=_warn)
@@ -525,6 +551,12 @@ def _log(args: argparse.Namespace, dirs: paths.Dirs) -> str:
 
 def _forget(args: argparse.Namespace, dirs: paths.Dirs) -> str:
     session = link.open_session(dirs, host_state.load_host_config(dirs), say=_say, warn=_warn)
+    gone = session.leave_left_over()
+    if gone is not None:
+        return (
+            f"left: pair {gone} was gone from this computer already, and the work rooms still "
+            "held over it are left now"
+        )
     told = session.forget()
     return (
         f"forgotten: pair {told.name} is forgotten on this computer, its work rooms left first; "

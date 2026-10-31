@@ -277,8 +277,12 @@ imported, and fails if either was. It also checks that its list of modules cover
 the runtime package, and that the package holds no symbolic link, which its walk would not follow.
 The hub server lives only in the `[conformance]` extra.
 
-**The spec's tests.** `tests/spec/` tests the protocol spec, not the host, which does not check messages
-against it yet.
+**The spec's tests.** `tests/spec/` tests the protocol spec, and the library facts its accept policy
+rests on; one of its tests also holds the host's check 3 to the spec's cases. The host checks each
+request it reads against the spec (`journal.py` for step 1 of the refusal order, dedupe; `envelope.py`
+for the envelope and steps 2 to 4; `jobs.py` for steps 5 to 9), and those checks are tested outside
+`tests/spec/`: `tests/test_envelope.py` and `tests/test_catalog.py` hold them to the request fixtures,
+and `tests/test_rooms.py` runs the host's checks 3 and 4 of the accept policy (`rooms.py`).
 - `test_schemas.py` walks every subschema of every schema, and fails on an object without
   `additionalProperties: false`, a value without a bound, or a pattern that reads differently in
   ECMA-262 (the regular expressions JSON Schema uses) and in Python. It also checks that the largest
@@ -298,7 +302,9 @@ against it yet.
   agent-switchboard, which keeps a pairing code's URL and an offered room's that way. It decodes codes,
   and it pairs, offers and accepts rooms on the library's in-process test hub, which needs the
   `conformance` extra: one whose URL ends in `/` or `//`, and one minted from another spelling of the
-  hub's URL (case, a port, a query, a fragment), which the library keeps as written.
+  hub's URL (case, a port, a query, a fragment), which the library keeps as written. Its first test also
+  holds the host's own check 3 (`rooms.py`) to the spec's cases. For check 4, it runs the library to
+  show that a room's `token_source` is `shared` exactly when its offer carried a hub token.
 - `test_packaged.py` builds the sdist and the wheel with `uv build`, installs the wheel into a fresh
   virtual environment, loads the schemas and fixtures from there, and checks them against the source
   tree. It needs `uv` on `PATH` and the build backend, which uv fetches or takes from its cache. It

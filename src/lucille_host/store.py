@@ -15,7 +15,10 @@
   processes, not threads, it can report a deadlock (``EDEADLK``) that is none: one thread of
   ``run`` inside the item's lock, another waiting for the pair store's lock, which a command holds
   while it waits for the item's lock. The thread inside lets go without waiting on anything, since
-  no lock is ever taken while the item's lock is held, so the host asks again after a pause.
+  no lock is ever taken while the item's lock is held, so the host asks again after a pause. A
+  signal ``run`` handles does not end a wait for any of them either (``state.wait_for_lock``): a
+  stop signal that arrives while ``run`` waits for a command is kept, and ``run`` stops once the
+  command lets go (``loop.py`` says how).
 - Saves that change nothing but when the pair or a room was last read or used (the stamps listed
   in :data:`PAIR_STAMPS` and :data:`ROOM_STAMPS`) are skipped while the item was written less
   than :data:`STAMP_EVERY` seconds ago. Switchboard saves the pair on every resolve and touch, and
@@ -142,7 +145,7 @@ class _FileLock:
         pause = DEADLOCK_PAUSE
         while True:
             try:
-                os.lockf(descriptor, os.F_LOCK, 0)
+                state.wait_for_lock(descriptor)
                 return
             except OSError as exc:
                 if exc.errno != errno.EDEADLK:
@@ -161,6 +164,10 @@ class _FileLock:
                 except OSError as exc:
                     os.close(descriptor)
                     raise StoreError(exc.errno, f"{self._path} cannot be locked") from exc
+                except BaseException:
+                    # A signal handler that raises, as Ctrl-C's default one does, ends the wait.
+                    os.close(descriptor)
+                    raise
                 self._descriptor = descriptor
             self._depth += 1
             try:

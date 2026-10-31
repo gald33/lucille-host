@@ -10,6 +10,8 @@ from __future__ import annotations
 import contextlib
 import errno
 import json
+import os
+import signal
 import stat
 import subprocess
 import sys
@@ -26,8 +28,9 @@ from keyring.backends.null import Keyring as NullKeyring
 from switchboard import pairing, sharing
 from switchboard.testing import hub
 
-from lucille_host import _switchboard, state, store
+from lucille_host import _switchboard, cli, journal, paths, state, store
 from lucille_host import link as link_module
+from lucille_host.controls import Controls
 from tests import _audit_hook
 from tests._host import HostEnv, lock_free, lock_held
 from tests._keyring import MemoryKeyring
@@ -469,6 +472,171 @@ def test_store_lock_excludes_threads_and_processes(
         second.read()
         assert not lock_free(folder / store.PAIRS_LOCK)
     assert lock_free(folder / store.PAIRS_LOCK)
+
+
+def _waiting(site: str, dirs: paths.Dirs) -> tuple[Path, Callable[[], bool]]:
+    """A lock file of the host's own, and what waits for it as the host does: the record lock
+    (``run``'s main thread, each step), the controls' lock (``pause``) and the policy lock (a verb
+    that changes the policy). The second says whether the lock was taken."""
+    folder = paths.ensure_dir(dirs.state)
+    if site == "record":
+        record = folder / link_module.RECORD_LOCK
+
+        def step() -> bool:
+            with store.file_lock(record):
+                return True
+
+        return record, step
+    if site == "controls":
+        return folder / ".controls.lock", Controls(folder).pause
+    paths.ensure_dir(dirs.config)
+
+    def change() -> bool:
+        with cli._policy_lock(dirs):
+            return True
+
+    return dirs.config / ".policy.lock", change
+
+
+@pytest.mark.parametrize(
+    "signum", [signal.SIGTERM, signal.SIGHUP, signal.SIGINT], ids=["term", "hup", "int"]
+)
+@pytest.mark.parametrize("site", ["record", "controls", "policy"])
+def test_a_signal_run_handles_does_not_end_a_wait_for_a_lock(
+    home: Path, site: str, signum: int
+) -> None:
+    # `run`'s handlers note a stop signal and return. Python's os.lockf then raises
+    # InterruptedError rather than wait on, as PEP 475 has most calls do. Before, a stop signal that
+    # came while `run`'s main thread waited for the record lock (`forget` holds it through its hub
+    # calls) stopped `run` with an error, and its drain never ran.
+    assert threading.current_thread() is threading.main_thread()
+    dirs = paths.dirs()
+    lock, wait = _waiting(site, dirs)
+    stops = (signal.SIGTERM, signal.SIGHUP, signal.SIGINT)
+    # The handlers as `run` installs them, each from its default (one inherited ignored would stay
+    # ignored), and put back after.
+    inherited = {stop: signal.signal(stop, signal.SIG_DFL) for stop in stops}
+    controls = Controls(dirs.state)
+    restore = controls.install_handlers()
+    main = threading.main_thread().ident
+    assert main is not None
+    try:
+        with lock_held(lock) as release:
+
+            def interrupt() -> None:
+                time.sleep(0.3)  # the main thread waits for the lock now
+                signal.pthread_kill(main, signum)
+                deadline = time.monotonic() + 10
+                while not controls.draining.is_set() and time.monotonic() < deadline:
+                    time.sleep(0.02)
+                release()
+
+            helper = threading.Thread(target=interrupt, daemon=True)
+            helper.start()
+            try:
+                taken = wait()
+            finally:
+                helper.join(10)
+    finally:
+        restore()
+        for stop, handler in inherited.items():
+            signal.signal(stop, handler)
+    # The handler ran while the main thread waited, and the wait went on until the lock was free.
+    assert controls.draining.is_set()
+    assert taken
+    assert lock_free(lock)
+
+
+@pytest.mark.parametrize(
+    "signum", [signal.SIGTERM, signal.SIGHUP, signal.SIGINT], ids=["term", "hup", "int"]
+)
+def test_a_signal_run_handles_does_not_end_a_wait_on_another_thread(
+    home: Path, signum: int
+) -> None:
+    # A signal sent to the process (by kill(1), say) may reach any thread that does not block it:
+    # in `run`, a reader, the poster or the worker, each of which waits for the journal's lock. The
+    # handler runs on the main thread, but the os.lockf of the thread the signal reached is
+    # interrupted all the same. Before, that wait raised StoreError, which stopped `run`.
+    assert threading.current_thread() is threading.main_thread()
+    dirs = paths.dirs()
+    lock = paths.ensure_dir(dirs.state) / journal.LOCK
+    stops = (signal.SIGTERM, signal.SIGHUP, signal.SIGINT)
+    inherited = {stop: signal.signal(stop, signal.SIG_DFL) for stop in stops}
+    controls = Controls(dirs.state)
+    restore = controls.install_handlers()
+    seen: list[str] = []
+
+    def wait() -> None:
+        try:
+            with store.file_lock(lock):
+                seen.append("taken")
+        except BaseException as exc:
+            seen.append(repr(exc))
+
+    try:
+        with lock_held(lock) as release:
+            waiter = threading.Thread(target=wait, daemon=True)
+            waiter.start()
+            time.sleep(0.3)  # the waiter waits for the lock now
+            assert waiter.ident is not None
+            signal.pthread_kill(waiter.ident, signum)
+            # The main thread runs the handler here, between two of its sleeps.
+            deadline = time.monotonic() + 10
+            while not controls.draining.is_set() and time.monotonic() < deadline:
+                time.sleep(0.02)
+            time.sleep(0.2)  # long enough for the waiter to stop, had the signal ended its wait
+            assert waiter.is_alive(), seen
+            release()
+            waiter.join(10)
+    finally:
+        restore()
+        for stop, handler in inherited.items():
+            signal.signal(stop, handler)
+    assert controls.draining.is_set()
+    assert seen == ["taken"]
+    assert lock_free(lock)
+
+
+def _open_on(path: Path) -> int:
+    """How many descriptors this process has open on ``path``."""
+    wanted = path.stat()
+    count = 0
+    for entry in os.listdir("/dev/fd"):
+        try:
+            found = os.fstat(int(entry))
+        except OSError:
+            continue  # the one the listing used, closed since
+        if (found.st_dev, found.st_ino) == (wanted.st_dev, wanted.st_ino):
+            count += 1
+    return count
+
+
+def test_ctrl_c_ends_a_wait_for_a_lock_and_leaves_its_file_closed(home: Path) -> None:
+    # Ctrl-C's default handler raises KeyboardInterrupt: that ends a wait for one of the host's lock
+    # files, as it should, and the file the wait opened is closed. Only an OSError closed it.
+    assert threading.current_thread() is threading.main_thread()
+    lock = paths.ensure_dir(paths.dirs().state) / link_module.RECORD_LOCK
+    inherited = signal.signal(signal.SIGINT, signal.default_int_handler)
+    main = threading.main_thread().ident
+    assert main is not None
+    try:
+        with lock_held(lock):
+
+            def interrupt() -> None:
+                time.sleep(0.3)  # the main thread waits for the lock now
+                signal.pthread_kill(main, signal.SIGINT)
+
+            helper = threading.Thread(target=interrupt, daemon=True)
+            helper.start()
+            try:
+                with pytest.raises(KeyboardInterrupt), store.file_lock(lock):
+                    pass
+            finally:
+                helper.join(10)
+            assert _open_on(lock) == 0
+    finally:
+        signal.signal(signal.SIGINT, inherited)
+    assert lock_free(lock)
 
 
 def test_an_unreadable_item_is_left_as_it_is(memory_keyring: MemoryKeyring, tmp_path: Path) -> None:

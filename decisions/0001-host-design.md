@@ -120,6 +120,11 @@ The host:
    policy as of 2026-10-27; not proven by this repository).
 2. `lucille-host pair <code>`:
    - **refuses while a pair is held** ("Disconnect first"): a profile keeps one pair;
+   - **refuses while another `pair` of the profile runs.** It holds `state/.pair.lock` (`os.lockf`,
+     taken without waiting) from before it looks for a pair held until it returns, its question
+     included, so two `pair`s at once cannot both answer a code. The second refuses at once (exit 1)
+     and changes nothing. `pair status`, `pair confirm` and `pair reject` take no such lock: the SAS
+     can be shown, confirmed or rejected in another shell while `pair` asks;
    - **decodes** the code (`pairing.PairingCode.decode`). It refuses the wrong hub or a carried token, and
      shows the pair's note only after sanitizing it. With `--code-stdin`, the code is read from stdin,
      never from the command line;
@@ -171,6 +176,13 @@ The host:
    - Lucille has its own gate on the same comparison, and sends no request before it opens (Lucille
      policy as of 2026-10-27; not proven by this repository). The host's gate does not depend on it:
      nothing runs on the host before the host's own gate opens.
+   - **Two refinements, accepted by the maintainer on 2026-10-31.** The first version of this record said
+     that the host **shows the SAS** and asks the user to type `y` if it matches the code on Lucille's
+     page, and no more on when `y` counts. Two of the build's additions to this gate, both above, are the
+     ones the maintainer accepted, as written in the pull request that built pairing: `pair confirm`
+     refuses a SAS that no command has shown, and at a terminal, input typed before the question is
+     discarded, with no question asked when it cannot be. The build added a third, also above, that was
+     not part of that acceptance: a pair with no gate record cannot be confirmed on the host (`refused`).
 
 **The Store.**
 - The host implements Switchboard's `pairing.Store` Protocol over the OS keyring: one item per profile,
@@ -557,7 +569,55 @@ one (`waiting`, `sas_pending`, `confirmed`, `leaked`, `expired`, ...).
   drain waits too), by the gate's record: `run` notes which record it started with (the pair's name, and
   when the record was made), and a record that is gone, names another pair, or was made for another
   pairing under the same name stops it, whether or not Lucille was told. Stopping so, it touches nothing
-  of what the profile holds, which may already be a new pair's.
+  of what the profile holds, which may already be a new pair's. A stop signal (SIGTERM, SIGHUP, Ctrl-C)
+  that arrives while `run`'s main thread waits for `forget` is not lost, and does not end the wait: once
+  `forget` is done, `run` stops, for its pair when `forget` forgot it (`none`, with no drain), and
+  otherwise by draining. The request running from a marked room is killed at once all the same, since
+  `forget` marked its room first.
+- A command that found the pair held, and finds once it holds the record lock that another command
+  forgot it meanwhile (a second `forget`, `pair reject`, the deadline, or a resolve or an answer that
+  found the pair over), does not forget it again: it says the pair is gone (`none`, exit 1, as `forget`,
+  `pair reject` and `pair confirm` say when no pair is held at all), and neither tells Lucille again nor
+  says that Lucille could not be told. `forget` and `pair reject` judge so by the pair being no longer
+  held, or by its gate record having been made since, for another pairing under the same name, which
+  they leave as it is. A command's resolve judges so only when the library holds no such pair
+  (`unknown`). When a resolve says the pair is over in any other way (`ended`, `leaked`, ...), the
+  library may have dropped the pair itself, so it is forgotten as before and its rooms left, with a gate
+  record or without one. A touch of `run`'s can drop it too: the library resolves the pair within the
+  touch (sb `sharing.py:1082-1090`), and drops it when the pair room says this side ended it. `run`
+  then resolves at once, in the same step and under the same record lock, whatever back-off a failed
+  resolve left owed (the library makes no hub call for a pair it no longer holds), and finds no such
+  pair (`unknown`); its gate record, intact, shows that no other command forgot it, so what is left is
+  forgotten as after `ended`, and `run` says the pair is gone (`none`).
+- Every resolve (`pair`'s wait, `pair status`, `pair confirm`, a step of `run`) and the answer to a code
+  are made under the record lock, for three reasons. A `forget` or `pair reject` comes before a resolve
+  or after it, never within it: made while the library reads the pair room, it would forget the pair
+  under it, and the library, saving what it read, then says that the pair was forgotten as `ended` (sb
+  `pairing.py:2644-2647`), so `pair` would say the pair was ended, and forget it a second time. A pair
+  the library drops within the call (this side ended it, the code leaked) is forgotten here by that
+  call before another command can act on it: by a resolve with its own lines in the audit log, by an
+  answer with none, since the log never had that pair as accepted. And the answer's gate record and the
+  pair the library saves within it come together: `forget` with no pair held takes a gate record with no
+  pair for one a dropped pair left, and deletes it (below), which between the two would be the new
+  pairing's record, and that pair could never be confirmed. `pair`'s wait lets the lock go
+  between its resolves, so another command waits for the resolve under way, not for the wait. `pair
+  status` and `pair confirm` hold the lock from their resolve to their judgement, so that a pair another
+  command forgets meanwhile is never said to be `waiting`.
+- While the pair is held, a work room that cannot be left keeps it (`error`; `forget` tries again). Once
+  the library has dropped the pair, a room that cannot be left keeps nothing: the gate record is deleted
+  all the same, the command says that the pair is gone and that `forget` leaves the room (`error`), and
+  `lucille-host status` says so of the room; it says so too of a room held over a pair this computer no
+  longer holds that a process stopped part way left, and of the room an accept a stop interrupted may
+  have kept over it. With no pair held, `forget` leaves the work rooms
+  still held over a pair this computer no longer holds (with the one an accept had kept when a stop
+  interrupted it), deletes that pair's gate record, drops how far each room was read, and says so
+  (`left`, exit 0), telling Lucille nothing. A command that finds the pair gone, as above, leaves such
+  rooms too before it says so.
+- `forget`'s own leave can have the library drop the pair: a leave touches the pairs on the room's
+  list (sb `sharing.py:1733`), and the touch drops a pair whose pair room says this side ended it.
+  `forget` then says that Lucille was told, since the pair room says that end already, which is what
+  telling Lucille writes there, rather than asking the library to forget a pair it no longer holds and
+  saying that the hub could not be reached. A room it cannot leave after that keeps nothing, as above.
 - `--profile <name>` selects a separate config dir, state dir and store, so that two computers can be
   simulated on one machine.
 
@@ -736,8 +796,8 @@ template test, which needs that hub's injected clock. It may spawn only the loca
 
 ## Choices made in building pairing and the read loop
 
-The spec and the sections above leave these to the host. Each was made with the code on 2026-10-30, and
-each could be made another way in a later pull request that updates this list.
+The spec and the sections above leave these to the host. Each was made with the code on 2026-10-30 or
+2026-10-31, and each could be made another way in a later pull request that updates this list.
 
 **The stores.**
 - **One keyring item per profile.** Service `lucille-host`, the profile's name as user name. It holds one
@@ -752,14 +812,33 @@ each could be made another way in a later pull request that updates this list.
   command holds as it waits for the item's. No lock is ever taken while the item's is held, so that is no
   deadlock: the host asks again after a pause, 10 ms doubling to 0.5 s.
 - **A fourth lock file**, `.record.lock`, is held while the record of offers and rooms is read, changed
-  and written whole, so that `run` and another command (`forget`, say) never change it at once. Without it,
-  `forget` could write over a room `run` had just recorded, and that room and its keys would stay in the
-  share store after the pair was gone. `run` holds it through each step of its session, hub calls
+  and written whole, so that `run` and another command (`forget`, say) never change it at once. Without
+  it, `forget` could write over a room `run` had just recorded, and that room and its keys would stay in
+  the share store after the pair was gone. `run` holds it through each step of its session, hub calls
   included, so a command waits for that step to end; and `run`'s main thread waits for a command's
-  (`forget`'s leaves and its note to Lucille). Its other threads never take it: they only read the room
-  record and the gate's record, each written whole, to stop the work of a room another command marked.
-- **Two more**: `.run.lock`, held by `run` for as long as it runs, so that a profile runs one `run`; and
-  `.journal.lock`, held around each read and each read-modify-write of the journal.
+  (`forget`'s leaves and its note to Lucille, or the resolve of `pair status`). The other commands hold
+  it around each resolve, and `pair` around its answer to the code, from the gate record's write to the
+  library's save of the pair, hub call included: a forget made within a resolve is one the library calls
+  `ended`, the library may drop the pair within the call, and `forget` with no pair held takes a gate
+  record with no pair for one a dropped pair left ("CLI verbs" says more). `run`'s other threads never
+  take it: they only read the room record and the gate's record, each written whole, to stop the work of
+  a room another command marked.
+- **Three more**: `.run.lock`, held by `run` for as long as it runs, so that a profile runs one `run`;
+  `.pair.lock`, held by `pair [CODE]` until it returns, so that a profile runs one `pair`; and
+  `.journal.lock`, held around each read and each read-modify-write of the journal. The first two are
+  taken without waiting: a second `run` or `pair` refuses rather than waits.
+- **Two more, for the local settings**: `.controls.lock` in the state folder, held while `pause`,
+  `resume` or `kill` writes its flags (each goes ahead without it where the filesystem cannot lock,
+  `controls.py`); and `config/.policy.lock`, held by a verb that changes the policy from reading the file
+  to writing it (such a verb refuses where the filesystem cannot lock).
+- **A signal does not end a wait for a lock file.** `run`'s handlers note the signal (a second Ctrl-C
+  while draining also asks for a kill) and return. Python retries most calls after such a signal (PEP
+  475), but not `os.lockf`, which raises `InterruptedError` (measured on 3.11 and 3.13): so every wait
+  for one of the host's lock files asks again (`state.wait_for_lock`). That holds on every thread: the
+  handler runs on the main thread, but a signal sent to `run`'s process (a SIGTERM, say) can interrupt
+  a wait on any of its threads. Without that, a stop signal that came while `run` waited for a command's
+  lock would stop `run` with an error, skipping its drain. A handler that raises, as Ctrl-C's default
+  one does, still ends the wait, and the lock file it opened is closed.
 - **Keyring writes are throttled, not measured.** A save that changes only when the pair or a room was
   last read or used is skipped while the item was written less than an hour ago; every other change, and
   every delete, is written before the call returns. In a simulated day of 5-minute touches and a room
@@ -784,11 +863,12 @@ each could be made another way in a later pull request that updates this list.
   record of the pair forgotten, made when that pair was, so a record another pairing wrote since stays. A
   record that is missing, or names another pair, keeps the gate shut. The record is written, changed,
   deleted and its deadline judged only under the record lock (`state/.record.lock`) that `run` holds
-  through each step and forgetting holds throughout: so a `pair confirm` made in time is never expired by
-  a `run` or a `pair status` that read the record before it, no showing or confirmation writes a record
-  back for a pair being forgotten, and `pair reject` (or `n`) beside a `pair confirm` either finds the gate
-  open, and refuses, or forgets the pair before the confirm finds it gone. Forgetting leaves the work
-  rooms only while the record of rooms names that pair, or a pair no longer held.
+  through each step, the other commands around each resolve and the answer to a code, and forgetting
+  throughout: so a `pair confirm` made in time is never expired by a `run` or a `pair status` that read
+  the record before it, no showing or confirmation writes a record back for a pair being forgotten, and
+  `pair reject` (or `n`) beside a `pair confirm` either finds the gate open, and refuses, or forgets the
+  pair before the confirm finds it gone. Forgetting leaves the work rooms only while the record of rooms
+  names that pair, or a pair no longer held.
 - **The policy is reset right before a new code is answered,** once its hub and token checks pass: a
   policy that is not the fresh one moves to `config/policy.previous.toml`. A fresh or missing one is never
   set aside over an earlier one. Before the answer, not after, so that a stop between the two never leaves
@@ -836,7 +916,18 @@ each could be made another way in a later pull request that updates this list.
   returns what the computer last saw, unchecked, with the hub's error in `Resolution.hub_error`
   (sb `pairing.py:2278-2290`), and the host takes `retry_after` from that error. `pair`, waiting for
   Lucille, waits that long too, when it is longer than its own 5 s. A hub error another part of the host
-  meets asks for a resolve only when none ran in the last 30 s.
+  meets asks for a resolve only when none ran in the last 30 s. A touch that finds the pair gone has the
+  resolve made at once, whatever back-off is owed (above).
+- **The 5-minute touch, and `run`'s resolves, count on the wall clock,** the clock the library's calls
+  are given. When that clock reads more than a minute earlier than the last touch (it was set back), a
+  touch is due at once, and the rhythm counts from it. So is a resolve when it reads more than a minute
+  earlier than the last resolve, whatever counted from that one: at least daily, every 5 s while Lucille
+  has not collected the answer, and the wait after a failure. No offer is taken while a resolve is owed,
+  so before this a clock set back an hour after a failed resolve held up every room Lucille offered for
+  an hour. A smaller step back, as a clock's jitter, makes no touch or resolve of its own: it puts the
+  next off by as much, so a clock that steps back a little between steps does not touch on every step,
+  each a hub call. `pair`'s own wait for Lucille counts on the monotonic clock. Once the gate is open,
+  the touch still comes every 5 minutes, and a touch resolves the pair itself (sb `sharing.py:1082`).
 
 **The read loop and replies.**
 - **The journal** is `state/journal.json` (`journal.py`): for each job id, its room, sequence number,

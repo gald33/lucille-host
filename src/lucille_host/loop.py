@@ -59,7 +59,10 @@ record not the one the session serves) is halted there and then, as above but fo
 nothing more starts from it, and a running child of a request from it is killed with no reply.
 ``run`` itself stops at its first step after the other command is done, by the pair's gate record,
 whether or not Lucille was told, and touches nothing of what the profile holds, which may already
-be a new pair's. Until that step, a drain and ``state/status.json`` wait for main as well.
+be a new pair's. Until that step, a drain and ``state/status.json`` wait for main as well: a stop
+signal that arrives meanwhile does not end main's wait for the lock (``state.wait_for_lock``), and
+is not lost: once the command is done, ``run`` stops, for its pair when the command forgot it, and
+otherwise by draining.
 
 **After a restart**, before a room is read, the journal's entries for it with no reply sent are
 taken up: a decision to run gets ``failed interrupted``, never a second run; a refusal is posted
@@ -125,6 +128,7 @@ __all__ = [
     "Failed",
     "Runner",
     "next_cursor",
+    "one_at_a_time",
     "one_run",
     "run",
     "wake_gap",
@@ -159,34 +163,37 @@ ALREADY_RUNNING: Final = (
 _PAIR: Final = _switchboard.PAIR_CHANNEL
 _EXEC: Final = _switchboard.EXEC_CHANNEL
 _ENDED: Final = frozenset({"ended", "none"})
-# The run locks this process holds, by real path. ``lockf`` belongs to the process: a second
-# ``run`` here would take the lock again, and closing its descriptor would release the first's.
+# The locks :func:`one_at_a_time` holds in this process, by real path. ``lockf`` belongs to the
+# process: a second ``run`` here would take the lock again, and closing its descriptor would
+# release the first's.
 _HELD: set[str] = set()
 _HELD_GUARD = threading.Lock()
 
 
 class Failed(RuntimeError):
-    """``run`` stopped because one of its threads met something it cannot go on from."""
+    """``run`` stopped because one of its threads met something it cannot go on from; or a command
+    found another of the profile holding a lock only one may hold (:func:`one_at_a_time`)."""
 
 
 @contextlib.contextmanager
-def one_run(state_dir: Path) -> Iterator[None]:
-    """Hold the profile's run lock until the block ends; raise :class:`Failed`, holding nothing,
-    when another ``run`` of the profile holds it, in this process or another, or it cannot be
+def one_at_a_time(lock: Path, busy: str, verb: str) -> Iterator[None]:
+    """Hold the lock file ``lock``, taken without waiting, until the block ends. Raise
+    :class:`Failed` with ``busy``, holding nothing, when another command holds it, in this process
+    or another; or saying that ``verb`` cannot make sure it is the only one, when it cannot be
     taken here."""
-    path = os.path.realpath(paths.ensure_dir(state_dir) / RUN_LOCK)
+    path = os.path.realpath(lock)
     with _HELD_GUARD:
         if path in _HELD:
-            raise Failed(ALREADY_RUNNING)
+            raise Failed(busy)
         descriptor = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
         try:
             os.lockf(descriptor, os.F_TLOCK, 0)
         except OSError as exc:
             os.close(descriptor)
             if exc.errno in (errno.EACCES, errno.EAGAIN):
-                raise Failed(ALREADY_RUNNING) from None
+                raise Failed(busy) from None
             raise Failed(
-                f"cannot lock {path} ({exc.strerror}), so `run` cannot make sure it is the only "
+                f"cannot lock {path} ({exc.strerror}), so {verb} cannot make sure it is the only "
                 "one of this profile"
             ) from exc
         _HELD.add(path)
@@ -196,6 +203,13 @@ def one_run(state_dir: Path) -> Iterator[None]:
         with _HELD_GUARD:
             _HELD.discard(path)
             os.close(descriptor)
+
+
+def one_run(state_dir: Path) -> contextlib.AbstractContextManager[None]:
+    """Hold the profile's run lock until the block ends; raise :class:`Failed`, holding nothing,
+    when another ``run`` of the profile holds it, in this process or another, or it cannot be
+    taken here."""
+    return one_at_a_time(paths.ensure_dir(state_dir) / RUN_LOCK, ALREADY_RUNNING, "`run`")
 
 
 def next_cursor(

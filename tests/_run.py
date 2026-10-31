@@ -77,6 +77,13 @@ def until(condition: Callable[[], Any], timeout: float = 20.0, what: str = "the 
         time.sleep(0.02)
 
 
+def nothing(_signum: int, _frame: Any) -> None:
+    """A signal handler that does nothing, to stand in for the default one around a ``run`` on the
+    main thread. ``run`` replaces it with its own, as it would the default, and puts it back when it
+    returns: a stop signal a test sends after that, as it would if ``run`` stopped early for another
+    reason, then cannot end the test process, and the test fails on what ``run`` said instead."""
+
+
 def body(
     op: str = "host.describe",
     args: Any = None,

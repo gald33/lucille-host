@@ -14,6 +14,7 @@ import datetime
 import hashlib
 import json
 import os
+import signal
 import socket
 import sys
 import tempfile
@@ -31,9 +32,9 @@ from switchboard.testing import hub
 from lucille_host import _switchboard, cli, jobs, link, loop
 from lucille_host.controls import Controls
 from tests import _audit_hook
-from tests._host import HostEnv
+from tests._host import HostEnv, lock_held
 from tests._lucille import EXEC, FakeLucille
-from tests._run import RunHost, body, counting, fast, until
+from tests._run import RunHost, body, counting, fast, nothing, until
 
 pytestmark = pytest.mark.filterwarnings(
     "ignore:Using `httpx` with `starlette.testclient` is deprecated"
@@ -929,6 +930,63 @@ def test_pause_kill_drain_in_run(host: RunHost) -> None:
         assert host.lucille.reply("work-1", job_id) is None
         assert host.journal().get(job_id) is None
         assert host.events("received", job_id=job_id) == []
+
+
+@pytest.mark.parametrize("signum", [signal.SIGTERM, signal.SIGINT], ids=["term", "int"])
+def test_a_drain_signal_while_run_waits_for_the_record_lock_still_drains(
+    host: RunHost, signum: int
+) -> None:
+    # `run` on the main thread, with its own handlers, as `lucille-host run` runs. Another process
+    # holds the record lock (as `pair status` holds it, or `forget` through its hub calls) while a
+    # request runs, and main waits for it at its next step. A stop signal then does not end that
+    # wait: once the lock is free, `run` drains, the running operation's reply is posted, and a
+    # request posted while main waited is never taken up. Before, the wait raised, `run` stopped
+    # with an error, and the reply was dropped.
+    assert threading.current_thread() is threading.main_thread()
+    host.enable("host.sleep")
+    runner = loop.Runner(host.dirs, host.session(), controls=host.controls, say=host.said.append)
+    host.runner = runner
+    sent = body(op="host.sleep", args={"n": 2})
+    main = threading.main_thread().ident
+    assert main is not None
+    stops = (signal.SIGTERM, signal.SIGHUP, signal.SIGINT)
+    # Each from a handler that does nothing, so that one the test process inherited ignored is
+    # handled here too, and one that comes once `run` has returned cannot end the test process.
+    inherited = {stop: signal.signal(stop, nothing) for stop in stops}
+    trouble: list[BaseException] = []
+    after: list[str] = []
+
+    def driver() -> None:
+        try:
+            host.offer("work-1")
+            host.request("work-1", sent)
+            until(lambda: host.events("start", job_id=sent["job_id"]), what="the child started")
+            with lock_held(host.dirs.state / link.RECORD_LOCK):
+                time.sleep(0.3)  # main waits for the lock at its next step
+                signal.pthread_kill(main, signum)
+                until(host.controls.draining.is_set, what="the handler running")
+                after.append(host.request("work-1", body()))
+        except BaseException as exc:  # noqa: BLE001 - handed to the test thread
+            trouble.append(exc)
+            host.controls.draining.set()
+
+    thread = threading.Thread(target=driver, daemon=True)
+    thread.start()
+    try:
+        said = runner.run()
+    finally:
+        thread.join(30)
+        for stop, handler in inherited.items():
+            signal.signal(stop, handler)
+    assert trouble == []
+    assert said == "drained: run stopped"
+    reply = host.lucille.reply("work-1", sent["job_id"])
+    assert reply is not None and reply["body"]["status"] == "done"
+    assert host.events("sent", job_id=sent["job_id"])
+    (later,) = after
+    assert host.lucille.reply("work-1", later) is None
+    assert host.journal().get(later) is None
+    assert host.events("received", job_id=later) == []
 
 
 def test_nothing_before_local_confirm(

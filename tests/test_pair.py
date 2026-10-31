@@ -8,8 +8,10 @@ hub whatever the address.
 from __future__ import annotations
 
 import dataclasses
+import errno
 import json
 import os
+import queue
 import re
 import select
 import termios
@@ -25,11 +27,11 @@ from keyring.backends.fail import Keyring as FailKeyring
 from switchboard import client, pairing
 from switchboard.testing import hub
 
-from lucille_host import _switchboard, gate, link, paths, policy, state
-from lucille_host.cli import main
+from lucille_host import _switchboard, gate, link, loop, paths, policy, state
+from lucille_host.cli import ALREADY_PAIRING, PAIR_LOCK, main
 from tests import _audit_hook
 from tests._cli import HostCli, collecting, until
-from tests._host import HostEnv
+from tests._host import HostEnv, lock_free, lock_held
 from tests._lucille import FakeLucille
 
 pytestmark = pytest.mark.filterwarnings(
@@ -217,6 +219,146 @@ def test_pair_refuses_while_held(cli: HostCli, tmp_path: Path) -> None:
     assert cli.held() == held
 
 
+class _Given:
+    """``pair``'s stdin, a pipe: each line it asks for waits until the test gives it
+    (:meth:`give`), as a slow pipe or a user who has not typed it yet would."""
+
+    def __init__(self) -> None:
+        self.asked = 0
+        self._lines: queue.Queue[str] = queue.Queue()
+        self._changed = threading.Condition()
+
+    def isatty(self) -> bool:
+        return False
+
+    def readline(self) -> str:
+        with self._changed:
+            self.asked += 1
+            self._changed.notify_all()
+        return self._lines.get(timeout=30)
+
+    def give(self, line: str) -> None:
+        self._lines.put(line)
+
+    def wait_asked(self, lines: int) -> None:
+        """Wait until ``pair`` has asked for ``lines`` lines."""
+        with self._changed:
+            assert self._changed.wait_for(lambda: self.asked >= lines, 30), "never asked"
+
+
+def test_a_second_pair_refuses_while_one_runs(cli: HostCli, tmp_path: Path) -> None:
+    # The first `pair` waits for its code on stdin. Before, it had looked for a pair held before
+    # it read the code, and held nothing until it answered: a second `pair` meanwhile answered a
+    # code of its own, the first then answered too, and the profile held two pairs, the gate's
+    # record naming only the later.
+    _enable_and_add_a_folder(tmp_path)
+    before = cli.policy()
+    first, second = cli.lucille(), cli.lucille()
+    stdin = _Given()
+    running = cli.start("pair", stdin=stdin)
+    stdin.wait_asked(1)
+    code = second.start()
+    with collecting(second):
+        ran = cli.run("pair", "--code-stdin", stdin=code + "\n", timeout=30)
+    assert ran.rc == 1, ran.text
+    assert ran.err == f"lucille-host: {ALREADY_PAIRING}\n"
+    _nothing_changed(cli, before)
+    assert second.collect().state == "waiting"
+    lock = cli.dirs.state / PAIR_LOCK
+    assert not lock_free(lock), "another process could take the pair lock"
+    # The first goes on, and pairs.
+    cli.monkeypatch.setattr("sys.stdin", stdin)
+    stdin.give(first.start() + "\n")
+    with collecting(first):
+        stdin.wait_asked(2)  # the SAS is shown, and the question asked
+    stdin.give("y\n")
+    ran = running.wait()
+    assert ran.rc == 0, ran.text
+    assert ran.out.splitlines()[-1] == f"confirmed: pair {first.name} is confirmed on this computer"
+    assert cli.held() == [first.name]
+    found = cli.gate()
+    assert found is not None and found.pair == first.name and found.opened_at is not None
+    assert lock_free(lock)
+
+
+def test_pair_refuses_while_another_process_runs_pair(cli: HostCli) -> None:
+    before = cli.policy()
+    lucille = cli.lucille()
+    code = lucille.start()
+    with lock_held(paths.ensure_dir(cli.dirs.state) / PAIR_LOCK), collecting(lucille):
+        ran = cli.run("pair", "--code-stdin", stdin=code + "\n", timeout=30)
+    assert ran.rc == 1, ran.text
+    assert ran.err == f"lucille-host: {ALREADY_PAIRING}\n"
+    _nothing_changed(cli, before)
+    # Once that one has ended, `pair` goes ahead.
+    cli.paired(cli.lucille())
+
+
+def test_pair_refuses_where_the_pair_lock_cannot_be_taken(
+    cli: HostCli, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Where the filesystem cannot lock (ENOLCK, on a network mount with no lock service, say),
+    # `pair` cannot make sure that no other `pair` of the profile answers a code: it says so,
+    # naming itself, and answers nothing.
+    before = cli.policy()
+    code = cli.lucille().start()
+    real = os.lockf
+
+    def cannot_lock(descriptor: int, command: int, length: int) -> None:
+        if command == os.F_TLOCK:
+            raise OSError(errno.ENOLCK, os.strerror(errno.ENOLCK))
+        real(descriptor, command, length)
+
+    monkeypatch.setattr("os.lockf", cannot_lock)
+    ran = cli.run("pair", "--code-stdin", stdin=code + "\n", timeout=30)
+    lock = os.path.realpath(cli.dirs.state / PAIR_LOCK)
+    assert ran.rc == 1, ran.text
+    assert ran.err == (
+        f"lucille-host: cannot lock {lock} ({os.strerror(errno.ENOLCK)}), so `pair` cannot make "
+        "sure it is the only one of this profile\n"
+    )
+    _nothing_changed(cli, before)
+
+
+@pytest.mark.parametrize("verb", ["confirm", "reject"])
+def test_pair_status_confirm_and_reject_work_while_pair_asks(cli: HostCli, verb: str) -> None:
+    # `pair` holds the pair lock until it returns, its question included. The other pairing verbs
+    # take no such lock: the SAS can still be shown, confirmed or rejected in another shell.
+    lucille = cli.lucille()
+    stdin = _Given()
+    stdin.give(lucille.start() + "\n")
+    with collecting(lucille):
+        running = cli.start("pair", stdin=stdin)
+        stdin.wait_asked(2)
+    lock = cli.dirs.state / PAIR_LOCK
+    assert not lock_free(lock), "the pair lock is not held while `pair` asks"
+    # It is `state/.pair.lock`, and not `run`'s lock: a `run` started now is not refused as one
+    # already running, and takes no work room until the SAS is confirmed.
+    assert not lock_free(cli.dirs.state / ".pair.lock")
+    assert lock_free(cli.dirs.state / loop.RUN_LOCK), "`pair` holds the run lock"
+    with loop.one_run(cli.dirs.state):
+        pass
+    cli.capsys.readouterr()  # what `pair` has printed so far
+    status = cli.run("pair", "status")
+    assert status.rc == 0, status.text
+    assert status.out.startswith(f"sas_pending: pair {lucille.name}: the SAS is {lucille.sas()}.")
+    ran = cli.run("pair", verb)
+    assert ran.rc == 0, ran.text
+    stdin.give("y\n")
+    asked = running.wait()
+    if verb == "confirm":
+        assert ran.out == f"confirmed: pair {lucille.name} is confirmed on this computer\n"
+        assert asked.rc == 0, asked.text
+        assert asked.out.splitlines()[-1] == f"confirmed: pair {lucille.name} is already confirmed"
+        assert cli.held() == [lucille.name]
+    else:
+        assert ran.out.startswith(f"rejected: pair {lucille.name} is forgotten on this computer")
+        assert asked.rc == 1
+        assert asked.err.startswith(f"none: pair {lucille.name} is gone from this computer")
+        assert cli.held() == []
+    assert lock_free(lock)
+
+
 def test_store_file_pairs_where_the_keyring_stores_nothing(
     cli: HostCli, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -365,6 +507,10 @@ def test_pair_leaked_states_stop(case: str, cli: HostCli, monkeypatch: pytest.Mo
     assert f"({case})" in ran.err
     assert cli.gate() is None and cli.held() == []
     assert not ran.out.splitlines()[-1].startswith("sas_pending")
+    # Nothing of the pair stays in the profile's store: when the library dropped it, aborted, it
+    # kept a verdict under its name, which forgetting what is left of the pair here clears.
+    opened = _switchboard.open_link(cli.dirs, state.load_host_config(cli.dirs))
+    assert opened.pairs.verdict_names() == []
 
 
 @pytest.mark.parametrize("case", ["expired", "wrong_hub", "never_confirmed", "unsent"])
@@ -1037,20 +1183,49 @@ def test_policy_previous_lists_archive(cli: HostCli, tmp_path: Path) -> None:
     assert ran.rc == 0 and ran.out.startswith("no earlier policy")
     folder = _enable_and_add_a_folder(tmp_path)
     cli.paired(cli.lucille())
-    ran = cli.run("policy", "previous")
-    assert ran.rc == 0
-    assert ran.out.splitlines()[1:] == [
+    listed = [
+        f"the last policy a pairing set aside ({cli.dirs.previous_policy_file}); nothing uses it:",
         "operations:",
         "  files.sha256",
         "  host.describe",
         "folders:",
         f"  docs  {folder}",
     ]
+    ran = cli.run("policy", "previous")
+    assert ran.rc == 0
+    assert ran.out.splitlines() == listed
     # Read only: nothing it lists is enabled.
     assert cli.policy() == policy.fresh()
+    # A later pairing from the fresh policy sets nothing aside, so the file holds what an earlier
+    # one set aside, and the header still says what it is. Before, it named the latest pairing.
+    assert cli.run("pair", "reject").rc == 0
+    ran = cli.paired(cli.lucille())
+    assert "the policy is reset" not in ran.out
+    assert cli.run("policy", "previous").out.splitlines() == listed
     cli.dirs.previous_policy_file.write_text("version = 2\n")
     ran = cli.run("policy", "previous")
     assert ran.rc == 1 and "invalid" in ran.err
+
+
+def test_policy_and_forget_help_say_what_they_do(capsys: pytest.CaptureFixture[str]) -> None:
+    # The help says what `policy previous` lists, as its header does: what a pairing set aside
+    # last, which is not the policy before the latest pair once a pairing from the fresh policy
+    # set nothing aside (above). And `forget`'s says what it does with no pair held.
+    def helped(*argv: str) -> str:
+        with pytest.raises(SystemExit) as exit_info:
+            main([*argv, "--help"])
+        assert exit_info.value.code == 0
+        return " ".join(capsys.readouterr().out.split())
+
+    assert " policy show the last policy a pairing set aside " in helped()
+    assert (
+        " previous list the operations and folders of the last policy a pairing set aside "
+        in helped("policy")
+    )
+    assert (
+        " With no pair held, it leaves the work rooms still held over a pair already gone from "
+        "this computer, and tells Lucille nothing. " in helped("forget")
+    )
 
 
 def test_policy_archive(tmp_path: Path) -> None:
@@ -1125,6 +1300,8 @@ def test_pairing_verbs_refuse_root_and_switchboard_settings(
         ran = cli.run(*argv, timeout=15)
         assert ran.rc == 1 and "root" in ran.err
     assert cli.gate() is None and not cli.dirs.host_file.exists()
+    # Refused before it takes the pair lock: a refused `pair`, root's above all, makes no file.
+    assert not (cli.dirs.state / PAIR_LOCK).exists()
     # The verbs that touch no pair still run.
     assert cli.run("policy", "previous").rc == 0
     assert cli.run("ops", "list").rc == 0

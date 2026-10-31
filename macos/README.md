@@ -278,9 +278,10 @@ anyone to work around the warning.
   relaxed for exactly those links. Moving the whole runtime would not do: those folders are for code
   only, and Apple's signing tools take a folder with a dot in its name, such as `python3.13` or a
   `.dist-info`, for a bundle.
-- **Pairing.** The host has no `pair` verb yet, so "Connect to Lucille" is disabled.
-- **Running in the background.** The host has no long-running loop yet, so the app starts nothing that
-  keeps running, and it does not open at login.
+- **Pairing.** The host's command line can pair (`lucille-host pair`), but the app has no screen for it
+  yet, so "Connect to Lucille" is disabled.
+- **Running in the background.** The host has a long-running loop (`lucille-host run`), but the app
+  starts nothing that keeps running, and it does not open at login.
 - **Updates.** There are none. A new version is a new disk image.
 - **Uninstall.** Dragging the app to the Trash removes it. The host's own folder,
   `~/Library/Application Support/lucille-host`, stays.

@@ -13,7 +13,8 @@ name (``pair: confirmed: ...``, ``clock: skewed: ...``):
 - the pair, in the words ``pair status`` uses (:meth:`link.Session.pair_state`), from this
   computer's store and the gate's record: never the SAS, which ``pair status`` shows;
 - each work room held, or ``none``, with the check its last room failed when the host left that
-  room on its own (spec/PROTOCOL.md section 9), and how many offers wait;
+  room on its own (spec/PROTOCOL.md section 9), and how many offers wait; with no pair held, the
+  room an accept a stop interrupted may have kept is named too, since ``forget`` leaves it;
 - what the latest ``lucille-host run`` wrote in ``state/status.json``: whether it runs, when it
   last reached the hub, and the clock. The clock is ``ok`` (with the skew measured on the last reply
   posted); ``skewed`` when the hub refused a write of the host's because this computer's clock is
@@ -103,17 +104,23 @@ def _policy(dirs: paths.Dirs) -> list[str]:
     return lines
 
 
-def _rooms(dirs: paths.Dirs, live: dict[str, Any] | None) -> list[str]:
+def _rooms(dirs: paths.Dirs, live: dict[str, Any] | None, paired: bool) -> list[str]:
     record = rooms.load(dirs.rooms_file)
     reading = set(live["reading"]) if live is not None else set()
     stuck = set(live["read_stuck"]) if live is not None else set()
+    # With no pair held, nothing tries a leave again on its own: `forget` leaves what is left.
+    again = "its leave is tried again" if paired else "`lucille-host forget` leaves it"
     lines = []
     for name, held in sorted(record.held.items()):
         notes = [f"accepted {link.iso(held.accepted_at)}"]
         if held.abandoned is not None:
+            notes.append(f"abandoned ({held.abandoned}): nothing is taken from it, and {again}")
+        elif not paired:
+            # Left by a process that stopped after the library dropped the pair, before it left
+            # the pair's rooms.
             notes.append(
-                f"abandoned ({held.abandoned}): nothing is taken from it, and its leave is tried "
-                "again"
+                "the pair it was taken over is gone from this computer: nothing is taken from it, "
+                f"and {again}"
             )
         elif name in stuck:
             notes.append(
@@ -122,7 +129,15 @@ def _rooms(dirs: paths.Dirs, live: dict[str, Any] | None) -> list[str]:
         elif name in reading:
             notes.append("read by `run`")
         lines.append(f"work room: {name} ({'; '.join(notes)})")
-    if not record.in_use():
+    kept = record.accepting
+    if kept is not None and kept.room not in record.held and not paired:
+        # An accept a stop interrupted, and then the library dropped the pair: no start will judge
+        # that room now, and `forget` leaves it, if the accept kept it.
+        lines.append(
+            f"work room: {kept.room} (an accept a stop interrupted may have kept it; the pair it "
+            f"was taken over is gone from this computer: nothing is taken from it, and {again})"
+        )
+    elif not record.held:
         line = "work room: none: this computer holds no work room"
         if record.no_room is not None:
             line += (
@@ -204,6 +219,6 @@ def status(dirs: paths.Dirs, session: link.Session, config: state.HostConfig) ->
         and seen["running"]
         and session.link.now() - seen["written_at"] <= STALE_AFTER
     )
-    lines += _rooms(dirs, seen if live else None)
+    lines += _rooms(dirs, seen if live else None, bool(session.held()))
     lines += _run(seen, live)
     return lines

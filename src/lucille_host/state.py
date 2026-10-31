@@ -4,6 +4,8 @@
   renamed over the old one, and the folder synced. A file that is missing reads as nothing; one
   that cannot be read, or holds something else, stops the host (it fails closed), as an invalid
   policy does.
+- Every wait for a lock file of the host's own (``os.lockf``) goes through :func:`wait_for_lock`,
+  so that a signal whose handler returns, as ``run``'s do, does not end the wait.
 - ``config/host.json`` says where the pair is kept (``keyring``, the default, or ``file`` under
   ``--store-file``) and which loopback hub, if any, the local configuration names. Only a hub of
   the form ``http://127.0.0.1:<port>`` or ``http://localhost:<port>`` can be named there.
@@ -52,6 +54,7 @@ __all__ = [
     "save_host_config",
     "startup_checks",
     "valid_loopback_hub",
+    "wait_for_lock",
     "write_json",
 ]
 
@@ -96,6 +99,21 @@ def write_json(path: Path, value: Any) -> None:
         Path(temp).unlink(missing_ok=True)
         raise
     _sync_dir(path.parent)
+
+
+def wait_for_lock(descriptor: int) -> None:
+    """Take the ``os.lockf`` lock on ``descriptor``, waiting while another process holds it.
+
+    A signal whose handler returns does not end the wait. ``os.lockf`` is not among the calls
+    Python retries after one (PEP 475): it raises ``InterruptedError`` (measured on 3.11 and
+    3.13), and the lock is then asked for again. A handler that raises, as Ctrl-C's default one
+    does, still ends it."""
+    while True:
+        try:
+            os.lockf(descriptor, os.F_LOCK, 0)
+        except InterruptedError:
+            continue
+        return
 
 
 def remove_file(path: Path) -> bool:

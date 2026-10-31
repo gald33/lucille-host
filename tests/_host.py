@@ -5,6 +5,7 @@ from __future__ import annotations
 import contextlib
 import subprocess
 import sys
+import threading
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
@@ -57,8 +58,9 @@ def lock_free(lock: Path) -> bool:
 
 
 @contextlib.contextmanager
-def lock_held(lock: Path) -> Iterator[None]:
-    """Another process holds ``lock`` (as a CLI verb would) until the block ends."""
+def lock_held(lock: Path) -> Iterator[Callable[[], None]]:
+    """Another process holds ``lock`` (as a CLI verb would) until the block ends, or until the
+    function it gives is called, from any thread."""
     holder = subprocess.Popen(
         [sys.executable, "-c", _HOLD, str(lock)],
         stdin=subprocess.PIPE,
@@ -66,9 +68,17 @@ def lock_held(lock: Path) -> Iterator[None]:
         text=True,
     )
     assert holder.stdin is not None and holder.stdout is not None
+    stdin = holder.stdin
+    once = threading.Lock()
+
+    def release() -> None:
+        with once:
+            if not stdin.closed:
+                stdin.close()
+        holder.wait(10)
+
     try:
         assert holder.stdout.readline() == "held\n"
-        yield
+        yield release
     finally:
-        holder.stdin.close()
-        holder.wait(10)
+        release()
