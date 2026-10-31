@@ -1,0 +1,27 @@
+# What the Mac app is built from, besides this repository and uv.lock.
+#
+# build_app.py reads this file. It downloads the Python runtime from `url` and refuses to build
+# unless the download's sha256 is `sha256`. To move to a new runtime, change all four values in
+# one reviewed commit: the asset name, its version, its URL and its sha256 from the release's
+# SHA256SUMS file.
+
+[python]
+# python-build-standalone, Apple silicon, the "install_only_stripped" flavour.
+version = "3.13.18"
+asset = "cpython-3.13.18+20261026-aarch64-apple-darwin-install_only_stripped.tar.gz"
+url = "https://github.com/astral-sh/python-build-standalone/releases/download/20261026/cpython-3.13.18%2B20261026-aarch64-apple-darwin-install_only_stripped.tar.gz"
+sha256 = "8392b6ea51d94391befb2c31ebe75463f045d0b69dfcf5e1bb3234e1f5fa3405"
+
+[app]
+# The app's name, as macOS and its user see it: letters and digits, with single spaces between
+# words. build_app.py writes it into Info.plist, the app reads it from there, and the checks read
+# it from here, so no code changes with it. A new name does also change the app's paths and
+# artifact names in .github/workflows/macos-app.yml and the values tests/test_macos_build.py pins,
+# and those tests fail until all of them agree with this file. It is a working name until the
+# first signed build. The host program inside keeps its own name, lucille-host.
+name = "Capsule"
+# The app's permanent identifier. Changing it after a signed release makes macOS ask the user
+# again for every folder and Keychain item.
+bundle_id = "com.lucille-ai.capsule"
+minimum_macos = "15.0"
+category = "public.app-category.utilities"

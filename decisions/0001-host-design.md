@@ -569,7 +569,9 @@ one (`waiting`, `sas_pending`, `confirmed`, `leaked`, `expired`, ...).
 - Runtime dependencies are `agent-switchboard==2.6.*` (base) and `keyring`, with their own dependencies,
   all pinned exactly in the release's lock. The wheel's metadata declares the ranges, not the lock's
   pins, so an install with `pipx` or `uv tool` can resolve other versions. How a release carries the
-  exact pins to an install is not decided yet.
+  exact pins to an install is not decided yet. The build of Capsule, the Mac app (`macos/`), is one
+  channel: it installs the lock's exact pins, by hash, into the Python runtime it embeds. No Mac
+  release exists yet.
 - An extra, `[conformance]`, adds `agent-switchboard[server]` at the runtime pin and `starlette>=1.9`, for
   the conformance suite only. A test asserts that the runtime import graph never reaches `fastapi` or
   `uvicorn`.

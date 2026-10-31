@@ -26,6 +26,19 @@ pull request.
 - The workflow's token can only read the repository (`permissions: contents: read`), and the checkout
   keeps no credentials (`persist-credentials: false`).
 
+The workflow `macos-app` (`.github/workflows/macos-app.yml`) runs on pull requests that change `macos/`,
+`src/`, `pyproject.toml`, `uv.lock` or the workflow itself, on pushes to `main`, and by hand.
+- Job `app`, on GitHub-hosted `macos-15` (Apple silicon): it builds the Mac app, Capsule, and its disk
+  image, signed ad hoc, then runs the checks [macos/README.md](macos/README.md#what-ci-checks) lists,
+  then the host's test suite on the app's trimmed Python runtime.
+- Its token can only read the repository, its checkout keeps no credentials, and it uses no secret. It
+  uploads the disk image only when every check passed. Its own copy skips the upload for a pull request
+  from a fork, but such a pull request runs the fork's copy of the workflow, which can upload anything:
+  an artifact on that run is the fork's build, whatever its name. The artifact's name says which event
+  and which commit built it, and the image's name ends `-adhoc-macOS-arm64.dmg`: it is not a release.
+  Whether a fork's pull request runs workflows before a maintainer approves it is a repository setting
+  ("Approval for running fork pull request workflows from contributors"), which no file here can show.
+
 **The four guards.** What the guards are for: they catch accidental and casual violations of the rules
 below, in the forms they list. They are not a sandbox, and they are not a defence against an author who
 sets out to get past them. A maintainer reviews every pull request before it merges, and that review is

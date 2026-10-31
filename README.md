@@ -108,12 +108,13 @@ This repository proves only the host's side. The full design is
 | `src/lucille_host/spec/` | The protocol's JSON Schemas and golden fixtures, which ship in the wheel. |
 | `tools/spec/` | Writes the protocol fixtures for each place in each schema pattern; a test checks that the committed fixtures are what it writes. |
 | `tools/guards/` | Checks CI runs on every change. They catch accidental and casual violations; they are not a sandbox or a defence against a determined author, and maintainer review of every pull request is the backstop. [VERIFYING.md](VERIFYING.md) describes each one and what it cannot see. |
+| [macos/](macos/README.md) | A first build of Capsule, the Mac app, which lets Lucille use only the folders you choose: a menu bar app that drives the host's command line, and the scripts that build and check it. Not a release. |
 | [PRIVACY.md](PRIVACY.md) | The claim, and what this project must never claim. |
 | [CLAIMS.md](CLAIMS.md) | Each sentence of the claim, mapped to its code and test. |
 | [THREAT_MODEL.md](THREAT_MODEL.md) | What the host defends against, and what is left. |
 | [VERIFYING.md](VERIFYING.md) | How a third party checks the program (draft). |
 | [SECURITY.md](SECURITY.md) | How to report a vulnerability, and what a bad release means for you. |
-| [decisions/](decisions/) | Design records. |
+| [decisions/](decisions/) | Design records: [0001](decisions/0001-host-design.md), the host, and [0002](decisions/0002-macos-app.md), Capsule, the Mac app. |
 
 ## Development
 
