@@ -38,6 +38,8 @@ from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any, Final
 
+from lucille_host import state
+
 __all__ = ["Controls"]
 
 PAUSE_FILE: Final = "paused"
@@ -99,7 +101,7 @@ class Controls:
         descriptor = os.open(self._lock_file, os.O_RDWR | os.O_CREAT, 0o600)
         try:
             try:
-                os.lockf(descriptor, os.F_LOCK, 0)
+                state.wait_for_lock(descriptor)
             except OSError:
                 yield False
                 return

@@ -1,14 +1,44 @@
 """The ``lucille-host`` command.
 
 With no arguments, or with ``--version``, it prints ``lucille-host <version>`` and exits 0. The
-verbs in this release change only local state; none of them talks to a hub:
+verbs:
 
+- ``pair [CODE]``: answer the pairing code Lucille shows, wait for Lucille to collect the answer,
+  then show the pair's SAS and ask for ``y`` if Lucille's page shows the same (``link.py``,
+  ``gate.py``): ``y`` confirms, ``n`` forgets the pair, and the end of stdin leaves the answer to
+  ``pair confirm`` or ``pair reject``. What was typed at a terminal before the question is
+  discarded, unanswered. The code is read from stdin when it is not given, and only
+  from stdin with ``--code-stdin``, which also stops once the SAS is shown (``sas_pending``).
+  ``--hub`` names a loopback hub to accept codes for, and ``--store-file`` keeps the pair in files
+  rather than the OS keyring; both are saved for the profile. ``pair`` refuses while a pair is
+  held, and while another ``pair`` of the profile runs: it holds ``state/.pair.lock``, taken
+  without waiting, until it returns. It resets the policy to the fresh one before it answers a new
+  code, keeping the earlier one aside;
+- ``pair status``, ``pair confirm`` and ``pair reject``: where the pair is (showing the SAS again
+  while it waits to be confirmed), the ``y`` given later, and forgetting a pair that has not been
+  confirmed;
+- ``run``: the long-running host (``loop.py``): it keeps the pair, takes the work rooms Lucille
+  offers over it, and reads and answers Lucille's requests there, once the local gate is open.
+  The first SIGTERM, SIGHUP or Ctrl-C drains it; it also stops, exiting 0, when the pair ends;
+- ``status``: the version, the local policy, the pair, the work rooms, and what ``run`` last saw
+  of the hub and the clock, read from the profile's files with no hub call (``report.py``);
+- ``log [--limit N]``: the last lines of the audit log, oldest first, across its rotated files;
+- ``forget``: leave the pair's work rooms, forget the pair here, and tell Lucille if the hub can
+  be reached; it says whether Lucille was told. When another command forgot the pair while this
+  one waited for the record lock, it says the pair is gone (``none``), as with no pair at all.
+  With no pair held, it leaves the work rooms still held over a pair already gone from this
+  computer, and tells Lucille nothing (``left``);
 - ``ops list|enable|disable``: which catalog operations the local policy enables;
 - ``roots list|add|remove``: which folders the operations may work in, by alias;
+- ``policy previous``: the operations and folders of the last policy a pairing set aside (a
+  pairing sets aside only a policy that is not the fresh one);
 - ``pause``, ``resume`` and ``kill``: the local controls.
 
+Each verb is dispatched by name; one with no handler is refused, never run as another verb.
 ``--profile <name>`` selects a separate config and state directory, so that two computers can be
-simulated on one machine. A verb that fails prints why on stderr and exits 1.
+simulated on one machine. A verb that fails prints why on stderr and exits 1; a pairing that ends
+early, or a refusal of the pairing verbs, prints its state word first (``leaked: ...``,
+``expired: ...``).
 
 A verb that changes the policy holds the profile's policy lock from reading the file to writing
 it, so that two verbs run at once do not lose a change; on a filesystem that cannot lock, it
@@ -22,14 +52,40 @@ import argparse
 import contextlib
 import os
 import sys
-from collections.abc import Iterator, Sequence
+import termios
+from collections.abc import Callable, Iterator, Sequence
 from dataclasses import replace
 from types import MappingProxyType
+from typing import Final
 
-from lucille_host import __version__, paths, policy
+from lucille_host import (
+    __version__,
+    _switchboard,
+    audit,
+    gate,
+    link,
+    loop,
+    paths,
+    policy,
+    report,
+    store,
+)
+from lucille_host import state as host_state
 from lucille_host.containment import inside_own, on_proc
 from lucille_host.controls import Controls
 from lucille_host.ops import OPERATIONS
+
+# The words ``pair`` takes in place of a code.
+PAIR_ACTIONS: Final = ("status", "confirm", "reject")
+# In the state folder: held by ``pair [CODE]`` until it returns.
+PAIR_LOCK: Final = ".pair.lock"
+ALREADY_PAIRING: Final = (
+    "another `lucille-host pair` is running for this profile, and a profile answers one pairing "
+    "code at a time: two could each answer one, and the profile keeps one pair. Let that one "
+    "end first"
+)
+# How many lines ``log`` prints unless told otherwise.
+LOG_LINES: Final = 20
 
 
 class _Refused(Exception):
@@ -46,8 +102,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="lucille-host",
         description=(
-            "Runs a closed set of named operations for a paired Lucille account. This release "
-            "has the catalog, the local policy and the local controls; it does not pair yet."
+            "Runs a closed set of named operations for a paired Lucille account: `pair` pairs "
+            "this computer with Lucille, and `run` answers Lucille's requests, within the "
+            "catalog, the local policy and the local controls."
         ),
     )
     parser.add_argument("--version", action="version", version=version_line())
@@ -78,6 +135,85 @@ def build_parser() -> argparse.ArgumentParser:
     )
     remove = roots_verbs.add_parser("remove", help="stop operations working in a folder")
     remove.add_argument("alias")
+
+    pair = verbs.add_parser(
+        "pair",
+        help="pair with Lucille: answer its code, then confirm the SAS both sides show",
+        description=(
+            "`pair [CODE]` answers the pairing code Lucille shows, then shows the pair's SAS and "
+            "asks for y if Lucille's page shows the same; `pair status` says where the pair is, "
+            "and shows the SAS again while it waits; `pair confirm` confirms the SAS shown; "
+            "`pair reject` forgets a pair that is not confirmed."
+        ),
+    )
+    pair.add_argument(
+        "code",
+        nargs="?",
+        metavar="CODE | status | confirm | reject",
+        help="the pairing code (read from stdin when it is not given), or one of the actions",
+    )
+    pair.add_argument(
+        "--code-stdin",
+        action="store_true",
+        help="read the code from stdin only, and stop once the SAS is shown",
+    )
+    pair.add_argument(
+        "--hub",
+        metavar="URL",
+        help="also accept codes for this hub: http://127.0.0.1:<port> or http://localhost:<port>",
+    )
+    pair.add_argument(
+        "--store-file",
+        action="store_true",
+        help="keep the pair in files in the state folder, not the OS keyring (weaker)",
+    )
+
+    verbs.add_parser(
+        "run",
+        help="answer Lucille's requests over the pair until stopped (Ctrl-C drains)",
+        description=(
+            "Keeps the pair, takes the work rooms Lucille offers over it, and runs the requests "
+            "it posts there that the local policy allows. Nothing is accepted, posted or run "
+            "before the SAS is confirmed. The first Ctrl-C, SIGTERM or SIGHUP lets the running "
+            "operation finish and stops; a second Ctrl-C kills it."
+        ),
+    )
+
+    verbs.add_parser(
+        "status",
+        help="show the policy, the pair, the work rooms and what `run` last saw (no hub call)",
+        description=(
+            "Shows the version, the local policy and the operations it enables, the controls, "
+            "where the pair is kept and the hub, the pair (never its SAS), the work rooms held, "
+            "and what `run` last saw: whether it runs, its last contact with the hub, and the "
+            "clock. It reads this computer's files only, and makes no hub call."
+        ),
+    )
+    log = verbs.add_parser("log", help="show the last lines of the audit log, oldest first")
+    log.add_argument(
+        "--limit",
+        type=int,
+        default=LOG_LINES,
+        metavar="N",
+        help="how many lines (default: %(default)s)",
+    )
+    verbs.add_parser(
+        "forget",
+        help="leave the work rooms, forget the pair here, and tell Lucille if the hub is reachable",
+        description=(
+            "Leaves every work room held over the pair, then deletes this computer's half of the "
+            "pair and tells Lucille, best effort; it says whether Lucille was told. If it was not, "
+            "Lucille keeps its half until the computer is removed there. With no pair held, it "
+            "leaves the work rooms still held over a pair already gone from this computer, and "
+            "tells Lucille nothing."
+        ),
+    )
+
+    policy_verb = verbs.add_parser("policy", help="show the last policy a pairing set aside")
+    policy_verbs = policy_verb.add_subparsers(dest="policy_verb", metavar="ACTION", required=True)
+    policy_verbs.add_parser(
+        "previous", help="list the operations and folders of the last policy a pairing set aside"
+    )
 
     verbs.add_parser("pause", help="start nothing until resume; refuse new requests")
     verbs.add_parser("resume", help="clear pause and any kill request")
@@ -112,7 +248,7 @@ def _policy_lock(dirs: paths.Dirs) -> Iterator[None]:
     descriptor = os.open(lock, os.O_RDWR | os.O_CREAT, 0o600)
     try:
         try:
-            os.lockf(descriptor, os.F_LOCK, 0)
+            host_state.wait_for_lock(descriptor)
         except OSError as exc:
             raise _Refused(
                 f"cannot lock {lock} ({exc.strerror}), so the policy was not changed"
@@ -206,6 +342,228 @@ def _roots(args: argparse.Namespace, dirs: paths.Dirs) -> str:
     return f"added {alias}"
 
 
+def _policy_previous(args: argparse.Namespace, dirs: paths.Dirs) -> str:
+    path = dirs.previous_policy_file
+    if not path.exists():
+        return "no earlier policy: no pairing has set one aside"
+    try:
+        previous = policy.load(path)
+    except policy.PolicyError as exc:
+        raise _Refused(f"the earlier policy {path} is invalid: {exc}") from exc
+    lines = [f"the last policy a pairing set aside ({path}); nothing uses it:"]
+    lines.append("operations:")
+    lines += [f"  {name}" for name in sorted(previous.enabled)] or ["  (none)"]
+    lines.append("folders:")
+    roots = previous.roots
+    lines += [f"  {alias}  {roots[alias].path}" for alias in sorted(roots)] or ["  (none)"]
+    return "\n".join(lines)
+
+
+def _say(line: str) -> None:
+    print(line, flush=True)
+
+
+def _warn(line: str) -> None:
+    print(f"lucille-host: warning: {line}", file=sys.stderr, flush=True)
+
+
+def _read_line(prompt: str) -> str:
+    """One line of stdin, with a prompt on stderr when stdin is a terminal; "" at its end."""
+    if sys.stdin.isatty():
+        print(prompt, end="", file=sys.stderr, flush=True)
+    return sys.stdin.readline()
+
+
+def _pair_action(args: argparse.Namespace, dirs: paths.Dirs) -> str:
+    if args.code_stdin or args.hub is not None or args.store_file:
+        raise _Refused(f"`pair {args.code}` takes no options")
+    session = link.open_session(dirs, host_state.load_host_config(dirs), say=_say, warn=_warn)
+    if args.code == "status":
+        word, detail = session.status()
+        return f"{word}: {detail}"
+    if args.code == "reject":
+        told = session.reject()
+        return f"rejected: pair {told.name} is forgotten on this computer; " + link.told_sentence(
+            told
+        )
+    return f"confirmed: {session.confirm()}"
+
+
+def _discard_typed_ahead() -> bool:
+    """Discard what was typed on the terminal before the SAS was shown: a ``y`` typed while
+    ``pair`` waited for Lucille was typed before anyone could compare. Whether that was done,
+    or there was nothing to do (stdin is not a terminal, and what it holds is read as given)."""
+    if not sys.stdin.isatty():
+        return True
+    try:
+        termios.tcflush(sys.stdin.fileno(), termios.TCIFLUSH)
+    except (termios.error, OSError):
+        return False
+    return True
+
+
+def _ask(session: link.Session, name: str, deadline: float | None) -> str:
+    """Ask whether Lucille's page shows the same SAS until ``y``, ``n``, or the end of stdin.
+    Nothing typed on the terminal before the question counts; where that cannot be made sure
+    of, nothing is asked, and ``pair confirm`` or ``pair reject`` answers later."""
+    before = f" before {link.iso(deadline)}" if deadline is not None else ""
+    later = (
+        f"sas_pending: pair {name} is not confirmed yet: `lucille-host pair confirm` "
+        f"confirms it{before}, and `lucille-host pair reject` rejects it"
+    )
+    if not _discard_typed_ahead():
+        return later
+    while True:
+        entry = _read_line("Does Lucille's page show the same SAS? Type y if it does, n if not: ")
+        if not entry:
+            return later
+        said = gate.answer(entry)
+        if said is True:
+            return f"confirmed: {session.open_gate(name)}"
+        if said is False:
+            told = session.reject()
+            raise link.Stopped(
+                "rejected",
+                f"pair {name} is forgotten on this computer; start again in Lucille. "
+                + link.told_sentence(told),
+            )
+        print(
+            "type y if Lucille's page shows the same SAS, or n if it does not",
+            file=sys.stderr,
+            flush=True,
+        )
+
+
+def _pair(args: argparse.Namespace, dirs: paths.Dirs) -> str:
+    if args.code in PAIR_ACTIONS:
+        return _pair_action(args, dirs)
+    if args.code_stdin and args.code is not None:
+        raise _Refused("with --code-stdin the code is read from stdin only; do not pass it")
+    try:
+        wanted = host_state.HostConfig(hub=args.hub, store="file" if args.store_file else "keyring")
+    except ValueError as exc:
+        raise _Refused(str(exc)) from exc
+    host_state.startup_checks()
+    # One `pair` of the profile at a time, from before it looks for a pair held until it returns,
+    # its question included: two at once could each answer a code. `pair status`, `pair confirm`
+    # and `pair reject` take no such lock, so that the SAS can be confirmed in another shell.
+    lock = paths.ensure_dir(dirs.state) / PAIR_LOCK
+    with loop.one_at_a_time(lock, ALREADY_PAIRING, "`pair`"):
+        return _answer(args, dirs, wanted)
+
+
+def _answer(args: argparse.Namespace, dirs: paths.Dirs, wanted: host_state.HostConfig) -> str:
+    """``pair [CODE]``, under the profile's pair lock: answer a code, wait for Lucille to collect
+    the answer, show the SAS and ask about it."""
+    current = host_state.load_host_config(dirs)
+    try:
+        session = link.open_session(dirs, current, say=_say, warn=_warn)
+        opened = current
+    except store.InsecureKeyring:
+        if wanted.store != "file":
+            raise
+        # A keyring that stores nothing holds no pair: only the file store is looked in.
+        session = link.open_session(dirs, wanted, say=_say, warn=_warn)
+        opened = wanted
+    if session.held():
+        raise _Refused(
+            "Disconnect first: this computer already holds a pair (`lucille-host pair reject` "
+            "forgets one that is not confirmed yet)"
+        )
+    text = args.code
+    if text is None:
+        text = _read_line("Paste the pairing code Lucille shows: ").strip()
+        if not text:
+            raise _Refused("no pairing code was given on stdin")
+    code = session.check_code(text, wanted)
+    _say(f"pairing code for pair {code.name}, on {code.url}")
+    note = link.sanitize(code.note)
+    if note:
+        _say(f"note: {note}")
+    if wanted != opened:
+        session = link.open_session(dirs, wanted, say=_say, warn=_warn)
+        if session.held():
+            raise _Refused(
+                "Disconnect first: this computer already holds a pair in that store "
+                "(`lucille-host pair reject` forgets one that is not confirmed yet)"
+            )
+    if wanted != current:
+        host_state.save_host_config(dirs, wanted)
+    # A new pair starts from the fresh policy; the one it had is set aside, not applied.
+    with _policy_lock(dirs):
+        moved = policy.archive(dirs.policy_file, dirs.previous_policy_file)
+    if moved:
+        _say(
+            "the policy is reset for the new pair: only host.describe is enabled, and no folder "
+            "is held; `lucille-host policy previous` lists the earlier one"
+        )
+    name = session.accept(code)
+    if session.skewed:
+        _warn(link.SKEWED)
+    _say(f"accepted: pair {name}")
+    _say("waiting: for Lucille to collect this computer's answer")
+    try:
+        session.wait(name)
+    except KeyboardInterrupt:
+        raise link.Stopped(
+            "interrupted", f"pair {name} is kept; `lucille-host pair status` resumes"
+        ) from None
+    shown = session.show(name)
+    if shown is None:
+        raise session.no_gate(name)
+    sas, found = shown
+    _say(f"sas_pending: {session.pending(name, sas, found)}")
+    if args.code_stdin:
+        return ""
+    try:
+        return _ask(session, name, found.deadline)
+    except KeyboardInterrupt:
+        raise link.Stopped(
+            "interrupted",
+            f"pair {name} is kept; `lucille-host pair status` shows its SAS again, and "
+            "`lucille-host pair confirm` confirms it",
+        ) from None
+
+
+def _run(args: argparse.Namespace, dirs: paths.Dirs) -> str:
+    session = link.open_session(dirs, host_state.load_host_config(dirs), say=_say, warn=_warn)
+    controls = Controls(paths.ensure_dir(dirs.state))
+    return loop.run(dirs, session, controls=controls, say=_say)
+
+
+def _status(args: argparse.Namespace, dirs: paths.Dirs) -> str:
+    config = host_state.load_host_config(dirs)
+    session = link.open_session(dirs, config, say=_say, warn=_warn)
+    return "\n".join(report.status(dirs, session, config))
+
+
+def _log(args: argparse.Namespace, dirs: paths.Dirs) -> str:
+    if args.limit < 1:
+        raise _Refused("--limit takes a number of lines, 1 or more")
+    lines = audit.tail(dirs.state, args.limit)
+    if not lines:
+        print(
+            f"lucille-host: the audit log has no lines yet ({dirs.state / audit.FILE_NAME})",
+            file=sys.stderr,
+        )
+    return "\n".join(lines)
+
+
+def _forget(args: argparse.Namespace, dirs: paths.Dirs) -> str:
+    session = link.open_session(dirs, host_state.load_host_config(dirs), say=_say, warn=_warn)
+    gone = session.leave_left_over()
+    if gone is not None:
+        return (
+            f"left: pair {gone} was gone from this computer already, and the work rooms still "
+            "held over it are left now"
+        )
+    told = session.forget()
+    return (
+        f"forgotten: pair {told.name} is forgotten on this computer, its work rooms left first; "
+        + link.told_sentence(told)
+    )
+
+
 def _controls(verb: str, dirs: paths.Dirs) -> str:
     controls = Controls(paths.ensure_dir(dirs.state))
     if verb == "resume":
@@ -214,9 +572,11 @@ def _controls(verb: str, dirs: paths.Dirs) -> str:
     elif verb == "pause":
         locked = controls.pause()
         message = "paused: the host starts nothing until `lucille-host resume`"
-    else:
+    elif verb == "kill":
         locked = controls.kill()
         message = "paused, and asked the running host to kill the operation in flight, if any"
+    else:
+        raise _Refused(f"{verb} is not a control")
     if not locked:
         print(
             "lucille-host: note: this filesystem cannot lock, so this ran without the controls' "
@@ -227,6 +587,36 @@ def _controls(verb: str, dirs: paths.Dirs) -> str:
     return message
 
 
+def _ops_verb(args: argparse.Namespace, dirs: paths.Dirs) -> str:
+    with contextlib.nullcontext() if args.ops_verb == "list" else _policy_lock(dirs):
+        return _ops(args, dirs)
+
+
+def _roots_verb(args: argparse.Namespace, dirs: paths.Dirs) -> str:
+    with contextlib.nullcontext() if args.roots_verb == "list" else _policy_lock(dirs):
+        return _roots(args, dirs)
+
+
+def _control(verb: str) -> Callable[[argparse.Namespace, paths.Dirs], str]:
+    return lambda args, dirs: _controls(verb, dirs)
+
+
+# Every verb the parser knows, and what runs it.
+VERBS: Final[dict[str, Callable[[argparse.Namespace, paths.Dirs], str]]] = {
+    "pair": _pair,
+    "run": _run,
+    "status": _status,
+    "log": _log,
+    "forget": _forget,
+    "ops": _ops_verb,
+    "roots": _roots_verb,
+    "policy": _policy_previous,
+    "pause": _control("pause"),
+    "resume": _control("resume"),
+    "kill": _control("kill"),
+}
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     """Entry point for the ``lucille-host`` console script and ``python -m lucille_host``."""
     args = build_parser().parse_args(argv)
@@ -235,14 +625,28 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
     try:
         dirs = _dirs(args.profile)
-        if args.verb in ("ops", "roots"):
-            action = args.ops_verb if args.verb == "ops" else args.roots_verb
-            verb = _ops if args.verb == "ops" else _roots
-            with contextlib.nullcontext() if action == "list" else _policy_lock(dirs):
-                message = verb(args, dirs)
-        else:
-            message = _controls(args.verb, dirs)
-    except (_Refused, paths.UnsupportedPlatform, policy.PolicyError) as exc:
+        verb = VERBS.get(args.verb)
+        if verb is None:
+            raise _Refused(f"{args.verb} is not a verb this release has")
+        message = verb(args, dirs)
+    except link.Stopped as exc:
+        print(f"{exc.state}: {exc}", file=sys.stderr)
+        return 1
+    except _switchboard.PairFailed as exc:
+        print(f"error: the pair cannot be used here ({exc.state})", file=sys.stderr)
+        return 1
+    except _switchboard.HubError as exc:
+        print(f"error: {exc}; try again", file=sys.stderr)
+        return 1
+    except (
+        _Refused,
+        paths.UnsupportedPlatform,
+        policy.PolicyError,
+        host_state.Refused,
+        host_state.StateError,
+        host_state.Unprepared,
+        loop.Failed,
+    ) as exc:
         print(f"lucille-host: {exc}", file=sys.stderr)
         return 1
     except OSError as exc:

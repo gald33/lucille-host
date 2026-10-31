@@ -729,7 +729,7 @@ MENU_ITEMS: Final = (
     "Connect to Lucille (coming soon)",
     f"Quit {APP_NAME}",
 )
-# The menu's status line. Pairing is not built, so the Mac is never connected.
+# The menu's status line. The app cannot pair yet, so it always says the Mac is not connected.
 NOT_CONNECTED: Final = "Not connected to Lucille"
 
 

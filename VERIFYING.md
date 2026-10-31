@@ -126,9 +126,9 @@ enforces.
        `__future__`, `argparse`, `base64`, `binascii`, `collections`, `contextlib`, `copy`,
        `dataclasses`, `datetime`, `enum`, `errno`, `functools`, `hashlib`, `hmac`, `io`, `itertools`,
        `json`, `logging`, `math`, `os`, `pathlib`, `re`, `secrets`, `shutil`, `signal`, `stat`, `sys`,
-       `tempfile`, `textwrap`, `threading`, `time`, `tomllib`, `types`, `typing`, `keyring`,
-       `switchboard` and `lucille_host` itself. `src/lucille_host/_exec.py` may also import
-       `subprocess`. An import anywhere in a file counts. A submodule comes with its module
+       `tempfile`, `termios`, `textwrap`, `threading`, `time`, `tomllib`, `types`, `typing`,
+       `keyring`, `switchboard` and `lucille_host` itself. `src/lucille_host/_exec.py` may also
+       import `subprocess`. An import anywhere in a file counts. A submodule comes with its module
        (`os.path`, `logging.handlers`), and what the rules above refuse stays refused inside an
        allowed module (`os.system`, `logging.config`). A module an allowed module re-exports is
        checked as itself, by the same list: `from logging.handlers import socket` imports `socket`,
@@ -182,9 +182,9 @@ enforces.
      agent-switchboard 2.6.0's `switchboard/client.py`, which the runtime imports, imports
      `subprocess` and can run `git` to derive an agent id; keyring imports the backend that an
      environment variable, its configuration file or an installed entry point names, when the host
-     first asks it for a password. Whether the host's own calls ever reach Switchboard's `git` path
-     is not checked yet; the design's invariant "The host's stores and Switchboard footprint are its
-     own" (no subprocess from pairing) is the pending test for it;
+     first asks it for a password. Tests with an audit hook find that the host's pairing and sharing
+     calls, and `run`, start no process on the paths they take, against Switchboard's in-process hub
+     ([CLAIMS.md](CLAIMS.md), C1); a path no test takes is not checked;
    - files it does not parse: configuration, data and shell scripts.
 
    Review covers the rest.
@@ -277,8 +277,12 @@ imported, and fails if either was. It also checks that its list of modules cover
 the runtime package, and that the package holds no symbolic link, which its walk would not follow.
 The hub server lives only in the `[conformance]` extra.
 
-**The spec's tests.** `tests/spec/` tests the protocol spec, not the host, which does not check messages
-against it yet.
+**The spec's tests.** `tests/spec/` tests the protocol spec, and the library facts its accept policy
+rests on; one of its tests also holds the host's check 3 to the spec's cases. The host checks each
+request it reads against the spec (`journal.py` for step 1 of the refusal order, dedupe; `envelope.py`
+for the envelope and steps 2 to 4; `jobs.py` for steps 5 to 9), and those checks are tested outside
+`tests/spec/`: `tests/test_envelope.py` and `tests/test_catalog.py` hold them to the request fixtures,
+and `tests/test_rooms.py` runs the host's checks 3 and 4 of the accept policy (`rooms.py`).
 - `test_schemas.py` walks every subschema of every schema, and fails on an object without
   `additionalProperties: false`, a value without a bound, or a pattern that reads differently in
   ECMA-262 (the regular expressions JSON Schema uses) and in Python. It also checks that the largest
@@ -298,7 +302,9 @@ against it yet.
   agent-switchboard, which keeps a pairing code's URL and an offered room's that way. It decodes codes,
   and it pairs, offers and accepts rooms on the library's in-process test hub, which needs the
   `conformance` extra: one whose URL ends in `/` or `//`, and one minted from another spelling of the
-  hub's URL (case, a port, a query, a fragment), which the library keeps as written.
+  hub's URL (case, a port, a query, a fragment), which the library keeps as written. Its first test also
+  holds the host's own check 3 (`rooms.py`) to the spec's cases. For check 4, it runs the library to
+  show that a room's `token_source` is `shared` exactly when its offer carried a hub token.
 - `test_packaged.py` builds the sdist and the wheel with `uv build`, installs the wheel into a fresh
   virtual environment, loads the schemas and fixtures from there, and checks them against the source
   tree. It needs `uv` on `PATH` and the build backend, which uv fetches or takes from its cache. It
@@ -353,8 +359,8 @@ installed with it, not one that happens to be first on your `PATH`.
 
 ## 4. Watch (needs a release)
 
-`lucille-host log` and `lucille-host status` show every request received, every local decision, and a
-fingerprint of everything sent.
+`lucille-host log` shows every request received, every local decision, and a fingerprint of everything
+sent. `lucille-host status` shows the pair, its work rooms, and when the host last reached the hub.
 
 ## What verification cannot establish
 

@@ -7,6 +7,8 @@ import json
 import os
 import signal
 import sys
+import threading
+import time
 from pathlib import Path
 from typing import Any
 
@@ -15,6 +17,7 @@ import pytest
 
 from lucille_host import __version__, spec
 from lucille_host.jobs import (
+    Abandoned,
     Draining,
     Job,
     Outcome,
@@ -284,3 +287,78 @@ def test_received_is_written_before_deciding(
     monkeypatch.setattr("lucille_host.jobs.check", spy)
     process(Job(job_id=JOB_ID, op="host.sleep", args={"n": 1}), ctx)
     assert seen == [["received"]]
+
+
+def _kinds(ctx: Any) -> list[str]:
+    return [json.loads(line)["kind"] for line in ctx.audit.path.read_text().splitlines()]
+
+
+def test_decided_is_called_after_the_decision_line_and_before_anything_runs(
+    make_context: MakeContext, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ctx = make_context(enabled=["host.sleep"])
+    seen: list[tuple[str, str | None, bytes | None, list[str]]] = []
+
+    def decided(decision: str, code: str | None, data: bytes | None) -> None:
+        seen.append((decision, code, data, _kinds(ctx)))
+
+    data = process(Job(job_id=JOB_ID, op="host.sleep", args={"n": 1}), ctx, decided=decided)
+    assert seen == [("run", None, None, ["received", "decision"])]
+    assert json.loads(data)["status"] == "done"
+    # A refusal hands over the exact bytes of its reply, before the sent line.
+    seen.clear()
+    refused = process(Job(job_id=JOB_ID, op="host.nothing", args={}), ctx, decided=decided)
+    assert len(seen) == 1
+    decision, code, sent, kinds = seen[0]
+    assert (decision, code, sent) == ("refused", "unknown_op", refused)
+    assert kinds[-2:] == ["received", "decision"]
+    # And one the read loop decided passes through it too.
+    seen.clear()
+    early = process(
+        Job(job_id=JOB_ID, op="x", args=None), ctx, earlier_code="bad_request", decided=decided
+    )
+    assert seen[0][:3] == ("refused", "bad_request", early)
+
+
+def test_abandoned_before_the_start_starts_nothing(
+    tmp_path: Path, make_context: MakeContext
+) -> None:
+    ctx = dataclasses.replace(make_context(enabled=["host.sleep"]), stop=lambda: True)
+    with pytest.raises(Abandoned):
+        process(Job(job_id=JOB_ID, op="host.sleep", args={"n": 30}), ctx)
+    lines = [json.loads(line) for line in ctx.audit.path.read_text().splitlines()]
+    assert [line["kind"] for line in lines] == ["received", "decision", "execution"]
+    assert (lines[2]["started"], lines[2]["stopped"]) == (False, "abandoned")
+
+
+def test_abandoned_while_running_kills_with_no_reply(
+    make_context: MakeContext, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    stop = threading.Event()
+    ctx = dataclasses.replace(make_context(enabled=["host.sleep"]), stop=stop.is_set)
+    done: list[Any] = []
+    kills: list[bool] = []
+    monkeypatch.setattr(ctx.controls, "kill_done", lambda: kills.append(True))
+
+    def run() -> None:
+        try:
+            done.append(process(Job(job_id=JOB_ID, op="host.sleep", args={"n": 30}), ctx))
+        except Abandoned as exc:
+            done.append(exc)
+
+    thread = threading.Thread(target=run, daemon=True)
+    started = time.monotonic()
+    thread.start()
+    deadline = time.monotonic() + 10
+    while '"kind":"start"' not in (ctx.audit.path.read_text() if ctx.audit.path.exists() else ""):
+        assert time.monotonic() < deadline, "the child never started"
+        time.sleep(0.02)
+    stop.set()
+    thread.join(15)
+    assert time.monotonic() - started < 15
+    assert len(done) == 1 and isinstance(done[0], Abandoned)
+    lines = [json.loads(line) for line in ctx.audit.path.read_text().splitlines()]
+    assert [line["kind"] for line in lines] == ["received", "decision", "start", "execution"]
+    assert (lines[3]["ended"], lines[3]["abandoned"]) == ("killed", True)
+    # A user's kill request, if any, is left as it was: the room's abandonment is not one.
+    assert kills == []

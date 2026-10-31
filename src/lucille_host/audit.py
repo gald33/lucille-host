@@ -12,10 +12,16 @@ what it records:
   ``log_results = true``);
 - ``sent``: the sha256 and size of the exact bytes about to be posted.
 
+The read loop (``loop.py``) adds lines of its own: what it ignored and why, a message it could not
+open, a room it could read no further in, each reply posted or not posted, and the pair's and the
+rooms' events (``link.py``). No line holds the pairing code, the SAS, or a key.
+
 The files rotate by size (``audit.log`` becomes ``audit.log.1``, and so on, keeping
-:data:`KEEP` old files) and are never edited. No key is ever written. The log is user-writable: it
-records, and proves nothing against someone with the user's privileges. The host never derives its
-dedupe or restart state from it, because it rotates.
+:data:`KEEP` old files) and are never edited. One lock, for every log in the process, keeps the
+read loop's threads from writing, or rotating, at once. No key is ever written. The log is
+user-writable: it records, and proves nothing against someone with the user's privileges. The host
+never derives its dedupe or restart state from it, because it rotates. ``lucille-host log`` prints
+its last lines, across the rotated files (:func:`tail`).
 """
 
 from __future__ import annotations
@@ -23,15 +29,20 @@ from __future__ import annotations
 import datetime
 import json
 import os
+import threading
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Final
 
-__all__ = ["KEEP", "MAX_BYTES", "AuditLog"]
+__all__ = ["FILE_NAME", "KEEP", "MAX_BYTES", "AuditLog", "tail"]
 
 MAX_BYTES: Final = 8 * 1024 * 1024
 KEEP: Final = 5
 FILE_NAME: Final = "audit.log"
+
+# Held while a line is written, by every log in the process: the read loop writes from several
+# threads, and a size check, a rotation and an append must not interleave.
+_WRITING = threading.Lock()
 
 
 def _sync_dir(path: Path) -> None:
@@ -79,6 +90,10 @@ class AuditLog:
             separators=(",", ":"),
         ).encode("ascii")
         line += b"\n"
+        with _WRITING:
+            self._append(line)
+
+    def _append(self, line: bytes) -> None:
         try:
             size = self.path.stat().st_size
         except FileNotFoundError:
@@ -116,3 +131,26 @@ class AuditLog:
 
     def sent(self, job_id: str, sha256: str, size: int) -> None:
         self.write("sent", job_id=job_id, sha256=sha256, size=size)
+
+
+def tail(state_dir: Path, limit: int, *, keep: int = KEEP) -> list[str]:
+    """The last ``limit`` whole lines of the profile's audit log, oldest first, read across the
+    rotated files, newest file first. A line still being written (no newline yet) is left out.
+    Each byte outside printable ASCII is shown as ``?``: the log writes only escaped ASCII, so
+    anything else was put there by another hand, and must not reach a terminal as it is."""
+    found: list[str] = []
+    names = [FILE_NAME] + [f"{FILE_NAME}.{index}" for index in range(1, keep + 1)]
+    for name in names:
+        if len(found) >= limit:
+            break
+        try:
+            data = (state_dir / name).read_bytes()
+        except FileNotFoundError:
+            continue
+        lines = [_printable(line) for line in data.split(b"\n")[:-1]]
+        found = lines[max(0, len(lines) - (limit - len(found))) :] + found
+    return found
+
+
+def _printable(line: bytes) -> str:
+    return "".join(chr(byte) if 0x20 <= byte < 0x7F else "?" for byte in line)

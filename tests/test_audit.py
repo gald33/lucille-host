@@ -8,6 +8,7 @@ import json
 import os
 import stat
 import sys
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -226,3 +227,27 @@ def test_each_audit_line_is_synced_before_the_act_it_records(
     # received, decision and start were each synced before the child started; every line was.
     assert when_started == [[1, 2, 3]]
     assert synced == [1, 2, 3, 4, 5]
+
+
+def test_threads_writing_at_once_lose_no_line(state_dir: Path) -> None:
+    """The read loop writes from several threads: a size check, a rotation and an append must not
+    interleave, or a rotation can move a file another thread is about to append to."""
+    log = AuditLog(state_dir, max_bytes=2000, keep=200)
+    each = 150
+
+    def write(thread: int) -> None:
+        for index in range(each):
+            log.write("ignored", thread=thread, index=index, pad="x" * 40)
+
+    threads = [threading.Thread(target=write, args=(n,)) for n in range(8)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    lines = []
+    for path in state_dir.glob("audit.log*"):
+        assert path.stat().st_size <= 2000
+        lines += [json.loads(line) for line in path.read_text().splitlines()]
+    assert sorted((line["thread"], line["index"]) for line in lines) == [
+        (thread, index) for thread in range(8) for index in range(each)
+    ]

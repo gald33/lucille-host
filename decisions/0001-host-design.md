@@ -6,9 +6,11 @@ for this public repository 2026-10-27; the protocol it describes was written out
 skeleton, the guards, CI, the protocol spec (its prose, schemas and fixtures), and, on 2026-10-29: "The
 closed operation set" without `files.search` or limits tightened in the policy; "Execution rules";
 "Local policy and upgrades", except reloading on a local signal; "Audit log"; and, of "Pause, kill and
-shutdown", `pause`, `resume`, `kill` and drain. Not built: pairing, the read loop (and with it the
-envelope checks, dedupe, expiry, restarts and reply posting), what happens on removal on the Lucille
-side, `status`, `log` and `forget`, and the conformance suite.
+shutdown", `pause`, `resume`, `kill` and drain. On 2026-10-30: "Pairing" and its stores, "The read loop"
+(with the envelope checks, dedupe, expiry, restarts and reply posting), what the host does on removal on
+the Lucille side, and `status`, `log` and `forget`, tested against Switchboard's in-process hub and a
+stand-in for Lucille; "Choices made in building pairing and the read loop" lists what that build chose.
+Not built: the conformance suite, `files.search`, the release workflow and `lucille-host verify`.
 
 This record describes the program in this repository, and it governs the host's code. A pull request that
 changes the design updates this record in the same pull request.
@@ -52,7 +54,8 @@ The host:
 - **Library.** The runtime embeds `agent-switchboard` (MIT), pinned `==2.6.*`, base install with no extras.
   Its runtime closure is 11 packages, including `cryptography` and `httpx`.
 - **Only the plain synchronous library is used:**
-  - `pairing.accept`, `pairing.resolve`, `pairing.forget` and `pairing.status`;
+  - `pairing.accept`, `pairing.resolve` and `pairing.forget`. Not `pairing.status`, which resolves
+    every pair over the hub: `status` reads the pair from the host's own store, with no hub call;
   - `switchboard.client.Client`: `post`, `inbox(since=...)` (a non-committing peek), and `read_channels`
     to step past a message it cannot open;
   - the part of `switchboard.sharing` that takes and uses a room Lucille offers: `sharing.touch` reads the
@@ -70,7 +73,8 @@ The host:
   - The only exception is a loopback hub (`http://127.0.0.1:<port>` or `http://localhost:<port>`), and
     only when the local config names it (`--hub`, set by the conformance harness). `status` shows it. A
     code naming a loopback hub without that is refused.
-  - A test will assert that the host never opens a listening socket (pending).
+  - The host opens no listening socket. A test with an audit hook sees none bound while the host
+    pairs, runs and answers a request.
 - **The hub token.** agent-switchboard 2.6.0 sends the managed hub's published token
   (`MANAGED_HUB_TOKEN`) itself to `https://switchboard.lucille-ai.com` when none is configured
   (sb `config.py:586-603`). The live hub admits it (Lucille policy as of 2026-10-19; not proven by this
@@ -115,10 +119,21 @@ The host:
 1. The user adds the computer on Lucille's "Computers" page, which shows a `swbp1_` code once (Lucille
    policy as of 2026-10-27; not proven by this repository).
 2. `lucille-host pair <code>`:
+   - **refuses while a pair is held** ("Disconnect first"): a profile keeps one pair;
+   - **refuses while another `pair` of the profile runs.** It holds `state/.pair.lock` (`os.lockf`,
+     taken without waiting) from before it looks for a pair held until it returns, its question
+     included, so two `pair`s at once cannot both answer a code. The second refuses at once (exit 1)
+     and changes nothing. `pair status`, `pair confirm` and `pair reject` take no such lock: the SAS
+     can be shown, confirmed or rejected in another shell while `pair` asks;
    - **decodes** the code (`pairing.PairingCode.decode`). It refuses the wrong hub or a carried token, and
-     shows the pair's note only after sanitizing it;
+     shows the pair's note only after sanitizing it. With `--code-stdin`, the code is read from stdin,
+     never from the command line;
+   - **resets the local policy** to the fresh one (only `host.describe`, no folder) right before it
+     answers a new code. The earlier policy is set aside, unused, and `lucille-host policy previous`
+     lists it;
    - **accepts** it with the host's own Store and `base=None`, so nothing is written under `~/.switchboard`
-     and no subprocess runs. Measured locally: zero spawns, and only the store's own files written;
+     and no subprocess runs. Tests with an audit hook find no process started, and nothing written
+     outside the profile's own folders and its keyring item;
    - **waits for Lucille to collect.**
      - While waiting it calls `pairing.resolve` every 5 s, and at once on any `swbp1/*` note. The note is
        only a wake: 2.6.0 posts `paired` best effort, and a failed post is not retried on its own
@@ -127,33 +142,62 @@ The host:
      - It stops waiting when the state is `paired`. The SAS reaches the responder on its first resolve
        after the initiator collects.
      - On AlreadyRedeemed, `aborted` or `superseded`, it says the code leaked, and stops.
-     - On `expired`, `never_confirmed` or a void `unsent`, it says to pair again, and stops.
-   - **shows the SAS** and asks the user to type `y` if it matches the code on Lucille's page (that
-     Lucille's page shows the code is Lucille policy as of 2026-10-27; not proven by this repository).
+     - On `expired`, `never_confirmed`, `wrong_hub` or a void `unsent`, it says to pair again, and stops.
+     - Stopping so, it forgets whatever is left of the pair on the computer.
+   - **shows the SAS** and asks the user to type `y` if it matches the one Lucille's page shows (that
+     Lucille's page shows it is Lucille policy as of 2026-10-27; not proven by this repository). `y` or
+     `yes` confirms, `n` or `no` rejects, and any other answer is asked again. The end of stdin, or
+     Ctrl-C, leaves the answer to `pair confirm` or `pair reject`. With `--code-stdin`, `pair` stops once
+     the SAS is shown (`sas_pending`, with the deadline).
+   - **What was typed before the question does not count.** When stdin is a terminal, `pair` discards
+     whatever was typed there before it asks (`termios.tcflush`), so a `y` typed while it waited for
+     Lucille, before anyone could compare, answers nothing; where that cannot be done, it asks nothing,
+     and leaves the answer to `pair confirm` or `pair reject`. Input that is not a terminal (a pipe, a
+     file) is read as given: whoever wrote it chose the answer.
 3. **The host's gate.**
-   - Until the user confirms locally, the host posts nothing and runs nothing.
-   - The gate's deadline counts from when the SAS is first shown on the host. It is about 24 h, chosen to
-     match the deadline of Lucille's own gate (that deadline is Lucille policy as of 2026-10-27; not
-     proven by this repository).
+   - Until the user confirms locally, the host touches nothing, accepts nothing, posts nothing and runs
+     nothing.
+   - The gate opens only on a SAS the host has shown. Until a command has shown it, the gate stays shut
+     and has no deadline: `run` resolves the pair but shows no SAS, and `pair confirm` refuses a SAS the
+     host has not shown (`sas_ready`).
+   - The gate's deadline counts from when the SAS is first shown on the host, by `pair` or `pair status`.
+     It is 24 h, chosen to match the deadline of Lucille's own gate (that deadline is Lucille policy as of
+     2026-10-27; not proven by this repository).
    - `lucille-host pair confirm` and `pair reject` answer later, after the interactive `pair` has exited.
-     `pair status` shows the SAS again.
-   - `n`, `pair reject`, or the deadline passing forgets the pair.
+     `pair status` reports `none`, `waiting`, `sas_pending` or `confirmed`, and in `sas_pending` shows the
+     SAS again, with the deadline. A pair with no gate record cannot be confirmed on the host: `pair`,
+     `pair status` and `pair confirm` each refuse it (`refused`), showing no SAS.
+   - `n`, `pair reject`, or the deadline passing with the gate still shut forgets the pair. A gate opened
+     in time has no deadline.
+   - The host writes no copy of the SAS of its own: neither the gate's record nor the audit log holds it
+     (the pair record the library keeps in the store does). `lucille-host status` sends the user to
+     `pair status` rather than showing it, and says `sas_ready` while the SAS has reached the host and no
+     command has shown it.
    - Lucille has its own gate on the same comparison, and sends no request before it opens (Lucille
      policy as of 2026-10-27; not proven by this repository). The host's gate does not depend on it:
      nothing runs on the host before the host's own gate opens.
+   - **Two refinements, accepted by the maintainer on 2026-10-31.** The first version of this record said
+     that the host **shows the SAS** and asks the user to type `y` if it matches the code on Lucille's
+     page, and no more on when `y` counts. Two of the build's additions to this gate, both above, are the
+     ones the maintainer accepted, as written in the pull request that built pairing: `pair confirm`
+     refuses a SAS that no command has shown, and at a terminal, input typed before the question is
+     discarded, with no question asked when it cannot be. The build added a third, also above, that was
+     not part of that acceptance: a pair with no gate record cannot be confirmed on the host (`refused`).
 
 **The Store.**
 - The host implements Switchboard's `pairing.Store` Protocol over the OS keyring: one item per profile,
-  plus a file lock.
-- **Tested against the template, measured locally.** A keyring-shaped store passed the eight cases of
-  v2.6.0's template file (`tests/test_pairing_store.py`) that exercise the store under test.
+  plus file locks ("Choices made in building pairing and the read loop" says which).
+- **Tested against the template.** The host's store passes the eight cases of v2.6.0's template file
+  that exercise the store under test (vendored as `tests/vendored/test_pairing_store.py`).
   - The ninth case, the parametrized `directory` one, tests `PairStore`.
-  - That run used the in-process `switchboard.testing` hub with starlette 1.9.0. It failed with
-    starlette 1.6.0.
+  - It runs on the in-process `switchboard.testing` hub, which needs starlette 1.9 or later (the
+    `[conformance]` extra). Measured locally, it failed with starlette 1.6.0.
   - The test reaches into the store's instrumentation, so a thin wrapper exposes `held`, `locks`, `broken`
     and `enabled` for it.
 - With `--store-file`, the host uses `PairStore(<state dir>/pairs, env={})` (mode 0600) and says that this
-  is weaker.
+  is weaker. Its storage failures (a full disk, a folder it cannot write) reach the rest of the host as
+  the keyring store's do, as a failure of the store: 2.6.0 counts a plain `OSError` among the hub's errors
+  (`pairing.hub_errors()`), and the host never reads a store it cannot write as a hub out of reach.
 - **Never `~/.switchboard/pairs`.** A user's own Switchboard CLI or MCP listener would then park in the
   host's pair, and could act in it.
 - **The share store follows the same rule.** 2.6.0's `ShareStore` defaults to `~/.switchboard/pairs`
@@ -163,9 +207,13 @@ The host:
   (sb `docs/sharing.md:533-536`). The host keeps room keys as it keeps the pair: in its OS-keyring Store,
   beside the pair, or in a 0600 file only under `--store-file`, with the same warning
   (spec/PROTOCOL.md §18).
-- The host refuses insecure keyring backends it can recognise, and refuses to run as uid 0.
+- The host refuses insecure keyring backends it can recognise, and refuses to run as uid 0. It recognises
+  keyring's `fail` and `null` backends, a chain with nothing in it, and a backend named `PlaintextKeyring`,
+  as keyrings.alt names the one that writes secrets unencrypted to a file of its own (keyrings.alt 5.0.2),
+  and a chain that holds any of them. `pair --store-file` pairs where the keyring stores nothing, since such
+  a keyring holds no pair.
 
-**Hazards neutralized,** each with a conformance test:
+**Hazards neutralized,** each with a test:
 - **The signer socket.**
   - Every Switchboard client attaches to any unix socket at its signer path when it is built. It sends
     `{op: pubkey}` at construction, and then the plaintext of each message it signs
@@ -175,16 +223,21 @@ The host:
   - So, before building any Switchboard client, pairing's included, the host sets `XDG_RUNTIME_DIR` for
     its own process to a private 0700 directory under its state dir. `signing.attach` then finds no
     socket.
-  - It also sets `client.signing = SigningIdentity.generate()` on every client it builds for
-    `pair:<name>` and for each accepted room.
-  - If the private `XDG_RUNTIME_DIR` disturbs keyring's Secret Service lookup, the host sets it only
-    around Switchboard client construction.
-  - A test plants a socket at the signer path for the host's agent id, both under the user's real
-    `XDG_RUNTIME_DIR` and under `/tmp/switchboard/` with it unset. It runs pair, request and reply, and
-    asserts the socket is never connected to.
+  - It also sets `client.signing = SigningIdentity.generate()` on every client it builds, pairing's
+    included, and builds none unless `XDG_RUNTIME_DIR` names that folder.
+  - The variable is set for the whole process. Read from the source, not tried on a desktop: keyring,
+    and the libraries it uses for the Secret Service on Linux, never read `XDG_RUNTIME_DIR` (jeepney
+    finds the session bus from `DBUS_SESSION_BUS_ADDRESS` alone). From this it is inferred, unchecked,
+    that the private folder does not disturb that lookup. Other keyring backends were not checked.
+  - A test plants a socket at the signer path for the host's agent id, both under the `XDG_RUNTIME_DIR`
+    the host was started with and, with that variable unset, under the system temporary folder, where
+    2.6.0 looks then (sb `signing.py:245-247`). It runs pair, request and reply, and asserts the socket
+    is never connected to.
 - **`SWITCHBOARD_*` in the environment.** The host refuses to start if any is set.
-- **Clock skew.** Writes fail with 403 beyond ±300 s of the hub's clock. The host reports that as its own
-  status, not as a generic error.
+- **Clock skew.** Writes fail with 403 beyond ±300 s of the hub's clock. `status` shows that as its own
+  state (`clock: skewed`), not as a generic error, once `run` has met it: on a reply it posted, or on a
+  write the library made for it in a touch, an accept or a leave. `pair` warns when the hub refuses its
+  answer for it. `status` reads what `run` wrote, so it shows nothing of the kind before `run` has run.
 
 ## The read loop
 
@@ -214,12 +267,14 @@ The host:
   `sharing.accept`, so a failure there leaves the room at once; they are run again for every held room at
   start and before each read or post in it. A refusal by the other three checks is not final: the offer
   stays pending and is considered again at start, when the SAS gate opens, whenever the host leaves a
-  room, and whenever a touch reports a pending offer `left` or `withdrawn`. A newly accepted room replaces
-  the old one only once it has passed the hub and token checks, and the host records that replacement
-  before it accepts, so a restart completes it. While more than one offer over the pair is pending the
-  host accepts none of them, since nothing it may read orders them; it first drops from its record any
-  offer its share store no longer holds (spec/PROTOCOL.md §6). The host never accepts again a room it has
-  left.
+  room, and whenever a touch reports a pending offer `left` or `withdrawn`; an accept that failed without
+  refusing the offer (the hub or the pair room could not be read) is tried again after the next touch that
+  reads the pair room. A newly accepted room replaces the old one only once it has passed the hub and token
+  checks, and the host records that replacement before it accepts, so a restart completes it. While more
+  than one offer over the pair is pending the host accepts none of them, since nothing it may read orders
+  them; it first drops from its record any offer its share store no longer holds (spec/PROTOCOL.md §6). The
+  host never takes back a room it has left: one offered again is accepted and left at once, unused, since a
+  pending offer shows no workspace (spec/PROTOCOL.md §6, No re-accept).
 - **Read with a since-cursor peek:** `Client.inbox(channels=[...], since=cursor, wait=25, limit=200)`,
   with a client timeout of 40 s, and one cursor per room (this design's reading: hub sequence numbers
   are global across rooms, below, so one shared cursor could skip a room's messages).
@@ -234,6 +289,12 @@ The host:
       unreadable one. It logs that one's seq, sets the cursor to it, and resumes the peek.
     - If no unreadable row above the cursor is in the window, it reports `read_stuck` and does not
       advance.
+  - **A body that opens with the room's key but cannot be read** (not JSON, or nested more than 64 levels
+    deep) is handled the same way. 2.6.0 raises `DecryptionError` only for a body that does not open; its
+    JSON parser raises anything else past it (sb `crypto.py:365`, `client.py:1473-1481`), so the peek
+    fails with an error the loop does not expect, and so does the recovery read, which marks only a
+    `DecryptionError` unreadable. The host's own readers, in the work rooms and in pair:<name>, give the
+    room's cipher a wrapper that raises `DecryptionError` for such a body (spec/PROTOCOL.md §19).
 - **How the cursor advances.** `limit` is per channel on the hub, and hub sequence numbers are global
   across rooms (sb `store.py:76-77`). So:
   - the cursor advances only to the lowest last seq among channels whose page came back full (the rule
@@ -482,12 +543,81 @@ policy changed. A plain hash would let anyone holding it confirm a guessed folde
 
 ## CLI verbs (v0.1)
 
-`pair`, `pair status`, `pair confirm`, `pair reject`, `run`, `status`, `ops list|enable|disable`,
-`roots add|remove`, `pause`, `resume`, `kill`, `log`, `forget`.
-- `status` shows the version, policy check, enabled ops, pair state, last hub contact, clock skew, and a
-  loopback hub if one is configured.
-- `forget` calls `pairing.forget`, which deletes the store item and then tells Lucille, best effort. It
-  prints whether Lucille was told.
+`pair [CODE] [--code-stdin] [--hub URL] [--store-file]`, `pair status`, `pair confirm`, `pair reject`,
+`run`, `status`, `log [--limit N]`, `forget`, `ops list|enable|disable`, `roots list|add|remove`,
+`policy previous`, `pause`, `resume`, `kill`. They print text, with the state word first where there is
+one (`waiting`, `sas_pending`, `confirmed`, `leaked`, `expired`, ...).
+- `status` makes no hub call. It shows the version, the policy check, the enabled operations and folder
+  aliases, whether the host is paused, where the pair is kept, the hub and a loopback hub if one is
+  configured, the pair's state (never its SAS: `pair status` shows that), each work room held or that it
+  holds none (with the check its last room failed, when it left that room on its own), and what `run`
+  last saw: whether it runs, its last contact with the hub, and the clock skew, which shows as its own
+  state past ±300 s.
+- `log` prints the last lines of the audit log, oldest first, across its rotated files.
+- `run` holds `state/.run.lock` (`os.lockf`, taken without waiting) for as long as it runs: a second `run`
+  of the profile, in another shell or the same process, refuses at once (exit 1) and changes nothing,
+  since two would each read and answer every request. `run` refuses a pair with no gate record, which
+  can never be confirmed on the host, as `pair status` and `pair confirm` do.
+- `forget` leaves the pair's work rooms, then calls `pairing.forget`, which deletes the pair from the
+  store and then tells Lucille, best effort. It prints whether Lucille was told. It marks every room
+  abandoned in the room record before the first leave, and holds the record lock until it is done,
+  through hub calls that can each take up to the client's timeout. A `run` going at the time does not
+  wait for that lock to stop its work in those rooms: its worker, readers and poster read the room
+  record and the gate's record themselves, with no lock, before each request, read and post and every
+  0.05 s while a child runs. So a request running from a marked room is killed then, with no reply, and
+  nothing more starts from it. `run` itself stops at its first step once `forget` is done (until then a
+  drain waits too), by the gate's record: `run` notes which record it started with (the pair's name, and
+  when the record was made), and a record that is gone, names another pair, or was made for another
+  pairing under the same name stops it, whether or not Lucille was told. Stopping so, it touches nothing
+  of what the profile holds, which may already be a new pair's. A stop signal (SIGTERM, SIGHUP, Ctrl-C)
+  that arrives while `run`'s main thread waits for `forget` is not lost, and does not end the wait: once
+  `forget` is done, `run` stops, for its pair when `forget` forgot it (`none`, with no drain), and
+  otherwise by draining. The request running from a marked room is killed at once all the same, since
+  `forget` marked its room first.
+- A command that found the pair held, and finds once it holds the record lock that another command
+  forgot it meanwhile (a second `forget`, `pair reject`, the deadline, or a resolve or an answer that
+  found the pair over), does not forget it again: it says the pair is gone (`none`, exit 1, as `forget`,
+  `pair reject` and `pair confirm` say when no pair is held at all), and neither tells Lucille again nor
+  says that Lucille could not be told. `forget` and `pair reject` judge so by the pair being no longer
+  held, or by its gate record having been made since, for another pairing under the same name, which
+  they leave as it is. A command's resolve judges so only when the library holds no such pair
+  (`unknown`). When a resolve says the pair is over in any other way (`ended`, `leaked`, ...), the
+  library may have dropped the pair itself, so it is forgotten as before and its rooms left, with a gate
+  record or without one. A touch of `run`'s can drop it too: the library resolves the pair within the
+  touch (sb `sharing.py:1082-1090`), and drops it when the pair room says this side ended it. `run`
+  then resolves at once, in the same step and under the same record lock, whatever back-off a failed
+  resolve left owed (the library makes no hub call for a pair it no longer holds), and finds no such
+  pair (`unknown`); its gate record, intact, shows that no other command forgot it, so what is left is
+  forgotten as after `ended`, and `run` says the pair is gone (`none`).
+- Every resolve (`pair`'s wait, `pair status`, `pair confirm`, a step of `run`) and the answer to a code
+  are made under the record lock, for three reasons. A `forget` or `pair reject` comes before a resolve
+  or after it, never within it: made while the library reads the pair room, it would forget the pair
+  under it, and the library, saving what it read, then says that the pair was forgotten as `ended` (sb
+  `pairing.py:2644-2647`), so `pair` would say the pair was ended, and forget it a second time. A pair
+  the library drops within the call (this side ended it, the code leaked) is forgotten here by that
+  call before another command can act on it: by a resolve with its own lines in the audit log, by an
+  answer with none, since the log never had that pair as accepted. And the answer's gate record and the
+  pair the library saves within it come together: `forget` with no pair held takes a gate record with no
+  pair for one a dropped pair left, and deletes it (below), which between the two would be the new
+  pairing's record, and that pair could never be confirmed. `pair`'s wait lets the lock go
+  between its resolves, so another command waits for the resolve under way, not for the wait. `pair
+  status` and `pair confirm` hold the lock from their resolve to their judgement, so that a pair another
+  command forgets meanwhile is never said to be `waiting`.
+- While the pair is held, a work room that cannot be left keeps it (`error`; `forget` tries again). Once
+  the library has dropped the pair, a room that cannot be left keeps nothing: the gate record is deleted
+  all the same, the command says that the pair is gone and that `forget` leaves the room (`error`), and
+  `lucille-host status` says so of the room; it says so too of a room held over a pair this computer no
+  longer holds that a process stopped part way left, and of the room an accept a stop interrupted may
+  have kept over it. With no pair held, `forget` leaves the work rooms
+  still held over a pair this computer no longer holds (with the one an accept had kept when a stop
+  interrupted it), deletes that pair's gate record, drops how far each room was read, and says so
+  (`left`, exit 0), telling Lucille nothing. A command that finds the pair gone, as above, leaves such
+  rooms too before it says so.
+- `forget`'s own leave can have the library drop the pair: a leave touches the pairs on the room's
+  list (sb `sharing.py:1733`), and the touch drops a pair whose pair room says this side ended it.
+  `forget` then says that Lucille was told, since the pair room says that end already, which is what
+  telling Lucille writes there, rather than asking the library to forget a pair it no longer holds and
+  saying that the hub could not be reached. A room it cannot leave after that keeps nothing, as above.
 - `--profile <name>` selects a separate config dir, state dir and store, so that two computers can be
   simulated on one machine.
 
@@ -564,8 +694,8 @@ That nobody else pairs until then is Lucille policy as of 2026-10-27; not proven
 3. **Run** the suite: install `lucille-host[conformance]==X` into a fresh venv, then run
    `python -m lucille_host.conformance` offline, against a local Switchboard hub it starts. It attempts
    each widening listed under "Host invariants".
-4. **Watch.** `lucille-host log` and `status` show every request, every local decision, and a fingerprint
-   of everything sent.
+4. **Watch.** `lucille-host log` shows every request, every local decision, and a fingerprint of
+   everything sent; `status` shows the pair, its work rooms, and when the host last reached the hub.
 
 **What verification cannot establish:**
 - anything about what Lucille's backend does with a reply;
@@ -637,8 +767,8 @@ template test, which needs that hub's injected clock. It may spawn only the loca
 |---|---|
 | Nothing Lucille sends can widen what the host permits | Conformance tries each of these: an unknown op, a not-enabled op, extra keys (`exe`, `argv`, `env`, `cwd`, `timeout`), policy- and update-shaped fields, traversal, an absolute path, a symlink escape, a file named `--version`, and oversize args. Each is refused with the right code, the policy digest is unchanged, and the spawn count is 0. `caps` above the host's own are not refused, but the effective cap never exceeds the host's own |
 | No shell; one spawn site; children get a built environment and no key | The AST lint. A fixture that dumps its environment shows only allowlisted keys |
-| Nothing runs before the local SAS confirmation | A fake Lucille posts a request before the user confirms: no spawn, no reply. `pair confirm` after the code has expired then opens the gate |
-| One run per job id, never after `not_after` | A duplicated request runs once. An expired request is refused with no spawn. A restart between a decision to run and sent gives `failed interrupted`, with no second run; a refusal not yet sent is re-posted unchanged |
+| Nothing runs before the local SAS confirmation | A fake Lucille offers a room and posts a request before the user confirms the SAS: no touch, no accept, no spawn, no reply; `pair confirm` before the host has shown the SAS confirms nothing; once the SAS is shown and confirmed, the request runs. At `pair`'s prompt on a terminal, a `y` typed before the question is discarded. `pair confirm` after the code has expired still opens the gate. `n`, `pair reject` and the deadline each forget the pair, and a confirmation made in time is never expired by `run` or `pair status` judging the gate beside it |
+| One run per job id, never after `not_after` | A duplicated request runs once. A second `run` of the profile refuses while one runs, and two processes writing the journal at once never both take a job id. An expired request is refused with no spawn. A restart between a decision to run and sent gives `failed interrupted`, with no second run; a refusal not yet sent is re-posted unchanged |
 | Only `lucille.exec`, in a room Lucille offered over the host's pair and the host accepted, is acted on | A request on `pair`, in `pair:<name>` on any channel, or in a room not offered over the host's pair or not accepted, is ignored. A `swbp1/paired`, `moved` or `ended` note only triggers a resolve, and a `swbp1/shared` note only a share read |
 | No request is skipped | A test fills `lucille.exec` past one page: none skipped. A heal mid-stream does not move the work room, but counts as a suspected leak (spec/PROTOCOL.md §9): the request in flight in the old room is killed with no reply, the host leaves that room, and a request Lucille posts in the replacement room before the host accepts it still runs |
 | The host never invites anyone into its pair's rooms, and offers no room of its own | No invite or `share_new` call exists, and no verb makes one (lint plus test). It only accepts Lucille's offers. 2.6.0's accept writes the host's record back to Lucille carrying that same room's offer, the sharer's "accepted" (sb `sharing.py:1546-1550`), so no test asserts that the host writes no offer record |
@@ -646,7 +776,7 @@ template test, which needs that hub's injected clock. It may spawn only the loca
 | Output is bounded, decodable and path-free | A 1 MiB output comes back truncated and flagged, and the serialized reply stays under 256 KiB. Non-UTF-8 and NUL output decode without U+0000 or surrogates. No reply contains a root's realpath or `$HOME` |
 | The host's stores and Switchboard footprint are its own | No write under `~/.switchboard`, from the pair store or the share store, no subprocess from pairing, a planted signer socket is never connected to, and the Store template test passes |
 | An upgrade never runs a changed op under old consent | Change an enabled entry's definition, then upgrade: the entry is disabled |
-| No listening socket | Socket test |
+| No listening socket | An audit hook sees no socket bound while the host pairs, runs and answers a request |
 | Every release comes from a hosted runner and environment `pypi` | The workflow lint, and a post-publish provenance check |
 
 ## Threats the host bounds
@@ -654,31 +784,202 @@ template test, which needs that hub's injected clock. It may spawn only the loca
 | Threat | What bounds it | What is left |
 |---|---|---|
 | Compromised or prompt-injected Lucille backend | the release catalog, enabled ops and roots; v0.1 is read-only; only `host.describe` is on after pairing; `pause` and `kill` work offline | anything enabled ops can read under enabled roots, while the host runs |
-| Intercepted or phished pairing code | the code must name Lucille's hub and carry no token; nothing else is accepted except a loopback hub the local config names (for conformance); the SAS is compared and confirmed on both screens (Lucille's screen: Lucille policy as of 2026-10-27; not proven by this repository) | a user who confirms without comparing |
-| Someone else's pairing code (an attacker pairing the computer to themselves) | the hub check; the local SAS gate; only `host.describe` enabled after pairing | a user who confirms a mismatched SAS, then enables ops |
+| Intercepted or phished pairing code | the code must name Lucille's hub and carry no token; nothing else is accepted except a loopback hub the local config names (for conformance); the SAS is compared and confirmed on both screens: the host shows it and asks for `y` if Lucille's page shows the same (Lucille's screen and its own confirmation: Lucille policy as of 2026-10-27; not proven by this repository) | a user who confirms without comparing |
+| Someone else's pairing code (an attacker pairing the computer to themselves) | the hub check; the local SAS gate, which catches this only when the user compares against Lucille's own page; only `host.describe` enabled after pairing | a user who confirms the SAS the attacker shows (it matches the host's), or confirms without comparing, then enables ops |
 | Leaked `pair:<name>` key, offered work-room key, or pair secret | Only two places hold the pair, and both hold it with the `pair:<name>` key: the host's store (local, owner-only, same-user malware is out of scope) and Lucille's database (encrypted with Lucille's master key: Lucille policy as of 2026-10-27; not proven by this repository). Signing requests with a key pinned at pairing would not help, because every leak path found exposes that key with the pair. The response is to remove the computer, or `forget`, and pair again. v0.1 has no heal verb. This analysis was written for `pair:<name>`'s derived key. That key opens nothing shared (sb `docs/sharing.md:526-528`). The offered work rooms' keys sit in each side's share store as well as in the pair room's offer records, and of a share store, "A copy of it opens every room in it" (`:533-536`). That every leak path exposes those keys with the pair was not re-checked for the offered rooms. spec/PROTOCOL.md §18 states what a room's key opens (every message still on the hub in that room; epoch rotation does not bound it), and §19 that nothing in v1 detects a leak of a room's key alone | the holder can read and forge traffic, and ask for enabled ops until then |
 | Malicious payload (metacharacters, traversal, flag or env injection) | schemas, argv only, `--`, paths resolved one name at a time beneath their folder, the built environment, conformance | none known |
 | Malicious release, or compromised maintainer account | protected tags, the `pypi` environment, which needs the repository owner's approval, attestations (they prove where a release was built, not what it does), a public diff of the catalog and `CLAIMS.md`, exact pins in the lock CI uses (see "Packaging"), no auto-update | a validly attested malicious release from an account that holds both tag and environment rights |
 | Compromised dependency, including `agent-switchboard` | minimal dependencies, exactly pinned in the lock CI uses (an install with `pipx` or `uv tool` resolves the declared ranges; see "Packaging"); Switchboard's own provenance checked | dependency code runs with the host's privileges |
 | Same-user malware | out of scope, and stated | it can read the store, edit site-packages and rewrite the log |
-| Another local user planting a signer socket | the private `XDG_RUNTIME_DIR` and the generated signing identity | not tested cross-user; the conformance test is same-user |
+| Another local user planting a signer socket | the private `XDG_RUNTIME_DIR` and the generated signing identity | not tested cross-user; the test is same-user |
 | Hazards in external binaries (config files, flags) | each catalog entry is reviewed; absolute paths; the env allowlist; `rg --no-config` | each new op widens this surface |
+
+## Choices made in building pairing and the read loop
+
+The spec and the sections above leave these to the host. Each was made with the code on 2026-10-30 or
+2026-10-31, and each could be made another way in a later pull request that updates this list.
+
+**The stores.**
+- **One keyring item per profile.** Service `lucille-host`, the profile's name as user name. It holds one
+  JSON document: the pair store's records, pending handshakes and verdicts, and the share store's own
+  document under `shared`. The pair store and the share store are two views of it (`KeyringPairs` and
+  `KeyringRooms` in `_switchboard.py`). One item is one keychain entry to unlock and to remove.
+- **Three lock files** in the state folder: the pair store's lock, the share store's (2.6.0 asks for a
+  second one, sb `sharing.py:241-244`), and one around each read-modify-write of the item, never held
+  across a hub call. Each is `os.lockf` beside a `threading.RLock`, one lock object per file per process:
+  `lockf` keeps other processes out, not other threads. The kernel sees processes, so it can refuse a lock
+  with `EDEADLK` when one thread of `run` is inside the item's lock while another waits for a lock that a
+  command holds as it waits for the item's. No lock is ever taken while the item's is held, so that is no
+  deadlock: the host asks again after a pause, 10 ms doubling to 0.5 s.
+- **A fourth lock file**, `.record.lock`, is held while the record of offers and rooms is read, changed
+  and written whole, so that `run` and another command (`forget`, say) never change it at once. Without
+  it, `forget` could write over a room `run` had just recorded, and that room and its keys would stay in
+  the share store after the pair was gone. `run` holds it through each step of its session, hub calls
+  included, so a command waits for that step to end; and `run`'s main thread waits for a command's
+  (`forget`'s leaves and its note to Lucille, or the resolve of `pair status`). The other commands hold
+  it around each resolve, and `pair` around its answer to the code, from the gate record's write to the
+  library's save of the pair, hub call included: a forget made within a resolve is one the library calls
+  `ended`, the library may drop the pair within the call, and `forget` with no pair held takes a gate
+  record with no pair for one a dropped pair left ("CLI verbs" says more). `run`'s other threads never
+  take it: they only read the room record and the gate's record, each written whole, to stop the work of
+  a room another command marked.
+- **Three more**: `.run.lock`, held by `run` for as long as it runs, so that a profile runs one `run`;
+  `.pair.lock`, held by `pair [CODE]` until it returns, so that a profile runs one `pair`; and
+  `.journal.lock`, held around each read and each read-modify-write of the journal. The first two are
+  taken without waiting: a second `run` or `pair` refuses rather than waits.
+- **Two more, for the local settings**: `.controls.lock` in the state folder, held while `pause`,
+  `resume` or `kill` writes its flags (each goes ahead without it where the filesystem cannot lock,
+  `controls.py`); and `config/.policy.lock`, held by a verb that changes the policy from reading the file
+  to writing it (such a verb refuses where the filesystem cannot lock).
+- **A signal does not end a wait for a lock file.** `run`'s handlers note the signal (a second Ctrl-C
+  while draining also asks for a kill) and return. Python retries most calls after such a signal (PEP
+  475), but not `os.lockf`, which raises `InterruptedError` (measured on 3.11 and 3.13): so every wait
+  for one of the host's lock files asks again (`state.wait_for_lock`). That holds on every thread: the
+  handler runs on the main thread, but a signal sent to `run`'s process (a SIGTERM, say) can interrupt
+  a wait on any of its threads. Without that, a stop signal that came while `run` waited for a command's
+  lock would stop `run` with an error, skipping its drain. A handler that raises, as Ctrl-C's default
+  one does, still ends the wait, and the lock file it opened is closed.
+- **Keyring writes are throttled, not measured.** A save that changes only when the pair or a room was
+  last read or used is skipped while the item was written less than an hour ago; every other change, and
+  every delete, is written before the call returns. In a simulated day of 5-minute touches and a room
+  look-up before each read, the item is written 24 times (`tests/test_rooms.py` holds it to at most 30);
+  without the throttle the same day wrote it 4032 times, measured once. The stamps it delays decide only
+  whether a pair has gone unread for days, and what the library shows about a room. What a keychain write
+  costs on macOS, and whether it prompts, is not measured.
+- **`--hub` and `--store-file` are options of `pair`,** saved in `config/host.json`, which every later
+  verb reads; a file that cannot be read stops the verb. `--hub` takes only `http://127.0.0.1:<port>` or
+  `http://localhost:<port>`. Under `--store-file` the host warns, wherever the store is opened, that the
+  file store keeps the pair secret and the rooms' keys unencrypted, in files only the user can read, and
+  that this is weaker than the OS keyring.
+- **`forget` leaves the keyring item in place,** holding no pair and no room key (what 2.6.0 keeps of a
+  room left holds none). It also drops how far each room was read, and keeps the journal: a job id is
+  answered once per profile, whatever pair it came over.
+
+**Pairing and the gate.**
+- **The gate's record** is `state/pair.json`: the pair's name, the hub its code named (check 3 compares
+  against it), when the record was made, when the SAS was first shown on the host and the deadline that
+  sets, when the gate opened, and when the first touch after that ran. It holds no SAS, no code and no
+  key. It is written before the code is answered and deleted whenever the pair is forgotten: only the
+  record of the pair forgotten, made when that pair was, so a record another pairing wrote since stays. A
+  record that is missing, or names another pair, keeps the gate shut. The record is written, changed,
+  deleted and its deadline judged only under the record lock (`state/.record.lock`) that `run` holds
+  through each step, the other commands around each resolve and the answer to a code, and forgetting
+  throughout: so a `pair confirm` made in time is never expired by a `run` or a `pair status` that read
+  the record before it, no showing or confirmation writes a record back for a pair being forgotten, and
+  `pair reject` (or `n`) beside a `pair confirm` either finds the gate open, and refuses, or forgets the
+  pair before the confirm finds it gone. Forgetting leaves the work rooms only while the record of rooms
+  names that pair, or a pair no longer held.
+- **The policy is reset right before a new code is answered,** once its hub and token checks pass: a
+  policy that is not the fresh one moves to `config/policy.previous.toml`. A fresh or missing one is never
+  set aside over an earlier one. Before the answer, not after, so that a stop between the two never leaves
+  the old folders enabled for the new pair; a code the library then refuses has still reset the policy.
+- **Exit codes:** 0 when `pair` stops at `sas_pending` (with `--code-stdin`, when stdin ends, or when
+  what was typed ahead at the terminal cannot be discarded) or the gate opens, and when `run` is drained
+  or the pair ends; 1 for every refusal and every pairing that ends early, `n` at `pair`'s prompt among
+  them (`rejected`), with the state word first on stderr.
+- **The startup checks** (not root, no `SWITCHBOARD_*` variable, a keyring backend that stores, a private
+  runtime folder) run for the pairing verbs, `run`, `status` and `forget`; the other verbs touch no store
+  and no hub.
+
+**The work rooms.**
+- **The record of offers and rooms** is `state/rooms.json` (`rooms.py`): each offer as the library first
+  notes it, before anything is decided; the accept about to be made and the rooms it replaces; the rooms
+  held, under names the host chooses (`room-<n>`, never reused, so no name Lucille chose collides with one
+  the host holds); every room this profile left, by workspace, kept across pairs; and the check its last
+  room failed when it holds none. 2.6.0 reports a pending offer once, as an `offered` note written only
+  when the offer is first seen (sb `sharing.py:842-846`), and `sharing.status`, which lists the offers
+  waiting, is not among the calls "Transport" lists, so the record is the host's own. A call returns only
+  the notes it made, and an accept that refuses returns none, though its own read of the pair room may
+  have noted a new offer (sb `sharing.py:1583-1627`). So the host reads the notes from its share store,
+  past the last id it read (ids only grow, `:389-393`), after every sharing call, refused ones included.
+  It keeps that id in memory: a stop between a note and the record is the case spec/PROTOCOL.md §19
+  leaves open.
+- **A room left is never taken back.** None of the four sharing calls shows a pending offer's workspace,
+  and 2.6.0 makes an offer pending again when a room this computer left is offered over a new pair. So such
+  a room is accepted and left at once, as a room failing check 3 or 4 is (spec/PROTOCOL.md §6 says so).
+- **An accept that fails in passing is tried again.** When the hub, or the pair room, could not be read
+  inside an accept, the offer is considered again after the next touch that reads the pair room: the
+  library notes an offer once, so no later touch would report it again. When the local name the host chose
+  is taken, the next consideration chooses another.
+- **An offer is dropped from the record when `resolve_room` says `unknown`,** and not on `left`: it looks a
+  name up as a held room, then a room left, then an offer, so an offer named like a room left reads `left`
+  while it is still pending.
+- **A move of pair:<name> is found by its generation,** compared with the one the record holds, never by
+  the library's `moved_from`, which only the resolve that made the move sees. A touch that read the pair
+  room compares the generation the store keeps too, and asks for a resolve when it differs: a move
+  another command followed first (`pair status` resolves) leaves that touch nothing to move and no note
+  to write. The rooms are abandoned before the new generation is recorded, the room of an accept a stop
+  interrupted among them, unjudged: it was accepted over the pair as it stood before the move.
+- **Resolves back off** after a failure: the hub's `retry_after` on a 429, otherwise 1 s doubling to 30 s
+  plus up to a quarter more, drawn from `secrets`; a resolve that could not read the pair room counts as
+  a failure. 2.6.0 does not raise when the hub turns away its read of the pair room: `pairing.resolve`
+  returns what the computer last saw, unchecked, with the hub's error in `Resolution.hub_error`
+  (sb `pairing.py:2278-2290`), and the host takes `retry_after` from that error. `pair`, waiting for
+  Lucille, waits that long too, when it is longer than its own 5 s. A hub error another part of the host
+  meets asks for a resolve only when none ran in the last 30 s. A touch that finds the pair gone has the
+  resolve made at once, whatever back-off is owed (above).
+- **The 5-minute touch, and `run`'s resolves, count on the wall clock,** the clock the library's calls
+  are given. When that clock reads more than a minute earlier than the last touch (it was set back), a
+  touch is due at once, and the rhythm counts from it. So is a resolve when it reads more than a minute
+  earlier than the last resolve, whatever counted from that one: at least daily, every 5 s while Lucille
+  has not collected the answer, and the wait after a failure. No offer is taken while a resolve is owed,
+  so before this a clock set back an hour after a failed resolve held up every room Lucille offered for
+  an hour. A smaller step back, as a clock's jitter, makes no touch or resolve of its own: it puts the
+  next off by as much, so a clock that steps back a little between steps does not touch on every step,
+  each a hub call. `pair`'s own wait for Lucille counts on the monotonic clock. Once the gate is open,
+  the touch still comes every 5 minutes, and a touch resolves the pair itself (sb `sharing.py:1082`).
+
+**The read loop and replies.**
+- **The journal** is `state/journal.json` (`journal.py`): for each job id, its room, sequence number,
+  receipt time, prune time, the request's body (kept only up to 16 KiB, and only until it is decided), the
+  decision, the refusal's bytes (until they are sent), whether the reply was sent, and whether its room was
+  abandoned. The entry is written before the request is decided, the decision right after the audit log's
+  `decision` line and before anything runs, and `sent` once the hub accepted the post. Writing the entry
+  takes the job id: the look for an entry and the write are one step, so a job id another thread or
+  process took first is a duplicate. Each read and each read-modify-write holds `.journal.lock`
+  (`os.lockf` beside a thread lock), so neither another thread nor another process writes in between.
+  A change to an entry another write has pruned changes nothing: past its prune time the request is
+  settled. A request received
+  and not decided before a restart is decided afresh from that body: the range of its `not_after` from the
+  time it was first received, its expiry at the time of the new decision.
+- **Cursors** are kept per room workspace in `state/cursors.json`, each written after its message's audit
+  lines and journal entry. pair:<name>'s is not kept: its notes are wakes, and a start resolves and
+  touches anyway. A new room, or pair:<name> after a move, is a new workspace, so it is read from 0.
+- **Replies are posted by a thread of their own,** so the next request does not wait while a reply is
+  retried, and a write outage (a skewed clock, say) does not expire every request behind it. Each reply
+  retries with its own back-off until its TTL would have run out; it is then dropped and logged.
+- **Waking from sleep** is a wall clock that ran more than 30 s further than the monotonic clock between
+  two of `run`'s once-a-second looks (inferred: monotonic clocks stop in suspend on macOS and Linux; not
+  measured on either).
+- **The clock skew** `status` shows is measured on the host's own posts: the hub's `created_at` minus the
+  local time halfway through the call. It shows as `skewed` once the hub refused a write with a signature
+  outside its time window (sb `writekey.py:223-224`): one of the host's posts, or one the library made for
+  it in a touch, an accept or a leave, where the library keeps the hub's error as text (sb
+  `sharing.py:991-1001`, `:1583-1589`, `:1624-1631`, `:1733-1737`). It stays so until a post succeeds or a
+  touch reads the pair room and writes what it owes. The hub publishes no time of its own to read
+  otherwise.
+- **Abandoning a room** waits up to 10 s for the killed child of a request from it to end, so that the
+  leave comes after the kill. When the pair ends while `run` runs, every room it still reads is abandoned
+  so, including when another command forgot the pair. A room another command marked abandoned is
+  stopped in `run` as soon as one of its threads reads the mark, without the leave, which is that
+  command's.
+- **Draining** drops the pages queued, lets the running operation finish, and gives the reply thread 30 s;
+  what it has not posted by then is left to the next start.
+- **A thread of `run` that meets an error it does not expect stops `run`,** which exits 1.
+
+**Output.** Text only. The state words (`accepted`, `waiting`, `sas_ready`, `sas_pending`, `confirmed`,
+`leaked`, `expired`) are the ones a machine-readable form, not built here, would use. `sas_ready` is a SAS
+that has reached the host and that no command has shown; `sas_pending`, one shown and not yet confirmed.
 
 ## Not decided yet
 
 Each of these is open. The questions this list held about work rooms (how long a room lives, who leaves
 it and when, what the accept policy checks, how often the host touches the pair, what a heal means for
 the rooms the host holds, whether a room may admit other agents, and where the share store lives) are
-answered in [spec/PROTOCOL.md](../spec/PROTOCOL.md) §6 to §9 and §18.
+answered in [spec/PROTOCOL.md](../spec/PROTOCOL.md) §6 to §9 and §18; how the host keeps its record of
+the offers it has not decided is under "Choices made in building pairing and the read loop".
 - The points the spec leaves open in v1 (spec/PROTOCOL.md §19): detecting a leak of a room's key alone,
   re-finding an offer a crash hid, and how a receiver treats a body with a duplicate key.
-- How the host keeps its record of the offers it was told of and has not decided (spec/PROTOCOL.md §6).
-  The spec settles when it looks at them again: the host touches nothing before its local SAS gate opens,
-  so the first touch after reports each offer as new, and a refusal before the accept is not final. In
-  2.6.0 a touch reports an offer once, as an `offered` note written only when the offer is first seen (sb
-  `sharing.py:842-846`), and a touch returns only notes newer than its start (`:1246`).
-  `sharing.status`, which lists the offers waiting, is not among the calls "Transport" lists, so the
-  record is the host's own.
 - How a release carries exact dependency pins to a user's install. The wheel declares
   `agent-switchboard==2.6.*` and `keyring>=25`, and `pipx` and `uv tool` resolve those on the day they
   run, without reading the lock.

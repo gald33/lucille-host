@@ -20,7 +20,7 @@ Useful things to include:
 
 ## Supported versions
 
-No release exists yet. Version `0.1.0.dev0` cannot pair with Lucille and is not meant to be installed.
+No release exists yet. Version `0.1.0.dev0` is a development version, not meant to be installed.
 Which versions get fixes will be stated here with the first release.
 
 ## What counts
@@ -46,7 +46,8 @@ If a release turns out to be harmful:
    fixed version once there is one.
 3. Lucille raises the minimum host version it accepts. Its requests then carry `min_host_version`, and a
    host older than that refuses them with `host_too_old`. That step is Lucille policy as of 2026-10-27;
-   not proven by this repository. The refusal is host code (not written yet).
+   not proven by this repository. The refusal is host code (`early_code` in
+   `src/lucille_host/envelope.py`).
 
 **The bad code stays on your computer until you upgrade.** lucille-host has no auto-update. Yanking a
 release does not remove it from computers where it is installed. If an advisory names your version,

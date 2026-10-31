@@ -207,12 +207,18 @@ Anything else is refused and logged locally. What a refusal does depends on when
 **A refusal before the accept is not final.** A failure of check 1, 2 or 5 refuses the offer without leaving
 it: the offer stays pending, and the host considers every offer pending over its pair again at start, when
 its local SAS gate opens, whenever it leaves a room, and whenever a touch reports a pending offer `left` or
-`withdrawn` (below). Only a failure of check 3 or 4, after the accept, ends in a leave, and only that is
-final for the room. 2.6.0 reports a pending offer to the host once, as an
+`withdrawn` (below). An accept that fails without refusing the offer, because the hub or the pair room
+could not be read, is tried again after the next touch that reads the pair room: the library reports the
+offer once, so no later touch would report it again. Only a failure of check 3 or 4, after the accept,
+ends in a leave, and only that is final for the room. 2.6.0 reports a pending offer to the host once, as an
 `offered` note the first time a touch sees it (sb `sharing.py:842-846`), so the host keeps its own record of
 the offers it was told of and has not decided; and it touches nothing before its SAS gate opens
 ([§7](#7-staying-reachable)), so that the first touch after the gate opens reports each offer waiting as new.
-An offer whose note a crash hid is not specified in v1 ([§19](#19-not-specified-in-v1)).
+A sharing call returns only the notes it made itself, and an accept that refuses returns none, though its
+own read of the pair room may have made one (sb `sharing.py:1583-1627`); every note is kept in the
+share store under an id that only grows (`:389-393`), so the host reads the notes from its own share store,
+past the last one it read, after every sharing call, a refused one included. An offer whose note a crash
+hid is not specified in v1 ([§19](#19-not-specified-in-v1)).
 
 **The cap (check 5).** The host holds at most 2 rooms whose list names its current pair (the current room,
 plus its replacement while one is handed over), and at most 2 held rooms in all. A host at the cap accepts
@@ -245,8 +251,13 @@ surrogates in a note with spaces and cuts it to 200 characters, and restricts ro
 `[a-z0-9][a-z0-9-]{0,31}` (sb `sharing.py:138`, `:210-214`, `:620`, `:636`; `pairing.py:197`). It leaves
 other characters, such as bidirectional controls, as they are, so the host's own sanitizing still applies.
 
-**No re-accept.** The host never accepts again a room it has left. It leaves a room only when the room failed
-this policy, was replaced, or its pair is over, and a room that may have leaked never carries another job.
+**No re-accept.** The host never takes back a room it has left: it never reads or posts in it again. It leaves
+a room only when the room failed this policy, was replaced, or its pair is over, and a room that may have
+leaked never carries another job. Through the sharing calls the host uses, a pending offer shows no
+workspace (above), and 2.6.0 makes a room the host left pending again when it is offered over a new pair. So
+the host can tell such an offer only once it has accepted it: it then leaves the room at once and never
+uses it, as it does a room that fails check 3 or 4. That accept writes the offer-back, which Lucille reads
+as "accepted", and the leave writes the host's `left` record after it.
 
 **Posting before the accept.** Lucille may post a request in a room as soon as it has offered the room, and
 need not wait to see the host's accept. The host reads a newly accepted room from sequence number 0, so a
@@ -848,13 +859,19 @@ Each point below is open in this version. Each says what an implementation does 
   `sharing.py:842-846`, `:1246`). None of the sharing calls the host uses lists the offers waiting. So a host
   that stops between a touch that reported an offer and its own record of that offer
   ([§6](#6-offers-and-the-hosts-accept-policy)) cannot find the offer again through those calls.
-  **Meanwhile:** the host records each offer a touch reports before it decides on it, which leaves only a
-  stop inside that one step. An offer lost there is found again only when Lucille offers a new room (a
-  re-pair, heal or lapse, [§9](#9-room-lifetime-replacement-and-pair-events)); a user whose computer runs
-  no jobs runs `lucille-host forget` and pairs again.
+  **Meanwhile:** the host reads the notes from its own share store after every sharing call, a refused one
+  included ([§6](#6-offers-and-the-hosts-accept-policy)), and records each offer they report before it
+  decides on it, which leaves only a stop inside that one step. An offer lost there is found again only when
+  Lucille offers a new room (a re-pair, heal or lapse, [§9](#9-room-lifetime-replacement-and-pair-events));
+  a user whose computer runs no jobs runs `lucille-host forget` and pairs again.
 - **A body with a duplicate key.** v1 does not say how a receiver treats a JSON object that names the same
   key twice. **Meanwhile:** a sender never sends one. The host receives each body already parsed by the
   Switchboard library, which keeps the last value of a repeated key, so it cannot tell.
+- **A deeply nested body.** v1 sets no bound on how deeply a body nests. No message the schemas allow nests
+  more than a few levels: a request's objects end at `args` and `caps`. **Meanwhile:** a sender never nests
+  a body deeply. The host reads a body nested more than 64 levels deep (objects and arrays) as one it cannot
+  open: it logs it and reads past it, and posts nothing for it. Its checks of a body walk every level, and
+  the library's JSON parser stops at a depth that depends on the Python it runs on.
 
 ## 20. Fixtures
 

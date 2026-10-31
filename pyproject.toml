@@ -14,7 +14,7 @@ build-backend = "hatchling.build"
 [project]
 name = "lucille-host"
 dynamic = ["version"]
-description = "A small program that will run a closed, reviewed set of named operations on your computer when your paired Lucille account asks. No release yet: this version cannot pair with Lucille."
+description = "A small program that will run a closed, reviewed set of named operations on your computer when your paired Lucille account asks. No release yet: a development version, not meant to be installed."
 readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE"]

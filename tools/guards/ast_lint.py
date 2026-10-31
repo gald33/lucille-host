@@ -327,6 +327,7 @@ RUNTIME_IMPORTS = frozenset(
         "stat",  # file modes
         "sys",  # the interpreter; its frame, module, import-path and breakpoint hooks are refused
         "tempfile",  # private temporary files
+        "termios",  # discards what was typed ahead at a terminal before `pair` asks; runs nothing
         "textwrap",  # formats messages
         "threading",  # the read loop and its timers
         "time",  # clocks and sleeps

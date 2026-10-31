@@ -44,7 +44,7 @@ release, and it is for people developing the app.
   files, and opens no network connection.
 - **The menu** shows the version and "Not connected to Lucille", and offers Pause and Resume, the abilities
   (the operations, switched with `ops enable` and `ops disable`), Add a Folder…, the folders with Remove, and
-  Quit Capsule. "Connect to Lucille (coming soon)" is disabled, because the host cannot pair yet.
+  Quit Capsule. "Connect to Lucille (coming soon)" is disabled: the host's command line can pair (`lucille-host pair`), but the app has no screen for it yet.
 - **It is signed ad hoc**, with the hardened runtime and no entitlements, and it is not notarized, so macOS
   refuses to open it normally.
 - **The `macos-app` workflow** builds it on GitHub's `macos-15` runner, runs each check in
@@ -389,7 +389,7 @@ Capsule.app/Contents/
 | `roots add --suggest-alias` | a valid, unused alias from a folder's name |
 | `roots check [<alias>]` | opens the folder and reads one entry: `ok`, `denied_by_macos` (EPERM), `denied` (EACCES) or `missing`. Sends nothing anywhere |
 | `policy reset` | moves an invalid policy file aside and writes the fresh policy (§10) |
-| `policy previous` | lists, read only, the folders and operations of the policy a new pair set aside (§11.6) |
+| `policy previous` | lists, read only, the folders and operations of the last policy a pairing set aside (§11.6) |
 | `pair --code-stdin`, `pair status`, `pair confirm`, `pair reject` | non-interactive pairing (§11) |
 | `pair begin` | the Connect request (§11.4) |
 | `run --json-events --exit-on-stdin-eof` | supervision (§9) |
@@ -428,11 +428,11 @@ login ─► Capsule (menu bar; an "Open at Login" item)
 - **The lifeline.** `--exit-on-stdin-eof` makes `run` drain, exactly as on its first SIGTERM, when its standard
   input closes. If the app crashes or is force-quit, the kernel closes the pipe and the host finishes its
   operation, replies, and exits. No host runs unseen.
-- **One host per profile.** `run` holds `state/run.lock` (`os.lockf`). A relaunched app, or a `run` from
+- **One host per profile.** `run` holds `state/.run.lock` (`os.lockf`). A relaunched app, or a `run` from
   Terminal, finds it held and says "already running".
 - **The app's own profile.** The app runs every verb with `--profile mac-app`, and so does the Terminal
   wrapper inside it (§6). A `pipx` install on the same Mac keeps the `default` profile: its own folder under
-  `~/Library/Application Support/lucille-host`, its own Keychain item, its own `run.lock` and its own record
+  `~/Library/Application Support/lucille-host`, its own Keychain item, its own `.run.lock` and its own record
   of the last version run (§16). Without this, an older `pipx` host would refuse to start after the app ran
   a newer one (exit 25), or the app would refuse because of the command line's version, and a Keychain item
   the signed interpreter created would likely prompt when the `pipx` Python reads it (not yet tested on a
@@ -607,11 +607,13 @@ Lucille does: read the nonce from `pair begin` and put it in the note.
 ### 11.6 Every new pair starts from the fresh policy
 
 This changes 0001. The policy file is per profile, not per pair, so a second pairing would inherit the first's
-folders and operations. When `pair` accepts a new code, the core moves the current policy to
-`policy.previous.toml` (in its own folder) and starts from the fresh one: only `host.describe`, no folders.
-The app then reads that file through `policy previous --json` and offers its folders and operations as
-**unchecked** boxes; a box the user checks becomes an ordinary `roots add` or `ops enable`. This covers every
-way a pair ends: Disconnect, removal on Lucille's side, rejection, the deadline, a deleted Keychain item.
+folders and operations. When `pair` accepts a new code, the core moves the current policy, unless it is the
+fresh one already, to `policy.previous.toml` (in its own folder) and starts from the fresh one: only
+`host.describe`, no folders. `pair` says "the policy is reset" when it moved one. Only then does the app read
+that file through `policy previous --json` and offer its folders and operations as **unchecked** boxes; a box
+the user checks becomes an ordinary `roots add` or `ops enable`. A pairing from the fresh policy moves nothing,
+and the file then still holds the policy of an earlier pairing, which the app does not offer. This covers
+every way a pair ends: Disconnect, removal on Lucille's side, rejection, the deadline, a deleted Keychain item.
 `THREAT_MODEL.md`'s "only `host.describe` enabled after pairing" becomes true for every pairing.
 
 ### 11.7 What is left
@@ -654,8 +656,8 @@ does not change it. Nothing in this record moves a check or changes their order:
 code is redeemed, before any pair exists, and §6's checks run on room offers after it.
 
 A room the host leaves this way is not replaced (spec §9), so the computer runs nothing until it is paired
-again. The app shows that state, and one **Connect Again** button pairs again; as after any new pair, the
-previous folders and operations come back as unchecked boxes (§11.6).
+again. The app shows that state, and one **Connect Again** button pairs again; as after any new pair that set
+a policy aside, the previous folders and operations come back as unchecked boxes (§11.6).
 
 ## 12. Folders and macOS privacy
 

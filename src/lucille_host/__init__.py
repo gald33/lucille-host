@@ -1,8 +1,9 @@
-"""lucille-host: will run a closed set of named operations for a paired Lucille account.
+"""lucille-host: runs a closed set of named operations for a paired Lucille account.
 
-This version has the catalog, the executor, the local policy, the audit log and the local
-controls, with the CLI verbs that change them. It cannot pair with Lucille or read a request yet,
-so nothing can ask it to run anything.
+This development version pairs with Lucille's code (``pair``), keeps the pair and answers Lucille's
+requests in the work rooms Lucille offers over it (``run``), within the catalog, the local policy
+and the local controls, and shows and ends the pair (``status``, ``log``, ``forget``). No release
+exists.
 """
 
 from __future__ import annotations

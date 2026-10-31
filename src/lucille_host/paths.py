@@ -61,8 +61,58 @@ class Dirs:
     state: Path
 
     @property
+    def profile(self) -> str:
+        """The profile's name: the last part of the config directory, on both systems."""
+        return self.config.name
+
+    @property
     def policy_file(self) -> Path:
         return self.config / "policy.toml"
+
+    @property
+    def previous_policy_file(self) -> Path:
+        """The last policy a pairing set aside, kept for ``policy previous``."""
+        return self.config / "policy.previous.toml"
+
+    @property
+    def gate_file(self) -> Path:
+        """The local gate of the pair being made or held (``gate.py``)."""
+        return self.state / "pair.json"
+
+    @property
+    def rooms_file(self) -> Path:
+        """The offers, the work rooms held and the rooms left (``rooms.py``)."""
+        return self.state / "rooms.json"
+
+    @property
+    def journal_file(self) -> Path:
+        """Each request read, what was decided and whether its reply was sent (``journal.py``)."""
+        return self.state / "journal.json"
+
+    @property
+    def cursors_file(self) -> Path:
+        """How far each work room has been read (``loop.py``)."""
+        return self.state / "cursors.json"
+
+    @property
+    def status_file(self) -> Path:
+        """What a running ``lucille-host run`` last saw of the hub and its rooms (``loop.py``)."""
+        return self.state / "status.json"
+
+    @property
+    def host_file(self) -> Path:
+        """Which store the pair is kept in, and the loopback hub, if one is configured."""
+        return self.config / "host.json"
+
+    @property
+    def runtime(self) -> Path:
+        """The private folder the host gives Switchboard as ``XDG_RUNTIME_DIR``."""
+        return self.state / "run"
+
+    @property
+    def store_files(self) -> Path:
+        """Where ``--store-file`` keeps the pair and the work rooms' keys, in plain files."""
+        return self.state / "pairs"
 
     @property
     def own(self) -> tuple[Path, ...]:

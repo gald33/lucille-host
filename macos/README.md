@@ -8,7 +8,7 @@ command line and files.
 ## Status: a first build, not a release
 
 This folder builds a first, small version of Capsule. It is not a release and it is not ready for
-anyone who is not developing it. It cannot connect to Lucille, because the host cannot pair yet. Its disk
+anyone who is not developing it. It cannot connect to Lucille: the host's command line can pair (`lucille-host pair`), but the app has no screen for it yet. Its disk
 image is not notarized, so macOS refuses to open it normally (see [The disk image from CI](#the-disk-image-from-ci)).
 
 The design of the full app is [decisions/0002-macos-app.md](../decisions/0002-macos-app.md). It says what this
@@ -55,7 +55,7 @@ question. Whether it does, and whether that question names Capsule at all, is no
 | Item | What it runs |
 |---|---|
 | "Capsule *version*" | `--version` |
-| "Not connected to Lucille" | Nothing. The host cannot pair yet, so this Mac is never connected. When the host is paused, the line reads "Not connected to Lucille · Paused", from the pause flag the host keeps (see below), a line under it says that Lucille's requests are turned away until you resume, and the icon changes. |
+| "Not connected to Lucille" | Nothing. The app cannot pair yet, so it always says this, even if the host's command line has paired this Mac. When the host is paused, the line reads "Not connected to Lucille · Paused", from the pause flag the host keeps (see below), a line under it says that Lucille's requests are turned away until you resume, and the icon changes. |
 | Pause Lucille / Resume Lucille | `pause` / `resume` |
 | Abilities | `ops list`. Each ability shows in a few plain words, such as "Check a file's fingerprint", with a checkmark when it is enabled, and a sentence under it says what Lucille gets: "Lucille gets a code that identifies one file's exact contents, not the contents." Choosing one runs `ops enable` or `ops disable`. `host.sleep`, which is for testing, is not listed. Nor is `host.describe`; while it is on, the menu says what it shares once connected. |
 | Add a Folder… | See below. |
@@ -278,9 +278,10 @@ anyone to work around the warning.
   relaxed for exactly those links. Moving the whole runtime would not do: those folders are for code
   only, and Apple's signing tools take a folder with a dot in its name, such as `python3.13` or a
   `.dist-info`, for a bundle.
-- **Pairing.** The host has no `pair` verb yet, so "Connect to Lucille" is disabled.
-- **Running in the background.** The host has no long-running loop yet, so the app starts nothing that
-  keeps running, and it does not open at login.
+- **Pairing.** The host's command line can pair (`lucille-host pair`), but the app has no screen for it
+  yet, so "Connect to Lucille" is disabled.
+- **Running in the background.** The host has a long-running loop (`lucille-host run`), but the app
+  starts nothing that keeps running, and it does not open at login.
 - **Updates.** There are none. A new version is a new disk image.
 - **Uninstall.** Dragging the app to the Trash removes it. The host's own folder,
   `~/Library/Application Support/lucille-host`, stays.

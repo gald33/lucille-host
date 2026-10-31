@@ -861,6 +861,7 @@ def test_the_runtime_import_allowlist_is_pinned() -> None:
         "stat",
         "sys",
         "tempfile",
+        "termios",
         "textwrap",
         "threading",
         "time",

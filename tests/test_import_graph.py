@@ -31,12 +31,21 @@ RUNTIME_MODULES = (
     "lucille_host.cli",
     "lucille_host.containment",
     "lucille_host.controls",
+    "lucille_host.envelope",
+    "lucille_host.gate",
     "lucille_host.jobs",
+    "lucille_host.journal",
+    "lucille_host.link",
+    "lucille_host.loop",
     "lucille_host.mounts",
     "lucille_host.ops",
     "lucille_host.paths",
     "lucille_host.policy",
+    "lucille_host.report",
+    "lucille_host.rooms",
     "lucille_host.spec",
+    "lucille_host.state",
+    "lucille_host.store",
 )
 SERVER_PACKAGES = ("fastapi", "uvicorn")
 MARKER = "LOADED-MODULES:"
