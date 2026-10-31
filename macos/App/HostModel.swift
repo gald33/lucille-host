@@ -37,7 +37,7 @@ final class HostModel: ObservableObject {
         version.map { "\(HostText.appName) \($0)" } ?? HostText.appName
     }
 
-    /// Pairing is not built yet, so this Mac is never connected; the line says so first.
+    /// The app cannot pair yet, so the line always says this Mac is not connected, first.
     var statusLine: String {
         paused ? "Not connected to Lucille \u{00B7} Paused" : "Not connected to Lucille"
     }

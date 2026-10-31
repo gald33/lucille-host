@@ -44,7 +44,7 @@ release, and it is for people developing the app.
   files, and opens no network connection.
 - **The menu** shows the version and "Not connected to Lucille", and offers Pause and Resume, the abilities
   (the operations, switched with `ops enable` and `ops disable`), Add a Folder…, the folders with Remove, and
-  Quit Capsule. "Connect to Lucille (coming soon)" is disabled, because the host cannot pair yet.
+  Quit Capsule. "Connect to Lucille (coming soon)" is disabled: the host's command line can pair (`lucille-host pair`), but the app has no screen for it yet.
 - **It is signed ad hoc**, with the hardened runtime and no entitlements, and it is not notarized, so macOS
   refuses to open it normally.
 - **The `macos-app` workflow** builds it on GitHub's `macos-15` runner, runs each check in
