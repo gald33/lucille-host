@@ -176,13 +176,16 @@ The host:
    - Lucille has its own gate on the same comparison, and sends no request before it opens (Lucille
      policy as of 2026-10-27; not proven by this repository). The host's gate does not depend on it:
      nothing runs on the host before the host's own gate opens.
-   - **Two refinements, accepted by the maintainer on 2026-10-31.** The first version of this record said
-     that the host **shows the SAS** and asks the user to type `y` if it matches the code on Lucille's
-     page, and no more on when `y` counts. Two of the build's additions to this gate, both above, are the
-     ones the maintainer accepted, as written in the pull request that built pairing: `pair confirm`
-     refuses a SAS that no command has shown, and at a terminal, input typed before the question is
-     discarded, with no question asked when it cannot be. The build added a third, also above, that was
-     not part of that acceptance: a pair with no gate record cannot be confirmed on the host (`refused`).
+   - **Three refinements, accepted by the maintainer on 2026-10-31.** The first version of this record
+     said that the host **shows the SAS** and asks the user to type `y` if it matches the code on
+     Lucille's page, and no more on when `y` counts. The build added three rules to this gate, all above,
+     and the maintainer accepted each as written in the pull request that built pairing:
+     - `pair confirm` refuses a SAS that no command has shown;
+     - at a terminal, input typed before the question is discarded, with no question asked when it
+       cannot be;
+     - a pair with no gate record cannot be confirmed on the host: `pair`, `pair status` and `pair
+       confirm` each refuse it (`refused`) and show no SAS, and tell the user to run `pair reject` and
+       start again in Lucille. This one was accepted separately, after the first two.
 
 **The Store.**
 - The host implements Switchboard's `pairing.Store` Protocol over the OS keyring: one item per profile,
