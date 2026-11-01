@@ -116,6 +116,9 @@ EXEC_CHANNEL: Final = "lucille.exec"
 # The handle the library takes for a held room, so that a leave never names a pending offer.
 _HELD: Final = "shared:"
 
+# The characters of a SAS but its `-`: four of them, `-`, four more (:meth:`Link.sas`).
+_SAS_DIGITS: Final = frozenset("0123456789")
+
 FILE_STORE_WARNING: Final = (
     "the file store keeps the pair secret and the work rooms' keys unencrypted, in files only "
     "your user can read, in the host's state folder; that is weaker than the OS keyring"
@@ -590,6 +593,11 @@ def _stored() -> Iterator[None]:
     except OSError as exc:
         reason = exc.strerror or type(exc).__name__
         raise store.StoreError(exc.errno, f"the file store could not be used ({reason})") from exc
+    except RecursionError as exc:
+        # A file in it nested past what the library's parser follows, which none it writes is.
+        raise store.StoreError(
+            None, "the file store could not be used (a file in it nests too deep to be read)"
+        ) from exc
 
 
 class FilePairs:
@@ -784,14 +792,24 @@ class Link:
     def sas(self, name: str) -> str | None:
         """The pair's SAS as the library gives it (``NNNN-NNNN``, as Lucille's page shows it), for
         the local gate to show the user, and for nothing else; None until Lucille has collected
-        the answer."""
+        the answer. The library does not check the SAS of a record it reads from the store, so a
+        SAS of any other shape is refused (:class:`PairFailed`, ``invalid_sas``), and never shown
+        as one."""
         try:
             record = self.pairs.get(name)
         except pairing.PairingError as exc:
             raise _failed(exc) from None
         if record is None or not record.confirmed or not record.sas:
             return None
-        return str(record.sas)
+        sas = record.sas
+        if not (
+            isinstance(sas, str)
+            and len(sas) == 9
+            and sas[4] == "-"
+            and all(digit in _SAS_DIGITS for digit in sas[:4] + sas[5:])
+        ):
+            raise PairFailed("invalid_sas", f"pair {name}: the store holds a SAS of another shape")
+        return sas
 
     def kept(self, name: str) -> Kept | None:
         """Pair ``name`` as this computer's store keeps it, with no hub call; None when the store

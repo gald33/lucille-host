@@ -753,8 +753,67 @@ def test_pair_status_resumes(cli: HostCli) -> None:
     lucille = cli.lucille()
     cli.interrupted(lucille.start())
     ran = cli.run("pair", "status")
-    assert ran.rc == 0 and ran.out.startswith(f"waiting: pair {lucille.name}"), ran.text
+    # It asked the hub, so it says what `status`, which makes no hub call, cannot.
+    assert (ran.rc, ran.out) == (
+        0,
+        f"waiting: pair {lucille.name}: Lucille has not collected this computer's answer yet\n",
+    ), ran.text
+    # `pair confirm` asked the hub too, so it says so, and not that the hub was out of reach.
+    not_collected = (
+        f"pair {lucille.name}: Lucille has not collected this computer's answer yet, so there is "
+        "no SAS to confirm"
+    )
+    ran = cli.run("pair", "confirm")
+    assert (ran.rc, ran.out, ran.err) == (1, "", f"waiting: {not_collected}\n")
+    ran = cli.run("--json", "pair", "confirm")
+    assert ran.rc == 1 and _objects(ran) == [
+        {"v": 1, "type": "error", "code": "waiting", "message": not_collected}
+    ]
     assert lucille.collect().state == "paired"
+    # Lucille has collected it, and the hub is out of reach: the library's resolve cannot read the
+    # pair room, or the host's raises a hub error. `pair status` still says `waiting`, and says
+    # that whether Lucille has collected the answer is not known; `pair confirm` refuses so.
+    real = cli.client_class
+
+    class Down(cli.h.client_class()):  # type: ignore[misc]
+        def _call(self, *_: Any, **__: Any) -> Any:
+            raise httpx.ConnectError("the hub is out of reach")
+
+    def raised(*_: Any, **__: Any) -> Any:
+        raise _switchboard.HubError("the hub could not be reached (ConnectError)")
+
+    unknown = (
+        f"pair {lucille.name}: the hub could not be reached, so whether Lucille has collected "
+        "this computer's answer is not known"
+    )
+    for how in ("unreadable", "raised"):
+        with cli.monkeypatch.context() as patch:
+            if how == "raised":
+                patch.setattr(_switchboard.Link, "resolve", raised)
+            else:
+                cli.client_class = Down
+            ran = cli.run("pair", "status")
+            assert (ran.rc, ran.out, ran.err) == (
+                0,
+                f"waiting: {unknown}; `lucille-host pair status` asks again\n",
+                "",
+            ), how
+            ran = cli.run("pair", "status", "--json")
+            assert ran.rc == 0 and _objects(ran) == [
+                {"v": 1, "type": "pair", "state": "waiting", "name": lucille.name}
+            ], how
+            refused = (
+                f"{unknown}, and this computer holds no SAS to confirm; "
+                "`lucille-host pair status` asks again"
+            )
+            ran = cli.run("pair", "confirm")
+            assert (ran.rc, ran.out, ran.err) == (1, "", f"waiting: {refused}\n"), how
+            ran = cli.run("--json", "pair", "confirm")
+            assert ran.rc == 1 and _objects(ran) == [
+                {"v": 1, "type": "error", "code": "waiting", "message": refused}
+            ], how
+            cli.client_class = real
+        assert cli.gate() is not None and cli.gate().shown_at is None  # type: ignore[union-attr]
     ran = cli.run("pair", "status")
     found = cli.gate()
     assert found is not None and found.deadline is not None
@@ -814,6 +873,40 @@ def test_pair_status_resumes(cli: HostCli) -> None:
     for action in ("status", "confirm", "reject"):
         ran = cli.run("--profile", "json", "pair", action, "--hub", LOOPBACK, "--json")
         assert ran.rc == 1 and [o["code"] for o in _objects(ran)] == ["bad_options"]
+
+
+def test_json_takes_the_longest_pair_name_and_the_most_folders(
+    cli: HostCli, tmp_path: Path
+) -> None:
+    # As many folders as the policy holds, and the longest name the pairing library allows: every
+    # object that carries them carries them whole, and its schema takes it.
+    for index in range(policy.MAX_ROOTS):
+        made = tmp_path / "folders" / f"r{index}"
+        made.mkdir(parents=True)
+        assert cli.run("roots", "add", "--", f"r{index}", str(made)).rc == 0
+    (found,) = _objects(cli.run("--json", "status"))
+    assert len(found["policy"]["folders"]) == policy.MAX_ROOTS
+    lucille = cli.lucille()
+    longest = "p" * 32
+    code = lucille.start(name=longest)
+    with collecting(lucille):
+        ran = cli.run("pair", "--code-stdin", "--json", stdin=code + "\n")
+    assert ran.rc == 0, ran.text
+    objects = _objects(ran)
+    assert [(o["type"], o.get("state"), o.get("name")) for o in objects] == [
+        ("pair_code", None, longest),
+        ("policy_reset", None, None),
+        ("pair", "accepted", longest),
+        ("pair", "waiting", longest),
+        ("pair", "sas_pending", longest),
+    ]
+    (previous,) = _objects(cli.run("--json", "policy", "previous"))
+    assert len(previous["folders"]) == policy.MAX_ROOTS
+    for argv in (("pair", "status"), ("pair", "confirm"), ("status",), ("forget",)):
+        ran = cli.run("--json", *argv)
+        assert ran.rc == 0, ran.text
+        (found,) = _objects(ran)
+        assert found.get("name", found.get("pair", {}).get("name")) == longest, argv
 
 
 def test_an_interrupted_pair_is_kept(cli: HostCli) -> None:

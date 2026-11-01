@@ -810,6 +810,16 @@ def test_suggest_alias_valid_and_unused(
         # A `_` left at the end by the cut to 32, or by the cut before a suffix, is dropped too.
         ("a" * 31 + "_b", set(), "a" * 31),
         ("a" * 29 + "_bb", {"a" * 29 + "_bb"}, "a" * 29 + "-2"),
+        # A name in decomposed form, each mark after its letter, gives what the composed one gives.
+        ("Re\u0301sume\u0301", set(), "resume"),
+        ("Zu\u0308rich Fotos", set(), "zurich-fotos"),
+        ("A\u030angstro\u0308m", set(), "angstrom"),
+        # A Latin letter past U+017F is not in the table: it is `-`, as spec/CLI.md 9.1 says. In
+        # decomposed form its mark is dropped and its plain letter stays, so the two differ.
+        ("Bra\u0219ov", set(), "bra-ov"),
+        ("Bras\u0326ov", set(), "brasov"),
+        ("Ti\u1ebfng Vi\u1ec7t", set(), "ti-ng-vi-t"),
+        ("Tie\u0302\u0301ng Vie\u0323\u0302t", set(), "tieng-viet"),
     ]
     for name, taken, expected in cases:
         found = policy.suggest_alias(name, taken)
@@ -967,6 +977,21 @@ class _Unlisted:
 
     def __next__(self) -> Any:
         raise OSError(self.raised, os.strerror(self.raised))
+
+
+def test_roots_check_with_no_folder_writes_nothing_and_exits_0(
+    tmp_path: Path,
+    host_env: HostEnv,
+    stack: contextlib.ExitStack,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Empty standard output is no folder to check, not a failure (spec/CLI.md section 7).
+    w = World(tmp_path, stack, capsys, monkeypatch)
+    for argv in (["--json", "roots", "check"], ["roots", "check"]):
+        ran = w.run(*argv)
+        assert ran.rc == 0, ran.err
+        assert ran.out == ""
 
 
 def test_roots_check_maps_errno(
@@ -1541,6 +1566,7 @@ FAILURES: list[tuple[str, bool, Callable[[World], None] | None, list[str], str]]
     ),
     ("not-enabled", False, None, ["--json", "ops", "disable", "host.sleep"], "not_enabled"),
     ("bad-alias", False, None, ["--json", "roots", "add", "Docs", "/home/me"], "bad_alias"),
+    ("bad-alias-long", False, None, ["--json", "roots", "add", "a" * 33, "/home/me"], "bad_alias"),
     (
         "alias-taken",
         False,
@@ -1716,8 +1742,13 @@ def test_json_failure_ends_with_error_object(
         assert ran.err == (
             "error: this profile holds 2 pairs (pair-a, pair-b), and the host keeps one\n"
         )
+    # A name refused for any of its rules, its length included, is told all of them, as spec/CLI.md
+    # section 10 gives them.
+    rule = "lowercase letters, digits, '-' and '_', starting with a letter, at most 32"
     if code == "bad_profile":
-        assert "starting with a letter" in objects[-1]["message"]
+        assert objects[-1]["message"] == f"a profile name is {rule}"
+    if code == "bad_alias":
+        assert objects[-1]["message"] == f"an alias is {rule}"
     assert text.rc == 1
     word = TEXT_WORDS.get(code, "lucille-host")
     assert text.err.splitlines()[-1].startswith(f"{word}: "), text.err
@@ -1858,6 +1889,102 @@ def test_status_json_reports_a_keyring_that_cannot_be_read(
         {"v": 1, "type": "error", "code": "store_error", "message": message}
     ]
     assert ran.err == text.err == f"lucille-host: {message}\n"
+
+
+# Nested past what Python's parsers follow, on 3.11 and on 3.13: TOML from about 500 arrays, JSON
+# from about 1000 on 3.11 and about 10000 on 3.13.
+_DEEP_TOML = "version = 1\nx = " + "[" * 5000 + "]" * 5000 + "\n"
+_DEEP_JSON = "[" * 100000 + "]" * 100000
+
+
+def test_a_file_nested_too_deep_is_an_invalid_one(
+    tmp_path: Path,
+    host_env: HostEnv,
+    stack: contextlib.ExitStack,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A file of the host's own nested too deep to parse is invalid as any other is: the parser's
+    # RecursionError is never an `internal` error.
+    w = World(tmp_path, stack, capsys, monkeypatch, with_hub=True)
+    paths.ensure_dir(w.dirs.config)
+    w.dirs.policy_file.write_text(_DEEP_TOML)
+    said = f"{w.dirs.policy_file} nests too deep to be read"
+    for argv in (["--json", "ops", "list"], ["--json", "roots", "list"]):
+        ran = w.run(*argv)
+        assert ran.rc == 1 and assert_objects(ran) == [
+            {
+                "v": 1,
+                "type": "error",
+                "code": "policy_invalid",
+                "message": f"the policy file {w.dirs.policy_file} is invalid: {said}",
+            }
+        ], argv
+    (status,) = assert_objects(w.ok("--json", "status"))
+    assert status["policy"] == {"state": "invalid", "error": said}
+    assert status["pair"] == {"state": "none"}
+    # `pair` sets such a policy aside, as it does any invalid one, and the pairing goes ahead.
+    code = w.code()
+    with collecting(w.lucille):
+        ran = w.ok("--json", "pair", "--code-stdin", stdin=code + "\n")
+    found = assert_objects(ran)
+    assert [obj["type"] for obj in found[:2]] == ["pair_code", "policy_reset"]
+    assert found[-1]["state"] == "sas_pending"
+    assert policy.load(w.dirs.policy_file) == policy.fresh()
+    # Each state file of the host's own, with the pair held: `status` stops with state_invalid.
+    for path in (w.dirs.host_file, w.dirs.gate_file, w.dirs.rooms_file, w.dirs.status_file):
+        before = path.read_bytes() if path.exists() else None
+        path.write_text(_DEEP_JSON)
+        ran = w.run("--json", "status")
+        assert ran.rc == 1 and assert_objects(ran) == [
+            {
+                "v": 1,
+                "type": "error",
+                "code": "state_invalid",
+                "message": f"{path} nests too deep to be read",
+            }
+        ], path
+        if before is None:
+            path.unlink()
+        else:
+            path.write_bytes(before)
+    assert_objects(w.ok("--json", "status"))
+
+
+def test_status_reports_a_store_nested_too_deep_as_unreadable(
+    tmp_path: Path,
+    host_env: HostEnv,
+    stack: contextlib.ExitStack,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The keyring item, then the file store's record of the pair, nested too deep to parse:
+    # `status` says the pair is unreadable and fills in every other field; `pair status` fails
+    # with store_error.
+    w = World(tmp_path, stack, capsys, monkeypatch, with_hub=True)
+    w.ok("pause")
+    w.keyring.set_password(store.SERVICE, "default", _DEEP_JSON)
+    message = (
+        f"the keyring item {store.SERVICE}/default is not one this version wrote; it may hold the "
+        "only copy of the pair secret, so it is left as it is"
+    )
+    (status,) = assert_objects(w.ok("--json", "status"))
+    assert status["pair"] == {"state": "unreadable", "code": "store_error", "message": message}
+    assert status["paused"] is True and status["policy"]["state"] == "ok"
+    w.keyring.delete_password(store.SERVICE, "default")
+    w.lucille = w.host.lucille()
+    w.host.paired(w.lucille, "--store-file")
+    record = w.dirs.store_files / f"{w.lucille.name}.json"
+    assert record.is_file()
+    record.write_text(_DEEP_JSON)
+    message = "the file store could not be used (a file in it nests too deep to be read)"
+    (status,) = assert_objects(w.ok("--json", "status"))
+    assert status["pair"] == {"state": "unreadable", "code": "store_error", "message": message}
+    assert status["paused"] is True and status["store"] == "file"
+    ran = w.run("--json", "pair", "status")
+    assert ran.rc == 1 and assert_objects(ran) == [
+        {"v": 1, "type": "error", "code": "store_error", "message": message}
+    ]
 
 
 def _run_record(**changes: Any) -> dict[str, Any]:
@@ -2035,8 +2162,13 @@ def test_broad_folder_says_which_kind(
     w = World(tmp_path, stack, capsys, monkeypatch)
     spelled = tmp_path / "home-again"
     spelled.symlink_to(w.home)
+    # `/` spelled another way is `/` too: through a link, or with the two `/` a path may start with.
+    top = tmp_path / "top"
+    top.symlink_to("/")
     cases = [
         ("/", "root"),
+        (str(top), "root"),
+        ("//", "root"),
         (str(w.home), "home"),
         (str(spelled), "home"),
         (str(w.home.parent), "holds_home"),
@@ -2126,6 +2258,14 @@ def test_suggest_alias_folds_every_latin_letter_and_full_width_form() -> None:
         folded = UNDECOMPOSED.get(letter, plain.lower())
         assert folded == "-" or (folded.isascii() and folded.isalpha()), hex(code)
         assert policy.suggest_alias(f"x{letter}x", ()) == f"x{folded}x", hex(code)
+        # Decomposed, it gives the same: each combining mark is dropped.
+        decomposed = unicodedata.normalize("NFD", letter)
+        assert policy.suggest_alias(f"x{decomposed}x", ()) == f"x{folded}x", hex(code)
+    # Every combining mark of U+0300 to U+036F is dropped, and the characters around it are not.
+    for code in range(0x0300, 0x0370):
+        assert policy.suggest_alias(f"x{chr(code)}x", ()) == "xx", hex(code)
+    for letter in ("\u02ff", "\u0370"):
+        assert policy.suggest_alias(f"x{letter}x", ()) == "x-x"
     # Around the range: other letters are `-`.
     for letter in ("¿", "ƀ", "Ѐ"):
         assert policy.suggest_alias(f"x{letter}x", ()) == "x-x"
@@ -2136,6 +2276,10 @@ def test_suggest_alias_folds_every_latin_letter_and_full_width_form() -> None:
         ), hex(code)
     for letter in ("＀", "｟"):
         assert policy.suggest_alias(f"x{letter}x", ()) == "x-x"
+    # Past U+FF5E, the half-width letters and the full-width signs (U+FFE1, U+FFE5, ...) are no
+    # full-width form of ASCII: each is `-`, whatever a shift by U+FEE0 would land on.
+    for code in range(0xFF5F, 0xFFF0):
+        assert policy.suggest_alias(f"x{chr(code)}x", ()) == "x-x", hex(code)
 
 
 # Run as a process of its own: a second folder whose listing stalls until the test lets it go.

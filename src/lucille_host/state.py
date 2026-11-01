@@ -145,6 +145,9 @@ def read_json(path: Path) -> Any:
         return json.loads(text)
     except ValueError as exc:
         raise StateError(f"{path} is not valid JSON ({exc})") from exc
+    except RecursionError as exc:
+        # Nested past what the parser follows, which no file the host writes is.
+        raise StateError(f"{path} nests too deep to be read") from exc
 
 
 def valid_time(value: Any) -> bool:

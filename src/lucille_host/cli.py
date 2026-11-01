@@ -837,7 +837,8 @@ def _roots(args: argparse.Namespace, dirs: paths.Dirs, out: _Out) -> None:
     if not policy.valid_alias(alias):
         raise _Refused(
             "bad_alias",
-            "an alias is lowercase letters, digits, '-' and '_', starting with a letter",
+            "an alias is lowercase letters, digits, '-' and '_', starting with a letter, at most "
+            "32",
         )
     if alias in roots:
         raise _Refused("alias_taken", f"{alias} is already a folder alias; remove it first")

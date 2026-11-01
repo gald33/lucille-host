@@ -525,13 +525,17 @@ def test_status_never_shows_sas(cli: HostCli) -> None:
     cli.interrupted(code)
     ran = cli.run("status")
     assert ran.rc == 0, ran.text
-    assert _line(ran.out, "pair") == (
-        f"pair: waiting: pair {lucille.name}: Lucille has not collected this computer's answer yet"
+    # It makes no hub call, so it says only that no command has seen Lucille collect the answer.
+    waiting = (
+        f"pair: waiting: pair {lucille.name}: no command here has seen Lucille collect this "
+        "computer's answer, and it may have since: `lucille-host pair status` asks the hub"
     )
+    assert _line(ran.out, "pair") == waiting
     assert _line(ran.out, "hub") == f"hub: {_switchboard.LUCILLE_HUB}"
-    # Lucille collects. Until the host resolves the pair, it does not know: status makes no call.
+    # Lucille collects. Until the host resolves the pair, it does not know: status makes no call,
+    # and says the same, which stays true.
     assert lucille.collect().state == "paired"
-    assert "pair: waiting: " in cli.run("status").out
+    assert _line(cli.run("status").out, "pair") == waiting
     # `pair status` resolves, and shows the SAS; `status` points to it, and shows none.
     sas = lucille.sas()
     assert sas in cli.run("pair", "status").out
@@ -624,13 +628,16 @@ def test_status_json_never_shows_sas(cli: HostCli) -> None:
 
 def test_status_json_reports_no_generation_past_the_bound(cli: HostCli) -> None:
     # Lucille's side can raise the pair's generation, and the library takes any integer from 0.
-    # One past the bound is reported as unknown, and status still answers, as text and as JSON.
+    # Every one up to 2^53 - 1, the bound the schema gives, is reported as it is; one past it is
+    # reported as unknown, and status still answers, as text and as JSON.
     lucille = cli.lucille()
     cli.paired(lucille)
     assert cli.run("pair", "confirm").rc == 0
     for generation, reported in (
-        (link.GENERATION_MOST, link.GENERATION_MOST),
-        (link.GENERATION_MOST + 1, None),
+        (2, 2),
+        (5, 5),
+        (2**53 - 1, 2**53 - 1),
+        (2**53, None),
         (2**70, None),
     ):
         record = lucille.pairs.get(lucille.name)
@@ -642,6 +649,55 @@ def test_status_json_reports_no_generation_past_the_bound(cli: HostCli) -> None:
         assert kept is not None and kept.generation == generation
         found = _agree(_through(cli))
         assert found["pair"] == {"state": "confirmed", "name": lucille.name, "generation": reported}
+    # The host's own record of the pair, which the library does not check when it reads it: a
+    # generation that is not a whole number from 0 is reported as unknown too.
+    here = _switchboard.open_link(cli.dirs, state.load_host_config(cli.dirs))
+    for generation in (True, -1, "7"):
+        record = here.pairs.get(lucille.name)
+        record.generation = generation
+        here.pairs.save(record)
+        found = _agree(_through(cli))
+        assert found["pair"] == {"state": "confirmed", "name": lucille.name, "generation": None}
+
+
+def test_pair_status_refuses_a_sas_the_host_never_writes(cli: HostCli) -> None:
+    # The host's own record of the pair, which the library does not check when it reads it: a SAS
+    # of any other shape than the library's is never shown, in JSON or in text. The pair cannot
+    # be used here, and every verb that would show the SAS says so.
+    lucille = cli.lucille()
+    cli.paired(lucille)
+    here = _switchboard.open_link(cli.dirs, state.load_host_config(cli.dirs))
+    shown = here.pairs.get(lucille.name).sas
+    said = "the pair cannot be used here (invalid_sas)"
+    for sas in (
+        "SAS is 1234-5678‮",
+        "1234-5678‮",
+        "1234-56789",
+        "12345678",
+        "1234_5678",
+        "1234-567a",
+        "١٢٣٤-٥٦٧٨",
+        # Wrong in the first four only, at either end of them, or only just past the `-`.
+        "a234-5678",
+        "123a-5678",
+        "١٢٣٤-5678",
+        "1234-a678",
+        12345678,
+    ):
+        record = here.pairs.get(lucille.name)
+        record.sas = sas
+        here.pairs.save(record)
+        ran = cli.run("pair", "status", "--json")
+        assert ran.rc == 1 and _objects(ran.out) == [
+            {"v": 1, "type": "error", "code": "pair_unusable", "message": said}
+        ], (sas, ran.text)
+        ran = cli.run("pair", "status")
+        assert (ran.rc, ran.out, ran.err) == (1, "", f"error: {said}\n"), sas
+    record = here.pairs.get(lucille.name)
+    record.sas = shown
+    here.pairs.save(record)
+    ran = cli.run("pair", "status", "--json")
+    assert ran.rc == 0 and _objects(ran.out)[0]["sas"] == shown
 
 
 def test_status_json_matches_text(host: RunHost, command: Commands, tmp_path: Path) -> None:
@@ -757,27 +813,25 @@ def test_status_json_matches_text_with_no_pair_held(
 
 def test_status_json_matches_text_for_the_rooms_run_reads(cli: HostCli) -> None:
     # A pair held, with a room `run` reads and one where it stopped reading; `run` has not reached
-    # the hub yet.
+    # the hub yet. As `run` writes it, a room it is stuck in is still among those it reads.
     lucille = cli.lucille()
     cli.paired(lucille)
     assert cli.run("pair", "confirm").rc == 0
     now = cli.h.now
     held = {"room-1": rooms.Held("workspace-1", now), "room-2": rooms.Held("workspace-2", now)}
     rooms.save(cli.dirs.rooms_file, rooms.Record(pair=lucille.name, made=now, held=held))
-    state.write_json(
-        cli.dirs.status_file,
-        {
-            "v": 1,
-            "running": True,
-            "pid": 4242,
-            "written_at": now,
-            "last_contact": None,
-            "skew": None,
-            "skewed": False,
-            "reading": ["room-1"],
-            "read_stuck": ["room-2"],
-        },
-    )
+    written = {
+        "v": 1,
+        "running": True,
+        "pid": 4242,
+        "written_at": now,
+        "last_contact": None,
+        "skew": None,
+        "skewed": False,
+        "reading": ["room-1", "room-2"],
+        "read_stuck": ["room-2"],
+    }
+    state.write_json(cli.dirs.status_file, written)
     found = _agree(_through(cli))
     accepted = link.iso(now)
     assert found["work_rooms"] == [
@@ -786,6 +840,22 @@ def test_status_json_matches_text_for_the_rooms_run_reads(cli: HostCli) -> None:
     ]
     assert found["run"] == {"state": "running", "pid": 4242, "as_of": accepted}
     assert found["last_hub_contact"] is None
+    # The same record, left by a `run` that stopped without saying so, and by one that stopped:
+    # neither reads any room now, whatever its last record lists.
+    gone = now - 4 * loop.STATUS_EVERY
+    for running, written_at, run in (
+        (True, gone, {"state": "not_seen", "pid": 4242, "as_of": link.iso(gone)}),
+        (False, now, {"state": "stopped", "as_of": accepted}),
+    ):
+        state.write_json(
+            cli.dirs.status_file, {**written, "running": running, "written_at": written_at}
+        )
+        found = _agree(_through(cli))
+        assert found["work_rooms"] == [
+            {"state": "not_read", "name": "room-1", "accepted_at": accepted},
+            {"state": "not_read", "name": "room-2", "accepted_at": accepted},
+        ]
+        assert found["run"] == run
 
 
 def test_status_json_names_each_check_the_last_room_failed(cli: HostCli) -> None:
@@ -863,13 +933,20 @@ def test_status_refuses_a_room_record_it_cannot_report(cli: HostCli) -> None:
     # A rooms file that holds a value no status could report is a file of the host's own that
     # holds something else: it stops the command, as every other such file does.
     good = rooms.Record(pair="pair-abc", made=1.0, held={"room-1": rooms.Held("workspace", 1.0)})
-    for bad in (
-        dataclasses.replace(good, held={"room-1": rooms.Held("workspace", 1.0, "no idea")}),
-        dataclasses.replace(good, held={"Room 1": rooms.Held("workspace", 1.0)}),
-        dataclasses.replace(good, pair="Pair ABC"),
-        dataclasses.replace(good, accepting=rooms.Accepting("offer", "Room!", ())),
-    ):
-        paths.ensure_dir(cli.dirs.state)
+    bad_records = [
+        dataclasses.replace(good, held={"room-1": rooms.Held("workspace", 1.0, "no idea")})
+    ]
+    # A name the pairing library does not allow, as a room held, the room of an accept, or the
+    # pair: wrong at the first character, or only further on (a character it does not take, a
+    # 33rd, a `-` first).
+    for name in ("Room 1", "Pair ABC", "Room!", "Room-1", "room-1!", "room_1", "r" * 33, "-room"):
+        bad_records += [
+            dataclasses.replace(good, held={name: rooms.Held("workspace", 1.0)}),
+            dataclasses.replace(good, pair=name),
+            dataclasses.replace(good, accepting=rooms.Accepting("offer", name, ())),
+        ]
+    paths.ensure_dir(cli.dirs.state)
+    for bad in bad_records:
         rooms.save(cli.dirs.rooms_file, bad)
         ran = cli.run("--json", "status")
         assert ran.rc == 1, bad
@@ -877,6 +954,23 @@ def test_status_refuses_a_room_record_it_cannot_report(cli: HostCli) -> None:
         assert "not a lucille-host room record" in ran.err
     rooms.save(cli.dirs.rooms_file, good)
     assert cli.run("--json", "status").rc == 0
+    # Every name the library allows loads, and is reported as its schema takes it: 32 characters,
+    # and a digit first. With no pair held, the rooms are over a pair gone, then the accept's.
+    for pair, held, kept in (("p" * 32, "r" * 32, "a" * 32), ("2026-mac", "1room", "9")):
+        record = rooms.Record(
+            pair=pair,
+            made=1.0,
+            held={held: rooms.Held("workspace", 1.0)},
+            accepting=rooms.Accepting("offer", kept, ()),
+        )
+        rooms.save(cli.dirs.rooms_file, record)
+        ran = cli.run("--json", "status")
+        assert ran.rc == 0, ran.err
+        (found,) = _objects(ran.out)
+        assert [(room["state"], room["name"]) for room in found["work_rooms"]] == [
+            ("pair_gone", held),
+            ("accept_interrupted", kept),
+        ]
 
 
 # --- log ------------------------------------------------------------------------------------------

@@ -43,6 +43,9 @@ fixtures are the contract together. It is separate from the protocol between Luc
   only when the user says Lucille's page shows the same. It never confirms on its own, and never before it
   has shown that SAS. It calls `pair status` only while it shows the user the `sas` that call returns. To
   learn where the pair is without showing the SAS, it calls `status` (section 7, "The SAS in JSON").
+  `status` makes no hub call, so its `waiting` cannot tell a pair whose answer Lucille has not collected
+  from one whose answer it has collected since a command last asked the hub: a shell that finds `waiting`
+  shows its pairing screen, where it calls `pair status`.
 - **A reader ignores a `type` it does not know**, and a field it does not know. Section 12 says what may be
   added within version 1, and what a reader does with a value it does not know.
 - **A reader checks `v`.** Every object carries `"v": 1`. An object with another `v` is from another major
@@ -272,7 +275,7 @@ apart.
 | `state` | Other fields | |
 |---|---|---|
 | `none` | | This computer holds no pair. |
-| `waiting` | `name` | Lucille has not collected this computer's answer yet. |
+| `waiting` | `name` | No command has seen Lucille collect this computer's answer yet. `status` makes no hub call, so Lucille may have collected it since: `pair status` asks the hub. |
 | `sas_ready` | `name` | The SAS has reached this computer, and no command has shown it yet. `pair status` shows it. |
 | `sas_pending` | `name`, `deadline` | The SAS was shown, and is not confirmed. |
 | `confirmed` | `name`, `generation` (integer or null) | The local gate is open. `generation` is the generation of the pair room this computer last followed. It is null when the store does not say, or holds one above 2^53 - 1, which Lucille's side could set and a JSON reader may not keep exactly. |
@@ -503,7 +506,11 @@ Notes:
   a broken pipe.
 - **`pair status`** resolves the pair once, sending an unsent answer again. A shell that was relaunched
   learns where the pair is from `status`, and calls `pair status` once its pairing screen is up; it calls it
-  every 5 s while it reports `waiting`.
+  every 5 s while it reports `waiting`. `status` cannot tell its `waiting` from a pair whose answer Lucille
+  has collected since a command last asked the hub, so a shell that finds `waiting` there shows its pairing
+  screen too. `pair status` writes `waiting` also when the hub could not be reached, and this computer holds
+  no SAS: whether Lucille has collected the answer is then not known, its text says so, and the object does
+  not (section 13). The next call 5 s later asks again.
 - **`pair confirm`** is the user's "yes, Lucille's page shows the same SAS". `pair reject` is "no".
 - **`ops enable`** and **`ops disable`** write the operation's `op` object as it is once the change is made,
   so a shell sets its switch from the host's answer, not from what it asked for.
@@ -514,6 +521,8 @@ Notes:
   starts with `-` is written `--suggest-alias=<path>`. It writes nothing, and takes no lock: another verb may
   take the alias before `roots add` runs, which then refuses with `alias_taken`, and the shell asks again.
 - **`roots check`** exits 0 whatever it found: a folder that cannot be opened is a result, not a failure.
+  With no folder in the policy it writes no object and exits 0; empty standard output then means there is
+  no folder to check, not that the verb failed.
 - **`forget`** with no pair held, and no work room left over, refuses with `none`: there is nothing to
   forget. A shell disconnecting takes that as done.
 - **`log`** writes no object, and exits 0, when the audit log has no lines yet; standard error says so.
@@ -570,7 +579,11 @@ local policy has. It reads the policy and nothing else, and writes nothing.
    - a full-width form (U+FF01 to U+FF5E): the ASCII character it stands for, then as above;
    - a Latin letter with a mark, or a Latin ligature, from U+00C0 to U+017F: its plain letters, lowercase
      (`é` is `e`, `ß` is `ss`, `æ` is `ae`, `œ` is `oe`, `ø` is `o`, `þ` is `th`, `ł` is `l`);
-   - anything else, letters of other scripts included: `-`.
+   - a combining mark (U+0300 to U+036F), which a name in decomposed form carries after its letter:
+     nothing. So a letter up to U+017F gives the same decomposed as composed (`e` then U+0301 is `e`, as
+     `é` is). A Latin letter past U+017F does not: composed, it is `-`, as below; decomposed, its marks
+     are dropped and its plain letter stays (`Brașov` gives `bra-ov` composed and `brasov` decomposed);
+   - anything else, letters of other scripts and Latin letters past U+017F (`ș`, say) included: `-`.
 3. Each run of `-` becomes one `-`. Every `-` and `_` at either end is removed.
 4. An empty result becomes `folder`. A result that starts with a digit gets `folder-` in front.
 5. It is cut to 32 characters, and every `-` and `_` at its end is removed again.
@@ -651,10 +664,10 @@ limit, as it runs every verb, and stops it when the limit passes.
 | `expired` | The pairing, or the SAS, was not finished in time. The pair is forgotten. Start again. |
 | `ended` | The pair was ended, by Lucille or on this computer. |
 | `none` | This computer holds no pair, or another command forgot it meanwhile. |
-| `waiting` | Lucille has not collected this computer's answer yet, so there is no SAS to confirm. |
+| `waiting` | No resolve has seen Lucille collect this computer's answer, so there is no SAS to confirm: Lucille has not collected it, or the hub could not be reached to ask. The message says which. |
 | `sas_ready` | This computer has not shown the SAS yet: `pair status` shows it. |
 | `interrupted` | Ctrl-C while `pair` waited. The pair is kept; `pair status` resumes. |
-| `pair_unusable` | The pairing library refused the pair here. |
+| `pair_unusable` | The pairing library refused the pair here, or the store holds a SAS for it that is not four digits, `-`, four digits. |
 | `room_not_left` | A work room could not be left, so its keys would stay behind; the command can be tried again, or `forget` leaves it. |
 | `several_pairs` | The profile holds more than one pair, and the host keeps one. |
 
