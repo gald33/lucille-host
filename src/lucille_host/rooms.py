@@ -21,11 +21,15 @@ rest of what its accept policy needs here, apart from the share store:
   the host never accepts a room again once it has left it;
 - ``no_room``: the check that failed, when the host left its only room on its own and holds none.
 
-It holds no key and no SAS: rooms' keys are in the share store, beside the pair.
+It holds no key and no SAS: rooms' keys are in the share store, beside the pair. A file that holds
+a value the host never writes there (a name that is not a pair's or a room's, a reason for
+abandoning a room it does not know, a time that is not one) is not one of its own, and stops the
+host, as any other is.
 """
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Final
@@ -33,6 +37,7 @@ from typing import Any, Final
 from lucille_host import state
 
 __all__ = [
+    "ABANDONED_WHYS",
     "CHECKS",
     "Accepting",
     "Held",
@@ -72,6 +77,13 @@ NOT_LISTED: Final = "not over the current pair"
 PAIR_OVER: Final = "pair over"
 # A room that left the share store without this host leaving it (another command left it).
 GONE: Final = "gone"
+# Every reason the host records for abandoning a room it holds: the ones above, and the check a
+# room failed when the host left it on its own.
+ABANDONED_WHYS: Final = frozenset(
+    {REPLACED, LUCILLE_LEFT, MOVED, NOT_LISTED, PAIR_OVER, GONE, *CHECKS}
+)
+# A pair's name, as the library allows it, and the host's own name for a room.
+_NAME: Final = re.compile(r"[a-z0-9][a-z0-9-]{0,31}", re.ASCII)
 
 _KEYS: Final = frozenset(
     {"v", "pair", "made", "generation", "offers", "accepting", "held", "left", "no_room", "named"}
@@ -161,10 +173,6 @@ def local_name(record: Record) -> str:
     return f"room-{record.named}"
 
 
-def _number(value: Any) -> bool:
-    return isinstance(value, int | float) and not isinstance(value, bool)
-
-
 def _integer(value: Any) -> bool:
     return isinstance(value, int) and not isinstance(value, bool)
 
@@ -175,6 +183,10 @@ def _invalid(path: Path) -> state.StateError:
 
 def _strings(value: Any) -> bool:
     return isinstance(value, list) and all(isinstance(item, str) for item in value)
+
+
+def _name(value: Any) -> bool:
+    return isinstance(value, str) and _NAME.fullmatch(value) is not None
 
 
 def load(path: Path) -> Record:
@@ -195,8 +207,8 @@ def _record(data: dict[str, Any]) -> Record:
     pair, made, generation = data["pair"], data["made"], data["generation"]
     named, no_room = data["named"], data["no_room"]
     if not (
-        (pair is None or isinstance(pair, str))
-        and (made is None or _number(made))
+        (pair is None or _name(pair))
+        and (made is None or state.valid_time(made))
         and (generation is None or _integer(generation))
         and _integer(named)
         and named >= 0
@@ -204,13 +216,13 @@ def _record(data: dict[str, Any]) -> Record:
     ):
         raise ValueError
     offers = data["offers"]
-    if not isinstance(offers, dict) or not all(_number(at) for at in offers.values()):
+    if not isinstance(offers, dict) or not all(state.valid_time(at) for at in offers.values()):
         raise ValueError
     accepting = data["accepting"]
     if accepting is not None:
         if set(accepting) != {"offer", "room", "replaces"} or not _strings(accepting["replaces"]):
             raise ValueError
-        if not (isinstance(accepting["offer"], str) and isinstance(accepting["room"], str)):
+        if not (isinstance(accepting["offer"], str) and _name(accepting["room"])):
             raise ValueError
         accepting = Accepting(accepting["offer"], accepting["room"], tuple(accepting["replaces"]))
     held: dict[str, Held] = {}
@@ -218,9 +230,10 @@ def _record(data: dict[str, Any]) -> Record:
         if set(entry) != {"workspace", "accepted_at", "abandoned"}:
             raise ValueError
         if not (
-            isinstance(entry["workspace"], str)
-            and _number(entry["accepted_at"])
-            and (entry["abandoned"] is None or isinstance(entry["abandoned"], str))
+            _name(name)
+            and isinstance(entry["workspace"], str)
+            and state.valid_time(entry["accepted_at"])
+            and (entry["abandoned"] is None or entry["abandoned"] in ABANDONED_WHYS)
         ):
             raise ValueError
         held[name] = Held(entry["workspace"], entry["accepted_at"], entry["abandoned"])
@@ -230,7 +243,7 @@ def _record(data: dict[str, Any]) -> Record:
             raise ValueError
         if not (isinstance(entry["room"], str) and isinstance(entry["why"], str)):
             raise ValueError
-        if not _number(entry["at"]):
+        if not state.valid_time(entry["at"]):
             raise ValueError
         left[workspace] = Left(entry["room"], entry["why"], entry["at"])
     return Record(

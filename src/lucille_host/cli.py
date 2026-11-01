@@ -29,7 +29,9 @@ verbs:
   With no pair held, it leaves the work rooms still held over a pair already gone from this
   computer, and tells Lucille nothing (``left``);
 - ``ops list|enable|disable``: which catalog operations the local policy enables;
-- ``roots list|add|remove``: which folders the operations may work in, by alias;
+- ``roots list|add|remove|check``: which folders the operations may work in, by alias.
+  ``roots add --suggest-alias PATH`` suggests an alias for a folder and changes nothing; ``roots
+  check`` says whether the host can open each folder and read an entry in it;
 - ``policy previous``: the operations and folders of the last policy a pairing set aside (a
   pairing sets aside only a policy that is not the fresh one);
 - ``pause``, ``resume`` and ``kill``: the local controls.
@@ -39,6 +41,12 @@ Each verb is dispatched by name; one with no handler is refused, never run as an
 simulated on one machine. A verb that fails prints why on stderr and exits 1; a pairing that ends
 early, or a refusal of the pairing verbs, prints its state word first (``leaked: ...``,
 ``expired: ...``).
+
+``--json``, anywhere before a ``--``, makes every verb but ``run`` write on stdout the JSON objects
+of ``spec/CLI.md`` instead of its text, one per line, with the same exit codes; stderr stays as it
+is. A failure ends with an ``error`` object, and a usage error writes one too. Each verb writes its
+text and its objects at the same points, from the same values, so that they say the same. With
+``--json``, ``pair`` takes the code only on stdin, with ``--code-stdin``, and asks nothing.
 
 A verb that changes the policy holds the profile's policy lock from reading the file to writing
 it, so that two verbs run at once do not lose a change; on a filesystem that cannot lock, it
@@ -50,13 +58,15 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import json
 import os
+import re
 import sys
 import termios
 from collections.abc import Callable, Iterator, Sequence
 from dataclasses import replace
 from types import MappingProxyType
-from typing import Final
+from typing import Any, Final, NoReturn
 
 from lucille_host import (
     __version__,
@@ -86,10 +96,110 @@ ALREADY_PAIRING: Final = (
 )
 # How many lines ``log`` prints unless told otherwise.
 LOG_LINES: Final = 20
+# The version of the --json contract this release writes (spec/CLI.md).
+CONTRACT: Final = "1.0"
+# The message of every usage error with --json: argparse's own words, which can quote the command
+# line, a pairing code included, stay on stderr.
+USAGE_MESSAGE: Final = "the command line could not be parsed; standard error says why"
+# What --json writes for an unexpected error, whose traceback is on stderr.
+INTERNAL_MESSAGE: Final = "an unexpected error; standard error holds its traceback"
+# Unpaired surrogates, as a file name that is not UTF-8 reaches the host: written as U+FFFD.
+_SURROGATES: Final = re.compile("[\ud800-\udfff]")
 
 
 class _Refused(Exception):
-    """A verb that cannot do what it was asked; the message says why."""
+    """A verb that cannot do what it was asked; the message says why. ``code`` is what ``--json``
+    calls it (spec/CLI.md section 10), and ``extra`` the fields its ``error`` object adds."""
+
+    def __init__(self, code: str, message: str, **extra: str) -> None:
+        super().__init__(message)
+        self.code = code
+        self.extra = extra
+
+
+class _Usage(Exception):
+    """The command line could not be parsed: argparse's own error, raised rather than exiting, so
+    that ``--json`` can write its ``error`` object first."""
+
+    def __init__(self, parser: argparse.ArgumentParser, message: str) -> None:
+        super().__init__(message)
+        self.parser = parser
+        self.message = message
+
+
+class _Parser(argparse.ArgumentParser):
+    """The command's parsers: a usage error raises :class:`_Usage`."""
+
+    # Whether the command line asked for --json, for --version, which ends it.
+    json_wanted = False
+    # The parsers of the verbs whose forms are checked once the line is parsed, by name.
+    forms: dict[str, argparse.ArgumentParser] = {}
+
+    def error(self, message: str) -> NoReturn:
+        raise _Usage(self, message)
+
+
+class _Version(argparse.Action):
+    """``--version``: the version, as text or as a ``version`` object, and the end of the line."""
+
+    def __call__(
+        self,
+        parser: argparse.ArgumentParser,
+        namespace: argparse.Namespace,
+        values: Any,
+        option_string: str | None = None,
+    ) -> None:
+        _Out(getattr(parser, "json_wanted", False)).version()
+        parser.exit(0)
+
+
+def _valid(value: Any) -> Any:
+    """``value`` with every unpaired surrogate in its strings written as U+FFFD."""
+    if isinstance(value, str):
+        return _SURROGATES.sub("\ufffd", value)
+    if isinstance(value, dict):
+        return {key: _valid(item) for key, item in value.items()}
+    if isinstance(value, list | tuple):
+        return [_valid(item) for item in value]
+    return value
+
+
+class _Out:
+    """Where a verb writes what it did: its text on stdout, or, with ``--json``, the objects of
+    spec/CLI.md, one per line, each flushed before the host does the next thing."""
+
+    def __init__(self, as_json: bool) -> None:
+        self.as_json = as_json
+
+    def say(self, line: str, type_name: str, **fields: Any) -> None:
+        """The text line, or the object of type ``type_name``."""
+        if self.as_json:
+            self.obj(type_name, **fields)
+        else:
+            self.text(line)
+
+    def text(self, line: str) -> None:
+        """A line of the text only."""
+        if not self.as_json:
+            print(line, flush=True)
+
+    def obj(self, type_name: str, **fields: Any) -> None:
+        """An object only."""
+        if self.as_json:
+            # A value that is not JSON (NaN, an infinity) raises here, before anything is written.
+            written = json.dumps(
+                _valid({"v": 1, "type": type_name, **fields}),
+                ensure_ascii=True,
+                allow_nan=False,
+                separators=(",", ":"),
+            )
+            print(written, flush=True)
+
+    def error(self, code: str, message: str, **extra: Any) -> None:
+        self.obj("error", code=code, message=message, **extra)
+
+    def version(self) -> None:
+        self.say(version_line(), "version", host_version=__version__, contract=CONTRACT)
 
 
 def version_line() -> str:
@@ -97,9 +207,20 @@ def version_line() -> str:
     return f"lucille-host {__version__}"
 
 
+def _json_option(parser: argparse.ArgumentParser) -> None:
+    # On every parser, so that --json may come before the verb, after it, or after its action. A
+    # subparser sets it only when it sees it: a False default would undo one given earlier.
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="write the JSON objects of spec/CLI.md on stdout instead of text",
+    )
+
+
 def build_parser() -> argparse.ArgumentParser:
     """The argument parser for the ``lucille-host`` command."""
-    parser = argparse.ArgumentParser(
+    parser = _Parser(
         prog="lucille-host",
         description=(
             "Runs a closed set of named operations for a paired Lucille account: `pair` pairs "
@@ -107,7 +228,14 @@ def build_parser() -> argparse.ArgumentParser:
             "catalog, the local policy and the local controls."
         ),
     )
-    parser.add_argument("--version", action="version", version=version_line())
+    parser.add_argument(
+        "--version", nargs=0, action=_Version, help="show the version, and do nothing else"
+    )
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        help="write the JSON objects of spec/CLI.md on stdout instead of text",
+    )
     parser.add_argument(
         "--profile",
         default=paths.DEFAULT_PROFILE,
@@ -116,25 +244,50 @@ def build_parser() -> argparse.ArgumentParser:
     verbs = parser.add_subparsers(dest="verb", metavar="VERB")
 
     ops = verbs.add_parser("ops", help="list, enable or disable catalog operations")
+    _json_option(ops)
     ops_verbs = ops.add_subparsers(dest="ops_verb", metavar="ACTION", required=True)
-    ops_verbs.add_parser("list", help="show every catalog operation and whether it is enabled")
+    _json_option(
+        ops_verbs.add_parser("list", help="show every catalog operation and whether it is enabled")
+    )
     for action in ("enable", "disable"):
         sub = ops_verbs.add_parser(action, help=f"{action} one operation")
+        _json_option(sub)
         sub.add_argument("op", help="the operation's name, e.g. files.sha256")
 
-    roots = verbs.add_parser("roots", help="list, add or remove folder aliases")
+    roots = verbs.add_parser("roots", help="list, add, remove or check folder aliases")
+    _json_option(roots)
     roots_verbs = roots.add_subparsers(dest="roots_verb", metavar="ACTION", required=True)
-    roots_verbs.add_parser("list", help="show each folder alias and its folder")
-    add = roots_verbs.add_parser("add", help="let operations work in a folder, under an alias")
-    add.add_argument("alias", help="the name Lucille will use: lowercase, at most 32 characters")
-    add.add_argument("path", help="the folder")
+    _json_option(roots_verbs.add_parser("list", help="show each folder alias and its folder"))
+    add = roots_verbs.add_parser(
+        "add",
+        help="let operations work in a folder, under an alias",
+        usage=(
+            "%(prog)s [-h] [--allow-home-or-root] alias path\n       %(prog)s --suggest-alias PATH"
+        ),
+    )
+    _json_option(add)
+    add.add_argument(
+        "alias", nargs="?", help="the name Lucille will use: lowercase, at most 32 characters"
+    )
+    add.add_argument("path", nargs="?", help="the folder")
     add.add_argument(
         "--allow-home-or-root",
         action="store_true",
         help="needed when the folder is your home folder, holds it, or is /",
     )
+    add.add_argument(
+        "--suggest-alias",
+        metavar="PATH",
+        help="only suggest an alias for the folder PATH, which no folder has yet; change nothing",
+    )
     remove = roots_verbs.add_parser("remove", help="stop operations working in a folder")
+    _json_option(remove)
     remove.add_argument("alias")
+    check = roots_verbs.add_parser(
+        "check", help="say whether the host can open each folder and read an entry in it"
+    )
+    _json_option(check)
+    check.add_argument("alias", nargs="?", help="check this folder alias only")
 
     pair = verbs.add_parser(
         "pair",
@@ -146,6 +299,7 @@ def build_parser() -> argparse.ArgumentParser:
             "`pair reject` forgets a pair that is not confirmed."
         ),
     )
+    _json_option(pair)
     pair.add_argument(
         "code",
         nargs="?",
@@ -168,18 +322,19 @@ def build_parser() -> argparse.ArgumentParser:
         help="keep the pair in files in the state folder, not the OS keyring (weaker)",
     )
 
-    verbs.add_parser(
+    run = verbs.add_parser(
         "run",
         help="answer Lucille's requests over the pair until stopped (Ctrl-C drains)",
         description=(
             "Keeps the pair, takes the work rooms Lucille offers over it, and runs the requests "
             "it posts there that the local policy allows. Nothing is accepted, posted or run "
             "before the SAS is confirmed. The first Ctrl-C, SIGTERM or SIGHUP lets the running "
-            "operation finish and stops; a second Ctrl-C kills it."
+            "operation finish and stops; a second Ctrl-C kills it. It has no --json form yet."
         ),
     )
+    _json_option(run)
 
-    verbs.add_parser(
+    status = verbs.add_parser(
         "status",
         help="show the policy, the pair, the work rooms and what `run` last saw (no hub call)",
         description=(
@@ -189,7 +344,9 @@ def build_parser() -> argparse.ArgumentParser:
             "clock. It reads this computer's files only, and makes no hub call."
         ),
     )
+    _json_option(status)
     log = verbs.add_parser("log", help="show the last lines of the audit log, oldest first")
+    _json_option(log)
     log.add_argument(
         "--limit",
         type=int,
@@ -197,7 +354,7 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="N",
         help="how many lines (default: %(default)s)",
     )
-    verbs.add_parser(
+    forget = verbs.add_parser(
         "forget",
         help="leave the work rooms, forget the pair here, and tell Lucille if the hub is reachable",
         description=(
@@ -208,22 +365,62 @@ def build_parser() -> argparse.ArgumentParser:
             "tells Lucille nothing."
         ),
     )
+    _json_option(forget)
 
     policy_verb = verbs.add_parser("policy", help="show the last policy a pairing set aside")
+    _json_option(policy_verb)
     policy_verbs = policy_verb.add_subparsers(dest="policy_verb", metavar="ACTION", required=True)
-    policy_verbs.add_parser(
-        "previous", help="list the operations and folders of the last policy a pairing set aside"
+    _json_option(
+        policy_verbs.add_parser(
+            "previous",
+            help="list the operations and folders of the last policy a pairing set aside",
+        )
     )
 
-    verbs.add_parser("pause", help="start nothing until resume; refuse new requests")
-    verbs.add_parser("resume", help="clear pause and any kill request")
-    verbs.add_parser("kill", help="kill the operation in flight, and pause")
+    _json_option(verbs.add_parser("pause", help="start nothing until resume; refuse new requests"))
+    _json_option(verbs.add_parser("resume", help="clear pause and any kill request"))
+    _json_option(verbs.add_parser("kill", help="kill the operation in flight, and pause"))
+    parser.forms = {"run": run, "pair": pair, "roots add": add}
     return parser
+
+
+def _wants_json(argv: Sequence[str]) -> bool:
+    """Whether the command line holds ``--json`` before any ``--``: what a usage error, which has
+    no parsed line to look in, and ``--version``, which ends the line, go by."""
+    for word in argv:
+        if word == "--":
+            return False
+        if word == "--json":
+            return True
+    return False
+
+
+def _check_usage(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
+    """The forms the parser takes and the command does not: they are usage errors too."""
+    as_json = getattr(args, "json", False)
+    forms = getattr(parser, "forms", {})
+    if args.verb == "run" and as_json:
+        forms["run"].error("run has no --json form in this version")
+    if args.verb == "pair" and as_json and args.code is None and not args.code_stdin:
+        forms["pair"].error("with --json, pair reads the code with --code-stdin")
+    if args.verb == "roots" and args.roots_verb == "add":
+        add = forms["roots add"]
+        if args.suggest_alias is not None:
+            if args.alias is not None or args.path is not None or args.allow_home_or_root:
+                add.error("--suggest-alias takes no alias, no folder and no other option")
+            return
+        missing = [name for name in ("alias", "path") if getattr(args, name) is None]
+        if missing:
+            add.error(f"the following arguments are required: {', '.join(missing)}")
 
 
 def _dirs(profile: str) -> paths.Dirs:
     if not paths.valid_profile(profile):
-        raise _Refused("a profile name is lowercase letters, digits, '-' and '_', at most 32")
+        raise _Refused(
+            "bad_profile",
+            "a profile name is lowercase letters, digits, '-' and '_', starting with a letter, "
+            "at most 32",
+        )
     return paths.dirs(profile)
 
 
@@ -231,7 +428,9 @@ def _load(dirs: paths.Dirs) -> policy.Policy:
     try:
         return policy.load(dirs.policy_file)
     except policy.PolicyError as exc:
-        raise _Refused(f"the policy file {dirs.policy_file} is invalid: {exc}") from exc
+        raise _Refused(
+            "policy_invalid", f"the policy file {dirs.policy_file} is invalid: {exc}"
+        ) from exc
 
 
 def _save(dirs: paths.Dirs, new: policy.Policy) -> None:
@@ -251,112 +450,211 @@ def _policy_lock(dirs: paths.Dirs) -> Iterator[None]:
             host_state.wait_for_lock(descriptor)
         except OSError as exc:
             raise _Refused(
-                f"cannot lock {lock} ({exc.strerror}), so the policy was not changed"
+                "policy_lock_failed",
+                f"cannot lock {lock} ({exc.strerror}), so the policy was not changed",
             ) from exc
         yield
     finally:
         os.close(descriptor)
 
 
-def _ops(args: argparse.Namespace, dirs: paths.Dirs) -> str:
+def _op(name: str, current: policy.Policy, family: str) -> dict[str, Any]:
+    """An operation as ``ops`` reports it with ``--json``: its switch, and its words."""
+    op = OPERATIONS.get(name)
+    if op is None:
+        return {"name": name, "state": "not_in_catalog", "enabled": False}
+    enabled = current.enabled.get(name) == op.definition_hash
+    # One this computer cannot run is unavailable whatever definition the policy holds:
+    # `ops enable` would refuse it, so it is never offered as changed by an upgrade.
+    if not op.available(family):
+        state = "unavailable"
+    elif name in current.enabled and not enabled:
+        state = "disabled_by_upgrade"
+    else:
+        state = "enabled" if enabled else "disabled"
+    found = {
+        "name": name,
+        "state": state,
+        "enabled": enabled,
+        "summary": op.about.summary,
+        "sends": op.about.sends,
+        "sends_file_content": op.about.sends_file_content,
+        "diagnostic": op.about.diagnostic,
+    }
+    if state == "unavailable":
+        found["missing_executable"] = op.executable(family)
+    return found
+
+
+def _ops(args: argparse.Namespace, dirs: paths.Dirs, out: _Out) -> None:
     family = paths.os_family()
     current = _load(dirs)
     if args.ops_verb == "list":
-        eff = policy.effective(current, family)
-        lines = []
-        for name, op in OPERATIONS.items():
-            if name in eff.enabled_ops:
-                state = "enabled"
-            elif name in eff.changed_by_upgrade:
+        for name in OPERATIONS:
+            found = _op(name, current, family)
+            if found["state"] == "disabled_by_upgrade":
                 state = (
                     f"disabled: an upgrade changed it; `lucille-host ops enable {name}` accepts it"
                 )
-            elif name in eff.unavailable:
-                state = f"enabled, but not on this computer: {op.executable(family)} is missing"
-            elif not op.available(family):
-                state = f"disabled; not on this computer: {op.executable(family)} is missing"
+            elif found["state"] == "unavailable":
+                state = (
+                    "enabled, but" if found["enabled"] else "disabled;"
+                ) + f" not on this computer: {found['missing_executable']} is missing"
             else:
-                state = "disabled"
-            lines.append(f"{name}  {state}")
-        for name in eff.not_in_catalog:
-            lines.append(f"{name}  in the policy, but not in this release's catalog")
-        return "\n".join(lines)
+                state = found["state"]
+            out.say(f"{name}  {state}", "op", **found)
+        for name in policy.effective(current, family).not_in_catalog:
+            out.say(
+                f"{name}  in the policy, but not in this release's catalog",
+                "op",
+                **_op(name, current, family),
+            )
+        return
     name = args.op
     enabled = dict(current.enabled)
     if args.ops_verb == "enable":
         op = OPERATIONS.get(name)
         if op is None:
-            raise _Refused(f"{name} is not in this release's catalog")
+            raise _Refused("not_in_catalog", f"{name} is not in this release's catalog")
         if not op.available(family):
-            raise _Refused(f"{name} cannot run here: {op.executable(family)} is missing")
+            raise _Refused(
+                "unavailable", f"{name} cannot run here: {op.executable(family)} is missing"
+            )
         enabled[name] = op.definition_hash
-        _save(dirs, replace(current, enabled=MappingProxyType(enabled)))
-        return f"enabled {name}"
+        changed = replace(current, enabled=MappingProxyType(enabled))
+        _save(dirs, changed)
+        out.say(f"enabled {name}", "op", **_op(name, changed, family))
+        return
     if name not in enabled:
-        raise _Refused(f"{name} is not enabled")
+        raise _Refused("not_enabled", f"{name} is not enabled")
     del enabled[name]
-    _save(dirs, replace(current, enabled=MappingProxyType(enabled)))
-    return f"disabled {name}"
+    changed = replace(current, enabled=MappingProxyType(enabled))
+    _save(dirs, changed)
+    if name in OPERATIONS:
+        out.say(f"disabled {name}", "op", **_op(name, changed, family))
+    else:
+        out.say(f"disabled {name}", "op_removed", name=name)
 
 
-def _roots(args: argparse.Namespace, dirs: paths.Dirs) -> str:
+def _broad(path: str) -> _Refused:
+    return _Refused(
+        "broad_folder",
+        f"{path} is your home folder, holds it, or is /; add --allow-home-or-root to mean it",
+        kind=policy.broad_kind(path),
+    )
+
+
+def _roots(args: argparse.Namespace, dirs: paths.Dirs, out: _Out) -> None:
     current = _load(dirs)
     roots = dict(current.roots)
     if args.roots_verb == "list":
-        return "\n".join(f"{alias}  {roots[alias].path}" for alias in sorted(roots))
+        for alias in sorted(roots):
+            root = roots[alias]
+            out.say(f"{alias}  {root.path}", "root", alias=alias, path=root.path, broad=root.broad)
+        return
+    if args.roots_verb == "check":
+        _check(args, roots, out)
+        return
+    if args.roots_verb == "add" and args.suggest_alias is not None:
+        name = os.path.basename(os.path.abspath(args.suggest_alias))
+        alias = policy.suggest_alias(name, roots)
+        out.say(alias, "alias_suggestion", alias=alias)
+        return
     alias = args.alias
     if args.roots_verb == "remove":
         if alias not in roots:
-            raise _Refused(f"no folder alias {alias!r}")
+            raise _Refused("no_such_alias", f"no folder alias {alias!r}")
         del roots[alias]
         _save(dirs, replace(current, roots=MappingProxyType(roots)))
-        return f"removed {alias}"
+        out.say(f"removed {alias}", "root_removed", alias=alias)
+        return
     if not policy.valid_alias(alias):
-        raise _Refused("an alias is lowercase letters, digits, '-' and '_', starting with a letter")
+        raise _Refused(
+            "bad_alias",
+            "an alias is lowercase letters, digits, '-' and '_', starting with a letter",
+        )
     if alias in roots:
-        raise _Refused(f"{alias} is already a folder alias; remove it first")
+        raise _Refused("alias_taken", f"{alias} is already a folder alias; remove it first")
     if len(roots) >= policy.MAX_ROOTS:
-        raise _Refused(f"the policy holds at most {policy.MAX_ROOTS} folder aliases")
+        raise _Refused(
+            "too_many_roots", f"the policy holds at most {policy.MAX_ROOTS} folder aliases"
+        )
     path = os.path.abspath(args.path)
     if not os.path.isdir(path):
-        raise _Refused(f"{path} is not a folder")
+        raise _Refused("not_a_folder", f"{path} is not a folder")
     if inside_own(path, [str(own) for own in dirs.own]):
-        raise _Refused(f"{path} is where lucille-host keeps its own files")
+        raise _Refused("own_folder", f"{path} is where lucille-host keeps its own files")
     if on_proc(path):
         raise _Refused(
+            "on_proc",
             f"{path} is on /proc, where names mean one process to the host and another to an "
-            "operation (or this computer's mount table does not say where /proc is)"
+            "operation (or this computer's mount table does not say where /proc is)",
         )
     # Only here, with the user at the terminal to interrupt it, does the check look below the
     # folder (policy.holds).
     broad = policy.is_broad(path, look_below=True)
     if broad and not args.allow_home_or_root:
-        raise _Refused(
-            f"{path} is your home folder, holds it, or is /; add --allow-home-or-root to mean it"
-        )
+        raise _broad(path)
     roots[alias] = policy.Root(path=path, broad=broad)
     try:
         _save(dirs, replace(current, roots=MappingProxyType(roots)))
     except policy.PolicyError as exc:
-        raise _Refused(str(exc)) from exc
-    return f"added {alias}"
+        raise _Refused("unstorable_path", str(exc)) from exc
+    out.say(f"added {alias}", "root", alias=alias, path=path, broad=broad)
 
 
-def _policy_previous(args: argparse.Namespace, dirs: paths.Dirs) -> str:
+def _check(args: argparse.Namespace, roots: dict[str, policy.Root], out: _Out) -> None:
+    """``roots check``: open each folder and read one entry, writing each answer as it is known.
+    It takes no lock, opens no session, and sends and writes nothing."""
+    if args.alias is not None and args.alias not in roots:
+        raise _Refused("no_such_alias", f"no folder alias {args.alias!r}")
+    family = paths.os_family()
+    for alias in [args.alias] if args.alias is not None else sorted(roots):
+        path = roots[alias].path
+        state, name = policy.check_root(path, family)
+        found: dict[str, Any] = {"alias": alias, "path": path, "state": state}
+        if name is not None:
+            found["errno"] = name
+        out.say(f"{alias}  {state}" + (f": {name}" if name else ""), "root_check", **found)
+
+
+def _policy_previous(args: argparse.Namespace, dirs: paths.Dirs, out: _Out) -> None:
     path = dirs.previous_policy_file
     if not path.exists():
-        return "no earlier policy: no pairing has set one aside"
+        out.say("no earlier policy: no pairing has set one aside", "previous_policy", state="none")
+        return
     try:
         previous = policy.load(path)
     except policy.PolicyError as exc:
-        raise _Refused(f"the earlier policy {path} is invalid: {exc}") from exc
+        raise _Refused("previous_invalid", f"the earlier policy {path} is invalid: {exc}") from exc
+    # When it was set aside: the file's time, which a pairing sets. One no file of the host's holds
+    # is refused with --json and without it alike, so that both exit the same.
+    set_aside = path.stat().st_mtime
+    if not host_state.valid_time(set_aside):
+        raise _Refused(
+            "previous_invalid",
+            f"the earlier policy {path} is invalid: the time it was set aside cannot be read",
+        )
+    roots = previous.roots
+    if out.as_json:
+        out.obj(
+            "previous_policy",
+            state="found",
+            set_aside_at=link.iso(set_aside),
+            ops=sorted(previous.enabled),
+            folders=[
+                {"alias": alias, "path": roots[alias].path, "broad": roots[alias].broad}
+                for alias in sorted(roots)
+            ],
+        )
+        return
     lines = [f"the last policy a pairing set aside ({path}); nothing uses it:"]
     lines.append("operations:")
     lines += [f"  {name}" for name in sorted(previous.enabled)] or ["  (none)"]
     lines.append("folders:")
-    roots = previous.roots
     lines += [f"  {alias}  {roots[alias].path}" for alias in sorted(roots)] or ["  (none)"]
-    return "\n".join(lines)
+    for line in lines:
+        out.text(line)
 
 
 def _say(line: str) -> None:
@@ -367,26 +665,47 @@ def _warn(line: str) -> None:
     print(f"lucille-host: warning: {line}", file=sys.stderr, flush=True)
 
 
-def _read_line(prompt: str) -> str:
-    """One line of stdin, with a prompt on stderr when stdin is a terminal; "" at its end."""
-    if sys.stdin.isatty():
+def _read_line(prompt: str, out: _Out) -> str:
+    """One line of stdin, with a prompt on stderr when stdin is a terminal and the command asks
+    for text; "" at its end."""
+    if sys.stdin.isatty() and not out.as_json:
         print(prompt, end="", file=sys.stderr, flush=True)
     return sys.stdin.readline()
 
 
-def _pair_action(args: argparse.Namespace, dirs: paths.Dirs) -> str:
+def _pair_view(view: link.PairView) -> dict[str, Any]:
+    """What ``pair status`` reports, as the ``pair`` object's fields."""
+    found: dict[str, Any] = {"state": view.word}
+    if view.name is not None:
+        found["name"] = view.name
+    if view.word == "sas_pending":
+        found["sas"] = view.sas
+        found["deadline"] = link.iso(view.deadline or 0)
+    return found
+
+
+def _pair_action(args: argparse.Namespace, dirs: paths.Dirs, out: _Out) -> None:
     if args.code_stdin or args.hub is not None or args.store_file:
-        raise _Refused(f"`pair {args.code}` takes no options")
+        raise _Refused("bad_options", f"`pair {args.code}` takes no options")
     session = link.open_session(dirs, host_state.load_host_config(dirs), say=_say, warn=_warn)
     if args.code == "status":
-        word, detail = session.status()
-        return f"{word}: {detail}"
+        view = session.status_view()
+        word, detail = link.pair_words(view)
+        out.say(f"{word}: {detail}", "pair", **_pair_view(view))
+        return
     if args.code == "reject":
         told = session.reject()
-        return f"rejected: pair {told.name} is forgotten on this computer; " + link.told_sentence(
-            told
+        out.say(
+            f"rejected: pair {told.name} is forgotten on this computer; "
+            + link.told_sentence(told),
+            "pair",
+            state="rejected",
+            name=told.name,
+            lucille_told=told.told,
         )
-    return f"confirmed: {session.confirm()}"
+        return
+    name, said = session.confirm_pair()
+    out.say(f"confirmed: {said}", "pair", state="confirmed", name=name)
 
 
 def _discard_typed_ahead() -> bool:
@@ -402,7 +721,7 @@ def _discard_typed_ahead() -> bool:
     return True
 
 
-def _ask(session: link.Session, name: str, deadline: float | None) -> str:
+def _ask(session: link.Session, name: str, deadline: float | None, out: _Out) -> str:
     """Ask whether Lucille's page shows the same SAS until ``y``, ``n``, or the end of stdin.
     Nothing typed on the terminal before the question counts; where that cannot be made sure
     of, nothing is asked, and ``pair confirm`` or ``pair reject`` answers later."""
@@ -414,7 +733,9 @@ def _ask(session: link.Session, name: str, deadline: float | None) -> str:
     if not _discard_typed_ahead():
         return later
     while True:
-        entry = _read_line("Does Lucille's page show the same SAS? Type y if it does, n if not: ")
+        entry = _read_line(
+            "Does Lucille's page show the same SAS? Type y if it does, n if not: ", out
+        )
         if not entry:
             return later
         said = gate.answer(entry)
@@ -434,25 +755,35 @@ def _ask(session: link.Session, name: str, deadline: float | None) -> str:
         )
 
 
-def _pair(args: argparse.Namespace, dirs: paths.Dirs) -> str:
+def _pair(args: argparse.Namespace, dirs: paths.Dirs, out: _Out) -> None:
     if args.code in PAIR_ACTIONS:
-        return _pair_action(args, dirs)
+        _pair_action(args, dirs, out)
+        return
     if args.code_stdin and args.code is not None:
-        raise _Refused("with --code-stdin the code is read from stdin only; do not pass it")
+        raise _Refused(
+            "code_in_argv", "with --code-stdin the code is read from stdin only; do not pass it"
+        )
+    if out.as_json and args.code is not None:
+        raise _Refused(
+            "code_in_argv",
+            "with --json the code is read from stdin only, with --code-stdin; do not pass it",
+        )
     try:
         wanted = host_state.HostConfig(hub=args.hub, store="file" if args.store_file else "keyring")
     except ValueError as exc:
-        raise _Refused(str(exc)) from exc
+        raise _Refused("bad_hub", str(exc)) from exc
     host_state.startup_checks()
     # One `pair` of the profile at a time, from before it looks for a pair held until it returns,
     # its question included: two at once could each answer a code. `pair status`, `pair confirm`
     # and `pair reject` take no such lock, so that the SAS can be confirmed in another shell.
     lock = paths.ensure_dir(dirs.state) / PAIR_LOCK
     with loop.one_at_a_time(lock, ALREADY_PAIRING, "`pair`"):
-        return _answer(args, dirs, wanted)
+        _answer(args, dirs, wanted, out)
 
 
-def _answer(args: argparse.Namespace, dirs: paths.Dirs, wanted: host_state.HostConfig) -> str:
+def _answer(
+    args: argparse.Namespace, dirs: paths.Dirs, wanted: host_state.HostConfig, out: _Out
+) -> None:
     """``pair [CODE]``, under the profile's pair lock: answer a code, wait for Lucille to collect
     the answer, show the SAS and ask about it."""
     current = host_state.load_host_config(dirs)
@@ -467,25 +798,33 @@ def _answer(args: argparse.Namespace, dirs: paths.Dirs, wanted: host_state.HostC
         opened = wanted
     if session.held():
         raise _Refused(
+            "held",
             "Disconnect first: this computer already holds a pair (`lucille-host pair reject` "
-            "forgets one that is not confirmed yet)"
+            "forgets one that is not confirmed yet)",
         )
     text = args.code
     if text is None:
-        text = _read_line("Paste the pairing code Lucille shows: ").strip()
+        text = _read_line("Paste the pairing code Lucille shows: ", out).strip()
         if not text:
-            raise _Refused("no pairing code was given on stdin")
+            raise _Refused("no_code", "no pairing code was given on stdin")
     code = session.check_code(text, wanted)
-    _say(f"pairing code for pair {code.name}, on {code.url}")
     note = link.sanitize(code.note)
+    out.say(
+        f"pairing code for pair {code.name}, on {code.url}",
+        "pair_code",
+        name=code.name,
+        hub=code.url,
+        note=note,
+    )
     if note:
-        _say(f"note: {note}")
+        out.text(f"note: {note}")
     if wanted != opened:
         session = link.open_session(dirs, wanted, say=_say, warn=_warn)
         if session.held():
             raise _Refused(
+                "held",
                 "Disconnect first: this computer already holds a pair in that store "
-                "(`lucille-host pair reject` forgets one that is not confirmed yet)"
+                "(`lucille-host pair reject` forgets one that is not confirmed yet)",
             )
     if wanted != current:
         host_state.save_host_config(dirs, wanted)
@@ -493,15 +832,20 @@ def _answer(args: argparse.Namespace, dirs: paths.Dirs, wanted: host_state.HostC
     with _policy_lock(dirs):
         moved = policy.archive(dirs.policy_file, dirs.previous_policy_file)
     if moved:
-        _say(
+        out.say(
             "the policy is reset for the new pair: only host.describe is enabled, and no folder "
-            "is held; `lucille-host policy previous` lists the earlier one"
+            "is held; `lucille-host policy previous` lists the earlier one",
+            "policy_reset",
         )
     name = session.accept(code)
     if session.skewed:
         _warn(link.SKEWED)
-    _say(f"accepted: pair {name}")
-    _say("waiting: for Lucille to collect this computer's answer")
+    out.say(
+        f"accepted: pair {name}", "pair", state="accepted", name=name, clock_skewed=session.skewed
+    )
+    out.say(
+        "waiting: for Lucille to collect this computer's answer", "pair", state="waiting", name=name
+    )
     try:
         session.wait(name)
     except KeyboardInterrupt:
@@ -512,11 +856,18 @@ def _answer(args: argparse.Namespace, dirs: paths.Dirs, wanted: host_state.HostC
     if shown is None:
         raise session.no_gate(name)
     sas, found = shown
-    _say(f"sas_pending: {session.pending(name, sas, found)}")
+    out.say(
+        f"sas_pending: {session.pending(name, sas, found)}",
+        "pair",
+        state="sas_pending",
+        name=name,
+        sas=sas,
+        deadline=link.iso(found.deadline or 0),
+    )
     if args.code_stdin:
-        return ""
+        return
     try:
-        return _ask(session, name, found.deadline)
+        out.text(_ask(session, name, found.deadline, out))
     except KeyboardInterrupt:
         raise link.Stopped(
             "interrupted",
@@ -525,46 +876,70 @@ def _answer(args: argparse.Namespace, dirs: paths.Dirs, wanted: host_state.HostC
         ) from None
 
 
-def _run(args: argparse.Namespace, dirs: paths.Dirs) -> str:
+def _run(args: argparse.Namespace, dirs: paths.Dirs, out: _Out) -> None:
     session = link.open_session(dirs, host_state.load_host_config(dirs), say=_say, warn=_warn)
     controls = Controls(paths.ensure_dir(dirs.state))
-    return loop.run(dirs, session, controls=controls, say=_say)
+    said = loop.run(dirs, session, controls=controls, say=_say)
+    if said:
+        print(said)
 
 
-def _status(args: argparse.Namespace, dirs: paths.Dirs) -> str:
+def _status(args: argparse.Namespace, dirs: paths.Dirs, out: _Out) -> None:
     config = host_state.load_host_config(dirs)
-    session = link.open_session(dirs, config, say=_say, warn=_warn)
-    return "\n".join(report.status(dirs, session, config))
+    failure: BaseException | None = None
+    session: link.Session | None = None
+    try:
+        session = link.open_session(dirs, config, say=_say, warn=_warn)
+    except (store.InsecureKeyring, store.StoreError) as exc:
+        # A store that cannot be read is reported in the pair, and the rest as it is.
+        failure = exc
+    lines, found = report.collect(dirs, session, config, failure=failure)
+    if out.as_json:
+        out.obj("status", **found)
+        return
+    for line in lines:
+        print(line)
 
 
-def _log(args: argparse.Namespace, dirs: paths.Dirs) -> str:
+def _log(args: argparse.Namespace, dirs: paths.Dirs, out: _Out) -> None:
     if args.limit < 1:
-        raise _Refused("--limit takes a number of lines, 1 or more")
+        raise _Refused("bad_limit", "--limit takes a number of lines, 1 or more")
     lines = audit.tail(dirs.state, args.limit)
     if not lines:
         print(
             f"lucille-host: the audit log has no lines yet ({dirs.state / audit.FILE_NAME})",
             file=sys.stderr,
         )
-    return "\n".join(lines)
+    for line in lines:
+        out.say(line, "log_line", text=line)
 
 
-def _forget(args: argparse.Namespace, dirs: paths.Dirs) -> str:
+def _forget(args: argparse.Namespace, dirs: paths.Dirs, out: _Out) -> None:
     session = link.open_session(dirs, host_state.load_host_config(dirs), say=_say, warn=_warn)
     gone = session.leave_left_over()
     if gone is not None:
-        return (
+        out.say(
             f"left: pair {gone} was gone from this computer already, and the work rooms still "
-            "held over it are left now"
+            "held over it are left now",
+            "forget",
+            state="left",
+            name=gone,
         )
+        return
     told = session.forget()
-    return (
+    out.say(
         f"forgotten: pair {told.name} is forgotten on this computer, its work rooms left first; "
-        + link.told_sentence(told)
+        + link.told_sentence(told),
+        "forget",
+        state="forgotten",
+        name=told.name,
+        lucille_told=told.told,
     )
 
 
-def _controls(verb: str, dirs: paths.Dirs) -> str:
+def _controls(verb: str, dirs: paths.Dirs, out: _Out | None = None) -> None:
+    if verb not in ("pause", "resume", "kill"):
+        raise _Refused("internal", f"{verb} is not a control")
     controls = Controls(paths.ensure_dir(dirs.state))
     if verb == "resume":
         locked = controls.resume()
@@ -572,11 +947,9 @@ def _controls(verb: str, dirs: paths.Dirs) -> str:
     elif verb == "pause":
         locked = controls.pause()
         message = "paused: the host starts nothing until `lucille-host resume`"
-    elif verb == "kill":
+    else:
         locked = controls.kill()
         message = "paused, and asked the running host to kill the operation in flight, if any"
-    else:
-        raise _Refused(f"{verb} is not a control")
     if not locked:
         print(
             "lucille-host: note: this filesystem cannot lock, so this ran without the controls' "
@@ -584,25 +957,29 @@ def _controls(verb: str, dirs: paths.Dirs) -> str:
             "pause flag",
             file=sys.stderr,
         )
-    return message
+    (out or _Out(False)).say(message, "controls", paused=controls.paused())
 
 
-def _ops_verb(args: argparse.Namespace, dirs: paths.Dirs) -> str:
+def _ops_verb(args: argparse.Namespace, dirs: paths.Dirs, out: _Out) -> None:
     with contextlib.nullcontext() if args.ops_verb == "list" else _policy_lock(dirs):
-        return _ops(args, dirs)
+        _ops(args, dirs, out)
 
 
-def _roots_verb(args: argparse.Namespace, dirs: paths.Dirs) -> str:
-    with contextlib.nullcontext() if args.roots_verb == "list" else _policy_lock(dirs):
-        return _roots(args, dirs)
+def _roots_verb(args: argparse.Namespace, dirs: paths.Dirs, out: _Out) -> None:
+    # Listing, checking and suggesting change nothing, and take no lock.
+    reads = args.roots_verb in ("list", "check") or (
+        args.roots_verb == "add" and args.suggest_alias is not None
+    )
+    with contextlib.nullcontext() if reads else _policy_lock(dirs):
+        _roots(args, dirs, out)
 
 
-def _control(verb: str) -> Callable[[argparse.Namespace, paths.Dirs], str]:
-    return lambda args, dirs: _controls(verb, dirs)
+def _control(verb: str) -> Callable[[argparse.Namespace, paths.Dirs, _Out], None]:
+    return lambda args, dirs, out: _controls(verb, dirs, out)
 
 
 # Every verb the parser knows, and what runs it.
-VERBS: Final[dict[str, Callable[[argparse.Namespace, paths.Dirs], str]]] = {
+VERBS: Final[dict[str, Callable[[argparse.Namespace, paths.Dirs, _Out], None]]] = {
     "pair": _pair,
     "run": _run,
     "status": _status,
@@ -616,43 +993,77 @@ VERBS: Final[dict[str, Callable[[argparse.Namespace, paths.Dirs], str]]] = {
     "kill": _control("kill"),
 }
 
+# What --json calls each failure that carries no code of its own, the first class that matches
+# (spec/CLI.md section 10). _Refused, link.Stopped and loop.Failed carry theirs.
+FAILURE_CODES: Final = (
+    (_switchboard.PairFailed, "pair_unusable"),
+    (_switchboard.HubError, "hub_error"),
+    (store.InsecureKeyring, "insecure_keyring"),
+    (host_state.Refused, "startup_refused"),
+    (host_state.StateError, "state_invalid"),
+    (host_state.Unprepared, "runtime_folder"),
+    (paths.UnsupportedPlatform, "unsupported_platform"),
+    (policy.PolicyError, "policy_invalid"),
+    (store.StoreError, "store_error"),
+    (OSError, "os_error"),
+)
+_FAILURES: Final = (_Refused, link.Stopped, loop.Failed, *(kind for kind, _ in FAILURE_CODES))
+
+
+def _failure(exc: BaseException) -> tuple[str, str, str, dict[str, str]]:
+    """A failure: the line stderr shows, and the ``error`` object's code, message and other
+    fields."""
+    if isinstance(exc, link.Stopped):
+        return f"{exc.state}: {exc}", exc.code, str(exc), {}
+    if isinstance(exc, _switchboard.PairFailed):
+        said = f"the pair cannot be used here ({exc.state})"
+        return f"error: {said}", "pair_unusable", said, {}
+    if isinstance(exc, _switchboard.HubError):
+        said = f"{exc}; try again"
+        return f"error: {said}", "hub_error", said, {}
+    if isinstance(exc, _Refused | loop.Failed):
+        code = exc.code
+    else:
+        code = next(code for kind, code in FAILURE_CODES if isinstance(exc, kind))
+    if isinstance(exc, OSError) and not isinstance(exc, _Refused):
+        where = f" ({exc.filename})" if exc.filename else ""
+        said = f"{exc.strerror or exc}{where}"
+    else:
+        said = str(exc)
+    extra = exc.extra if isinstance(exc, _Refused) else {}
+    return f"lucille-host: {said}", code, said, extra
+
 
 def main(argv: Sequence[str] | None = None) -> int:
     """Entry point for the ``lucille-host`` console script and ``python -m lucille_host``."""
-    args = build_parser().parse_args(argv)
+    words = list(sys.argv[1:] if argv is None else argv)
+    wanted = _wants_json(words)
+    parser = build_parser()
+    if isinstance(parser, _Parser):
+        parser.json_wanted = wanted
+    try:
+        args = parser.parse_args(words)
+        _check_usage(parser, args)
+    except _Usage as exc:
+        _Out(wanted).error("usage", USAGE_MESSAGE)
+        argparse.ArgumentParser.error(exc.parser, exc.message)
+    out = _Out(bool(getattr(args, "json", False)))
     if args.verb is None:
-        print(version_line())
+        out.version()
         return 0
     try:
         dirs = _dirs(args.profile)
         verb = VERBS.get(args.verb)
         if verb is None:
-            raise _Refused(f"{args.verb} is not a verb this release has")
-        message = verb(args, dirs)
-    except link.Stopped as exc:
-        print(f"{exc.state}: {exc}", file=sys.stderr)
+            raise _Refused("internal", f"{args.verb} is not a verb this release has")
+        verb(args, dirs, out)
+    except _FAILURES as exc:
+        said, code, message, extra = _failure(exc)
+        print(said, file=sys.stderr)
+        out.error(code, message, **extra)
         return 1
-    except _switchboard.PairFailed as exc:
-        print(f"error: the pair cannot be used here ({exc.state})", file=sys.stderr)
-        return 1
-    except _switchboard.HubError as exc:
-        print(f"error: {exc}; try again", file=sys.stderr)
-        return 1
-    except (
-        _Refused,
-        paths.UnsupportedPlatform,
-        policy.PolicyError,
-        host_state.Refused,
-        host_state.StateError,
-        host_state.Unprepared,
-        loop.Failed,
-    ) as exc:
-        print(f"lucille-host: {exc}", file=sys.stderr)
-        return 1
-    except OSError as exc:
-        where = f" ({exc.filename})" if exc.filename else ""
-        print(f"lucille-host: {exc.strerror or exc}{where}", file=sys.stderr)
-        return 1
-    if message:
-        print(message)
+    except Exception:
+        # A bug: the object, then the traceback, as Python prints it, and exit 1.
+        out.error("internal", INTERNAL_MESSAGE)
+        raise
     return 0

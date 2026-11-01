@@ -1,4 +1,5 @@
-"""The schemas and fixtures ship in the wheel, and load from an installed copy of it.
+"""The schemas and fixtures ship in the wheel, and load from an installed copy of it: the
+protocol's, and the command line contract's (spec/CLI.md).
 
 This test builds the sdist and the wheel from this checkout with ``uv build`` (the wheel is built
 from the sdist, as a release builds it), installs the wheel with no dependencies into a fresh
@@ -115,3 +116,32 @@ def test_installed_fixtures_validate_as_labelled(built: dict[str, Any]) -> None:
     for name, fixture in report["fixtures"]["decode"].items():
         raw = base64.b64decode(fixture["raw_base64"])
         assert raw.decode("utf-8", errors="replace").replace("\x00", "") == fixture["text"], name
+
+
+def _cli_source_files() -> set[str]:
+    root = SOURCE_SPEC / "cli" / f"v{spec.CLI_MAJOR}"
+    return {
+        f"lucille_host/spec/cli/v{spec.CLI_MAJOR}/{path.relative_to(root).as_posix()}"
+        for path in root.rglob("*.json")
+    }
+
+
+def test_cli_spec_packaged(built: dict[str, Any]) -> None:
+    prefix = f"lucille_host/spec/cli/v{spec.CLI_MAJOR}/"
+    shipped = {name for name in built["wheel_names"] if name.startswith(prefix)}
+    assert shipped == _cli_source_files()
+    assert len(shipped) > 50
+    report = built["report"]["cli"]
+    loaded_from = Path(report["spec_dir"]).resolve()
+    assert loaded_from.is_relative_to(built["venv"])
+    assert not loaded_from.is_relative_to(REPO_ROOT)
+    assert report["schemas"] == {name: spec.load_cli_schema(name) for name in spec.CLI_TYPES}
+    source = {path.name: spec.load_cli_fixture(path) for path in spec.cli_fixture_paths()}
+    assert report["fixtures"] == source
+    errors = {}
+    for name, fixture in report["fixtures"].items():
+        for index, found in enumerate(fixture["stdout"]):
+            schema = report["schemas"][found["type"]]
+            if not _support.schema_accepts(found["type"], found, schema):
+                errors[f"{name}[{index}]"] = found
+    assert errors == {}

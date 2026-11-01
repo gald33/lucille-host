@@ -1,0 +1,52 @@
+{
+  "description": "ops list with host.describe disabled, host.sleep enabled and its executable missing, files.sha256 enabled under an earlier definition, and host.nothing in the policy",
+  "argv": [
+    "ops",
+    "list",
+    "--json"
+  ],
+  "exit": 0,
+  "stdout": [
+    {
+      "v": 1,
+      "type": "op",
+      "name": "host.describe",
+      "state": "disabled",
+      "enabled": false,
+      "summary": "Describe this computer's host",
+      "sends": "Lucille gets the host's version and protocol, the operating system family, which release's catalog it has, which operations are on, the names you gave your folders (never where they are), and a fingerprint of the local policy.",
+      "sends_file_content": false,
+      "diagnostic": false
+    },
+    {
+      "v": 1,
+      "type": "op",
+      "name": "host.sleep",
+      "state": "unavailable",
+      "enabled": true,
+      "summary": "Wait up to 4 minutes, for testing",
+      "sends": "Lucille gets how long the wait took and how it ended.",
+      "sends_file_content": false,
+      "diagnostic": true,
+      "missing_executable": "/bin/sleep"
+    },
+    {
+      "v": 1,
+      "type": "op",
+      "name": "files.sha256",
+      "state": "disabled_by_upgrade",
+      "enabled": false,
+      "summary": "Check a file's fingerprint",
+      "sends": "Lucille gets a code that identifies the file's exact contents, not the contents.",
+      "sends_file_content": false,
+      "diagnostic": false
+    },
+    {
+      "v": 1,
+      "type": "op",
+      "name": "host.nothing",
+      "state": "not_in_catalog",
+      "enabled": false
+    }
+  ]
+}

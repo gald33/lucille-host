@@ -1,0 +1,22 @@
+{
+  "description": "log --limit N, with --json last",
+  "argv": [
+    "log",
+    "--limit",
+    "5",
+    "--json"
+  ],
+  "exit": 0,
+  "stdout": [
+    {
+      "v": 1,
+      "type": "log_line",
+      "text": "{\"kind\":\"test\",\"n\":1}"
+    },
+    {
+      "v": 1,
+      "type": "log_line",
+      "text": "{\"kind\":\"test\",\"n\":2}"
+    }
+  ]
+}

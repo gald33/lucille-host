@@ -1,0 +1,16 @@
+{
+  "description": "run, which has no JSON form in version 1",
+  "argv": [
+    "--json",
+    "run"
+  ],
+  "exit": 2,
+  "stdout": [
+    {
+      "v": 1,
+      "type": "error",
+      "code": "usage",
+      "message": "the command line could not be parsed; standard error says why"
+    }
+  ]
+}

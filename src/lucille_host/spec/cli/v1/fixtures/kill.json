@@ -1,0 +1,15 @@
+{
+  "description": "kill",
+  "argv": [
+    "--json",
+    "kill"
+  ],
+  "exit": 0,
+  "stdout": [
+    {
+      "v": 1,
+      "type": "controls",
+      "paused": true
+    }
+  ]
+}

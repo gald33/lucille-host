@@ -1,0 +1,16 @@
+{
+  "description": "forget with no pair held and no work room left over",
+  "argv": [
+    "--json",
+    "forget"
+  ],
+  "exit": 1,
+  "stdout": [
+    {
+      "v": 1,
+      "type": "error",
+      "code": "none",
+      "message": "this computer holds no pair"
+    }
+  ]
+}

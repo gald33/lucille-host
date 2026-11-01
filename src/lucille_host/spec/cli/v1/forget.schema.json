@@ -1,0 +1,77 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/gald33/lucille-host/blob/main/src/lucille_host/spec/cli/v1/forget.schema.json",
+  "title": "lucille-host --json: forget",
+  "description": "What forget did.",
+  "oneOf": [
+    {
+      "$ref": "#/$defs/forget.forgotten"
+    },
+    {
+      "$ref": "#/$defs/forget.left"
+    }
+  ],
+  "$defs": {
+    "pair_name": {
+      "description": "A pair's name.",
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 32,
+      "pattern": "^[a-z0-9][a-z0-9-]{0,31}$"
+    },
+    "forget.forgotten": {
+      "description": "The pair's work rooms were left, then the pair was forgotten here.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "v",
+        "type",
+        "state",
+        "name",
+        "lucille_told"
+      ],
+      "properties": {
+        "v": {
+          "const": 1
+        },
+        "type": {
+          "const": "forget"
+        },
+        "state": {
+          "const": "forgotten"
+        },
+        "name": {
+          "$ref": "#/$defs/pair_name"
+        },
+        "lucille_told": {
+          "type": "boolean"
+        }
+      }
+    },
+    "forget.left": {
+      "description": "No pair was held; the work rooms still held over a pair already gone from this computer were left.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "v",
+        "type",
+        "state",
+        "name"
+      ],
+      "properties": {
+        "v": {
+          "const": 1
+        },
+        "type": {
+          "const": "forget"
+        },
+        "state": {
+          "const": "left"
+        },
+        "name": {
+          "$ref": "#/$defs/pair_name"
+        }
+      }
+    }
+  }
+}

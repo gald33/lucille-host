@@ -587,7 +587,7 @@ closed v1 schema allows none.
 | `host_version` | as in the reply |
 | `protocol` | `"lucille.exec/1"` |
 | `os_family` | `"linux"` or `"macos"` |
-| `catalog_version` | identifies the release's catalog; it changes whenever any catalog entry changes. 1 to 64 characters: an ASCII letter or digit first, then letters, digits, `.`, `+`, `_` or `-` (the pattern `^[0-9A-Za-z][0-9A-Za-z.+_-]{0,63}$`). |
+| `catalog_version` | identifies the release's catalog; it changes whenever any entry's definition, or whether a fresh install enables it, changes; the words a shell shows for an entry are outside it. 1 to 64 characters: an ASCII letter or digit first, then letters, digits, `.`, `+`, `_` or `-` (the pattern `^[0-9A-Za-z][0-9A-Za-z.+_-]{0,63}$`). |
 | `enabled_ops` | the names of the operations the local policy enables, at most 64, none twice |
 | `root_aliases` | the folder aliases the local policy holds, at most 64, none twice; never paths |
 | `policy_digest` | as in the reply |

@@ -1,0 +1,17 @@
+{
+  "description": "ops disable of a name the policy holds and this release's catalog does not",
+  "argv": [
+    "--json",
+    "ops",
+    "disable",
+    "host.nothing"
+  ],
+  "exit": 0,
+  "stdout": [
+    {
+      "v": 1,
+      "type": "op_removed",
+      "name": "host.nothing"
+    }
+  ]
+}

@@ -1,0 +1,18 @@
+{
+  "description": "ops enable of a name this release's catalog does not have",
+  "argv": [
+    "--json",
+    "ops",
+    "enable",
+    "host.nothing"
+  ],
+  "exit": 1,
+  "stdout": [
+    {
+      "v": 1,
+      "type": "error",
+      "code": "not_in_catalog",
+      "message": "host.nothing is not in this release's catalog"
+    }
+  ]
+}

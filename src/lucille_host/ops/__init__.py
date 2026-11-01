@@ -23,6 +23,14 @@ by 1, so it cannot begin with ``-``. (``host.sleep`` needs that: macOS's ``/bin/
 Each entry's :attr:`Operation.definition_hash` covers everything that decides what the entry does
 when it is enabled. The local policy stores it beside each enabled entry, and an upgrade that
 changes an enabled entry disables it until the user enables it again.
+
+Each entry also carries what a shell shows of it (:class:`About`, ``spec/CLI.md`` section 8): a few
+plain words for what it does, what Lucille gets when it runs, whether a reply can carry the
+contents of a file, and whether it is meant for testing. The words, and whether it is meant for
+testing, describe the entry and decide none of it, so they are outside the hash and outside
+:data:`CATALOG_VERSION`: a release that only changes them turns no operation off. Whether a reply
+can carry file contents is what a shell asks the user to acknowledge, so it is in the hash when
+it is true.
 """
 
 from __future__ import annotations
@@ -31,7 +39,7 @@ import hashlib
 import json
 import os
 import re
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Any, Final
@@ -40,12 +48,14 @@ from lucille_host._exec import CHILD_ENV
 
 __all__ = [
     "CATALOG_VERSION",
+    "About",
     "DEFAULT_TIMEOUT_S",
     "MAX_TIMEOUT_S",
     "OPERATIONS",
     "OS_FAMILIES",
     "Operation",
     "args_valid",
+    "catalog_version",
 ]
 
 # The operating systems this release runs on, by the names host.describe reports.
@@ -63,6 +73,21 @@ _PLACEHOLDER = re.compile(r"\{([a-z_][a-z0-9_]*)\}", re.ASCII)
 
 
 @dataclass(frozen=True)
+class About:
+    """What a shell shows of a catalog entry (``spec/CLI.md`` section 8)."""
+
+    # A few plain words for what it does, at most 60 characters.
+    summary: str
+    # What Lucille gets when it runs, at most 300 characters.
+    sends: str
+    # Whether a reply can carry the contents of a file. A shell asks the user to acknowledge it
+    # before it enables the entry. In the definition hash when true.
+    sends_file_content: bool = False
+    # Whether it is meant for testing; a shell may hide it.
+    diagnostic: bool = False
+
+
+@dataclass(frozen=True)
 class Operation:
     """One catalog entry."""
 
@@ -76,6 +101,8 @@ class Operation:
     timeout_plus_arg: str | None
     # Whether a fresh install enables it.
     default_enabled: bool
+    # What a shell shows of it. Only ``sends_file_content``, when true, is in the hash.
+    about: About
     # Arguments that name a file to the program. "-" is rendered "./-": most programs read
     # standard input for an operand "-", even after "--".
     file_operands: tuple[str, ...] = ()
@@ -134,7 +161,9 @@ class Operation:
     def definition_hash(self) -> str:
         """SHA-256 over what decides what this entry does when enabled: its name, parameter
         schema, argv templates and file operands, its time limit and the cap on it, where its
-        child runs (the folder's real path, or ``/``), and the child's environment."""
+        child runs (the folder's real path, or ``/``), and the child's environment; and, when a
+        reply can carry the contents of a file, that it can. The words a shell shows are not in
+        it."""
         return _sha256_json(self._definition())
 
     def _definition(self) -> dict[str, Any]:
@@ -148,6 +177,9 @@ class Operation:
             "max_timeout_s": MAX_TIMEOUT_S,
             "cwd": None if self.argv is None else ("root" if self.uses_root else "/"),
             "child_env": None if self.argv is None else dict(CHILD_ENV),
+            # Written only when true, so that the hashes of entries that send no file contents
+            # are the ones they had before the field existed.
+            **({"sends_file_content": True} if self.about.sends_file_content else {}),
         }
 
 
@@ -179,6 +211,7 @@ def _entry(
     name: str,
     params_json: str,
     argv: dict[str, tuple[str, ...]] | None,
+    about: About,
     *,
     timeout_plus_arg: str | None = None,
     default_enabled: bool = False,
@@ -191,18 +224,37 @@ def _entry(
         timeout_s=DEFAULT_TIMEOUT_S,
         timeout_plus_arg=timeout_plus_arg,
         default_enabled=default_enabled,
+        about=about,
         file_operands=file_operands,
     )
 
 
 _ENTRIES = (
     # Runs no process. Its reply is the document of spec/PROTOCOL.md section 11.
-    _entry("host.describe", _object([], {}), None, default_enabled=True),
+    _entry(
+        "host.describe",
+        _object([], {}),
+        None,
+        About(
+            summary="Describe this computer's host",
+            sends=(
+                "Lucille gets the host's version and protocol, the operating system family, "
+                "which release's catalog it has, which operations are on, the names you gave "
+                "your folders (never where they are), and a fingerprint of the local policy."
+            ),
+        ),
+        default_enabled=True,
+    ),
     # Diagnostic: sleeps n seconds, to test waits, deploys and a closed lid. Its limit is n + 30 s.
     _entry(
         "host.sleep",
         _object(["n"], {"n": {"type": "integer", "minimum": 1, "maximum": 240}}),
         {"linux": ("/bin/sleep", "{n}"), "macos": ("/bin/sleep", "{n}")},
+        About(
+            summary="Wait up to 4 minutes, for testing",
+            sends="Lucille gets how long the wait took and how it ended.",
+            diagnostic=True,
+        ),
         timeout_plus_arg="n",
     ),
     # The SHA-256 digest of one file under a folder alias. It shells out on purpose: the first
@@ -215,20 +267,32 @@ _ENTRIES = (
             "linux": ("/usr/bin/sha256sum", "--", "{path}"),
             "macos": ("/usr/bin/shasum", "-a", "256", "--", "{path}"),
         },
+        About(
+            summary="Check a file's fingerprint",
+            sends=(
+                "Lucille gets a code that identifies the file's exact contents, not the contents."
+            ),
+        ),
         file_operands=("path",),
     ),
 )
 
 OPERATIONS: Final[Mapping[str, Operation]] = MappingProxyType({op.name: op for op in _ENTRIES})
 
-# Identifies this release's catalog: it changes whenever any entry does, its definition or whether a
-# fresh install enables it.
-CATALOG_VERSION: Final = _sha256_json(
-    {
-        op.name: {"definition": op.definition_hash, "default_enabled": op.default_enabled}
-        for op in _ENTRIES
-    }
-)
+
+def catalog_version(entries: Iterable[Operation]) -> str:
+    """Identifies a catalog: it changes whenever any entry's definition, or whether a fresh install
+    enables it, changes. The words a shell shows for an entry are outside it."""
+    return _sha256_json(
+        {
+            op.name: {"definition": op.definition_hash, "default_enabled": op.default_enabled}
+            for op in entries
+        }
+    )
+
+
+# Identifies this release's catalog.
+CATALOG_VERSION: Final = catalog_version(_ENTRIES)
 
 
 def _check_schema(name: str, schema: Mapping[str, Any]) -> None:

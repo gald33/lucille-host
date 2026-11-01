@@ -1,0 +1,23 @@
+{
+  "description": "ops disable, with --json between the verb and the action",
+  "argv": [
+    "ops",
+    "--json",
+    "disable",
+    "host.describe"
+  ],
+  "exit": 0,
+  "stdout": [
+    {
+      "v": 1,
+      "type": "op",
+      "name": "host.describe",
+      "state": "disabled",
+      "enabled": false,
+      "summary": "Describe this computer's host",
+      "sends": "Lucille gets the host's version and protocol, the operating system family, which release's catalog it has, which operations are on, the names you gave your folders (never where they are), and a fingerprint of the local policy.",
+      "sends_file_content": false,
+      "diagnostic": false
+    }
+  ]
+}

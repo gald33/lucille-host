@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/gald33/lucille-host/blob/main/src/lucille_host/spec/cli/v1/op_removed.schema.json",
+  "title": "lucille-host --json: op_removed",
+  "description": "ops disable took out of the local policy an operation this release does not have.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "v",
+    "type",
+    "name"
+  ],
+  "properties": {
+    "v": {
+      "const": 1
+    },
+    "type": {
+      "const": "op_removed"
+    },
+    "name": {
+      "$ref": "#/$defs/policy_op_name"
+    }
+  },
+  "$defs": {
+    "policy_op_name": {
+      "description": "An operation name as the local policy may hold it: in this release's catalog or not.",
+      "type": "string",
+      "minLength": 3,
+      "pattern": "^[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*)+$"
+    }
+  }
+}

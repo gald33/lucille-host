@@ -1,0 +1,786 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/gald33/lucille-host/blob/main/src/lucille_host/spec/cli/v1/status.schema.json",
+  "title": "lucille-host --json: status",
+  "description": "What lucille-host status shows, as one object. It never holds the SAS.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "v",
+    "type",
+    "host_version",
+    "policy",
+    "paused",
+    "store",
+    "hub",
+    "loopback_hub",
+    "pair",
+    "work_rooms",
+    "last_left_because",
+    "offers_waiting",
+    "run",
+    "last_hub_contact",
+    "clock"
+  ],
+  "properties": {
+    "v": {
+      "const": 1
+    },
+    "type": {
+      "const": "status"
+    },
+    "host_version": {
+      "$ref": "#/$defs/host_version"
+    },
+    "policy": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/policy.ok"
+        },
+        {
+          "$ref": "#/$defs/policy.invalid"
+        }
+      ]
+    },
+    "paused": {
+      "type": "boolean"
+    },
+    "store": {
+      "type": "string",
+      "enum": [
+        "keyring",
+        "file"
+      ]
+    },
+    "hub": {
+      "$ref": "#/$defs/hub"
+    },
+    "loopback_hub": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/loopback_hub"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "pair": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/status_pair.none"
+        },
+        {
+          "$ref": "#/$defs/status_pair.waiting"
+        },
+        {
+          "$ref": "#/$defs/status_pair.sas_ready"
+        },
+        {
+          "$ref": "#/$defs/status_pair.sas_pending"
+        },
+        {
+          "$ref": "#/$defs/status_pair.confirmed"
+        },
+        {
+          "$ref": "#/$defs/status_pair.refused"
+        },
+        {
+          "$ref": "#/$defs/status_pair.expired"
+        },
+        {
+          "$ref": "#/$defs/status_pair.several_pairs"
+        },
+        {
+          "$ref": "#/$defs/status_pair.unreadable"
+        }
+      ]
+    },
+    "work_rooms": {
+      "type": "array",
+      "items": {
+        "oneOf": [
+          {
+            "$ref": "#/$defs/work_room.reading"
+          },
+          {
+            "$ref": "#/$defs/work_room.not_read"
+          },
+          {
+            "$ref": "#/$defs/work_room.read_stuck"
+          },
+          {
+            "$ref": "#/$defs/work_room.pair_gone"
+          },
+          {
+            "$ref": "#/$defs/work_room.abandoned"
+          },
+          {
+            "$ref": "#/$defs/work_room.accept_interrupted"
+          }
+        ]
+      }
+    },
+    "last_left_because": {
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "check_3",
+            "check_4",
+            "left_before"
+          ]
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "offers_waiting": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "run": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/run.none"
+        },
+        {
+          "$ref": "#/$defs/run.running"
+        },
+        {
+          "$ref": "#/$defs/run.not_seen"
+        },
+        {
+          "$ref": "#/$defs/run.stopped"
+        }
+      ]
+    },
+    "last_hub_contact": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/time"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "clock": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/clock.ok"
+        },
+        {
+          "$ref": "#/$defs/clock.skewed"
+        },
+        {
+          "$ref": "#/$defs/clock.unknown"
+        }
+      ]
+    }
+  },
+  "$defs": {
+    "host_version": {
+      "description": "The host release's version string.",
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 32,
+      "pattern": "^[0-9][0-9A-Za-z.+_-]{0,31}$"
+    },
+    "op_name": {
+      "description": "An operation name: namespaced, lowercase, at most 64 characters.",
+      "type": "string",
+      "minLength": 3,
+      "maxLength": 64,
+      "pattern": "^[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*)+$"
+    },
+    "policy_op_name": {
+      "description": "An operation name as the local policy may hold it: in this release's catalog or not.",
+      "type": "string",
+      "minLength": 3,
+      "pattern": "^[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*)+$"
+    },
+    "root": {
+      "description": "A folder alias from the host's local policy. Never a path.",
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 32,
+      "pattern": "^[a-z][a-z0-9_-]{0,31}$"
+    },
+    "path": {
+      "description": "An absolute path. A byte of a file name that is not UTF-8 is U+FFFD.",
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^/[^\\u0000]*$"
+    },
+    "time": {
+      "description": "A time, UTC, ISO 8601, to the second.",
+      "type": "string",
+      "minLength": 20,
+      "maxLength": 20,
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"
+    },
+    "pair_name": {
+      "description": "A pair's name.",
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 32,
+      "pattern": "^[a-z0-9][a-z0-9-]{0,31}$"
+    },
+    "room_name": {
+      "description": "The host's own name for a work room it holds.",
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 32,
+      "pattern": "^[a-z0-9][a-z0-9-]{0,31}$"
+    },
+    "hub": {
+      "description": "A hub: Lucille's, or a loopback hub `pair --hub` named.",
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 34,
+      "pattern": "^(https://switchboard\\.lucille-ai\\.com|http://(127\\.0\\.0\\.1|localhost):[1-9][0-9]{0,4})$"
+    },
+    "loopback_hub": {
+      "description": "A loopback hub `pair --hub` named.",
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 34,
+      "pattern": "^http://(127\\.0\\.0\\.1|localhost):[1-9][0-9]{0,4}$"
+    },
+    "message": {
+      "description": "A sentence for people. A shell shows it and never branches on it.",
+      "type": "string",
+      "pattern": "^[^\\u0000]*$"
+    },
+    "policy.ok": {
+      "description": "The local policy is valid.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "state",
+        "file",
+        "enabled",
+        "disabled",
+        "folders"
+      ],
+      "properties": {
+        "state": {
+          "const": "ok"
+        },
+        "file": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/path"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "enabled": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/op_name"
+          }
+        },
+        "disabled": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "name",
+              "why"
+            ],
+            "properties": {
+              "name": {
+                "$ref": "#/$defs/policy_op_name"
+              },
+              "why": {
+                "type": "string",
+                "enum": [
+                  "disabled_by_upgrade",
+                  "unavailable",
+                  "not_in_catalog"
+                ]
+              }
+            }
+          }
+        },
+        "folders": {
+          "type": "array",
+          "maxItems": 64,
+          "items": {
+            "$ref": "#/$defs/root"
+          }
+        }
+      }
+    },
+    "policy.invalid": {
+      "description": "The local policy file is invalid, and the host acts on nothing.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "state",
+        "error"
+      ],
+      "properties": {
+        "state": {
+          "const": "invalid"
+        },
+        "error": {
+          "$ref": "#/$defs/message"
+        }
+      }
+    },
+    "status_pair.none": {
+      "description": "This computer holds no pair.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "state"
+      ],
+      "properties": {
+        "state": {
+          "const": "none"
+        }
+      }
+    },
+    "status_pair.waiting": {
+      "description": "Lucille has not collected this computer's answer yet.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "state",
+        "name"
+      ],
+      "properties": {
+        "state": {
+          "const": "waiting"
+        },
+        "name": {
+          "$ref": "#/$defs/pair_name"
+        }
+      }
+    },
+    "status_pair.sas_ready": {
+      "description": "The SAS has reached this computer, and no command has shown it yet.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "state",
+        "name"
+      ],
+      "properties": {
+        "state": {
+          "const": "sas_ready"
+        },
+        "name": {
+          "$ref": "#/$defs/pair_name"
+        }
+      }
+    },
+    "status_pair.sas_pending": {
+      "description": "The SAS was shown, and is not confirmed.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "state",
+        "name",
+        "deadline"
+      ],
+      "properties": {
+        "state": {
+          "const": "sas_pending"
+        },
+        "name": {
+          "$ref": "#/$defs/pair_name"
+        },
+        "deadline": {
+          "$ref": "#/$defs/time"
+        }
+      }
+    },
+    "status_pair.confirmed": {
+      "description": "The local gate is open.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "state",
+        "name",
+        "generation"
+      ],
+      "properties": {
+        "state": {
+          "const": "confirmed"
+        },
+        "name": {
+          "$ref": "#/$defs/pair_name"
+        },
+        "generation": {
+          "oneOf": [
+            {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "status_pair.refused": {
+      "description": "The pair has no local gate record, so it can never be confirmed here.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "state",
+        "name"
+      ],
+      "properties": {
+        "state": {
+          "const": "refused"
+        },
+        "name": {
+          "$ref": "#/$defs/pair_name"
+        }
+      }
+    },
+    "status_pair.expired": {
+      "description": "The SAS was not confirmed in time.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "state",
+        "name",
+        "deadline"
+      ],
+      "properties": {
+        "state": {
+          "const": "expired"
+        },
+        "name": {
+          "$ref": "#/$defs/pair_name"
+        },
+        "deadline": {
+          "$ref": "#/$defs/time"
+        }
+      }
+    },
+    "status_pair.several_pairs": {
+      "description": "The profile holds more than one pair, and the host keeps one.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "state",
+        "message"
+      ],
+      "properties": {
+        "state": {
+          "const": "several_pairs"
+        },
+        "message": {
+          "$ref": "#/$defs/message"
+        }
+      }
+    },
+    "status_pair.unreadable": {
+      "description": "The store that keeps the pair could not be read.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "state",
+        "code",
+        "message"
+      ],
+      "properties": {
+        "state": {
+          "const": "unreadable"
+        },
+        "code": {
+          "type": "string",
+          "enum": [
+            "insecure_keyring",
+            "store_error",
+            "pair_unusable"
+          ]
+        },
+        "message": {
+          "$ref": "#/$defs/message"
+        }
+      }
+    },
+    "work_room.reading": {
+      "description": "run reads it.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "state",
+        "name",
+        "accepted_at"
+      ],
+      "properties": {
+        "state": {
+          "const": "reading"
+        },
+        "name": {
+          "$ref": "#/$defs/room_name"
+        },
+        "accepted_at": {
+          "$ref": "#/$defs/time"
+        }
+      }
+    },
+    "work_room.not_read": {
+      "description": "Held, and run is not reading it now.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "state",
+        "name",
+        "accepted_at"
+      ],
+      "properties": {
+        "state": {
+          "const": "not_read"
+        },
+        "name": {
+          "$ref": "#/$defs/room_name"
+        },
+        "accepted_at": {
+          "$ref": "#/$defs/time"
+        }
+      }
+    },
+    "work_room.read_stuck": {
+      "description": "A message there cannot be opened, and run reads no further there.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "state",
+        "name",
+        "accepted_at"
+      ],
+      "properties": {
+        "state": {
+          "const": "read_stuck"
+        },
+        "name": {
+          "$ref": "#/$defs/room_name"
+        },
+        "accepted_at": {
+          "$ref": "#/$defs/time"
+        }
+      }
+    },
+    "work_room.pair_gone": {
+      "description": "The pair it was taken over is gone from this computer; forget leaves it.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "state",
+        "name",
+        "accepted_at"
+      ],
+      "properties": {
+        "state": {
+          "const": "pair_gone"
+        },
+        "name": {
+          "$ref": "#/$defs/room_name"
+        },
+        "accepted_at": {
+          "$ref": "#/$defs/time"
+        }
+      }
+    },
+    "work_room.abandoned": {
+      "description": "Nothing is taken from it; its leave is tried again, or forget leaves it.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "state",
+        "name",
+        "accepted_at",
+        "why"
+      ],
+      "properties": {
+        "state": {
+          "const": "abandoned"
+        },
+        "name": {
+          "$ref": "#/$defs/room_name"
+        },
+        "accepted_at": {
+          "$ref": "#/$defs/time"
+        },
+        "why": {
+          "type": "string",
+          "enum": [
+            "replaced",
+            "left_by_lucille",
+            "pair_moved",
+            "not_over_current_pair",
+            "pair_over",
+            "gone",
+            "check_3",
+            "check_4",
+            "left_before"
+          ]
+        }
+      }
+    },
+    "work_room.accept_interrupted": {
+      "description": "An accept a stop interrupted may have kept it, over a pair that is gone.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "state",
+        "name"
+      ],
+      "properties": {
+        "state": {
+          "const": "accept_interrupted"
+        },
+        "name": {
+          "$ref": "#/$defs/room_name"
+        }
+      }
+    },
+    "run.none": {
+      "description": "No record of run.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "state"
+      ],
+      "properties": {
+        "state": {
+          "const": "none"
+        }
+      }
+    },
+    "run.running": {
+      "description": "run is running.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "state",
+        "pid",
+        "as_of"
+      ],
+      "properties": {
+        "state": {
+          "const": "running"
+        },
+        "pid": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 2147483647
+        },
+        "as_of": {
+          "$ref": "#/$defs/time"
+        }
+      }
+    },
+    "run.not_seen": {
+      "description": "run stopped without saying so.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "state",
+        "pid",
+        "as_of"
+      ],
+      "properties": {
+        "state": {
+          "const": "not_seen"
+        },
+        "pid": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 2147483647
+        },
+        "as_of": {
+          "$ref": "#/$defs/time"
+        }
+      }
+    },
+    "run.stopped": {
+      "description": "run stopped.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "state",
+        "as_of"
+      ],
+      "properties": {
+        "state": {
+          "const": "stopped"
+        },
+        "as_of": {
+          "$ref": "#/$defs/time"
+        }
+      }
+    },
+    "clock.ok": {
+      "description": "Measured on the last reply posted; positive when this computer is behind the hub.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "state",
+        "skew_s"
+      ],
+      "properties": {
+        "state": {
+          "const": "ok"
+        },
+        "skew_s": {
+          "type": "number"
+        }
+      }
+    },
+    "clock.skewed": {
+      "description": "The hub refuses what the host writes: this computer's clock is more than 300 s off.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "state",
+        "skew_s"
+      ],
+      "properties": {
+        "state": {
+          "const": "skewed"
+        },
+        "skew_s": {
+          "oneOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "clock.unknown": {
+      "description": "Not measured yet.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "state"
+      ],
+      "properties": {
+        "state": {
+          "const": "unknown"
+        }
+      }
+    }
+  }
+}

@@ -176,6 +176,10 @@ The host:
    - Lucille has its own gate on the same comparison, and sends no request before it opens (Lucille
      policy as of 2026-10-27; not proven by this repository). The host's gate does not depend on it:
      nothing runs on the host before the host's own gate opens.
+   - With `--json` ([spec/CLI.md](../spec/CLI.md)), writing the `sas_pending` object, which carries the
+     SAS, is showing it, and the program that reads it shows it to the user. The host cannot see that a
+     person looked: that rests on the program, which confirms only when the user says Lucille's page
+     shows the same.
    - **Three refinements, accepted by the maintainer on 2026-10-31.** The first version of this record
      said that the host **shows the SAS** and asks the user to type `y` if it matches the code on
      Lucille's page, and no more on when `y` counts. The build added three rules to this gate, all above,
@@ -548,8 +552,18 @@ policy changed. A plain hash would let anyone holding it confirm a guessed folde
 
 `pair [CODE] [--code-stdin] [--hub URL] [--store-file]`, `pair status`, `pair confirm`, `pair reject`,
 `run`, `status`, `log [--limit N]`, `forget`, `ops list|enable|disable`, `roots list|add|remove`,
-`policy previous`, `pause`, `resume`, `kill`. They print text, with the state word first where there is
-one (`waiting`, `sas_pending`, `confirmed`, `leaked`, `expired`, ...).
+`policy previous`, `pause`, `resume`, `kill`, and, for an app that drives the command line,
+`roots add --suggest-alias PATH` and `roots check [ALIAS]`. They print text, with the state word first
+where there is one (`waiting`, `sas_pending`, `confirmed`, `leaked`, `expired`, ...).
+- `--json` makes every verb but `run` write the JSON objects of [spec/CLI.md](../spec/CLI.md) on stdout
+  instead of its text, one per line, with the same exit codes; stderr stays as it is. A shell never parses
+  the text, and never writes the host's files. With `--json`, `pair` reads the code only with
+  `--code-stdin`, and asks nothing: it stops once the SAS is shown. Its `sas_pending` object carries the
+  SAS and the deadline, as the text does, and so does `pair status`'s: under this record's gate the user
+  compares the SAS the computer shows, so a program that drives the command line must show it. Writing it
+  in JSON counts as showing it: the deadline starts then, as when the text shows it, and the program shows
+  it to the user, who confirms (`pair confirm`) only once they have seen it. `lucille-host status` never
+  reports the SAS, in JSON either.
 - `status` makes no hub call. It shows the version, the policy check, the enabled operations and folder
   aliases, whether the host is paused, where the pair is kept, the hub and a loopback hub if one is
   configured, the pair's state (never its SAS: `pair status` shows that), each work room held or that it

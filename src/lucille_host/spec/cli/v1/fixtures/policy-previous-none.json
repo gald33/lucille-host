@@ -1,0 +1,16 @@
+{
+  "description": "policy previous before any pairing set a policy aside",
+  "argv": [
+    "--json",
+    "policy",
+    "previous"
+  ],
+  "exit": 0,
+  "stdout": [
+    {
+      "v": 1,
+      "type": "previous_policy",
+      "state": "none"
+    }
+  ]
+}

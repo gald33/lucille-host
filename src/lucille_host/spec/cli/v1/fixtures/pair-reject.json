@@ -1,0 +1,18 @@
+{
+  "description": "pair reject before the SAS is confirmed, with the hub reachable",
+  "argv": [
+    "--json",
+    "pair",
+    "reject"
+  ],
+  "exit": 0,
+  "stdout": [
+    {
+      "v": 1,
+      "type": "pair",
+      "state": "rejected",
+      "name": "pair-abcdef",
+      "lucille_told": true
+    }
+  ]
+}

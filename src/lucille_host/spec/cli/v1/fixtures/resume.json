@@ -1,0 +1,15 @@
+{
+  "description": "resume, after pause",
+  "argv": [
+    "resume",
+    "--json"
+  ],
+  "exit": 0,
+  "stdout": [
+    {
+      "v": 1,
+      "type": "controls",
+      "paused": false
+    }
+  ]
+}

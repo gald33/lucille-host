@@ -1,0 +1,18 @@
+{
+  "description": "roots add --suggest-alias for a folder whose alias a folder of the policy has already",
+  "argv": [
+    "roots",
+    "add",
+    "--suggest-alias",
+    "/home/me/Caf\u00e9 Notes",
+    "--json"
+  ],
+  "exit": 0,
+  "stdout": [
+    {
+      "v": 1,
+      "type": "alias_suggestion",
+      "alias": "cafe-notes-2"
+    }
+  ]
+}

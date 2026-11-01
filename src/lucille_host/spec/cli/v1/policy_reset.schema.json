@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/gald33/lucille-host/blob/main/src/lucille_host/spec/cli/v1/policy_reset.schema.json",
+  "title": "lucille-host --json: policy_reset",
+  "description": "The local policy was set aside for the new pair, and the fresh policy put in its place.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "v",
+    "type"
+  ],
+  "properties": {
+    "v": {
+      "const": 1
+    },
+    "type": {
+      "const": "policy_reset"
+    }
+  }
+}

@@ -172,7 +172,13 @@ _HELD_GUARD = threading.Lock()
 
 class Failed(RuntimeError):
     """``run`` stopped because one of its threads met something it cannot go on from; or a command
-    found another of the profile holding a lock only one may hold (:func:`one_at_a_time`)."""
+    found another of the profile holding a lock only one may hold (:func:`one_at_a_time`).
+    ``code`` is what ``--json`` calls it (spec/CLI.md section 10): ``busy`` or ``lock_failed``
+    for the lock. ``run``, which has no ``--json`` form, leaves it ``internal``."""
+
+    def __init__(self, message: str, *, code: str = "internal") -> None:
+        super().__init__(message)
+        self.code = code
 
 
 @contextlib.contextmanager
@@ -184,17 +190,18 @@ def one_at_a_time(lock: Path, busy: str, verb: str) -> Iterator[None]:
     path = os.path.realpath(lock)
     with _HELD_GUARD:
         if path in _HELD:
-            raise Failed(busy)
+            raise Failed(busy, code="busy")
         descriptor = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
         try:
             os.lockf(descriptor, os.F_TLOCK, 0)
         except OSError as exc:
             os.close(descriptor)
             if exc.errno in (errno.EACCES, errno.EAGAIN):
-                raise Failed(busy) from None
+                raise Failed(busy, code="busy") from None
             raise Failed(
                 f"cannot lock {path} ({exc.strerror}), so {verb} cannot make sure it is the only "
-                "one of this profile"
+                "one of this profile",
+                code="lock_failed",
             ) from exc
         _HELD.add(path)
     try:

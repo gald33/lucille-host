@@ -1,0 +1,51 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/gald33/lucille-host/blob/main/src/lucille_host/spec/cli/v1/pair_code.schema.json",
+  "title": "lucille-host --json: pair_code",
+  "description": "What a pairing code says, before it is answered.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "v",
+    "type",
+    "name",
+    "hub",
+    "note"
+  ],
+  "properties": {
+    "v": {
+      "const": 1
+    },
+    "type": {
+      "const": "pair_code"
+    },
+    "name": {
+      "$ref": "#/$defs/pair_name"
+    },
+    "hub": {
+      "$ref": "#/$defs/hub"
+    },
+    "note": {
+      "description": "The code's note, made safe as the text output makes it.",
+      "type": "string",
+      "maxLength": 200,
+      "pattern": "^[^\\u0000]*$"
+    }
+  },
+  "$defs": {
+    "pair_name": {
+      "description": "A pair's name.",
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 32,
+      "pattern": "^[a-z0-9][a-z0-9-]{0,31}$"
+    },
+    "hub": {
+      "description": "A hub: Lucille's, or a loopback hub `pair --hub` named.",
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 34,
+      "pattern": "^(https://switchboard\\.lucille-ai\\.com|http://(127\\.0\\.0\\.1|localhost):[1-9][0-9]{0,4})$"
+    }
+  }
+}

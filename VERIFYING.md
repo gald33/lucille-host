@@ -306,10 +306,24 @@ and `tests/test_rooms.py` runs the host's checks 3 and 4 of the accept policy (`
   holds the host's own check 3 (`rooms.py`) to the spec's cases. For check 4, it runs the library to
   show that a room's `token_source` is `shared` exactly when its offer carried a hub token.
 - `test_packaged.py` builds the sdist and the wheel with `uv build`, installs the wheel into a fresh
-  virtual environment, loads the schemas and fixtures from there, and checks them against the source
-  tree. It needs `uv` on `PATH` and the build backend, which uv fetches or takes from its cache. It
+  virtual environment, loads the schemas and fixtures from there, the command line's included, and
+  checks them against the source tree. It needs `uv` on `PATH` and the build backend, which uv fetches or takes from its cache. It
   builds from the working tree, so every file there that `.gitignore` does not exclude goes into the
   sdist: keep any other virtual environment outside the checkout, or name it `.venv*` or `venv`.
+
+**The command line's contract.** [spec/CLI.md](spec/CLI.md) is the contract between the `lucille-host`
+command line and any app that drives it, such as the Mac app: with `--json`, every verb but `run` writes
+JSON objects on stdout instead of text, with the same exit codes. Its JSON Schemas and golden fixtures ship
+in the wheel beside the protocol's, under `lucille_host/spec/cli/v1/`.
+- `tests/spec/test_cli_schemas.py` walks those schemas as `test_schemas.py` walks the protocol's, and
+  checks that every fixture validates.
+- `tests/test_cli_json.py` runs every fixture's command line, each in a home set up for it, and holds
+  what it writes to the schemas and to the fixture; runs it again without `--json` and checks that the
+  exit code and stderr are the same; and triggers each failure it can reach and checks its code against
+  spec/CLI.md's list for that verb. `tests/test_pair.py` and `tests/test_status.py` hold the pairing verbs,
+  `status`, `log` and `forget` to it.
+- `tests/test_catalog.py` checks that the words a shell shows for each operation are outside its
+  definition hash, and say nothing [PRIVACY.md](PRIVACY.md) says this project must never claim.
 
 **Run it yourself.**
 

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import dataclasses
 import errno
+import io
 import json
 import os
 import queue
@@ -27,12 +28,13 @@ from keyring.backends.fail import Keyring as FailKeyring
 from switchboard import client, pairing
 from switchboard.testing import hub
 
-from lucille_host import _switchboard, gate, link, loop, paths, policy, state
+from lucille_host import _switchboard, gate, link, loop, paths, policy, spec, state
 from lucille_host.cli import ALREADY_PAIRING, PAIR_LOCK, main
 from tests import _audit_hook
 from tests._cli import HostCli, collecting, until
 from tests._host import HostEnv, lock_free, lock_held
 from tests._lucille import FakeLucille
+from tests.spec import _support
 
 pytestmark = pytest.mark.filterwarnings(
     "ignore:Using `httpx` with `starlette.testclient` is deprecated"
@@ -72,6 +74,11 @@ def _enable_and_add_a_folder(tmp_path: Path) -> Path:
     assert main(["ops", "enable", "files.sha256"]) == 0
     assert main(["roots", "add", "docs", str(folder)]) == 0
     return folder
+
+
+def _objects(ran: Any) -> list[dict[str, Any]]:
+    """What a command run with ``--json`` wrote: one object per line, each held to its schema."""
+    return _support.cli_objects(ran.out)
 
 
 def _nothing_changed(cli: HostCli, before: policy.Policy) -> None:
@@ -167,6 +174,15 @@ def test_pair_accepts_configured_loopback(cli: HostCli) -> None:
     assert saved == {"v": 1, "hub": LOOPBACK, "store": "keyring"}
     found = cli.gate()
     assert found is not None and found.hub == LOOPBACK
+    # With --json, in another profile: the code's hub is the loopback hub, as the text says.
+    second = cli.lucille(url=LOOPBACK)
+    code = second.start()
+    with collecting(second):
+        argv = ["--profile", "json", "--json", "pair", "--code-stdin", "--hub", LOOPBACK]
+        ran = cli.run(*argv, stdin=code + "\n")
+    assert ran.rc == 0, ran.text
+    first = _objects(ran)[0]
+    assert (first["type"], first["name"], first["hub"]) == ("pair_code", second.name, LOOPBACK)
 
 
 def test_pair_note_shown_sanitized(cli: HostCli) -> None:
@@ -183,6 +199,15 @@ def test_pair_note_shown_sanitized(cli: HostCli) -> None:
     assert shown.startswith("Gal's  laptop [2J x")
     assert len(shown) <= link.NOTE_LIMIT
     assert all(" " <= char <= "~" for char in shown), shown
+    # With --json, the pair_code object carries the same note, made safe the same way.
+    second = cli.lucille()
+    code = second.start(note=unsafe)
+    with collecting(second):
+        ran = cli.run("--profile", "json", "--json", "pair", "--code-stdin", stdin=code + "\n")
+    assert ran.rc == 0, ran.text
+    first = _objects(ran)[0]
+    assert first["type"] == "pair_code" and first["note"] == shown == link.sanitize(unsafe)
+    assert list(_support.validator_for(spec.load_cli_schema("pair_code")).iter_errors(first)) == []
 
 
 def test_sanitize_replaces_every_unsafe_character() -> None:
@@ -386,11 +411,34 @@ def test_code_never_in_argv(cli: HostCli) -> None:
     assert "read from stdin only" in ran.err
     assert cli.gate() is None and cli.held() == []
     assert cli.run("pair", "--code-stdin", stdin="\n").rc == 1
+    # With --json, a code on the command line is refused whether or not --code-stdin is given,
+    # and is written nowhere.
+    for argv in (("pair", code, "--json"), ("pair", "--json", "--code-stdin", code)):
+        ran = cli.run(*argv)
+        assert ran.rc == 1, argv
+        (refused,) = _objects(ran)
+        assert (refused["type"], refused["code"]) == ("error", "code_in_argv"), argv
+        assert code not in ran.text
+    assert cli.gate() is None and cli.held() == []
+    # A code where the parser takes no word: standard error may quote it, the JSON never does.
+    cli.capsys.readouterr()
+    with pytest.raises(SystemExit) as exit_info:
+        main(["pair", "status", code, "--json"])
+    out, err = cli.capsys.readouterr()
+    assert exit_info.value.code == 2
+    assert [json.loads(line)["code"] for line in out.splitlines()] == ["usage"]
+    assert code not in out and code in err
     with collecting(lucille):
         ran = cli.run("pair", "--code-stdin", stdin=code + "\n")
     assert ran.rc == 0, ran.text
     # The code is nowhere the host writes: not its output, its files or its keyring item.
     assert code not in ran.text
+    second = cli.lucille()
+    other = second.start()
+    with collecting(second):
+        ran = cli.run("--profile", "json", "pair", "--code-stdin", "--json", stdin=other + "\n")
+    assert ran.rc == 0, ran.text
+    assert other not in ran.text and code not in ran.text
     for path in cli.env.home.rglob("*"):
         if path.is_file():
             assert code not in path.read_text(errors="replace"), path
@@ -434,6 +482,92 @@ def test_code_stdin_waits_until_sas_pending(cli: HostCli) -> None:
     # It stops once the SAS is shown, as Lucille's page shows it, with the deadline.
     assert f"the SAS is {lucille.sas()}." in lines[-1]
     assert link.iso(found.deadline) in lines[-1]
+
+    # With --json: the same steps, as objects, the SAS and the deadline in the last; no prompt.
+    second = cli.lucille()
+    code = second.start()
+    with collecting(second):
+        ran = cli.run("--profile", "json", "pair", "--code-stdin", "--json", stdin=code + "\n")
+    assert ran.rc == 0, ran.text
+    found = gate.load(paths.dirs("json").gate_file)
+    assert found is not None and found.deadline is not None
+    assert found.shown_at == cli.h.now
+    name = second.name
+    assert _objects(ran) == [
+        {"v": 1, "type": "pair_code", "name": name, "hub": _switchboard.LUCILLE_HUB, "note": ""},
+        {"v": 1, "type": "pair", "state": "accepted", "name": name, "clock_skewed": False},
+        {"v": 1, "type": "pair", "state": "waiting", "name": name},
+        {
+            "v": 1,
+            "type": "pair",
+            "state": "sas_pending",
+            "name": name,
+            "sas": second.sas(),
+            "deadline": link.iso(found.deadline),
+        },
+    ]
+    assert ran.err == ""
+    # From a policy that is not the fresh one, the policy is set aside before the code is
+    # answered, and it says so first.
+    assert cli.run("--profile", "reset", "ops", "enable", "host.sleep").rc == 0
+    third = cli.lucille()
+    code = third.start()
+    with collecting(third):
+        ran = cli.run("--profile", "reset", "pair", "--code-stdin", "--json", stdin=code + "\n")
+    assert ran.rc == 0, ran.text
+    assert [(o["type"], o.get("state")) for o in _objects(ran)] == [
+        ("pair_code", None),
+        ("policy_reset", None),
+        ("pair", "accepted"),
+        ("pair", "waiting"),
+        ("pair", "sas_pending"),
+    ]
+    # A code that leaked, and one past its time, end with an error object, exit 1.
+    leaked = cli.lucille()
+    code = leaked.start()
+    elsewhere = pairing.PairStore(cli.folder / "elsewhere", env={})
+    pairing.accept(code, None, store=elsewhere, connect=cli.h.client_class(), now=cli.h.now)
+    ran = cli.run("--profile", "leaked", "pair", "--code-stdin", "--json", stdin=code + "\n")
+    assert ran.rc == 1
+    assert [o["type"] for o in _objects(ran)] == ["pair_code", "error"]
+    assert _objects(ran)[-1]["code"] == "leaked"
+    late = cli.lucille()
+    code = late.start()
+    cli.h.advance(2 * 3600)
+    ran = cli.run("--profile", "late", "--json", "pair", "--code-stdin", stdin=code + "\n")
+    assert ran.rc == 1 and _objects(ran)[-1]["code"] == "expired", ran.text
+
+
+class _Typed(io.StringIO):
+    """A terminal's stdin, holding what was typed."""
+
+    def isatty(self) -> bool:
+        return True
+
+
+def test_json_pair_asks_nothing_at_a_terminal(cli: HostCli) -> None:
+    # As text, `pair --code-stdin` asks for the code on stderr when stdin is a terminal.
+    lucille = cli.lucille()
+    code = lucille.start()
+    with collecting(lucille):
+        ran = cli.run("--profile", "text", "pair", "--code-stdin", stdin=_Typed(code + "\n"))
+    assert ran.rc == 0 and ran.err.startswith("Paste the pairing code Lucille shows: "), ran.text
+    # With --json it asks nothing, through to the SAS, and when nothing is typed.
+    second = cli.lucille()
+    code = second.start()
+    with collecting(second):
+        ran = cli.run("pair", "--code-stdin", "--json", stdin=_Typed(code + "\n"))
+    assert ran.rc == 0 and ran.err == "", ran.text
+    assert [o.get("state") for o in _objects(ran)] == [None, "accepted", "waiting", "sas_pending"]
+    ran = cli.run("--profile", "empty", "--json", "pair", "--code-stdin", stdin=_Typed("\n"))
+    assert ran.rc == 1 and ran.err == "lucille-host: no pairing code was given on stdin\n"
+    assert [o["code"] for o in _objects(ran)] == ["no_code"]
+    # A code on the command line is refused before anything is read or asked.
+    ran = cli.run("--profile", "argv", "pair", "swbp1_x", "--json", stdin=_Typed("\n"))
+    assert ran.rc == 1 and ran.err == (
+        "lucille-host: with --json the code is read from stdin only, with --code-stdin; do not "
+        "pass it\n"
+    )
 
 
 def test_pair_completes_without_paired_note(cli: HostCli) -> None:
@@ -635,6 +769,51 @@ def test_pair_status_resumes(cli: HostCli) -> None:
     for action in ("status", "confirm", "reject"):
         ran = cli.run("pair", action, "--hub", LOOPBACK)
         assert ran.rc == 1 and "takes no options" in ran.err
+
+    # With --json, in another profile: the same states, as objects.
+    def pair_json(*argv: str, stdin: str = "") -> list[dict[str, Any]]:
+        ran = cli.run("--profile", "json", "pair", *argv, "--json", stdin=stdin)
+        assert ran.rc == 0, ran.text
+        return _objects(ran)
+
+    assert pair_json("status") == [{"v": 1, "type": "pair", "state": "none"}]
+    second = cli.lucille()
+    code = second.start()
+
+    def interrupt(*_: Any, **__: Any) -> Any:
+        raise KeyboardInterrupt
+
+    with cli.monkeypatch.context() as patch:
+        patch.setattr("lucille_host._switchboard.PairNotes.wait", interrupt)
+        ran = cli.run("--profile", "json", "pair", "--code-stdin", "--json", stdin=code + "\n")
+    assert ran.rc == 1 and ran.err.startswith("interrupted: ")
+    assert _objects(ran)[-1] == {
+        "v": 1,
+        "type": "error",
+        "code": "interrupted",
+        "message": f"pair {second.name} is kept; `lucille-host pair status` resumes",
+    }
+    waiting = {"v": 1, "type": "pair", "state": "waiting", "name": second.name}
+    assert pair_json("status") == [waiting]
+    assert second.collect().state == "paired"
+    (pending,) = pair_json("status")
+    found = gate.load(paths.dirs("json").gate_file)
+    assert found is not None and found.deadline is not None
+    assert pending == {
+        "v": 1,
+        "type": "pair",
+        "state": "sas_pending",
+        "name": second.name,
+        "sas": second.sas(),
+        "deadline": link.iso(found.deadline),
+    }
+    confirmed = {"v": 1, "type": "pair", "state": "confirmed", "name": second.name}
+    assert pair_json("confirm") == [confirmed]
+    assert pair_json("status") == [confirmed]
+    assert pair_json("confirm") == [confirmed]
+    for action in ("status", "confirm", "reject"):
+        ran = cli.run("--profile", "json", "pair", action, "--hub", LOOPBACK, "--json")
+        assert ran.rc == 1 and [o["code"] for o in _objects(ran)] == ["bad_options"]
 
 
 def test_an_interrupted_pair_is_kept(cli: HostCli) -> None:
@@ -1044,6 +1223,36 @@ def test_gate_deadline_from_when_the_sas_is_first_shown(cli: HostCli) -> None:
     assert ended.value.state == "ended_by_peer"
 
 
+def test_sas_in_json_starts_the_deadline(cli: HostCli) -> None:
+    # Writing the SAS in JSON is showing it: the program that reads it shows it to the user.
+    lucille = cli.lucille()
+    cli.interrupted(lucille.start())
+    assert lucille.collect().state == "paired"
+    found = cli.gate()
+    assert found is not None and found.shown_at is None and found.deadline is None
+    ran = cli.run("pair", "status", "--json")
+    assert ran.rc == 0, ran.text
+    found = cli.gate()
+    assert found is not None and found.shown_at == cli.h.now
+    assert found.deadline == found.shown_at + gate.WINDOW
+    assert _objects(ran) == [
+        {
+            "v": 1,
+            "type": "pair",
+            "state": "sas_pending",
+            "name": lucille.name,
+            "sas": lucille.sas(),
+            "deadline": link.iso(found.deadline),
+        }
+    ]
+    assert cli.audit().count('"event":"sas_shown"') == 1
+    # Shown again later, it keeps the deadline the first showing set.
+    cli.h.advance(600)
+    again = cli.run("--json", "pair", "status")
+    assert _objects(again) == _objects(ran) and cli.gate() == found
+    assert cli.audit().count('"event":"sas_shown"') == 1
+
+
 def test_pair_status_past_the_deadline_forgets(cli: HostCli) -> None:
     lucille = cli.lucille()
     cli.paired(lucille)
@@ -1095,6 +1304,17 @@ def test_reject_forgets_and_says_whether_told(cli: HostCli) -> None:
     assert "Lucille was not told" in ran.out
     assert cli.held() == [] and cli.gate() is None
     assert second.resolve().state == "paired"
+    # The same, with --json: the object says Lucille was not told.
+    cli.client_class = cli.h.client_class()
+    fourth = cli.lucille()
+    cli.paired(fourth)
+    cli.client_class = Down
+    ran = cli.run("--json", "pair", "reject")
+    assert ran.rc == 0, ran.text
+    assert _objects(ran) == [
+        {"v": 1, "type": "pair", "state": "rejected", "name": fourth.name, "lucille_told": False}
+    ]
+    assert cli.held() == [] and fourth.resolve().state == "paired"
 
     # A confirmed pair is not rejected: forgetting it is another verb's.
     cli.client_class = cli.h.client_class()
@@ -1181,8 +1401,33 @@ def test_a_refused_or_failed_code_resets_nothing_it_should_not(
 def test_policy_previous_lists_archive(cli: HostCli, tmp_path: Path) -> None:
     ran = cli.run("policy", "previous")
     assert ran.rc == 0 and ran.out.startswith("no earlier policy")
+    ran = cli.run("policy", "previous", "--json")
+    assert _objects(ran) == [{"v": 1, "type": "previous_policy", "state": "none"}]
     folder = _enable_and_add_a_folder(tmp_path)
+    # A broad folder: only `broad` says so, as `roots list` and `roots add` do.
+    home = str(cli.env.home)
+    assert cli.run("roots", "add", "--allow-home-or-root", "--", "home", home).rc == 0
+    # Last written long ago: when it was set aside is when the pairing set it aside.
+    os.utime(cli.dirs.policy_file, (1_600_000_000, 1_600_000_000))
+    before = time.time()
     cli.paired(cli.lucille())
+    set_aside = cli.dirs.previous_policy_file.stat().st_mtime
+    assert set_aside <= time.time() + 1
+    # To the second, it is at or after the second in which the pairing began, as spec/CLI.md tells a
+    # shell to compare it.
+    assert link.iso(set_aside) >= link.iso(int(before))
+    found = {
+        "v": 1,
+        "type": "previous_policy",
+        "state": "found",
+        "set_aside_at": link.iso(set_aside),
+        "ops": ["files.sha256", "host.describe"],
+        "folders": [
+            {"alias": "docs", "path": str(folder), "broad": False},
+            {"alias": "home", "path": home, "broad": True},
+        ],
+    }
+    assert _objects(cli.run("--json", "policy", "previous")) == [found]
     listed = [
         f"the last policy a pairing set aside ({cli.dirs.previous_policy_file}); nothing uses it:",
         "operations:",
@@ -1190,21 +1435,46 @@ def test_policy_previous_lists_archive(cli: HostCli, tmp_path: Path) -> None:
         "  host.describe",
         "folders:",
         f"  docs  {folder}",
+        f"  home  {home}",
     ]
     ran = cli.run("policy", "previous")
     assert ran.rc == 0
     assert ran.out.splitlines() == listed
     # Read only: nothing it lists is enabled.
     assert cli.policy() == policy.fresh()
+    # And listing it changes neither the file nor its time, so `set_aside_at` stays when it was set
+    # aside, however often a shell asks.
+    moment = 1_700_000_000
+    os.utime(cli.dirs.previous_policy_file, (moment, moment))
+    found["set_aside_at"] = link.iso(moment)
+    kept = cli.dirs.previous_policy_file.read_bytes()
+    for _ in range(2):
+        assert _objects(cli.run("--json", "policy", "previous")) == [found]
+        assert cli.run("policy", "previous").out.splitlines() == listed
+        assert cli.dirs.previous_policy_file.read_bytes() == kept
+        assert cli.dirs.previous_policy_file.stat().st_mtime_ns == moment * 10**9
     # A later pairing from the fresh policy sets nothing aside, so the file holds what an earlier
     # one set aside, and the header still says what it is. Before, it named the latest pairing.
     assert cli.run("pair", "reject").rc == 0
     ran = cli.paired(cli.lucille())
     assert "the policy is reset" not in ran.out
     assert cli.run("policy", "previous").out.splitlines() == listed
+    assert _objects(cli.run("policy", "--json", "previous")) == [found]
+    # When it was set aside is the file's time: one no file of the host's holds (before 1970, or
+    # past 9999 where the filesystem keeps that) is refused with --json and without it alike.
+    for moment in (-86400, 253402300800 + 864000):
+        os.utime(cli.dirs.previous_policy_file, (moment, moment))
+        if cli.dirs.previous_policy_file.stat().st_mtime != moment:
+            continue  # this filesystem keeps no such time
+        text, ran = cli.run("policy", "previous"), cli.run("policy", "previous", "--json")
+        assert (text.rc, ran.rc) == (1, 1), (moment, ran.text)
+        assert [o["code"] for o in _objects(ran)] == ["previous_invalid"]
+        assert text.err == ran.err and "cannot be read" in ran.err
     cli.dirs.previous_policy_file.write_text("version = 2\n")
     ran = cli.run("policy", "previous")
     assert ran.rc == 1 and "invalid" in ran.err
+    ran = cli.run("policy", "previous", "--json")
+    assert ran.rc == 1 and [o["code"] for o in _objects(ran)] == ["previous_invalid"]
 
 
 def test_policy_and_forget_help_say_what_they_do(capsys: pytest.CaptureFixture[str]) -> None:

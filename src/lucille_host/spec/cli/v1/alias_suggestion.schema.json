@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/gald33/lucille-host/blob/main/src/lucille_host/spec/cli/v1/alias_suggestion.schema.json",
+  "title": "lucille-host --json: alias_suggestion",
+  "description": "An alias made from a folder's name, which roots add takes and no folder of the local policy has.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "v",
+    "type",
+    "alias"
+  ],
+  "properties": {
+    "v": {
+      "const": 1
+    },
+    "type": {
+      "const": "alias_suggestion"
+    },
+    "alias": {
+      "$ref": "#/$defs/root"
+    }
+  },
+  "$defs": {
+    "root": {
+      "description": "A folder alias from the host's local policy. Never a path.",
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 32,
+      "pattern": "^[a-z][a-z0-9_-]{0,31}$"
+    }
+  }
+}

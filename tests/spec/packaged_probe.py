@@ -4,8 +4,8 @@
 the built wheel installed, in isolated mode (``-I``): neither this file's directory, nor the
 current directory, nor ``PYTHONPATH`` is on the import path, so ``lucille_host`` comes from that
 install and never from the source tree. It writes the spec's directory, schemas, fixtures and
-default host state, as the installed package loads them, to the JSON file its first argument
-names.
+default host state, and the command line contract's directory, schemas and fixtures, as the
+installed package loads them, to the JSON file its first argument names.
 """
 
 from __future__ import annotations
@@ -26,6 +26,13 @@ def main(out: str) -> int:
             for kind in spec.FIXTURE_KINDS
         },
         "host_state": spec.default_host_state(),
+        "cli": {
+            "spec_dir": str(spec.cli_spec_dir()),
+            "schemas": {name: spec.load_cli_schema(name) for name in spec.CLI_TYPES},
+            "fixtures": {
+                path.name: spec.load_cli_fixture(path) for path in spec.cli_fixture_paths()
+            },
+        },
     }
     Path(out).write_text(json.dumps(report, ensure_ascii=True), encoding="ascii")
     return 0

@@ -1,0 +1,17 @@
+{
+  "description": "pair status with the pair confirmed",
+  "argv": [
+    "--json",
+    "pair",
+    "status"
+  ],
+  "exit": 0,
+  "stdout": [
+    {
+      "v": 1,
+      "type": "pair",
+      "state": "confirmed",
+      "name": "pair-abcdef"
+    }
+  ]
+}

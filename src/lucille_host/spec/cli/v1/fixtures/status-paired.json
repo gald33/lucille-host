@@ -1,0 +1,59 @@
+{
+  "description": "status with the pair confirmed, a folder, one work room held and one abandoned, and the record of a run that stopped",
+  "argv": [
+    "status",
+    "--json"
+  ],
+  "exit": 0,
+  "stdout": [
+    {
+      "v": 1,
+      "type": "status",
+      "host_version": "0.1.0.dev0",
+      "policy": {
+        "state": "ok",
+        "file": "/home/me/.config/lucille-host/default/policy.toml",
+        "enabled": [
+          "host.describe"
+        ],
+        "disabled": [],
+        "folders": [
+          "docs"
+        ]
+      },
+      "paused": false,
+      "store": "keyring",
+      "hub": "https://switchboard.lucille-ai.com",
+      "loopback_hub": null,
+      "pair": {
+        "state": "confirmed",
+        "name": "pair-abcdef",
+        "generation": 1
+      },
+      "work_rooms": [
+        {
+          "state": "not_read",
+          "name": "room-1",
+          "accepted_at": "2026-11-01T12:00:00Z"
+        },
+        {
+          "state": "abandoned",
+          "name": "room-2",
+          "accepted_at": "2026-11-01T12:00:00Z",
+          "why": "left_by_lucille"
+        }
+      ],
+      "last_left_because": null,
+      "offers_waiting": 0,
+      "run": {
+        "state": "stopped",
+        "as_of": "2026-11-01T12:00:00Z"
+      },
+      "last_hub_contact": "2026-11-01T12:00:00Z",
+      "clock": {
+        "state": "ok",
+        "skew_s": 1.5
+      }
+    }
+  ]
+}

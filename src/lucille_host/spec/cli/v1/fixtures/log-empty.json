@@ -1,0 +1,9 @@
+{
+  "description": "log with no audit log yet: no object",
+  "argv": [
+    "--json",
+    "log"
+  ],
+  "exit": 0,
+  "stdout": []
+}

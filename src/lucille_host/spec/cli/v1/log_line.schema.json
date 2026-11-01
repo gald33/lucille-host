@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/gald33/lucille-host/blob/main/src/lucille_host/spec/cli/v1/log_line.schema.json",
+  "title": "lucille-host --json: log_line",
+  "description": "One line of the audit log, as lucille-host log prints it. For people: a shell decides nothing from it.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "v",
+    "type",
+    "text"
+  ],
+  "properties": {
+    "v": {
+      "const": 1
+    },
+    "type": {
+      "const": "log_line"
+    },
+    "text": {
+      "description": "Printable ASCII; any other byte is shown as ?.",
+      "type": "string",
+      "pattern": "^[ -~]*$"
+    }
+  }
+}

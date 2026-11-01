@@ -1334,3 +1334,43 @@ def test_run_through_the_command(
     lines = capsys.readouterr().out.splitlines()
     assert lines[0] == "running: pair lucille; Ctrl-C stops once the running operation ends"
     assert lines[-1] == "drained: run stopped"
+
+
+def test_run_fails_closed_on_an_invalid_policy(
+    host_env: HostEnv,
+    h: Any,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # A policy file that is not valid TOML, with the gate open and a room taken: `run` decides
+    # nothing, runs nothing and posts nothing, and stops by itself with the policy's error.
+    fast(monkeypatch)
+    host = RunHost(h, host_env, tmp_path)
+    real = _switchboard.open_link
+    monkeypatch.setattr(
+        "lucille_host._switchboard.open_link",
+        lambda dirs, config, **_: real(dirs, config, client_class=h.client_class()),
+    )
+    host.dirs.config.mkdir(parents=True, exist_ok=True)
+    host.dirs.policy_file.write_text("this is not toml\n")
+    before = host.dirs.policy_file.read_bytes()
+    result: dict[str, int] = {}
+    with _audit_hook.recording() as events:
+        thread = threading.Thread(target=lambda: result.update(rc=cli.main(["run"])), daemon=True)
+        thread.start()
+        host.lucille.offer("work-1")
+        until(lambda: host.record().held, what="the room taken")
+        job_id = host.request("work-1")
+        thread.join(30)
+    assert not thread.is_alive(), "run did not stop by itself"
+    assert result == {"rc": 1}
+    err = capsys.readouterr().err
+    assert err.splitlines()[-1] == f"lucille-host: {host.dirs.policy_file} is not valid TOML"
+    assert host.lucille.replies("work-1") == []
+    entry = host.journal().get(job_id)
+    assert entry is not None and entry.decision is None
+    for kind in ("received", "decision", "start", "execution", "sent"):
+        assert host.events(kind, job_id=job_id) == [], kind
+    assert _audit_hook.spawns(events) == []
+    assert host.dirs.policy_file.read_bytes() == before
