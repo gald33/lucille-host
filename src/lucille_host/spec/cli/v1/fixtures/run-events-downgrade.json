@@ -1,0 +1,16 @@
+{
+  "description": "run, on a profile where release 999.0.0 ran before",
+  "argv": [
+    "run",
+    "--json-events"
+  ],
+  "exit": 25,
+  "stdout": [
+    {
+      "v": 1,
+      "type": "stopped",
+      "reason": "downgrade",
+      "last_version": "999.0.0"
+    }
+  ]
+}

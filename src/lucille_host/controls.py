@@ -9,10 +9,13 @@
 - ``resume`` clears the pause flag and any kill request. Nothing Lucille sends can unpause a host:
   only these files, which only the local user's CLI writes, carry the state.
 - The first SIGTERM, SIGHUP (the terminal closed) or Ctrl-C drains: the operation in flight
-  finishes and replies, and nothing new starts. A second Ctrl-C kills, as ``kill`` does. A signal
-  that was ignored when the handlers were installed stays ignored, so a host started with
-  ``nohup`` keeps running when its terminal closes. The handler takes no lock: it runs between two
-  steps of the main thread, which may hold one.
+  finishes and replies, and nothing new starts. So does the end of standard input under ``run
+  --exit-on-stdin-eof``, and, with ``--json-events`` too, a standard output nobody reads any more
+  (``loop.Lifeline``). A Ctrl-C while draining kills, as ``kill`` does. A signal that was ignored
+  when the handlers were installed stays ignored, so a host started with ``nohup`` keeps running
+  when its terminal closes. The handler takes no lock: it runs between two steps of the main
+  thread, which may hold one. What began the drain is kept (:attr:`Controls.drain_cause`): the
+  ``stopped`` event says it.
 
 A ``kill`` and a ``resume`` run at once must never leave a kill request without the pause flag:
 a later operation would meet it and be killed. Each verb holds a lock file in the state directory
@@ -91,6 +94,8 @@ class Controls:
         self._lock_file = state_dir / LOCK_FILE
         self._kill = _Flag()
         self.draining = _Flag()
+        # What began the drain: ``signal``, ``stdin_end`` or ``stdout_gone``; None before one.
+        self.drain_cause: str | None = None
 
     # The CLI verbs.
 
@@ -150,7 +155,14 @@ class Controls:
         self._kill_file.unlink(missing_ok=True)
         self._kill.clear()
 
-    # Signals.
+    # Signals, and the other ways a drain begins.
+
+    def drain(self, cause: str) -> None:
+        """Drain, keeping what began it when nothing began it before. No lock: a signal handler
+        calls it."""
+        if not self.draining.is_set():
+            self.drain_cause = cause
+        self.draining.set()
 
     def on_signal(self, signum: int, _frame: Any) -> None:
         """The first SIGTERM, SIGHUP or SIGINT drains; a SIGINT while draining kills."""
@@ -160,7 +172,7 @@ class Controls:
             # descriptor would release one the interrupted code holds.
             _write_flag(self._pause_file)
             self._kill.set()
-        self.draining.set()
+        self.drain("signal")
 
     def install_handlers(self) -> Callable[[], None]:
         """Handle SIGTERM, SIGHUP and SIGINT (from the main thread), except one that is ignored

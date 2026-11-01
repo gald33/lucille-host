@@ -1,0 +1,17 @@
+{
+  "description": "run as a shell starts it, with standard input closed at once: it drains before it starts serving",
+  "argv": [
+    "run",
+    "--json-events",
+    "--exit-on-stdin-eof"
+  ],
+  "exit": 0,
+  "stdout": [
+    {
+      "v": 1,
+      "type": "stopped",
+      "reason": "drained",
+      "cause": "stdin_end"
+    }
+  ]
+}

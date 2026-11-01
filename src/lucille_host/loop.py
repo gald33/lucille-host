@@ -9,9 +9,18 @@ refuses, changing nothing, since two would each answer every request. The thread
   pairing and sharing call, through the :class:`link.Session` that keeps the pair and takes the
   work rooms Lucille offers over it: the session's rules decide when to resolve and touch, and
   what to accept, leave or abandon. Main feeds it the other threads' events (a note on the pair
-  channel, a hub error, a room that failed its checks) and a wake from sleep, which it finds by
-  the wall clock jumping ahead of the monotonic one, which stops while the computer sleeps. It
-  starts a reader for each room the session says may be read, and writes ``state/status.json``.
+  channel, a hub error, a room that failed its checks, the worker's verdict on the local policy)
+  and a wake from sleep, which it finds by the wall clock jumping ahead of the monotonic one,
+  which stops while the computer sleeps. It starts a reader for each room the session says may be
+  read, writes ``state/status.json``, and, for ``run --json-events``, the ``ready`` and ``state``
+  objects (spec/CLI.md section 13). It never loads the local policy, which looks at each of its
+  folders: it stats the file once a tick, checks a file that changed without looking at any
+  folder (``policy.check_file``), and asks the worker to load it.
+- **The heartbeat.** While main is in a step, where it can wait on a hub that does not answer
+  (each call given up after ``_switchboard.CLIENT_TIMEOUT``) or on the record lock, it writes
+  ``state/status.json`` and the ``state`` object again as main last wrote them, at least every
+  :data:`STATUS_EVERY` seconds, for up to :data:`WAIT_MOST` seconds of one step. It decides
+  nothing.
 - **The pair reader.** One long-poll on the ``pair`` channel of pair:<name>, at the generation
   the last resolve found, from sequence number 0 at each new generation. A library note there
   is only a wake for main (spec/PROTOCOL.md section 5); anything else is logged and ignored.
@@ -29,11 +38,14 @@ refuses, changing nothing, since two would each answer every request. The thread
   same time.
 - **The worker.** One request at a time, in the order they were read, so in sequence order within
   a room: the messages that get no reply are logged (``envelope.ignored``); a job id already in
-  the journal gets nothing (dedupe, across rooms); the journal entry is written; steps 2 to 4 of
-  the refusal order (``envelope.early_code``) and then ``jobs.process``, with a context built
-  for each request from the profile's files, so that a change of the local policy applies at
-  once; the decision goes to the journal as soon as it is made. Each message's cursor is written
-  to ``state/cursors.json`` only after its audit lines and its journal entry.
+  the journal gets nothing (dedupe, across rooms); the local policy is loaded, and while it is
+  invalid the request waits, unwritten; the journal entry is written; steps 2 to 4 of the
+  refusal order (``envelope.early_code``) and then ``jobs.process``, in a context built from
+  that load, so that a change of the local policy applies to the next request; the decision goes
+  to the journal as soon as it is made. Each message's cursor is written to
+  ``state/cursors.json`` only after its audit lines and its journal entry. It also loads the
+  policy when main asks, and tells main whether it is valid. For ``run --json-events`` it writes
+  each request's ``request`` objects, right after the audit lines they mirror.
 - **The poster.** Each reply is posted as a note with no thread and an explicit TTL
   (``envelope.reply_ttl``), after the room is checked again; a failed post is tried again with a
   back-off until its TTL would have run out, and a transport failure never becomes a ``failed``
@@ -59,10 +71,10 @@ record not the one the session serves) is halted there and then, as above but fo
 nothing more starts from it, and a running child of a request from it is killed with no reply.
 ``run`` itself stops at its first step after the other command is done, by the pair's gate record,
 whether or not Lucille was told, and touches nothing of what the profile holds, which may already
-be a new pair's. Until that step, a drain and ``state/status.json`` wait for main as well: a stop
-signal that arrives meanwhile does not end main's wait for the lock (``state.wait_for_lock``), and
-is not lost: once the command is done, ``run`` stops, for its pair when the command forgot it, and
-otherwise by draining.
+be a new pair's. Until that step, a drain waits for main as well, while the heartbeat writes
+``state/status.json``: a stop signal that arrives meanwhile does not end main's wait for the lock
+(``state.wait_for_lock``), and is not lost: once the command is done, ``run`` stops, for its pair
+when the command forgot it, and otherwise by draining.
 
 **After a restart**, before a room is read, the journal's entries for it with no reply sent are
 taken up: a decision to run gets ``failed interrupted``, never a second run; a refusal is posted
@@ -74,12 +86,19 @@ Nothing is posted for a request in a room abandoned or left.
 429, else 1 s doubling to 30 s, plus up to a quarter more at random. No single failure ends a
 thread, and each hub error is also a reason for main to resolve the pair.
 
-**Draining** (the first SIGTERM, SIGHUP or Ctrl-C): the readers stop after their current read, the
-worker finishes what it is running (``jobs.process`` starts nothing more), and the poster gets
-:data:`FLUSH` seconds to post what is waiting; the rest is left to the next start. A second
-Ctrl-C kills the running child, as ``lucille-host kill`` does. Pause and kill reach the worker
-through ``jobs.process``. A local policy that cannot be read drains the host too, and ``run``
-then fails.
+**Draining** (the first SIGTERM, SIGHUP or Ctrl-C; under ``--exit-on-stdin-eof`` the end of
+standard input, :class:`Lifeline`): the readers stop after their current read, the worker
+finishes the request it is deciding or running (``jobs.process`` starts nothing more), and the
+poster gets :data:`FLUSH` seconds to post what is waiting; the rest is left to the next start. A
+request the worker has not written down yet, one waiting for a valid policy among them, is
+dropped, and read again at the next start. Meanwhile main goes on writing ``state/status.json``.
+A Ctrl-C while draining kills the running child, as ``lucille-host kill`` does. Pause and kill
+reach the worker through ``jobs.process``.
+
+**The local policy while ``run`` runs** (spec/CLI.md section 13.5). While the file is invalid,
+or not checked yet at start, ``run`` acts on nothing: the session accepts no room
+(``Session.hold_offers``), no reader starts, and the worker writes no request down. Replies
+decided before are still posted, and the pair is kept. Once the file is valid, ``run`` goes on.
 
 Nothing here starts a process, opens a listening socket, or writes outside the profile's own
 folders and its keyring item.
@@ -116,6 +135,7 @@ from lucille_host import (
 from lucille_host.audit import AuditLog
 from lucille_host.controls import Controls
 from lucille_host.journal import Entry, Journal
+from lucille_host.ops import OPERATIONS, args_valid
 
 __all__ = [
     "ALREADY_RUNNING",
@@ -123,10 +143,17 @@ __all__ = [
     "PAGE",
     "RECOVER",
     "RUN_LOCK",
+    "STDIN_END",
+    "STDOUT_GONE",
+    "WORKER",
     "Backoff",
     "Cursors",
+    "Downgrade",
     "Failed",
+    "Lifeline",
     "Runner",
+    "check_version",
+    "clock_view",
     "next_cursor",
     "one_at_a_time",
     "one_run",
@@ -150,8 +177,19 @@ KILL_WAIT: Final = 10.0
 RECONCILE_EVERY: Final = 30.0
 # And writes status.json at least this often.
 STATUS_EVERY: Final = 60.0
+# How long main may wait in one step, on the hub (each call given up after
+# ``_switchboard.CLIENT_TIMEOUT``) or on the record lock another command holds, while the heartbeat
+# still writes status.json and ``state`` for it. Past this, ``run`` counts as not stepping.
+WAIT_MOST: Final = 300.0
 # At the end, how long main waits for a reader still in its last read.
 READER_GRACE: Final = 1.0
+# The thread that handles requests, and alone loads the local policy.
+WORKER: Final = "lucille-host worker"
+# What ends the lifeline: standard input at its end, or a standard output nobody reads.
+STDIN_END: Final = "stdin_end"
+STDOUT_GONE: Final = "stdout_gone"
+# How much of standard input the lifeline reads, and discards, at a time.
+_LIFELINE_READ: Final = 4096
 
 # In the state folder: held by ``run`` for as long as it runs.
 RUN_LOCK: Final = ".run.lock"
@@ -174,7 +212,8 @@ class Failed(RuntimeError):
     """``run`` stopped because one of its threads met something it cannot go on from; or a command
     found another of the profile holding a lock only one may hold (:func:`one_at_a_time`).
     ``code`` is what ``--json`` calls it (spec/CLI.md section 10): ``busy`` or ``lock_failed``
-    for the lock. ``run``, which has no ``--json`` form, leaves it ``internal``."""
+    for the lock. A thread's failure leaves it ``internal``, and the command names it by its
+    cause."""
 
     def __init__(self, message: str, *, code: str = "internal") -> None:
         super().__init__(message)
@@ -240,6 +279,132 @@ def wake_gap(wall: float, monotonic: float) -> bool:
     """Whether, over one interval, the wall clock moved ``wall`` seconds and the monotonic clock
     ``monotonic`` seconds, more than :data:`WAKE_GAP` apart: the computer slept in between."""
     return wall - monotonic > WAKE_GAP
+
+
+class Downgrade(RuntimeError):
+    """This release is older than one that started ``run`` on the profile before."""
+
+    def __init__(self, recorded: str, version: str) -> None:
+        super().__init__(
+            f"this release, {version}, is older than {recorded}, which started `run` on this "
+            "profile before, and an older release can be a vulnerable one: "
+            "`lucille-host run --allow-downgrade` starts it all the same"
+        )
+        self.recorded = recorded
+
+
+def load_last_version(dirs: paths.Dirs) -> str | None:
+    """The newest release that started ``run`` on the profile, by ``state/last_version.json``;
+    None when there is no record. A record that holds anything but ``{"v": 1, "version": <a
+    release>}`` is a :class:`state.StateError`."""
+    data = state.read_json(dirs.last_version_file)
+    if data is None:
+        return None
+    version = data.get("version") if isinstance(data, dict) else None
+    valid = (
+        isinstance(data, dict)
+        and set(data) == {"v", "version"}
+        and type(data["v"]) is int
+        and data["v"] == 1
+        and isinstance(version, str)
+        and envelope.is_release(version)
+    )
+    if not valid or not isinstance(version, str):
+        raise state.StateError(f"{dirs.last_version_file} is not a lucille-host version record")
+    return version
+
+
+def check_version(dirs: paths.Dirs, *, allow: bool, warn: Callable[[str], None]) -> None:
+    """Refuse a release older than the newest that started ``run`` on the profile
+    (:class:`Downgrade`), by the order of ``min_host_version`` (``envelope.older``); with
+    ``allow``, say so with ``warn`` and go on, leaving the record as it is. Otherwise record this
+    release when it is a release (``MAJOR.MINOR.PATCH`` alone) and not the one recorded: the
+    record only goes up. The caller holds the run lock."""
+    recorded = load_last_version(dirs)
+    version = __version__
+    if recorded is not None and envelope.older(version, recorded):
+        if not allow:
+            raise Downgrade(recorded, version)
+        warn(
+            f"this release, {version}, is older than {recorded}, which started `run` on this "
+            f"profile before; it runs because --allow-downgrade was given, and {recorded} stays "
+            "recorded"
+        )
+        return
+    if envelope.is_release(version) and version != recorded:
+        state.write_json(dirs.last_version_file, {"v": 1, "version": version})
+
+
+def clock_view(skew: float | None, skewed: bool) -> dict[str, Any]:
+    """The clock, as ``status`` and the ``state`` object say it (spec/CLI.md section 6):
+    ``skewed`` once the hub refused a write for this computer's clock, or a skew past
+    :data:`_switchboard.SKEW_WINDOW` was measured; ``unknown`` before any was; else ``ok``."""
+    if skewed or (skew is not None and abs(skew) > _switchboard.SKEW_WINDOW):
+        return {"state": "skewed", "skew_s": skew}
+    if skew is None:
+        return {"state": "unknown"}
+    return {"state": "ok", "skew_s": skew}
+
+
+class Lifeline:
+    """``run --exit-on-stdin-eof``: a thread reads standard input to its end, discarding what it
+    reads, and the end drains ``run`` as its first SIGTERM does. The end is ``b""`` (every holder
+    of the pipe's write end closed it: a shell that quits, crashes or is force-quit), a read error,
+    or no standard input at all (``fd`` -1). A read end handed over non-blocking is made blocking
+    and read again. With ``--json-events``, a standard output nobody reads ends it too
+    (:meth:`cut`, :data:`STDOUT_GONE`). It never closes standard input, writes nothing, and calls
+    no signal function; it may end before ``run`` starts serving, and ``run`` stops then."""
+
+    def __init__(self, fd: int) -> None:
+        self.fd = fd
+        self.ended = threading.Event()
+        self.cause: str | None = None
+        self._lock = threading.Lock()
+        self._on_end: Callable[[str], None] | None = None
+        self._thread = threading.Thread(
+            target=self._watch, name="lucille-host lifeline", daemon=True
+        )
+
+    def start(self) -> Lifeline:
+        if self.fd < 0:
+            self.cut(STDIN_END)
+        else:
+            self._thread.start()
+        return self
+
+    def _watch(self) -> None:
+        try:
+            while True:
+                try:
+                    data = os.read(self.fd, _LIFELINE_READ)
+                except BlockingIOError:
+                    os.set_blocking(self.fd, True)
+                    continue
+                if not data:
+                    return
+        except BaseException:  # noqa: BLE001 - any error reading is the end
+            return
+        finally:
+            self.cut(STDIN_END)
+
+    def cut(self, cause: str) -> None:
+        """The lifeline ended, for ``cause``; the first cause stays."""
+        with self._lock:
+            if self.cause is not None:
+                return
+            self.cause = cause
+            self.ended.set()
+            handler = self._on_end
+        if handler is not None:
+            handler(cause)
+
+    def attach(self, handler: Callable[[str], None]) -> None:
+        """Call ``handler`` with the cause when the lifeline ends, or at once if it has."""
+        with self._lock:
+            self._on_end = handler
+            cause = self.cause
+        if cause is not None:
+            handler(cause)
 
 
 class Backoff:
@@ -383,8 +548,54 @@ def _before_unreadable(
     return taken, None
 
 
+def _asked(body: dict[str, Any]) -> tuple[str | None, str | None, str | None]:
+    """What a request asked for, as its ``received`` object says it: the op, when it has an
+    operation name's form and the request is within the protocol's size; the folder alias and the
+    path, when the op is in the catalog, works in a folder, and its arguments hold to its schema.
+    A path that starts with ``/``, or holds a character a terminal must not show, is never
+    written: it is None."""
+    if envelope.size(body) > envelope.REQUEST_LIMIT:
+        return None, None, None
+    op = body.get("op")
+    if not isinstance(op, str) or not envelope.is_op_name(op):
+        return None, None, None
+    operation = OPERATIONS.get(op)
+    args = body.get("args")
+    if operation is None or not operation.uses_root or not args_valid(operation, args):
+        return op, None, None
+    path = args["path"]
+    if path.startswith("/") or link.has_unsafe(path):
+        return op, args["root"], None
+    return op, args["root"], path
+
+
+def _finished(outcome: jobs.Outcome, size: int) -> dict[str, Any]:
+    """A ``finished`` object's fields: how the request ended, and the sizes of its reply."""
+    if outcome.status == "done":
+        return {
+            "status": "done",
+            "exit_code": outcome.exit_code,
+            "duration_ms": outcome.duration_ms,
+            "stdout_bytes": envelope.size(outcome.stdout),
+            "stderr_bytes": envelope.size(outcome.stderr),
+            "reply_bytes": size,
+        }
+    if outcome.status == "refused":
+        return {"status": "refused", "code": outcome.code, "reply_bytes": size}
+    return {
+        "status": "failed",
+        "code": outcome.code,
+        "exit_code": outcome.exit_code,
+        "duration_ms": outcome.duration_ms,
+        "stdout_bytes": None if outcome.stdout is None else envelope.size(outcome.stdout),
+        "stderr_bytes": None if outcome.stderr is None else envelope.size(outcome.stderr),
+        "reply_bytes": size,
+    }
+
+
 class Runner:
-    """One ``lucille-host run``: its threads, and what they share."""
+    """One ``lucille-host run``: its threads, and what they share. ``tell``, when given, writes
+    one event of ``run --json-events``; ``lifeline``, when given, drains ``run`` at its end."""
 
     def __init__(
         self,
@@ -393,12 +604,20 @@ class Runner:
         *,
         controls: Controls,
         say: Callable[[str], None],
+        tell: Callable[[str, dict[str, Any]], None] | None = None,
+        lifeline: Lifeline | None = None,
     ) -> None:
         self.dirs = dirs
         self.session = session
         self.link = session.link
         self.controls = controls
         self.say = say
+        self.tell = tell
+        self.lifeline = lifeline
+        # How ``run`` ended, once it returned: ``drained``, ``forgotten`` or ``ended``.
+        self.outcome: str | None = None
+        # Whether ``ready`` was reached: ``run`` serves the pair from there on.
+        self.ready_sent = False
         paths.ensure_dir(dirs.state)
         self.audit = AuditLog(dirs.state)
         self.journal = Journal(dirs.journal_file, clock=self.link.now)
@@ -415,9 +634,30 @@ class Runner:
         self._closing = False
         self._threads_stop = False
         self._failure: BaseException | None = None
-        self._policy_error: policy.PolicyError | None = None
         self._snapshot: Any = None
         self._reconciled = 0.0
+        # The gate's record and the room record as main last read them.
+        self._seen_gate: gate.Gate | None = None
+        self._seen_record: rooms.Record | None = None
+        # The local policy, as main knows it: ``ok``, ``invalid``, or ``checking`` until the
+        # worker's first load. Main asks the worker to load it (``_recheck``), numbering each ask;
+        # a verdict from a load asked before the file last changed counts for nothing.
+        self._policy_state = "checking"
+        self._policy_sig: tuple[int, ...] | None = None
+        self._policy_asked = 0.0
+        self._policy_seq = 0
+        self._policy_changed_at = 0
+        self._recheck = True
+        # The worker's last good load: the effective policy and its digest.
+        self._loaded: tuple[policy.Effective, str] | None = None
+        self._digest_key = b""
+        # Set while the worker decides or runs a request it has written down.
+        self._deciding = False
+        # The pair ``run`` serves, once its start checks passed.
+        self._name = ""
+        # What the last ``state`` object said, and when.
+        self._state_seen: Any = None
+        self._state_at = 0.0
         # What status.json says.
         self._last_contact: float | None = None
         self._skew: float | None = None
@@ -428,14 +668,37 @@ class Runner:
         self._status_at = 0.0
         self._status_seen: Any = None
         self._started = False
-        self._worker = threading.Thread(target=self._guarded(self._work_loop), daemon=True)
-        self._poster = threading.Thread(target=self._guarded(self._post_loop), daemon=True)
+        # When main began the step it is in, while it is in one (it may wait on the hub there);
+        # what it last wrote in status.json and ``state``, for the heartbeat to write again; and
+        # the lock that both write them under.
+        self._waiting_since: float | None = None
+        self._said = threading.Lock()
+        self._said_status: dict[str, Any] | None = None
+        self._said_state: dict[str, Any] | None = None
+        self._beat_stop = threading.Event()
+        self._beat = threading.Thread(
+            target=self._guarded(self._beat_loop), name="lucille-host heartbeat", daemon=True
+        )
+        self._worker = threading.Thread(
+            target=self._guarded(self._work_loop), name=WORKER, daemon=True
+        )
+        self._poster = threading.Thread(
+            target=self._guarded(self._post_loop), name="lucille-host poster", daemon=True
+        )
 
     # --- the threads' messages to main --------------------------------------------------------
 
     def _event(self, kind: str, value: Any = None) -> None:
         with self._cv:
             self._events.append((kind, value))
+            self._cv.notify_all()
+
+    def _fail(self, exc: BaseException) -> None:
+        """Something a thread did not expect: ``run`` stops (it fails closed)."""
+        with self._cv:
+            if self._failure is None:
+                self._failure = exc
+            self._closing = True
             self._cv.notify_all()
 
     def _guarded(self, target: Callable[..., None]) -> Callable[..., None]:
@@ -445,13 +708,24 @@ class Runner:
             try:
                 target(*args)
             except BaseException as exc:  # noqa: BLE001 - handed to main, which stops
-                with self._cv:
-                    if self._failure is None:
-                        self._failure = exc
-                    self._closing = True
-                    self._cv.notify_all()
+                self._fail(exc)
 
         return body
+
+    def _tell(self, type_name: str, **fields: Any) -> None:
+        if self.tell is not None:
+            self.tell(type_name, fields)
+
+    def _lifeline_ended(self, cause: str) -> None:
+        """The lifeline ended (on its own thread, the events' writer, or main): drain first, as
+        the first SIGTERM does, then wake main, then say so in the audit log. A log that cannot be
+        written stops ``run``, which drains already."""
+        self.controls.drain(cause)
+        self._event("lifeline")
+        try:
+            self.audit.write("lifeline", event=cause)
+        except BaseException as exc:  # noqa: BLE001 - handed to main, which stops
+            self._fail(exc)
 
     def _hub_failed(self, exc: _switchboard.HubError) -> None:
         if exc.skewed:
@@ -466,73 +740,142 @@ class Runner:
     def run(self) -> str:
         """Run until drained, or until the pair ends; returns what to print. Raises
         :class:`link.Stopped` when the pair cannot be used here (at start, or later for any
-        reason but its end), :class:`Failed` (another ``run`` of the profile runs, among other
-        reasons), and the local policy's error."""
+        reason but its end), and :class:`Failed` (another ``run`` of the profile runs, among other
+        reasons)."""
         with one_run(self.dirs.state):
-            return self._run()
+            return self.serve()
 
-    def _run(self) -> str:
+    def serve(self) -> str:
+        """:meth:`run`, for a caller that holds the run lock already (the command, which takes it
+        before its other start checks)."""
         restore = None
         if threading.current_thread() is threading.main_thread():
             restore = self.controls.install_handlers()
         self.session.stop_room = self._stop_room
+        self.session.hold_offers = True
         try:
-            self.session.start()
-            name = self.session.current()
+            try:
+                self._digest_key = policy.digest_key(paths.ensure_dir(self.dirs.state))
+            except policy.PolicyError as exc:
+                # A damaged key is a file of the host's own, not an invalid policy.
+                raise state.StateError(str(exc)) from exc
+            name = self.session.check_ready()
+            self._name = name
+            if self.lifeline is not None:
+                self.lifeline.attach(self._lifeline_ended)
+                if self.lifeline.ended.is_set():
+                    # Its shell was gone before it served: nothing was read, written down or
+                    # started, and no hub was called.
+                    self.outcome = "drained"
+                    return "drained: run stopped"
             self.say(f"running: pair {name}; Ctrl-C stops once the running operation ends")
-            found = self.session.gate(name) if name is not None else None
-            if found is None or found.opened_at is None:
-                self.say(
-                    "no work room is taken and nothing runs until the SAS is confirmed: "
-                    "`lucille-host pair status` shows it, and `lucille-host pair confirm` "
-                    "confirms it"
-                )
+            self._tell("ready", host_version=__version__, pair=name)
+            self.ready_sent = True
             self._started = True
-            self._abandoned_at_start()
+            self._policy_sig = policy.signature(self.dirs.policy_file)
+            self._policy_asked = time.monotonic()
             self._worker.start()
             self._poster.start()
+            self._beat.start()
             try:
-                self._reconcile(force=True)
-                self._write_status(running=True)
+                # The first status and ``state``, before any hub call, once the worker's first
+                # look at the policy is in, or a tick has passed: the heartbeat writes them again
+                # while the first calls wait.
+                self._snapshot_now()
+                self._apply(self._next_events())
+                self._report(running=True)
+                with self._waiting():
+                    self.session.start()
+                    found = self.session.gate(name)
+                    if found is None or found.opened_at is None:
+                        self.say(
+                            "no work room is taken and nothing runs until the SAS is confirmed: "
+                            "`lucille-host pair status` shows it, and `lucille-host pair confirm` "
+                            "confirms it"
+                        )
+                    self._abandoned_at_start()
+                    self._reconcile(force=True)
+                self._report(running=True)
                 self._main_loop()
             except link.Stopped as exc:
                 if exc.state not in _ENDED:
                     raise
                 self._end_rooms()
+                self.outcome = "forgotten" if exc.state == "none" else "ended"
                 return f"{exc.state}: {exc}; run stopped"
             self._drain()
-            if self._policy_error is not None:
-                raise self._policy_error
+            self.outcome = "drained"
             return "drained: run stopped"
         finally:
             self._shutdown()
             if restore is not None:
                 restore()
 
+    def _next_events(self) -> list[tuple[str, Any]]:
+        """The other threads' events for main, waiting up to a tick for one."""
+        with self._cv:
+            if not self._events and self._failure is None:
+                self._cv.wait(TICK)
+            events = list(self._events)
+            self._events.clear()
+        return events
+
     def _main_loop(self) -> None:
         wall, mono = self.link.now(), time.monotonic()
         while True:
-            with self._cv:
-                if not self._events and self._failure is None:
-                    self._cv.wait(TICK)
-                events = list(self._events)
-                self._events.clear()
+            events = self._next_events()
             if self._failure is not None:
                 raise Failed(f"run stopped: {self._failure!r}") from self._failure
             if self.controls.draining.is_set():
                 return
-            changed = self._apply(events)
-            now_wall, now_mono = self.link.now(), time.monotonic()
-            if wake_gap(now_wall - wall, now_mono - mono):
-                self.session.wake()
-            wall, mono = now_wall, now_mono
-            if self._posted:
-                # The hub took a write signed by this clock: the session's refusal is past.
-                self._posted = False
-                self.session.skewed = False
-            self.session.step()
-            self._reconcile(force=changed)
-            self._write_status(running=True)
+            with self._waiting():
+                changed = self._apply(events)
+                now_wall, now_mono = self.link.now(), time.monotonic()
+                if wake_gap(now_wall - wall, now_mono - mono):
+                    self.session.wake()
+                wall, mono = now_wall, now_mono
+                if self._posted:
+                    # The hub took a write signed by this clock: the session's refusal is past.
+                    self._posted = False
+                    self.session.skewed = False
+                changed = self._watch_policy() or changed
+                self.session.step()
+                self._reconcile(force=changed)
+            self._report(running=True)
+
+    @contextlib.contextmanager
+    def _waiting(self) -> Iterator[None]:
+        """A step of main's, in which it can wait on the hub or on the record lock: meanwhile
+        the heartbeat writes what main last wrote again (:meth:`_beat_loop`)."""
+        self._waiting_since = time.monotonic()
+        try:
+            yield
+        finally:
+            self._waiting_since = None
+
+    def _beat_loop(self) -> None:
+        """The heartbeat. While main is in a step, for up to :data:`WAIT_MOST` seconds, it writes
+        status.json and the ``state`` object again as main last wrote them, at least every
+        :data:`STATUS_EVERY` seconds: a ``run`` waiting on a hub that does not answer still says
+        so, and its ``last_hub_contact`` grows old, rather than going quiet as one that is not
+        stepping does. It decides and reads nothing else."""
+        while not self._beat_stop.wait(TICK):
+            since = self._waiting_since
+            if since is None or time.monotonic() - since > WAIT_MOST:
+                continue
+            with self._said:
+                if self._waiting_since is None:
+                    continue
+                now = time.monotonic()
+                if self._said_status is not None and now - self._status_at >= STATUS_EVERY:
+                    self._status_at = now
+                    state.write_json(
+                        self.dirs.status_file,
+                        {**self._said_status, "written_at": self.link.now()},
+                    )
+                if self._said_state is not None and now - self._state_at >= STATUS_EVERY:
+                    self._state_at = now
+                    self._tell("state", **self._said_state)
 
     def _apply(self, events: list[tuple[str, Any]]) -> bool:
         """Hand the threads' events to the session; whether a room may have changed."""
@@ -547,11 +890,61 @@ class Runner:
                 # leaves it if it does fail.
                 self.session.check_room(value)
                 changed = True
+            elif kind == "policy":
+                asked, ok, why = value
+                # A load asked for before the file last changed says nothing of the file now.
+                if asked >= self._policy_changed_at:
+                    changed = self._set_policy("ok" if ok else "invalid", why) or changed
         return changed
+
+    # --- the local policy, as main sees it --------------------------------------------------
+
+    def _watch_policy(self) -> bool:
+        """Main's look at the policy file, once a tick. It never loads it: it stats it, and
+        when the file changed checks what it holds without looking at any folder, so that a file
+        made invalid holds the offers at once, even while the worker runs an operation. Either
+        way, and every :data:`RECONCILE_EVERY` seconds, it asks the worker to load it. Whether
+        the policy turned valid."""
+        now = time.monotonic()
+        sig = policy.signature(self.dirs.policy_file)
+        changed = sig != self._policy_sig
+        if not changed and now - self._policy_asked < RECONCILE_EVERY:
+            return False
+        self._policy_sig, self._policy_asked = sig, now
+        with self._cv:
+            self._policy_seq += 1
+            if changed:
+                self._policy_changed_at = self._policy_seq
+            self._recheck = True
+            self._cv.notify_all()
+        if changed:
+            try:
+                policy.check_file(self.dirs.policy_file)
+            except policy.PolicyError as exc:
+                self._set_policy("invalid", str(exc))
+        return False
+
+    def _set_policy(self, new: str, why: str | None) -> bool:
+        """The policy as main knows it is now ``new``: the session holds offers unless it is
+        ``ok``. A change to or from ``invalid`` is logged. Whether it turned ``ok``."""
+        old = self._policy_state
+        if new == old:
+            return False
+        self._policy_state = new
+        if new == "invalid":
+            self.audit.write("policy", event="invalid", error=why)
+        elif old == "invalid":
+            self.audit.write("policy", event="valid")
+        if new != "ok":
+            self.session.hold_offers = True
+            return False
+        self.session.allow_offers()
+        return True
 
     def _snapshot_now(self) -> Any:
         found = gate.load(self.dirs.gate_file)
         record = rooms.load(self.dirs.rooms_file)
+        self._seen_gate, self._seen_record = found, record
         opened = None if found is None else (found.pair, found.opened_at, found.touched_at)
         held = sorted((name, held.workspace, held.abandoned) for name, held in record.held.items())
         return opened, held
@@ -566,6 +959,9 @@ class Runner:
                     self._pair.stop.set()
                 self._pair = self._start_pair_reader(pair)
         snapshot = self._snapshot_now()
+        if self._policy_state != "ok" or self._loaded is None:
+            # No room is read while the policy is invalid, or not checked yet.
+            return
         now = time.monotonic()
         if not force and snapshot == self._snapshot and now - self._reconciled < RECONCILE_EVERY:
             return
@@ -612,8 +1008,10 @@ class Runner:
         for job_id, entry in self.journal.pending(room.workspace):
             if entry.decision == "run":
                 outcome = jobs.Outcome(status="failed", code="interrupted", duration_ms=0)
-                digest = self._context(room).policy_digest
-                data = jobs.encode(jobs.reply_body(job_id, outcome, digest))
+                # The digest of the worker's last good load: main never loads the policy, and
+                # rooms are read only while it is valid.
+                assert self._loaded is not None
+                data = jobs.encode(jobs.reply_body(job_id, outcome, self._loaded[1]))
                 self.audit.write("restart", job_id=job_id, room=room.name, reply="interrupted")
                 self._reply(room, job_id, data, entry.basis, restarted=True)
             elif entry.decision == "refused" and entry.reply is not None:
@@ -659,6 +1057,7 @@ class Runner:
         thread may call it, again too: the second call drops and marks only what came since."""
         with self._cv:
             self._abandoned.add(name)
+            self._stuck.discard(name)
             room = self._rooms.get(name)
             if room is not None:
                 room.stop.set()
@@ -710,7 +1109,10 @@ class Runner:
         return True
 
     def _drain(self) -> None:
-        """Stop reading; let the worker finish what runs; give the poster :data:`FLUSH` s."""
+        """Stop reading; let the worker finish the request it decides or runs; give the poster
+        :data:`FLUSH` s. A request the worker has not written down (one waiting for a valid
+        policy, or held in a load of it on a stalled mount) is not waited for. ``status.json``
+        and ``state`` go on being written meanwhile."""
         self.say("draining: the running operation finishes, and nothing new starts")
         with self._cv:
             self._closing = True
@@ -719,13 +1121,20 @@ class Runner:
             self._work.clear()
             self._stop_readers()
             self._cv.notify_all()
-            while self._current is not None and self._failure is None:
-                self._cv.wait(0.1)
-            deadline = time.monotonic() + FLUSH
-            while self._replies and self._failure is None and time.monotonic() < deadline:
-                self._cv.wait(0.1)
+        self._wait_while(lambda: self._deciding)
+        deadline = time.monotonic() + FLUSH
+        self._wait_while(lambda: bool(self._replies) and time.monotonic() < deadline)
         if self._failure is not None:
             raise Failed(f"run stopped: {self._failure!r}") from self._failure
+
+    def _wait_while(self, condition: Callable[[], bool]) -> None:
+        """Wait while ``condition`` holds and nothing failed, reporting as main does."""
+        while True:
+            with self._cv:
+                if self._failure is not None or not condition():
+                    return
+                self._cv.wait(0.1)
+            self._report(running=True)
 
     def _stop_readers(self) -> None:
         if self._pair is not None:
@@ -734,6 +1143,7 @@ class Runner:
             room.stop.set()
 
     def _shutdown(self) -> None:
+        self._beat_stop.set()
         with self._cv:
             self._closing = True
             self._threads_stop = True
@@ -742,7 +1152,7 @@ class Runner:
                 item.done = True
             self._work.clear()
             self._cv.notify_all()
-        for thread in (self._worker, self._poster):
+        for thread in (self._worker, self._poster, self._beat):
             if thread.is_alive():
                 thread.join(KILL_WAIT)
         readers = [room.thread for room in self._rooms.values()]
@@ -762,6 +1172,51 @@ class Runner:
         if self._started:
             self._write_status(running=False)
 
+    def _report(self, *, running: bool) -> None:
+        """``state/status.json``, and the ``state`` object of ``run --json-events``: written when
+        what it says changes, and at least every :data:`STATUS_EVERY` seconds whatever changed,
+        so that a shell that hears nothing for twice that knows ``run`` is not stepping."""
+        self._write_status(running=running)
+        if self.tell is None or not running:
+            return
+        found, record = self._seen_gate, self._seen_record
+        reading = sorted(name for name, room in self._rooms.items() if not room.stop.is_set())
+        with self._cv:
+            stuck = set(self._stuck)
+        held = [
+            {"name": name, "state": "read_stuck" if name in stuck else "reading"}
+            for name in reading
+        ]
+        left = None
+        if record is not None and not record.held and record.no_room is not None:
+            left = rooms.WORDS[record.no_room]
+        contact = None if self._last_contact is None else link.iso(self._last_contact)
+        clock = clock_view(self._skew, self._skewed or self.session.skewed)
+        view = {
+            "pair": self._name,
+            "confirmed": found is not None and found.opened_at is not None,
+            "paused": self.controls.paused(),
+            "policy": self._policy_state,
+            "last_hub_contact": contact,
+            "clock": clock,
+            "rooms": held,
+            "offers_waiting": 0 if record is None else len(record.offers),
+            "last_left_because": left,
+        }
+        # What a new object is written for at once; a new contact time or skew waits.
+        seen = tuple(
+            (key, json.dumps(value, sort_keys=True))
+            for key, value in view.items()
+            if key not in ("last_hub_contact", "clock")
+        ) + (contact is None, clock["state"])
+        with self._said:
+            now = time.monotonic()
+            if seen == self._state_seen and now - self._state_at < STATUS_EVERY:
+                return
+            self._state_seen, self._state_at = seen, now
+            self._said_state = view
+            self._tell("state", **view)
+
     def _write_status(self, *, running: bool) -> None:
         """``state/status.json``: what ``lucille-host status`` reads of a running host. Written
         when it changes, and at least every :data:`STATUS_EVERY` seconds."""
@@ -780,24 +1235,24 @@ class Runner:
             self._skew is None,
             self._last_contact is None,
         )
-        now = time.monotonic()
-        if running and seen == self._status_seen and now - self._status_at < STATUS_EVERY:
-            return
-        self._status_seen, self._status_at = seen, now
-        state.write_json(
-            self.dirs.status_file,
-            {
-                "v": 1,
-                "running": running,
-                "pid": os.getpid(),
-                "written_at": self.link.now(),
-                "last_contact": self._last_contact,
-                "skew": self._skew,
-                "skewed": skewed,
-                "reading": reading,
-                "read_stuck": stuck,
-            },
-        )
+        record = {
+            "v": 1,
+            "running": running,
+            "pid": os.getpid(),
+            "written_at": self.link.now(),
+            "last_contact": self._last_contact,
+            "skew": self._skew,
+            "skewed": skewed,
+            "reading": reading,
+            "read_stuck": stuck,
+        }
+        with self._said:
+            now = time.monotonic()
+            if running and seen == self._status_seen and now - self._status_at < STATUS_EVERY:
+                return
+            self._status_seen, self._status_at = seen, now
+            self._said_status = record
+            state.write_json(self.dirs.status_file, record)
 
     # --- the readers --------------------------------------------------------------------------
 
@@ -941,7 +1396,7 @@ class Runner:
         with self._cv:
             self._work.append(batch)
             self._cv.notify_all()
-            while not batch.done:
+            while not batch.done and not self._threads_stop:
                 self._cv.wait(0.5)
             return batch.finished
 
@@ -950,12 +1405,15 @@ class Runner:
     def _work_loop(self) -> None:
         while True:
             with self._cv:
-                while not self._work and not self._threads_stop:
+                while not (self._work or self._threads_stop or self._recheck):
                     self._cv.wait()
-                if not self._work:
+                if self._threads_stop:
                     return
-                item = self._work.popleft()
+                item = self._work.popleft() if self._work else None
                 self._current = item
+            if item is None:
+                self._load_policy()
+                continue
             finished = False
             try:
                 if isinstance(item, _Batch):
@@ -967,6 +1425,44 @@ class Runner:
                     item.done, item.finished = True, finished
                     self._current = None
                     self._cv.notify_all()
+
+    def _load_policy(self) -> tuple[policy.Effective, str] | None:
+        """Load the local policy, and tell main whether it is valid; the effective policy and
+        its digest, or None while it is invalid. Only the worker loads it: loading looks at each
+        folder, and a folder on a stalled mount holds up whoever loads it."""
+        with self._cv:
+            self._recheck = False
+            asked = self._policy_seq
+        try:
+            eff = policy.effective(policy.load(self.dirs.policy_file), paths.os_family())
+        except policy.PolicyError as exc:
+            self._event("policy", (asked, False, str(exc)))
+            return None
+        loaded = (eff, policy.digest(eff, self._digest_key))
+        self._loaded = loaded
+        self._event("policy", (asked, True, None))
+        return loaded
+
+    def _await_policy(self, room: _Room) -> tuple[policy.Effective, str] | None:
+        """The policy a request is decided under: loaded now, and, while it is invalid, again
+        each time main asks. None when ``run`` drains or stops, or the room is given up, first:
+        the request was not written down, and is read again."""
+        while True:
+            if self._closing or self.controls.draining.is_set() or self._halted(room):
+                return None
+            loaded = self._load_policy()
+            if self._closing or self.controls.draining.is_set():
+                return None
+            if loaded is not None:
+                return loaded
+            with self._cv:
+                while not (
+                    self._recheck
+                    or self._closing
+                    or self.controls.draining.is_set()
+                    or room.name in self._abandoned
+                ):
+                    self._cv.wait(TICK)
 
     def _handle(self, batch: _Batch) -> bool:
         room = batch.room
@@ -991,8 +1487,10 @@ class Runner:
         body = message.body
         job_id = body["job_id"]
         entry = None
+        loaded = None
         if not self.journal.seen(job_id):
-            if self.controls.draining.is_set():
+            loaded = self._await_policy(room)
+            if loaded is None or self.controls.draining.is_set():
                 return False
             received_at = self.link.now()
             # None when the job id was taken between the two reads: a duplicate as well.
@@ -1004,13 +1502,13 @@ class Runner:
                 not_after=envelope.valid_not_after(body, received_at),
                 body=body,
             )
-        if entry is None:
+        if entry is None or loaded is None:
             self.audit.write(
                 "ignored", room=room.name, seq=message.seq, job_id=job_id, why="duplicate"
             )
             self.cursors.set(room.workspace, min(message.seq, page_cursor))
             return True
-        if not self._decide(room, job_id, body, entry):
+        if not self._decide(room, job_id, body, entry, loaded):
             return False
         self.cursors.set(room.workspace, min(message.seq, page_cursor))
         return True
@@ -1018,35 +1516,73 @@ class Runner:
     def _afresh(self, item: _Afresh) -> bool:
         if self._halted(item.room) or self.controls.draining.is_set():
             return False
-        return self._decide(item.room, item.job_id, item.entry.body, item.entry)
+        loaded = self._await_policy(item.room)
+        if loaded is None or self.controls.draining.is_set():
+            return False
+        return self._decide(item.room, item.job_id, item.entry.body, item.entry, loaded)
 
-    def _context(self, room: _Room) -> jobs.Context:
-        """The context a request is decided in, built from the profile's files each time."""
-        family = paths.os_family()
-        eff = policy.effective(policy.load(self.dirs.policy_file), family)
-        key = policy.digest_key(paths.ensure_dir(self.dirs.state))
+    def _context(
+        self, room: _Room, loaded: tuple[policy.Effective, str], observe: Any
+    ) -> jobs.Context:
+        """The context a request is decided in: the policy the worker loaded for it, so that
+        what was judged valid is what is used."""
+        eff, digest = loaded
         return jobs.Context(
-            os_family=family,
+            os_family=paths.os_family(),
             policy=eff,
-            policy_digest=policy.digest(eff, key),
+            policy_digest=digest,
             controls=self.controls,
             audit=self.audit,
             own_dirs=tuple(str(own) for own in self.dirs.own),
             stop=lambda: self._halted(room),
+            observe=observe,
         )
 
-    def _decide(self, room: _Room, job_id: str, body: dict[str, Any], entry: Entry) -> bool:
+    def _observer(self, job_id: str, body: dict[str, Any]) -> Callable[..., None] | None:
+        """The request's ``request`` objects (and ``host_too_old``), each written right after the
+        audit line it mirrors: never an absolute path, never output (spec/CLI.md section 6)."""
+        if self.tell is None:
+            return None
+        op, root, path = _asked(body)
+
+        def observe(phase: str, *values: Any) -> None:
+            if phase == "received":
+                self._tell("request", phase="received", job_id=job_id, op=op, root=root, path=path)
+            elif phase == "decided":
+                decision, code = values
+                if decision == "run":
+                    self._tell("request", phase="decided", job_id=job_id, decision="run")
+                    return
+                self._tell("request", phase="decided", job_id=job_id, decision="refused", code=code)
+                if code == "host_too_old":
+                    self._tell(
+                        "host_too_old",
+                        job_id=job_id,
+                        min_host_version=body["min_host_version"],
+                        host_version=__version__,
+                    )
+            elif phase == "started":
+                self._tell("request", phase="started", job_id=job_id)
+            elif phase == "finished":
+                outcome, size = values
+                self._tell("request", phase="finished", job_id=job_id, **_finished(outcome, size))
+
+        return observe
+
+    def _decide(
+        self,
+        room: _Room,
+        job_id: str,
+        body: dict[str, Any],
+        entry: Entry,
+        loaded: tuple[policy.Effective, str],
+    ) -> bool:
         """Steps 2 to 9 of the refusal order and the run, then the reply to the poster; False
         when the request was left undecided (a drain) or its room abandoned."""
         early = envelope.early_code(
             body, received_at=entry.received_at, now=self.link.now(), host_version=__version__
         )
-        try:
-            ctx = self._context(room)
-        except policy.PolicyError as exc:
-            self._policy_error = exc
-            self.controls.draining.set()
-            return False
+        ctx = self._context(room, loaded, self._observer(job_id, body))
         # A request over the size limit is refused, and its fields are not copied to the log.
         small = envelope.size(body) <= envelope.REQUEST_LIMIT
         job = jobs.Job(
@@ -1060,17 +1596,26 @@ class Runner:
         def decided(decision: str, _code: str | None, data: bytes | None) -> None:
             self.journal.decided(job_id, decision, data)
 
+        # Until its reply is with the poster: a drain waits for it.
+        with self._cv:
+            self._deciding = True
         try:
-            data = jobs.process(job, ctx, earlier_code=early, decided=decided)
-        except jobs.Draining:
-            return False
-        except jobs.Abandoned:
-            self.audit.write(
-                "reply", event="not_posted", job_id=job_id, room=room.name, why="abandoned"
-            )
-            return False
-        self._reply(room, job_id, data, entry.basis)
-        return True
+            try:
+                data = jobs.process(job, ctx, earlier_code=early, decided=decided)
+            except jobs.Draining:
+                return False
+            except jobs.Abandoned:
+                self.audit.write(
+                    "reply", event="not_posted", job_id=job_id, room=room.name, why="abandoned"
+                )
+                self._tell("request", phase="finished", job_id=job_id, status="abandoned")
+                return False
+            self._reply(room, job_id, data, entry.basis)
+            return True
+        finally:
+            with self._cv:
+                self._deciding = False
+                self._cv.notify_all()
 
     def _reply(
         self, room: _Room, job_id: str, data: bytes, basis: float, *, restarted: bool = False
@@ -1181,5 +1726,6 @@ def run(
     controls: Controls,
     say: Callable[[str], None],
 ) -> str:
-    """``lucille-host run``: see the module docstring."""
+    """``lucille-host run``: see the module docstring. The command calls :meth:`Runner.serve`
+    under its own run lock, with ``--json-events`` and the lifeline when asked."""
     return Runner(dirs, session, controls=controls, say=say).run()

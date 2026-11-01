@@ -78,14 +78,16 @@ then due. The rules:
   earlier than that touch (it was set back).
 - **Offers.** Each offer the library notes in the share store is written down before anything is
   decided (``rooms.py``), whichever call made the note, one that then refused included
-  (:meth:`_switchboard.Link.notes`). Checks 1, 2 and 5 run before an accept, and a refusal by
-  them is not final: the offers are considered again at start, when the gate opens, after a room
-  is left, and when an offer is withdrawn. An accept that failed without refusing the offer (the
-  hub, or the pair's room, could not be read) is tried again after the next touch that reads the
-  pair's room. While more than one offer is pending, none is accepted, once those the share store
-  no longer knows are dropped. Checks 3 and 4 run right after the accept, and a room that fails
-  them, or that this computer left before, is left at once and never used. A room that passes
-  them replaces the others held over the pair, which are abandoned.
+  (:meth:`_switchboard.Link.notes`). While ``run`` holds the offers (``Session.hold_offers``: the
+  local policy is invalid, or not checked yet), none is accepted, and an accept a stop interrupted
+  is not completed; :meth:`Session.allow_offers` considers them again. Checks 1, 2 and 5 run before
+  an accept, and a refusal by them is not final: the offers are considered again at start, when
+  the gate opens, after a room is left, and when an offer is withdrawn. An accept that failed
+  without refusing the offer (the hub, or the pair's room, could not be read) is tried again after
+  the next touch that reads the pair's room. While more than one offer is pending, none is
+  accepted, once those the share store no longer knows are dropped. Checks 3 and 4 run right after
+  the accept, and a room that fails them, or that this computer left before, is left at once and
+  never used. A room that passes them replaces the others held over the pair, which are abandoned.
 - **Rooms held** are checked again (checks 3 and 4) at start and before each use, and whether a
   room's list still names the pair is judged only once a touch has run since the pair was made.
 - **Abandoning** a room records it first, then stops whatever the room was doing (a callback the
@@ -124,6 +126,7 @@ __all__ = [
     "TOUCH_EVERY",
     "Session",
     "Stopped",
+    "has_unsafe",
     "open_session",
     "outcome",
     "sanitize",
@@ -247,6 +250,11 @@ def sanitize(text: str, limit: int = NOTE_LIMIT) -> str:
     return _UNSAFE.sub(" ", text)[:limit].strip()
 
 
+def has_unsafe(text: str) -> bool:
+    """Whether ``text`` holds a character :func:`sanitize` would replace."""
+    return _UNSAFE.search(text) is not None
+
+
 def outcome(switchboard_state: str) -> str:
     """The host's word for a pairing call's refusal: ``leaked``, ``expired`` (pair again),
     ``ended``, ``none`` (no such pair), or ``error`` for anything that does not end the pair."""
@@ -365,6 +373,9 @@ class Session:
         # touch, an accept) because of this computer's clock; cleared by a touch that reached
         # the pair's room, which wrote whatever was owed.
         self.skewed = False
+        # Set by ``run`` while the local policy is invalid or not checked yet: no offer is
+        # accepted, and an accept a stop interrupted is not completed (:meth:`allow_offers`).
+        self.hold_offers = False
 
     # --- the gate's record ---------------------------------------------------------------
 
@@ -901,6 +912,21 @@ class Session:
 
     # --- the work rooms: events ----------------------------------------------------------
 
+    def check_ready(self) -> str:
+        """The pair ``run`` would serve, checked on this computer alone, with no hub call: held,
+        the only one, and with a gate record. Raises :class:`Stopped` otherwise, as
+        :meth:`start` would."""
+        name = self._require()
+        if self.gate(name) is None:
+            raise self.no_gate(name)
+        return name
+
+    def allow_offers(self) -> None:
+        """The local policy is valid: offers are considered again, and an accept a stop
+        interrupted is completed."""
+        self.hold_offers = False
+        self._wanted |= {_CONSIDER, _JUDGE}
+
     def start(self) -> None:
         """At start: resolve the pair; once its gate is open, finish an accept that a stop
         interrupted, leave what is owed, judge every room held, touch, and consider the offers.
@@ -1137,7 +1163,7 @@ class Session:
         for room, held in sorted(record.held.items()):
             if held.abandoned is not None:
                 self._leave(name, record, room, held.abandoned)
-        if record.accepting is not None:
+        if record.accepting is not None and not self.hold_offers:
             self._complete(name, record)
         for room in record.in_use():
             self._check(name, record, room)
@@ -1385,6 +1411,13 @@ class Session:
             if record.offers:
                 self.audit.write(
                     "offer", event="refused", offers=len(record.offers), check=rooms.CHECK_GATE
+                )
+            return
+        if self.hold_offers:
+            # The local policy is invalid, or not checked yet: the offers wait (allow_offers).
+            if record.offers:
+                self.audit.write(
+                    "offer", event="refused", offers=len(record.offers), check=rooms.CHECK_POLICY
                 )
             return
         # An offer the share store knows nothing of any more was withdrawn or left while a note

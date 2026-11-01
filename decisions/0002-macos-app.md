@@ -52,8 +52,8 @@ release, and it is for people developing the app.
   a 7-day artifact when every check passed.
 
 Not built yet: pairing, running in the background and opening at login, the app's use of the JSON
-contract (§8; the host's command line has it, [spec/CLI.md](../spec/CLI.md), except `run`'s events and
-the verbs §8 lists for §10, §11.4, §15 and section 17), the Welcome
+contract (§8; the host's command line has it, [spec/CLI.md](../spec/CLI.md), with `run`'s events and
+`policy reset`, except the verbs §8 lists for §11.4, §15 and section 17), the Welcome
 and main windows, updates, **Remove Capsule…** (section 17), Developer ID signing and notarization, ripgrep,
 and the release jobs. The first build also departs from this record in these ways, among others;
 `macos/README.md`, under "Choices made for the first build", says why for most of them:
@@ -430,9 +430,15 @@ login ─► Capsule (menu bar; an "Open at Login" item)
   nothing starts `lucille-host run` at login.
 - **The lifeline.** `--exit-on-stdin-eof` makes `run` drain, exactly as on its first SIGTERM, when its standard
   input closes. If the app crashes or is force-quit, the kernel closes the pipe and the host finishes its
-  operation, replies, and exits. No host runs unseen.
+  operation, replies, and exits. No host runs unseen. That holds only while no other process holds the
+  pipe's write end: the app gives it to no other child, and that Foundation's `Pipe` and `Process` keep it
+  out of the children the app starts later (some of which never end, such as a verb stuck on a stalled
+  drive) is not yet tested on a Mac. A check in `check_app.py` is to start `run`, start a long verb as
+  another child, drop the app's write end, and see `run` write `stopped` `drained` while the other child
+  lives; if it fails, the app sets `FD_CLOEXEC` on the write end itself, right after making the pipe. The
+  hardware tests check that a force-quit leaves no host process.
 - **One host per profile.** `run` holds `state/.run.lock` (`os.lockf`). A relaunched app, or a `run` from
-  Terminal, finds it held and says "already running".
+  Terminal, finds it held: `run` exits 21 (`already_running`) and changes nothing.
 - **The app's own profile.** The app runs every verb with `--profile mac-app`, and so does the Terminal
   wrapper inside it (§6). A `pipx` install on the same Mac keeps the `default` profile: its own folder under
   `~/Library/Application Support/lucille-host`, its own Keychain item, its own `.run.lock` and its own record
@@ -441,20 +447,63 @@ login ─► Capsule (menu bar; an "Open at Login" item)
   the signed interpreter created would likely prompt when the `pipx` Python reads it (not yet tested on a
   Mac). The cost: a Mac with both is two computers to Lucille, each paired on its own. README says to use
   one. Coexistence is tested by hand (§19).
-- **Exit codes of `run`**, in `spec/CLI.md`: 0 stopped on purpose (drained, forgotten, ended by Lucille); 20
-  not paired, or the local gate not open; 21 already running; 23 keyring unusable or insecure; 24 refused
-  environment (`SWITCHBOARD_*`, uid 0); 25 a downgrade (§16); anything else is a crash. A `stopped` event with
-  a reason comes before every planned exit.
+- **Exit codes of `run`**, in `spec/CLI.md` §13.3: 0 stopped on purpose (`drained`, with the `cause`; the pair
+  `forgotten` here, or `ended` by Lucille); 20 not paired, or a gate that can never open (`no_gate`, or the SAS
+  not confirmed by its deadline while `run` waited, `expired`); 21 already running; 23 keyring unusable or
+  insecure; 24 refused environment (`SWITCHBOARD_*`, uid 0); 25 a downgrade (§16); 1 a failure the host met
+  (`stopped` `failed`, with a code). A `stopped` event with a reason comes before every exit `run` chooses.
+  22 is reserved.
+- **How the app reads an exit.** It reads standard output to its end, for up to about 2 s, then looks at
+  how the process ended before it reads any number: 20 to 25 are also macOS signal numbers (`SIGCHLD`,
+  `SIGTTIN`, `SIGTTOU`, `SIGIO`, `SIGXCPU`, `SIGXFSZ`), and `SIGXCPU` and `SIGXFSZ` end a process. A
+  signal (`terminationReason` `.uncaughtSignal`) is a crash, except the one the app sent at its own last
+  step below. An exit's number is checked against the `stopped` reason it read, and the reason decides
+  within a number. When `stopped` is missing after 0 or 20, the app asks `status --json` where the pair is.
+  - 0 `drained` the app asked for (Quit, Prepare to Update): done. 0 `drained` it did not ask for (a
+    `SIGTERM` from elsewhere, a `stdin_end` or `stdout_gone` it did not cause), one within a few seconds of
+    `ready` above all: a crash. 0 `forgotten` or `ended`: Not connected, and the login item is unregistered.
+  - 20: Not connected, by reason (`no_gate`: "Disconnect, then connect again"; `leaked`, `expired`:
+    "Connect again"; `several_pairs`, `pair_unusable`: Needs attention, with Disconnect).
+  - 21: the app asks `status --json`. While `run` is `running`, a `run` is still finishing, likely its own from
+    before a relaunch, which drains once its pipe closed: "Finishing a task from before…", and it tries again
+    with the back-off. Once `run` is `stopped` or `not_seen`, it starts at once. If it stays `running` past the
+    drain's bound (the operation's time limit, at most 300 s, then 30 s for its reply), it says another copy of
+    Capsule's host is running, and how to stop it.
+  - 23: two reasons, in different words. `insecure_keyring` is permanent: Needs attention, "The Keychain
+    cannot keep Capsule's pairing safely". `store_error` can pass (a locked Keychain, a Deny at a prompt):
+    "Capsule cannot open its Keychain item", with Try Again. A `failed` `store_error` after `ready` is the
+    same, not a crash; so is `status --json`'s `pair` `unreadable` with those codes, before the app first
+    starts `run`.
+  - 24: Needs attention (the app builds the environment, so this is a bug). 25: §16.
+  - 2 (usage) can only be the app's own mistake against the host it ships: it is not retried; Needs
+    attention, with standard error.
+  - 1, a signal, or an exit code the app does not know: a crash.
 - **Crashes.** The app restarts `run` with backoff (2, 4, 8 … 300 s). After five crashes in ten minutes it
-  stops and shows "Capsule keeps stopping", with the last lines of standard error behind a disclosure.
-- **Quit.** The menu asks first: "Your Mac will stop answering Lucille until you open Capsule again." The
-  app then closes the pipe and shows "Finishing the current task…" with **Stop now**, which runs `kill`.
-  `kill` also sets the pause flag (`controls.py`), so the sheet says so: "Stop now (Capsule will be
-  paused when you next open it)".
-- **Logout, restart, shutdown.** The same, with the drain capped at 20 s. At the cap the app runs `kill`, so the
-  operation's process group is killed and the reply `failed killed_locally` is still posted. Only a force-quit
-  of the whole session leaves the known gap of an operation running without its time limit
-  (THREAT_MODEL.md, "Known gaps").
+  stops and shows "Capsule keeps stopping", with the last lines of standard error behind a disclosure. An
+  unrequested `drained` counts as a crash, so that something that keeps draining `run` (a standard input that
+  is not a live pipe, say) cannot loop it.
+- **Quit.** The menu asks first: "Your Mac will stop answering Lucille until you open Capsule again." Quit
+  from the menu, from the welcome alert, from an AppleScript or from Activity Monitor, and a logout, all reach
+  the app delegate's `applicationShouldTerminate`, which returns `.terminateLater`, drains, and then calls
+  `reply(toApplicationShouldTerminate:)`. While a `run` child lives, the app turns off sudden and automatic
+  termination (`ProcessInfo.disableSuddenTermination()` and `disableAutomaticTermination(_:)`), and turns
+  them on again once it has exited, so that a logout cannot end the app without its drain (not yet tested on
+  a Mac). The drain is a ladder; the app reads both pipes until `run` exits, at every step:
+  1. It closes the pipe and shows "Finishing the current task…" with **Stop now**. `run` finishes its
+     operation and its reply: up to the operation's time limit, at most 300 s, then 30 s.
+  2. **Stop now**, or the bound passing, runs `kill`, which kills the operation's process group and sets the
+     pause flag (`controls.py`), so the sheet says so: "Stop now (Capsule will be paused when you next open
+     it)". The app waits about 40 s more.
+  3. Then the app sends `SIGKILL` to `run`, its own child. This is the one step that can leave the known gap
+     of an operation running without its time limit (THREAT_MODEL.md, "Known gaps"). It is there because a
+     drain can wait without bound: a request being decided can wait on a folder on a stalled network mount
+     (spec/CLI.md §13.3), and `kill` stops only a process group.
+  After `stopped`, a `run` that has not exited within about 10 s gets `SIGKILL` too, and the app shows what
+  the `stopped` reason said.
+- **Logout, restart, shutdown.** The same ladder, with step 2 at 20 s. At `kill` the operation's process
+  group is killed and the reply `failed killed_locally` is still posted. Only a force-quit of the whole
+  session, or step 3, leaves the known gap of an operation running without its time limit (THREAT_MODEL.md,
+  "Known gaps").
 - **After a kill at Quit or log out**, the host is paused at the next launch, which the user did not choose
   after a log out. The app does not resume it on its own: a pause nobody asked for fails safe. The next
   launch says "Capsule is paused. This happens when a task is stopped at Quit or log out." with
@@ -485,13 +534,14 @@ login ─► Capsule (menu bar; an "Open at Login" item)
 
 ## 10. Local policy: reloaded when it changes
 
-This changes 0001's "Local policy and upgrades".
-- **Reload on change.** Before each decision, `run` compares the policy file's inode, modification time and
-  size with what it loaded, and reloads if any changed. A folder the user removes, or an operation turned off,
-  applies to the next request. No restart, no signal.
+This changes 0001's "Local policy and upgrades", and is built (spec/CLI.md §13.5).
+- **Reload on change.** `run` loads the policy before each decision, which covers comparing the file's inode,
+  modification time and size with what it loaded, and checks each folder at use. A folder the user removes,
+  or an operation turned off, applies to the next request. No restart, no signal.
 - **An invalid file still fails closed**, but `run` no longer exits: it acts on nothing, reports
-  `policy_invalid`, and resumes when the file is valid again. `policy reset` moves an invalid file aside and
-  writes the fresh policy.
+  `policy` `invalid` in its `state` event, and resumes when the file is valid again. `policy reset` moves an
+  invalid file aside, as `policy.invalid.toml`, and writes the fresh policy; the app's Reset Settings… runs
+  `policy reset --json`, and takes `not_invalid` as done.
 
 ## 11. Pairing
 
@@ -754,9 +804,21 @@ Nothing Lucille sends can unpause the host. The app offers no remote control of 
 ## 15. Status, activity and diagnostics
 
 - **The menu header** shows the latest state: Connected, Paused, Not connected, or Needs attention (clock skew,
-  hub unreachable since a time, policy invalid, Keychain unavailable).
+  hub unreachable since a time, policy invalid, Keychain unavailable). From `run`'s `state` events
+  (spec/CLI.md §13.2):
+  - Connected: `confirmed`, not `paused`, `policy` `ok`, `clock` not `skewed`, a room `reading`, and a
+    `last_hub_contact` less than 120 s old by the app's clock. With no room and no `last_left_because`:
+    "Connected, waiting for Lucille" (a computer has one standing room, which Lucille offers first).
+  - Paused: `paused`.
+  - Needs attention: `clock` `skewed` (with Open Date & Time Settings); `policy` `invalid` (with Reset
+    Settings…), or `checking` for more than 30 s ("A folder check is stuck"); `last_left_because` set ("This Mac
+    left its room because …", in words); a room `read_stuck`; `last_hub_contact` 120 s old or more ("Lucille
+    can't be reached since …"); no `state` at all for 120 s ("Capsule's host is not responding").
 - **Activity** reads `log --limit 200` and the live `request` events, in words: "10:42. Lucille asked for a
-  fingerprint of report.pdf in documents. Done." It is kept in memory only.
+  fingerprint of report.pdf in documents. Finished on this Mac." It never says Lucille received a reply:
+  `finished` says the request finished on the computer. Each entry carries the app's own clock when its
+  event arrived, since events carry no time. It is kept in memory only. Many `host_too_old` events make one
+  notice, with the highest `min_host_version` seen, cleared when the app is updated (§16).
 - **The app writes no log of its own.** The child's standard error goes to an in-memory buffer shown under
   Details. Any system log line from the app carries state names only: no paths, arguments or output.
 - **No automatic crash reports and no analytics.** Any upload would be a destination the claim does not list.
@@ -799,11 +861,14 @@ for updates.
   continuity. The same
   profile folder, so the pairing, folders and enabled operations carry over, except entries an update
   turned off.
-- **Downgrades are refused.** `run` records the version it last ran as in its state folder. A `run` older than
-  that refuses to start (exit 25), and the app says "This Capsule is older than the one you used before.
-  Download the newest." `run --allow-downgrade` overrides it, from Terminal only. An older signed release can be
-  a vulnerable one. So a bad release cannot be undone by going back in the app: the only fix is the next
-  release. The record is per profile, so the app's and a `pipx` install's do not interfere (§9).
+- **Downgrades are refused.** `run` records the newest release that has started `run` on the profile in its
+  state folder. A `run` older than that refuses to start (exit 25), and the app says "This Capsule is older than
+  the one you used before. Download the newest." `run --allow-downgrade` overrides it, from Terminal only, and
+  leaves the record as it is. An older signed release can be a vulnerable one. So a bad release cannot be undone
+  by going back in the app: the only fix is the next release, a new PATCH (spec/CLI.md §13.6). The record is
+  per profile, so the app's and a `pipx` install's do not interfere (§9). Only a release is recorded: an ad-hoc
+  build of the next version (§3.2) on the owner's Mac does not raise it, and one of the same version as the
+  release recorded is refused, which `run --allow-downgrade` in Terminal gets past for testing.
 
 **What we did not choose, and why.** An updater (Sparkle). "No auto-update" is a stated bound on a malicious
 release (THREAT_MODEL.md; 0001 says "There is no auto-update"). An update channel is the strongest attack

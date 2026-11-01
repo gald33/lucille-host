@@ -3,8 +3,9 @@
 - Each file is JSON, mode 0600, written whole: a temporary file in the same folder, synced, then
   renamed over the old one, and the folder synced. A file that is missing reads as nothing; one
   that cannot be read, or holds something else, stops the host (it fails closed), as an invalid
-  policy does. A time in one is a number of seconds from 1970 to the end of the year 9999
-  (:func:`valid_time`): never NaN, never infinite, and always one the host can write as a date.
+  policy stops the other verbs and holds ``run`` from acting. A time in one is a number of seconds
+  from 1970 to the end of the year 9999 (:func:`valid_time`): never NaN, never infinite, and
+  always one the host can write as a date.
 - Every wait for a lock file of the host's own (``os.lockf``) goes through :func:`wait_for_lock`,
   so that a signal whose handler returns, as ``run``'s do, does not end the wait.
 - ``config/host.json`` says where the pair is kept (``keyring``, the default, or ``file`` under

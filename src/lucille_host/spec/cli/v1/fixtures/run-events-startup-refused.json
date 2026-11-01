@@ -1,0 +1,15 @@
+{
+  "description": "run, with SWITCHBOARD_URL set",
+  "argv": [
+    "run",
+    "--json-events"
+  ],
+  "exit": 24,
+  "stdout": [
+    {
+      "v": 1,
+      "type": "stopped",
+      "reason": "startup_refused"
+    }
+  ]
+}

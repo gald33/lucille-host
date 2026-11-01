@@ -39,6 +39,8 @@ from lucille_host import state
 __all__ = [
     "ABANDONED_WHYS",
     "CHECKS",
+    "CHECK_POLICY",
+    "WORDS",
     "Accepting",
     "Held",
     "Left",
@@ -60,6 +62,9 @@ CAP: Final = 2
 CHECK_PAIR: Final = "check 1"
 CHECK_GATE: Final = "check 2"
 CHECK_CAP: Final = "check 5"
+# Not one of the protocol's checks: while the local policy is invalid, or not checked yet, the host
+# accepts no room (``run``, spec/CLI.md section 13.5).
+CHECK_POLICY: Final = "policy invalid"
 # Why the host left a room on its own, as its log and ``status`` name it.
 CHECK_HUB: Final = "check 3"
 CHECK_TOKEN: Final = "check 4"
@@ -82,6 +87,19 @@ GONE: Final = "gone"
 ABANDONED_WHYS: Final = frozenset(
     {REPLACED, LUCILLE_LEFT, MOVED, NOT_LISTED, PAIR_OVER, GONE, *CHECKS}
 )
+# Each reason, as ``--json`` names it (spec/CLI.md section 6): a word to branch on, where the text
+# says it in words.
+WORDS: Final = {
+    REPLACED: "replaced",
+    LUCILLE_LEFT: "left_by_lucille",
+    MOVED: "pair_moved",
+    NOT_LISTED: "not_over_current_pair",
+    PAIR_OVER: "pair_over",
+    GONE: "gone",
+    CHECK_HUB: "check_3",
+    CHECK_TOKEN: "check_4",
+    LEFT_BEFORE: "left_before",
+}
 # A pair's name, as the library allows it, and the host's own name for a room.
 _NAME: Final = re.compile(r"[a-z0-9][a-z0-9-]{0,31}", re.ASCII)
 

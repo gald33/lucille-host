@@ -49,6 +49,7 @@
             "state_invalid",
             "policy_invalid",
             "policy_lock_failed",
+            "not_invalid",
             "not_in_catalog",
             "unavailable",
             "not_enabled",

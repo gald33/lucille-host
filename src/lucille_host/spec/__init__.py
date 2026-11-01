@@ -68,6 +68,11 @@ CLI_TYPES = (
     "policy_reset",
     "pair",
     "previous_policy",
+    "ready",
+    "state",
+    "request",
+    "host_too_old",
+    "stopped",
     "error",
 )
 

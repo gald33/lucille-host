@@ -1652,7 +1652,7 @@ def test_run_refused_says_why(
             thread.join(30)
     assert len(outcome) == 1
     (ran,) = outcome
-    assert ran.rc == 1, ran
+    assert ran.rc == 21, ran
     assert ran.err == f"lucille-host: {loop.ALREADY_RUNNING}\n"
     assert ran.out == ""
 

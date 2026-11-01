@@ -1,0 +1,165 @@
+{
+  "description": "run with --json too, paired and confirmed, files.sha256 enabled on a folder docs holding a.txt, and a work room offered in which four requests wait: host.describe; files.sha256 of docs/a.txt; files.sha256 of /etc/hostname; host.describe with min_host_version 999.0.0. Standard input is a pipe, closed once the fourth reply is posted. Each state object is checked against its schema, not compared",
+  "argv": [
+    "--json",
+    "run",
+    "--json-events",
+    "--exit-on-stdin-eof"
+  ],
+  "exit": 0,
+  "stdout": [
+    {
+      "v": 1,
+      "type": "ready",
+      "host_version": "0.1.0.dev0",
+      "pair": "pair-abcdef"
+    },
+    {
+      "v": 1,
+      "type": "state",
+      "pair": "pair-abcdef",
+      "confirmed": true,
+      "paused": false,
+      "policy": "ok",
+      "last_hub_contact": "2026-11-01T12:00:00Z",
+      "clock": {
+        "state": "unknown"
+      },
+      "rooms": [
+        {
+          "name": "room-1",
+          "state": "reading"
+        }
+      ],
+      "offers_waiting": 0,
+      "last_left_because": null
+    },
+    {
+      "v": 1,
+      "type": "request",
+      "phase": "received",
+      "job_id": "00000000-0000-4000-8000-000000000001",
+      "op": "host.describe",
+      "root": null,
+      "path": null
+    },
+    {
+      "v": 1,
+      "type": "request",
+      "phase": "decided",
+      "job_id": "00000000-0000-4000-8000-000000000001",
+      "decision": "run"
+    },
+    {
+      "v": 1,
+      "type": "request",
+      "phase": "finished",
+      "job_id": "00000000-0000-4000-8000-000000000001",
+      "status": "done",
+      "exit_code": 0,
+      "duration_ms": 5,
+      "stdout_bytes": 100,
+      "stderr_bytes": 2,
+      "reply_bytes": 300
+    },
+    {
+      "v": 1,
+      "type": "request",
+      "phase": "received",
+      "job_id": "00000000-0000-4000-8000-000000000002",
+      "op": "files.sha256",
+      "root": "docs",
+      "path": "a.txt"
+    },
+    {
+      "v": 1,
+      "type": "request",
+      "phase": "decided",
+      "job_id": "00000000-0000-4000-8000-000000000002",
+      "decision": "run"
+    },
+    {
+      "v": 1,
+      "type": "request",
+      "phase": "started",
+      "job_id": "00000000-0000-4000-8000-000000000002"
+    },
+    {
+      "v": 1,
+      "type": "request",
+      "phase": "finished",
+      "job_id": "00000000-0000-4000-8000-000000000002",
+      "status": "done",
+      "exit_code": 0,
+      "duration_ms": 5,
+      "stdout_bytes": 100,
+      "stderr_bytes": 2,
+      "reply_bytes": 300
+    },
+    {
+      "v": 1,
+      "type": "request",
+      "phase": "received",
+      "job_id": "00000000-0000-4000-8000-000000000003",
+      "op": "files.sha256",
+      "root": "docs",
+      "path": null
+    },
+    {
+      "v": 1,
+      "type": "request",
+      "phase": "decided",
+      "job_id": "00000000-0000-4000-8000-000000000003",
+      "decision": "refused",
+      "code": "path_outside_root"
+    },
+    {
+      "v": 1,
+      "type": "request",
+      "phase": "finished",
+      "job_id": "00000000-0000-4000-8000-000000000003",
+      "status": "refused",
+      "code": "path_outside_root",
+      "reply_bytes": 300
+    },
+    {
+      "v": 1,
+      "type": "request",
+      "phase": "received",
+      "job_id": "00000000-0000-4000-8000-000000000004",
+      "op": "host.describe",
+      "root": null,
+      "path": null
+    },
+    {
+      "v": 1,
+      "type": "request",
+      "phase": "decided",
+      "job_id": "00000000-0000-4000-8000-000000000004",
+      "decision": "refused",
+      "code": "host_too_old"
+    },
+    {
+      "v": 1,
+      "type": "host_too_old",
+      "job_id": "00000000-0000-4000-8000-000000000004",
+      "min_host_version": "999.0.0",
+      "host_version": "0.1.0.dev0"
+    },
+    {
+      "v": 1,
+      "type": "request",
+      "phase": "finished",
+      "job_id": "00000000-0000-4000-8000-000000000004",
+      "status": "refused",
+      "code": "host_too_old",
+      "reply_bytes": 300
+    },
+    {
+      "v": 1,
+      "type": "stopped",
+      "reason": "drained",
+      "cause": "stdin_end"
+    }
+  ]
+}

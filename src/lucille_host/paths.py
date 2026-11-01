@@ -75,6 +75,11 @@ class Dirs:
         return self.config / "policy.previous.toml"
 
     @property
+    def invalid_policy_file(self) -> Path:
+        """The last invalid policy file ``policy reset`` set aside. Nothing reads it."""
+        return self.config / "policy.invalid.toml"
+
+    @property
     def gate_file(self) -> Path:
         """The local gate of the pair being made or held (``gate.py``)."""
         return self.state / "pair.json"
@@ -98,6 +103,11 @@ class Dirs:
     def status_file(self) -> Path:
         """What a running ``lucille-host run`` last saw of the hub and its rooms (``loop.py``)."""
         return self.state / "status.json"
+
+    @property
+    def last_version_file(self) -> Path:
+        """The newest release that has started ``run`` on this profile (``loop.py``)."""
+        return self.state / "last_version.json"
 
     @property
     def host_file(self) -> Path:

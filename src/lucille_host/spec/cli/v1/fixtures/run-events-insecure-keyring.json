@@ -1,0 +1,15 @@
+{
+  "description": "run, with a keyring that stores nothing",
+  "argv": [
+    "run",
+    "--json-events"
+  ],
+  "exit": 23,
+  "stdout": [
+    {
+      "v": 1,
+      "type": "stopped",
+      "reason": "insecure_keyring"
+    }
+  ]
+}

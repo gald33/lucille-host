@@ -22,7 +22,10 @@ protocol message has a field that maps onto it. The file looks like this::
   with the explicit flag, stored as ``broad = true``. :func:`holds` says which spellings of "holds
   it" are seen, and which one is not.
 - ``log_results = true`` keeps output bodies in the audit log.
-- Anything else makes the file invalid, and an invalid file stops the host: it fails closed.
+- Anything else makes the file invalid, and the host fails closed: ``run`` acts on nothing until
+  the file is valid again, and every other verb that reads it refuses. ``lucille-host policy reset``
+  sets an invalid file aside, as ``policy.invalid.toml`` beside it, which nothing reads, and writes
+  the fresh policy in its place (:func:`set_aside_invalid`).
 - With no file at all the policy is the fresh one: only ``host.describe`` is enabled, and no folder
   is held.
 - A new pair starts from the fresh policy. When ``lucille-host pair`` takes a new code, it moves the
@@ -34,6 +37,10 @@ protocol message has a field that maps onto it. The file looks like this::
 
 For a shell (``spec/CLI.md`` section 9): :func:`suggest_alias` makes an alias from a folder's name,
 and :func:`check_root` says whether the host can open a folder and read an entry in it.
+
+For ``run`` (``loop.py``), which notices a change of the file while it runs: :func:`signature`
+stats it, and :func:`check_file` checks what it holds without looking at any folder, which
+:func:`load` does (a folder on a stalled network mount would hold up whoever loads it).
 
 The policy digest is HMAC-SHA256 of the canonical effective policy under a random key kept in the
 state directory, which never leaves the computer. The user can match a result to a policy, and
@@ -68,6 +75,7 @@ __all__ = [
     "Root",
     "archive",
     "broad_kind",
+    "check_file",
     "check_root",
     "digest",
     "digest_key",
@@ -77,6 +85,8 @@ __all__ = [
     "is_broad",
     "load",
     "save",
+    "set_aside_invalid",
+    "signature",
     "suggest_alias",
     "valid_alias",
 ]
@@ -357,7 +367,7 @@ def _require(condition: bool, message: str) -> None:
         raise PolicyError(message)
 
 
-def _parse(data: Mapping[str, Any], home: str | None) -> Policy:
+def _parse(data: Mapping[str, Any], home: str | None, *, folders: bool = True) -> Policy:
     _require(not set(data) - {"version", "log_results", "ops", "roots"}, "unknown top-level key")
     _require(data.get("version") == VERSION and type(data.get("version")) is int, "version")
     log_results = data.get("log_results", False)
@@ -390,7 +400,7 @@ def _parse(data: Mapping[str, Any], home: str | None) -> Policy:
         )
         _require(type(broad) is bool, f"roots.{alias}.broad must be true or false")
         _require(
-            broad or not is_broad(path, home=home),
+            broad or not folders or not is_broad(path, home=home),
             f"roots.{alias} is your home folder, holds it, or is /, which needs the explicit flag",
         )
         roots[alias] = Root(path=path, broad=broad)
@@ -401,20 +411,48 @@ def _parse(data: Mapping[str, Any], home: str | None) -> Policy:
     )
 
 
-def load(path: Path, *, home: str | None = None) -> Policy:
-    """The policy in ``path``; the fresh policy if there is no file. Raises PolicyError if the
-    file is invalid."""
+def _read(path: Path) -> Mapping[str, Any] | None:
+    """The TOML in ``path``; None when there is no file. PolicyError for anything else."""
     try:
         raw = path.read_bytes()
     except FileNotFoundError:
-        return fresh()
+        return None
     except OSError as exc:
         raise PolicyError(f"{path} cannot be read: {exc.strerror}") from exc
     try:
-        data = tomllib.loads(raw.decode("utf-8"))
+        return tomllib.loads(raw.decode("utf-8"))
     except (UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
         raise PolicyError(f"{path} is not valid TOML") from exc
-    return _parse(data, home)
+
+
+def load(path: Path, *, home: str | None = None) -> Policy:
+    """The policy in ``path``; the fresh policy if there is no file. Raises PolicyError if the
+    file is invalid. It looks at each folder the file holds (:func:`is_broad`)."""
+    data = _read(path)
+    return fresh() if data is None else _parse(data, home)
+
+
+def check_file(path: Path) -> None:
+    """Raise PolicyError when the file in ``path`` is invalid by what it holds, looking at no
+    folder. A file that passes can still be invalid by a folder of it, which only :func:`load`
+    sees."""
+    data = _read(path)
+    if data is not None:
+        _parse(data, None, folders=False)
+
+
+def signature(path: Path) -> tuple[int, ...] | None:
+    """What says the policy file changed: its device, inode, size, and modification and change
+    times, in nanoseconds; None when there is no file, and ``(-1, errno)`` when it cannot be
+    statted. A file replaced (``save``), rewritten in place, or whose mode changed has another
+    one, even with its modification time put back."""
+    try:
+        info = os.stat(path)
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        return (-1, exc.errno or 0)
+    return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
 
 
 def _toml_string(value: str) -> str:
@@ -441,7 +479,7 @@ def dumps(policy: Policy) -> str:
     """The policy as the TOML text :func:`save` writes."""
     lines = [
         "# lucille-host local policy. Change it with `lucille-host ops ...` and",
-        "# `lucille-host roots ...`; an invalid file stops the host.",
+        "# `lucille-host roots ...`; the host acts on nothing while it is invalid.",
         f"version = {VERSION}",
         f"log_results = {'true' if policy.log_results else 'false'}",
     ]
@@ -488,6 +526,23 @@ def archive(path: Path, previous: Path) -> bool:
         pass
     os.replace(path, previous)
     os.utime(previous)
+    _sync_dir(path.parent)
+    save(path, fresh())
+    return True
+
+
+def set_aside_invalid(path: Path, aside: Path) -> bool:
+    """``lucille-host policy reset``: when the policy file in ``path`` is invalid, move it to
+    ``aside``, replacing an earlier one, and write the fresh policy in its place. Returns whether
+    it did. A valid file, and no file, are left as they are. A link is moved as a link: what it
+    points to is not touched. The caller holds the policy lock."""
+    try:
+        load(path)
+    except PolicyError:
+        pass
+    else:
+        return False
+    os.replace(path, aside)
     _sync_dir(path.parent)
     save(path, fresh())
     return True

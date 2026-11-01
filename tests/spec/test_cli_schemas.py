@@ -22,6 +22,8 @@ DIALECT = "https://json-schema.org/draft/2020-12/schema"
 ID_BASE = "https://github.com/gald33/lucille-host/blob/main/src/lucille_host/spec/cli/v1/"
 NO_NUL = "^[^\\u0000]*$"
 PATH = "^/[^\\u0000]*$"
+# A path inside a folder alias, as a `request` object writes it: never one that starts with /.
+RELATIVE = "^[^/\\u0000][^\\u0000]*$"
 TYPES = {"object", "string", "integer", "number", "boolean", "array", "null"}
 # Where the host sets no bound: the subschemas, by their place, that may have none.
 UNBOUNDED = (
@@ -123,7 +125,8 @@ def test_every_string_refuses_nul_and_every_pattern_is_portable() -> None:
         if re.search(r"\\[dDwWsSbB]|\(\?", pattern):
             problems.append((where, "a class or construct that differs between dialects"))
         outside_classes = re.sub(r"\[(?:\\.|[^\]])*\]", "", pattern)
-        free = pattern in (NO_NUL, PATH)
+        # Negated classes that cannot match U+0000, since each names it.
+        free = pattern in (NO_NUL, PATH, RELATIVE)
         if not free and ("[^" in pattern or re.search(r"(?<!\\)\.", outside_classes)):
             problems.append((where, "a negated class or a bare '.' could match U+0000"))
         if _support.ecma_regex(pattern).search("\x00") is not None:
@@ -142,7 +145,17 @@ def test_shared_definitions_agree_across_files() -> None:
     protocol: dict[str, dict[str, Any]] = {}
     for name in spec.SCHEMA_NAMES:
         protocol.update(spec.load_schema(name).get("$defs", {}))
-    for key in ("host_version", "op_name", "root"):
+    for key in (
+        "host_version",
+        "op_name",
+        "root",
+        "job_id",
+        "min_host_version",
+        "refused_code",
+        "failed_code",
+        "exit_code",
+        "duration_ms",
+    ):
         assert defs[key] == protocol[key], key
 
 
