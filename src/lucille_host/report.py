@@ -10,8 +10,10 @@ name (``pair: confirmed: ...``, ``clock: skewed: ...``):
 - whether the local controls hold the host paused;
 - where the pair is kept (the OS keyring, or files under ``--store-file``), and the hub: Lucille's,
   and the loopback hub ``pair --hub`` named, when one is configured;
-- the pair, in the words ``pair status`` uses (:meth:`link.Session.pair_state`), from this
-  computer's store and the gate's record: never the SAS, which ``pair status`` shows;
+- the pair, in the words ``pair status`` uses (:meth:`link.Session.pair_view`), from this
+  computer's store and the gate's record: never the SAS, which ``pair status`` shows. Its
+  ``waiting`` says only that no command has seen Lucille collect the answer: with no hub call, it
+  cannot know whether Lucille has since;
 - each work room held, or ``none``, with the check its last room failed when the host left that
   room on its own (spec/PROTOCOL.md section 9), and how many offers wait; with no pair held, the
   room an accept a stop interrupted may have kept is named too, since ``forget`` leaves it;
@@ -347,7 +349,7 @@ def collect(
         lines.append(f"pair: unreadable: {message}")
         pair_found = {"state": "unreadable", "code": code, "message": message}
     else:
-        word, detail = link.pair_words(view)
+        word, detail = link.pair_words(view, local=True)
         lines.append(f"pair: {word}: {detail}")
         pair_found = _pair(view)
     seen = run_record(dirs)

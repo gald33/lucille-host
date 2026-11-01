@@ -24,7 +24,7 @@ What ``lucille-host pair`` and its sub-verbs do, made of the calls in ``_switchb
   the deadline forget the pair. A pair with no gate record is refused (``refused``), and ``pair
   confirm`` refuses a SAS no command has shown (``sas_ready``). ``lucille-host status`` reports
   these words from what this computer holds, with no hub call and without the SAS
-  (:meth:`Session.pair_state`). Each command reports a :class:`PairView`, which its text and its
+  (:meth:`Session.pair_view`). Each command reports a :class:`PairView`, which its text and its
   ``--json`` object (spec/CLI.md) are both made from. Once the code is answered, the gate's
   record is changed, and its deadline judged, only under the record lock, which ``run`` holds
   through each step.
@@ -191,6 +191,13 @@ _NO_GATE: Final = (
     "pair {name} has no local gate record, so it cannot be confirmed here: run "
     "`lucille-host pair reject` and start again in Lucille"
 )
+# What `pair status` and `pair confirm` say of a pair whose SAS has not reached this computer:
+# when their resolve read the pair room, and when it could not, which leaves it not known.
+_NOT_COLLECTED: Final = "pair {name}: Lucille has not collected this computer's answer yet"
+_NOT_ASKED: Final = (
+    "pair {name}: the hub could not be reached, so whether Lucille has collected this computer's "
+    "answer is not known"
+)
 # What is said of a pair another command forgot while this one worked on it.
 _GONE: Final = "pair {name} is gone from this computer: another command forgot it"
 # What is said when a work room held over a pair this computer no longer holds could not be left.
@@ -229,7 +236,8 @@ class Stopped(Exception):
 @dataclass(frozen=True)
 class PairView:
     """Where the pair is, as ``pair status`` and ``lucille-host status`` report it: ``word`` is its
-    state. ``sas`` is set only by ``pair status``, which shows it; ``generation`` and ``message``
+    state. ``sas`` is set only by ``pair status``, which shows it, and ``unasked`` only by its
+    ``waiting``, when its resolve could not read the pair room; ``generation`` and ``message``
     only by ``status``. ``generation`` is None when the store does not say, or says one that is
     not an integer from 0 to :data:`GENERATION_MOST`."""
 
@@ -239,6 +247,7 @@ class PairView:
     deadline: float | None = None
     generation: int | None = None
     message: str | None = None
+    unasked: bool = False
 
 
 def sanitize(text: str, limit: int = NOTE_LIMIT) -> str:
@@ -283,9 +292,12 @@ def _pending(name: str, sas: str, deadline: float | None) -> str:
     )
 
 
-def pair_words(view: PairView) -> tuple[str, str]:
+def pair_words(view: PairView, *, local: bool = False) -> tuple[str, str]:
     """A :class:`PairView` as the text says it: the state word, and the sentence after it. Where
-    ``status`` has a SAS waiting to be confirmed, it points to ``pair status``, which shows it."""
+    ``status`` has a SAS waiting to be confirmed, it points to ``pair status``, which shows it.
+    ``local`` marks ``status``'s view, which makes no hub call: its ``waiting`` says only that no
+    command here has seen Lucille collect the answer, and points to ``pair status``, which asks.
+    A ``waiting`` of ``pair status`` that could not ask (``unasked``) says that it is not known."""
     name = view.name
     if view.word == "none":
         return "none", "this computer holds no pair"
@@ -294,8 +306,15 @@ def pair_words(view: PairView) -> tuple[str, str]:
     if view.word == "confirmed":
         generation = f" (generation {view.generation})" if view.generation is not None else ""
         return "confirmed", f"pair {name}{generation}"
+    if view.word == "waiting" and local:
+        return "waiting", (
+            f"pair {name}: no command here has seen Lucille collect this computer's answer, and "
+            "it may have since: `lucille-host pair status` asks the hub"
+        )
+    if view.word == "waiting" and view.unasked:
+        return "waiting", _NOT_ASKED.format(name=name) + "; `lucille-host pair status` asks again"
     if view.word == "waiting":
-        return "waiting", f"pair {name}: Lucille has not collected this computer's answer yet"
+        return "waiting", _NOT_COLLECTED.format(name=name)
     if view.word == "refused":
         return "refused", _NO_GATE.format(name=name)
     if view.word == "sas_ready":
@@ -786,14 +805,20 @@ class Session:
             if found is not None and found.opened_at is not None:
                 return name, f"pair {name} is already confirmed"
             try:
-                known = self.resolve(name).sas_known
+                pair = self.resolve(name)
+                known, asked = pair.sas_known, pair.checked
             except _switchboard.HubError:
-                known = self.link.sas(name) is not None  # judged on what this computer holds
+                # Judged on what this computer holds.
+                known, asked = self.link.sas(name) is not None, False
+            if not known and asked:
+                raise Stopped(
+                    "waiting", _NOT_COLLECTED.format(name=name) + ", so there is no SAS to confirm"
+                )
             if not known:
                 raise Stopped(
                     "waiting",
-                    f"pair {name}: Lucille has not collected this computer's answer yet, so "
-                    "there is no SAS to confirm",
+                    _NOT_ASKED.format(name=name) + ", and this computer holds no SAS to confirm; "
+                    "`lucille-host pair status` asks again",
                 )
             return name, self.open_gate(name)
 
@@ -807,7 +832,9 @@ class Session:
         ``sas_pending`` or ``confirmed``. While the gate is shut and the SAS is known, it shows
         the SAS, which starts the deadline the first time. A pair with no gate record, which
         cannot be confirmed here, raises :class:`Stopped` (``refused``), as ``pair confirm``
-        does; so does one past its deadline (``expired``), which is forgotten."""
+        does; so does one past its deadline (``expired``), which is forgotten. A ``waiting``
+        whose resolve could not read the pair room is ``unasked``: whether Lucille has collected
+        the answer is then not known."""
         name = self.current()
         if name is None:
             return PairView("none")
@@ -825,7 +852,7 @@ class Session:
             if found is not None and found.opened_at is not None:
                 return PairView("confirmed", name)
             if not known:
-                return PairView("waiting", name)
+                return PairView("waiting", name, unasked=pair is None or not pair.checked)
             if found is None:
                 raise self.no_gate(name)
             if gate.past_deadline(found, self.link.now()):
@@ -853,10 +880,6 @@ class Session:
                 )
             return self._forget(name, why="rejected", seen=seen)
 
-    def pair_state(self) -> tuple[str, str]:
-        """``lucille-host status``: :meth:`pair_view`, in words."""
-        return pair_words(self.pair_view())
-
     def pair_view(self) -> PairView:
         """``lucille-host status``: where the pair is, from this computer's store and the gate's
         record alone, with no hub call. The words are ``pair status``'s (``none``, ``waiting``,
@@ -865,7 +888,8 @@ class Session:
         with no gate record, which cannot be confirmed here, ``expired`` for a SAS not
         confirmed by the deadline, which the next command that resolves the pair forgets, and
         ``several_pairs`` for a profile that holds more than one. It never shows the SAS, and so
-        never starts the deadline: ``pair status`` does both."""
+        never starts the deadline: ``pair status`` does both. With no hub call, its ``waiting``
+        means only that no command has seen Lucille collect the answer: Lucille may have since."""
         try:
             name = self.current()
         except Stopped as exc:

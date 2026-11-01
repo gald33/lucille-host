@@ -350,7 +350,7 @@
       }
     },
     "status_pair.waiting": {
-      "description": "Lucille has not collected this computer's answer yet.",
+      "description": "No command has seen Lucille collect this computer's answer yet. status makes no hub call, so Lucille may have collected it since: pair status asks the hub.",
       "type": "object",
       "additionalProperties": false,
       "required": [

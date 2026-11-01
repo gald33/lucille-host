@@ -96,7 +96,7 @@
       }
     },
     "pair.waiting": {
-      "description": "Lucille has not collected this computer's answer yet.",
+      "description": "No resolve has seen Lucille collect this computer's answer: Lucille has not collected it, or the hub could not be reached to ask.",
       "type": "object",
       "additionalProperties": false,
       "required": [
