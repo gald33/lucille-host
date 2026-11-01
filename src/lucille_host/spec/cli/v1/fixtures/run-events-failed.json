@@ -1,0 +1,16 @@
+{
+  "description": "run, with the policy digest key in the state folder damaged (3 bytes)",
+  "argv": [
+    "run",
+    "--json-events"
+  ],
+  "exit": 1,
+  "stdout": [
+    {
+      "v": 1,
+      "type": "stopped",
+      "reason": "failed",
+      "code": "state_invalid"
+    }
+  ]
+}

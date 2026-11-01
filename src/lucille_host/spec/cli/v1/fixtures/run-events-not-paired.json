@@ -1,0 +1,15 @@
+{
+  "description": "run, with no pair held",
+  "argv": [
+    "run",
+    "--json-events"
+  ],
+  "exit": 20,
+  "stdout": [
+    {
+      "v": 1,
+      "type": "stopped",
+      "reason": "not_paired"
+    }
+  ]
+}

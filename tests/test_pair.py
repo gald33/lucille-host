@@ -1580,10 +1580,13 @@ def test_policy_and_forget_help_say_what_they_do(capsys: pytest.CaptureFixture[s
         assert exit_info.value.code == 0
         return " ".join(capsys.readouterr().out.split())
 
-    assert " policy show the last policy a pairing set aside " in helped()
+    assert " policy show the last policy a pairing set aside, or reset an invalid one " in helped()
     assert (
         " previous list the operations and folders of the last policy a pairing set aside "
         in helped("policy")
+    )
+    assert " reset set aside an invalid policy file, and start from the fresh policy " in helped(
+        "policy"
     )
     assert (
         " With no pair held, it leaves the work rooms still held over a pair already gone from "
@@ -1654,14 +1657,15 @@ def test_pairing_verbs_refuse_root_and_switchboard_settings(
     pairing_verbs = (["pair", code], ["pair", "status"], ["pair", "confirm"], ["pair", "reject"])
     # So do `run`, `status` and `forget`, the other verbs that open the pair's store.
     others = (["run"], ["status"], ["forget"])
+    # `run` has exit codes of its own: 24 for a refused environment (spec/CLI.md section 13.3).
     for argv in (*pairing_verbs, *others):
         ran = cli.run(*argv, timeout=15)
-        assert ran.rc == 1 and "SWITCHBOARD_URL is set" in ran.err
+        assert ran.rc == (24 if argv == ["run"] else 1) and "SWITCHBOARD_URL is set" in ran.err
     monkeypatch.delenv("SWITCHBOARD_URL")
     monkeypatch.setattr("os.geteuid", lambda: 0)
     for argv in (["pair", code], *others):
         ran = cli.run(*argv, timeout=15)
-        assert ran.rc == 1 and "root" in ran.err
+        assert ran.rc == (24 if argv == ["run"] else 1) and "root" in ran.err
     assert cli.gate() is None and not cli.dirs.host_file.exists()
     # Refused before it takes the pair lock: a refused `pair`, root's above all, makes no file.
     assert not (cli.dirs.state / PAIR_LOCK).exists()

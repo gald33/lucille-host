@@ -1,0 +1,44 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/gald33/lucille-host/blob/main/src/lucille_host/spec/cli/v1/ready.schema.json",
+  "title": "lucille-host --json: ready",
+  "description": "run passed its start checks, and serves the pair. It is written once, first, before run first calls the hub.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "v",
+    "type",
+    "host_version",
+    "pair"
+  ],
+  "properties": {
+    "v": {
+      "const": 1
+    },
+    "type": {
+      "const": "ready"
+    },
+    "host_version": {
+      "$ref": "#/$defs/host_version"
+    },
+    "pair": {
+      "$ref": "#/$defs/pair_name"
+    }
+  },
+  "$defs": {
+    "host_version": {
+      "description": "The host release's version string.",
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 32,
+      "pattern": "^[0-9][0-9A-Za-z.+_-]{0,31}$"
+    },
+    "pair_name": {
+      "description": "A pair's name.",
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 32,
+      "pattern": "^[a-z0-9][a-z0-9-]{0,31}$"
+    }
+  }
+}

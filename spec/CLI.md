@@ -49,13 +49,15 @@ fixtures are the contract together. It is separate from the protocol between Luc
 - **A reader ignores a `type` it does not know**, and a field it does not know. Section 12 says what may be
   added within version 1, and what a reader does with a value it does not know.
 - **A reader checks `v`.** Every object carries `"v": 1`. An object with another `v` is from another major
-  version of this contract; a reader that does not know it stops.
+  version of this contract; a reader that does not know it stops. (A shell supervising `run` keeps reading
+  instead, and stops `run`: section 13.2.)
 - **A shell validates in its tests, not at run time.** It holds its decoders to the schemas and fixtures of
   the host release it ships with.
-- **A shell runs every verb with a time limit.** Any verb that reads the local policy may wait on a folder
-  of it that is a stalled network mount, since loading the policy looks at each folder; `roots add` and
-  `roots check` also open the folder, and on macOS `roots check` may wait while macOS asks the user about a
-  protected folder. A shell stops a verb that runs too long with `SIGINT` or `SIGTERM`.
+- **A shell runs every verb with a time limit**, except `run`, which it supervises (section 13). Any verb
+  that reads the local policy may wait on a folder of it that is a stalled network mount, since loading the
+  policy looks at each folder; `roots add` and `roots check` also open the folder, and on macOS
+  `roots check` may wait while macOS asks the user about a protected folder. A shell stops a verb that runs
+  too long with `SIGINT` or `SIGTERM`.
 
 ## 3. Asking for JSON
 
@@ -70,8 +72,11 @@ fixtures are the contract together. It is separate from the protocol between Luc
   without `--json`, `--version` ends the command line at once: nothing after it runs.
 - `-h` and `--help` print help for people on standard output, also with `--json`, and exit 0: they are the
   one exception to section 4.1. A shell never asks for help.
-- `run` has no JSON form in version 1. `lucille-host run --json` is a usage error (exit 2). Supervising
-  `run` comes in a later version (section 13).
+- `run`'s JSON form is its event stream, `run --json-events` (section 13). `--json` beside it adds nothing:
+  `lucille-host --json run --json-events` and `lucille-host run --json-events` are the same.
+  `lucille-host run --json` alone is a usage error (exit 2), so that a shell never reads `run`'s text as
+  JSON. `--json-events`, `--exit-on-stdin-eof` and `--allow-downgrade` are options of `run` only; with
+  another verb they are a usage error, and `--json-events` asks for the `error` object as `--json` does.
 
 ## 4. The output
 
@@ -118,6 +123,8 @@ They are the same with `--json` as without it.
 - **How a shell stops a verb.** `SIGINT` (Ctrl-C) stops `pair` while it waits for Lucille with
   `interrupted`, and keeps the pair. `SIGTERM` ends any verb with nothing more written; the pair is then in
   whatever state the host had reached. After any stop, a shell calls `status` to learn where things are.
+- `run` has exit codes of its own, and ends with a `stopped` object rather than an `error` (section 13.3).
+  The table above holds for every other verb.
 
 ## 5. The error object
 
@@ -328,10 +335,14 @@ shows the text as it is, or not at all; it decides nothing from it.
 
 ### `policy_reset`
 
-No other fields. The local policy was set aside for the new pair: only `host.describe` is enabled, and no
-folder is held. `policy previous` lists what was set aside. It is written only when a policy was moved; a
-pairing from the fresh policy moves nothing. It comes before the code is answered, so a `pair` that then
-fails may already have written it; the policy was set aside all the same.
+No other fields. The local policy was set aside, and the fresh policy put in its place: only `host.describe`
+is enabled, and no folder is held.
+- `pair` writes it when it sets a policy aside for the new pair, as `config/policy.previous.toml`, which
+  `policy previous` lists. It is written only when a policy was moved; a pairing from the fresh policy moves
+  nothing. It comes before the code is answered, so a `pair` that then fails may already have written it;
+  the policy was set aside all the same.
+- `policy reset` writes it when it sets an invalid policy file aside, as `config/policy.invalid.toml`, which
+  the host never reads.
 
 ### `pair`
 
@@ -353,6 +364,102 @@ its own: the answer was kept, and is sent again while `pair` waits, but the cloc
 |---|---|---|
 | `none` | | No pairing has set a policy aside. |
 | `found` | `set_aside_at`, `ops` (array of names, by name), `folders` (array of `{"alias", "path", "broad"}`, by alias) | The last policy a pairing set aside. Nothing uses it. `set_aside_at` is when it was set aside, to the second, and listing it never changes it. A pairing sets the policy aside in the second the pairing began or a later one, so a shell offers it back only when `set_aside_at` is at or after the second in which the shell started the pairing it is showing. |
+
+### `ready`
+
+| Field | Type | |
+|---|---|---|
+| `host_version` | string | This release's version. |
+| `pair` | string, `^[a-z0-9][a-z0-9-]{0,31}$` | The pair `run` serves. |
+
+`run` passed its start checks (section 13.3) and serves the pair. It is written once, first, before `run`
+first calls the hub, and a `state` follows it, unless `run` stops at once: a state file of the profile that
+cannot be read (`rooms.json`, say) makes `stopped` `failed` follow `ready` directly. After it, `run` ends
+only with a `stopped` reason of exit 0, 1 or 20.
+
+### `state`: what a running `run` sees now
+
+| Field | Type | |
+|---|---|---|
+| `pair` | string | The pair `run` serves, as in `ready`. |
+| `confirmed` | boolean | The local gate is open: the SAS was confirmed on this computer. Until then `run` touches nothing, accepts nothing, posts nothing and runs nothing. |
+| `paused` | boolean | The pause flag is set. |
+| `policy` | `ok`, `invalid` or `checking` | The local policy: valid; invalid, so `run` acts on nothing until it is valid again (section 13.5), and `status` says why; or not checked yet, when `run` accepts nothing either: just after `run` started; after a valid file changed, until a load of it says it is still valid; and when `run` would accept a room under a load that began 30 s ago or more, until a new load answers. An invalid file that changed stays `invalid` until a load of it says it is valid. |
+| `last_hub_contact` | string (a time) or null | When `run` last reached the hub. |
+| `clock` | object | As in `status`: `ok` with `skew_s`, `skewed` with `skew_s` (a number or null), or `unknown`. |
+| `rooms` | array of objects, by name, at most 2 | The work rooms `run` reads now: `{"name", "state"}`, `state` being `reading`, or `read_stuck` when a message there cannot be opened and `run` reads no further there. Empty while it reads none. A room held and not read is not listed: while the policy is not `ok`, `run` starts reading no room, so one held when `run` starts, or whose reading stopped, is listed only once the policy is `ok`; and none is listed once `run` drains. `status` says which rooms are held. |
+| `offers_waiting` | integer | Offers of a room that wait to be judged. |
+| `last_left_because` | `check_3`, `check_4`, `left_before` or null | As in `status`: when no room is held and the host left its last one on its own, the check that room failed. |
+
+A computer has one standing work room ([PROTOCOL.md](PROTOCOL.md) §9), so `rooms` is empty before Lucille
+first offers one, and after the host left one on its own, which Lucille does not replace: then
+`last_left_because` says why.
+
+### `request`: one request, at each step
+
+Every `request` has `phase` and `job_id` (Lucille's id for the job, a lowercase UUID), then the fields of its
+phase. A request read before a restart and decided after it is written again from `received`.
+
+| `phase` | Other fields | When |
+|---|---|---|
+| `received` | `op`, `root`, `path` | The request was written to the audit log, before it is decided. |
+| `decided` | `decision` `run` | It is to run. |
+| `decided` | `decision` `refused`, `code` | It is refused. `code` is the protocol's refusal code. |
+| `started` | | The process it runs is about to start. Only for an operation that starts a process. |
+| `finished` | `status` `done`, `exit_code`, `duration_ms`, `stdout_bytes`, `stderr_bytes`, `reply_bytes` | It ran, and its reply is built. |
+| `finished` | `status` `refused`, `code`, `reply_bytes` | Its refusal is built. |
+| `finished` | `status` `failed`, `code`, `exit_code`, `duration_ms`, `stdout_bytes`, `stderr_bytes`, `reply_bytes` | It was decided to run and did not finish: `timeout`, `killed_locally` or `interrupted`. `exit_code`, `stdout_bytes` and `stderr_bytes` are null when the reply has none. |
+| `finished` | `status` `abandoned` | Its work room was given up while it was decided or ran (the pair moved, or `forget`): it was stopped, and gets no reply. |
+
+- `op` is the request's op when it has the form of an operation name and the request is within the
+  protocol's size limit; otherwise null.
+- `root` and `path` are the request's folder alias and path when its op is in this release's catalog, works
+  in a folder, and its arguments hold to that operation's schema; otherwise null. `path` is null too when it
+  starts with `/`, or holds a control, reordering or separator character (those `pair_code`'s `note` writes
+  as spaces). A path is what Lucille asked for, not a file on this computer: a shell shows it, and never uses
+  it to find a file.
+- `exit_code` is as the reply carries it, from -255 to 255. `duration_ms` is from 0 to 2147483647.
+- `stdout_bytes` and `stderr_bytes` are each stream's size in the reply, measured as the protocol measures a
+  stream (its JSON-encoded string, both quotes included): from 2 to 65536. `reply_bytes` is the size of the
+  reply as posted, from 1 to 262144.
+- `finished` comes once the reply is built and handed on to be posted: it ran on this computer. Whether the
+  hub took the reply is in the audit log, not in an event.
+- A request gets these objects only from the step at which it is written down. A message that is not a
+  request, a duplicate, a request read while `run` drains, and one waiting while the policy is invalid get
+  none. A reply posted again after a restart (`failed interrupted`, or the same refusal) gets none: its
+  objects were written by the `run` that decided it.
+- No object carries a key, a pairing code, the SAS, a room's workspace, an absolute path, or anything an
+  operation returned.
+
+### `host_too_old`
+
+| Field | Type | |
+|---|---|---|
+| `job_id` | string | The request's. |
+| `min_host_version` | string, `MAJOR.MINOR.PATCH` | The oldest release the request allows. |
+| `host_version` | string | This release's version. |
+
+Lucille asked for a newer release: the request is refused `host_too_old`. It comes right after that
+request's `decided` object. A shell tells the user once that a newer release is needed, keeping the highest
+`min_host_version` it saw, however many requests say so.
+
+### `stopped`: why `run` ended
+
+| `reason` | Other fields | Exit |
+|---|---|---|
+| `drained` | `cause`: `signal`, `stdin_end` or `stdout_gone` | 0 |
+| `forgotten`, `ended` | | 0 |
+| `not_paired`, `no_gate`, `several_pairs`, `pair_unusable`, `leaked`, `expired` | | 20 |
+| `already_running` | | 21 |
+| `insecure_keyring`, `store_error` | | 23 |
+| `startup_refused` | | 24 |
+| `downgrade` | `last_version` | 25 |
+| `failed` | `code` | 1 |
+
+It is the last object `run` writes. Section 13.3 says what each reason means. `cause` says what began a
+drain: a signal (`SIGTERM`, `SIGHUP` or Ctrl-C), the end of standard input, or a standard output nobody reads
+(section 13.4). `last_version` is the release recorded on this profile, which this one is older than.
+`code` is one of the codes of section 10.
 
 ## 7. Verbs
 
@@ -380,7 +487,8 @@ the codes listed for it, or one of the codes every verb can give: `usage` (exit 
 | `pair confirm` | one `pair` `confirmed` | `bad_options`, `none`, `several_pairs`, `waiting`, `sas_ready`, `no_gate`, `expired`, `leaked`, `ended`, `pair_unusable`, `room_not_left`, `startup_refused`, `insecure_keyring`, `store_error`, `runtime_folder`, `state_invalid` |
 | `pair reject` | one `pair` `rejected` | `bad_options`, `none`, `several_pairs`, `already_confirmed`, `pair_unusable`, `room_not_left`, `startup_refused`, `insecure_keyring`, `store_error`, `runtime_folder`, `state_invalid` |
 | `policy previous` | one `previous_policy` | `previous_invalid` |
-| `run` | no JSON form in version 1 | `usage` |
+| `policy reset` | one `policy_reset` | `policy_lock_failed`, `not_invalid` |
+| `run --json-events [--exit-on-stdin-eof] [--allow-downgrade]` | `ready`; `state`, `request` and `host_too_old` as they come; `stopped`, last (section 13) | `usage` |
 
 Notes:
 - **`pair` with `--json`** reads the code from standard input, and only with `--code-stdin`:
@@ -419,6 +527,11 @@ Notes:
 - **`forget`** with no pair held, and no work room left over, refuses with `none`: there is nothing to
   forget. A shell disconnecting takes that as done.
 - **`log`** writes no object, and exits 0, when the audit log has no lines yet; standard error says so.
+- **`policy reset`** sets aside a policy file that is invalid, and only such a file. With a valid file, or
+  none, it changes nothing and refuses `not_invalid`; a shell resetting takes that as done. It never touches
+  the policy a pairing set aside.
+- **`run --json-events`** writes no `error` object but for a usage error. Every other way it ends is a
+  `stopped` object and an exit code of section 13.3.
 
 ### The SAS in JSON
 
@@ -519,6 +632,7 @@ limit, as it runs every verb, and stops it when the limit passes.
 | `state_invalid` | A file of the host's own holds something else. |
 | `policy_invalid` | The local policy file is invalid. Nothing changes it but a verb. |
 | `policy_lock_failed` | The policy lock could not be taken on this filesystem, so the policy was not changed. |
+| `not_invalid` | The local policy is valid, or there is no file: `policy reset` sets aside only an invalid file. |
 | `not_in_catalog` | That operation is not in this release's catalog. |
 | `unavailable` | That operation cannot run here: its executable is missing. |
 | `not_enabled` | That operation is not enabled. |
@@ -585,22 +699,41 @@ Each fixture is one command line and what it writes:
   exit code and standard error are the same.
 - `ops-list-sends-file-content` is written with a catalog entry stubbed to send file contents, so that a
   shell's decoder sees `sends_file_content` true. No operation in this release does.
+- Every `stopped` reason has a fixture of `run`, except `forgotten`: only another command forgetting the pair
+  while `run` runs gives it, at a moment one command line does not fix, and a pair forgotten before `run`
+  starts leaves none to serve. The tests make it another way.
+- `run-events-leaked` is written with the pairing library's answer at `run`'s first hub call stubbed to say
+  the handshake was interfered with (`aborted`), which a set-up cannot do on the hub.
+- A fixture of `run` has `--json-events` in its `argv`, and its last object is `stopped`, whose reason gives
+  the exit code. `run` writes a `state` object when what it sees changes, at moments the test does not set,
+  so the tests check each `state` against its schema and compare the other objects, in order. The sizes and
+  the duration a `request` object reports are samples too. A fixture's set-up says how standard input ends:
+  "closed at once" is a standard input with no file descriptor behind it. The same line without
+  `--json-events` must give the same exit code and standard error.
 
 ## 12. Versioning
 
 - `v` names the major version of this contract, independent of the host's version and of the protocol's.
   `version`'s `contract` names the minor too.
 - **Within version 1**, a later release may add a type, add a field to a type (to one of its states), add
-  an `error` code, add a verb, an action or a flag, or give `run` a JSON form. Each of these is a minor
-  version. The schemas of each release describe exactly what that release writes. A reader ignores a type
-  and a field it does not know.
+  an `error` code, add a verb, an action or a flag, or add an event to `run`'s stream. Each of these is a
+  minor version. The schemas of each release describe exactly what that release writes. A reader ignores a
+  type and a field it does not know.
 - **Closed and open values.** Every `state` is closed: a new state is a new major version. So are `store`,
-  `policy.disabled[].why`, `root_check`'s `state`, `broad_folder`'s `kind` and `status.pair`'s `code`. Three
-  are open, and may gain values within version 1:
+  `policy.disabled[].why`, `root_check`'s `state`, `broad_folder`'s `kind`, `status.pair`'s `code`,
+  `request`'s `decision` and `status`, the protocol's refusal codes (closed in its version 1) and the codes
+  of a `failed` request, and `state`'s `rooms[].state` and `clock`'s `state`. These are open, and may gain
+  values within version 1:
   - `error`'s `code`: a reader treats one it does not know as a failure: the exit code says so, and it
     shows the `message`.
   - `work_rooms[].why`: a reader treats one it does not know as "abandoned for another reason".
-  - `last_left_because`: a reader treats one it does not know as "left by the host on its own".
+  - `last_left_because`, in `status` and in `state`: a reader treats one it does not know as "left by the
+    host on its own".
+  - `stopped`'s `reason`: a reader that does not know it goes by the exit code; `stopped`'s `code`, as
+    `error`'s; and `drained`'s `cause`, which a reader that does not know it treats as a drain it did not
+    ask for.
+  - `request`'s `phase`: a reader ignores a `request` object whose phase it does not know.
+  - `state`'s `policy`: a reader treats a value it does not know as `invalid`.
 - A field a reader must act on for safety is never added within version 1.
 - **Anything else is a new major version:** removing or renaming a type or a field, changing a field's JSON
   type or what it means, or adding a value to a closed value. A new major gets its own schemas, under
@@ -608,12 +741,188 @@ Each fixture is one command line and what it writes:
 - Changes are recorded at the end of this document, by contract version, with the host release that first
   writes them.
 
-## 13. Not in version 1
+## 13. Supervising `run`
 
-- Supervising `run`: an event stream from `run`, and its own exit codes. `run` keeps its codes meanwhile
-  (0 stopped on purpose, 1 failed).
-- `policy reset`, `diagnostics` and removing the host's data
-  ([decisions/0002-macos-app.md](../decisions/0002-macos-app.md) §8).
+### 13.1 What a shell starts
+
+```
+lucille-host --profile <name> run --json-events --exit-on-stdin-eof
+```
+
+- Standard input: a pipe whose write end the shell holds, close-on-exec, gives to no other process, and never
+  writes to. `run` reads and discards what is written, and its end comes only once every holder has closed
+  the write end.
+- Standard output and standard error: pipes the shell reads, each on a thread or queue that does nothing
+  else, until the process has exited, during a quit and a logout too.
+- A shell starts `run` only when the computer is paired and its gate is open (`status`: `pair`
+  `confirmed`). A `run` started before that does not stop at start: it writes `ready` and `state`
+  (`confirmed` false), takes no room and runs nothing, and goes on once `pair confirm` opens the gate.
+  Meanwhile it stops with 20 only as `expired` once the SAS deadline passes, as `leaked` if the pairing ends
+  early, or as `pair_unusable` if the pairing library refuses the pair (section 13.3).
+- `run` writes its events from a queue of its own, so a shell that reads slowly holds up no thread of `run`:
+  nothing waits for it, a drain and a `SIGTERM` included. A shell that stops reading altogether lets 1000
+  objects wait, and then counts as a standard output nobody reads (section 13.4). Standard error is written
+  as it comes: a shell reads it continuously.
+
+### 13.2 The events
+
+- One object per line, as section 4.1 says, each at most 16384 bytes.
+- `ready` is first, or absent: a refusal at start writes `stopped` alone. `stopped` is last, or absent: a
+  signal `run` does not handle, a kill, or a standard output that broke writes nothing more. Nothing follows
+  `stopped`.
+- Between them, `state`, `request` and `host_too_old` come in any order. A request's own objects are in
+  order: `received`, `decided`, then `host_too_old` for that refusal, `started` for an operation that starts
+  a process, and `finished`. The first `state` comes before any `request`. A `request` with no `finished`
+  before `stopped`, or before the process exits, ended there: a shell closes it as stopped.
+- `state` comes right after `ready` (unless `run` stops at once, section 6), before `run` first calls the
+  hub, again whenever what it says changes (a room read or left, the gate, the pause flag, the policy, the
+  clock's state, an offer), and at least every 60 s whatever changed. A hub that takes a connection and
+  never answers holds `run` in each call until the call is given up, after 40 s, and a step can make
+  several: meanwhile `state` still comes every 60 s, saying what `run` saw last, for up to 300 s of one
+  step. So no `state` for 120 s means `run` is not stepping, and the shell treats it as stuck. The hub is
+  out of reach when `last_hub_contact` is more than 120 s older than the shell's own clock (the same
+  computer's): `run` reaches it at least every 25 s while it can.
+- Events carry no time. A shell stamps each with its own clock as it arrives. `finished` says the request
+  finished on this computer, not that Lucille received the reply.
+- A line a shell cannot use (not JSON, longer than the bound) it drops, notes for diagnostics, and keeps
+  reading. A last fragment with no newline at the end of the stream is discarded. On an object with another
+  `v`, a shell stops trusting the events, keeps reading both streams, and stops `run` by closing its write
+  end of standard input.
+
+### 13.3 Exit codes of `run`
+
+| Exit | `stopped` `reason` | Meaning |
+|---|---|---|
+| 0 | `drained` | Stopped on purpose, by what `cause` says: the first `SIGTERM`, `SIGHUP` or Ctrl-C, or with `--exit-on-stdin-eof` the end of standard input or a standard output nobody reads (13.4). The running operation finished and its reply was posted, or the reply was given 30 s. |
+| 0 | `forgotten` | Another command on this computer forgot the pair (`forget`) while `run` ran. |
+| 0 | `ended` | Lucille ended the pair. This computer's half is forgotten too. |
+| 20 | `not_paired` | This computer holds no pair. |
+| 20 | `no_gate` | The pair has no local gate record, so it can never be confirmed here: `pair reject`, then pair again. |
+| 20 | `several_pairs` | The profile holds more than one pair, and the host keeps one. |
+| 20 | `pair_unusable` | The pairing library refused the pair here. |
+| 20 | `leaked`, `expired` | The pairing ended early, or its SAS was not confirmed by its deadline, while `run` waited: the pair is forgotten. Pair again. |
+| 21 | `already_running` | Another `run` of this profile runs. Nothing was changed. |
+| 23 | `insecure_keyring`, `store_error` | The store that keeps the pair is unsafe, or cannot be used. |
+| 24 | `startup_refused` | The host does not start here: it runs as root, or a `SWITCHBOARD_*` variable is set. |
+| 25 | `downgrade` | This release is older than one that started `run` on this profile before (13.6). |
+| 1 | `failed` | Anything else `run` met and stopped for; `code` says what, and standard error says why. An unexpected error (`internal`) also writes its traceback. |
+| 2 | | Usage: the command line could not be parsed. With `--json` or `--json-events`, one `error` object with `code` `usage`. |
+
+- `run`'s start checks come in this order, each before the next can write or read anything: the profile and
+  its host configuration (1); the environment (24); the run lock (21); the version record (25); the store
+  (23); the policy digest key, which a damaged file makes `failed` `state_invalid` rather than an invalid
+  policy (1); the pair, its record in the store and its gate record, read on this computer (20, or 23 for a
+  record the store cannot read); then `ready`, and the first hub call. So root writes nothing, a second
+  `run` changes nothing, and an older release reads no secret.
+- A pair whose SAS is not confirmed yet is not refused at start: `run` serves it, and waits for `pair
+  confirm` (section 13.1). Of the gate, only a pair with no gate record, which can never be confirmed here,
+  gives 20 at start (`no_gate`). While `run` waits, `expired` comes once the SAS deadline passes, and
+  `leaked` and `pair_unusable` as for a confirmed pair.
+- 21, 23, 24 and 25 come only before `ready`, and so do `not_paired`, `no_gate` and `several_pairs` unless
+  the pair goes while `run` runs. `pair_unusable` comes before `ready` for a record in the store the
+  library refuses, and after it when the library refuses the pair at a hub call. After `ready`, a store
+  that cannot be read is `failed` with `store_error`: a shell starts `run` again, and a store that still
+  cannot be used then gives 23. 22 is not used.
+- **How `run` ended comes first.** 20 to 25 are also signal numbers on macOS (`SIGCHLD` 20, `SIGTTIN` 21,
+  `SIGTTOU` 22, `SIGIO` 23, `SIGXCPU` 24, `SIGXFSZ` 25), and `SIGXCPU` and `SIGXFSZ` end a process. So a
+  shell checks that `run` exited (Foundation's `terminationReason` is `.exit`) before it reads the number, as
+  section 4.3 says, and checks the number against the `stopped` reason it read. Its exit can be seen before
+  its last line is read: a shell reads standard output to its end, for up to about 2 s, before it decides.
+- **Within an exit code, the reason decides.** After 0, `drained` is a stop the shell asked for, or not;
+  `forgotten` and `ended` mean the pair is gone. After 20, the reason says what the user does. When `stopped`
+  is missing after 0 or 20, the shell asks `status --json` where the pair is before it acts.
+- **What a shell does** ([decisions/0002-macos-app.md](../decisions/0002-macos-app.md) §9 says it for the
+  Mac app):
+  - after 1, a signal, an exit code it does not know, or a `drained` it did not ask for (a drain within a few
+    seconds of `ready` above all), it starts `run` again with a back-off, and counts each toward giving up;
+  - after 0 `forgotten` or `ended`, 20, 23, 24 or 25, it does not start `run` again, and shows why; after 2,
+    which can only be its own mistake, it does not either, and shows standard error;
+  - after 21, it asks `status --json`: while `run` is `running`, a `run` is still finishing, perhaps its own
+    from before a relaunch, and it tries again with a back-off; once `run` is `stopped` or `not_seen`, it
+    starts at once; if `run` stays `running` past the drain's bound (below), another copy runs, and it says
+    so. `run` keeps writing its status while it drains.
+- **A drain's bound** is the running operation's time limit (at most 300 s), then 30 s for its reply. A
+  request still waiting for a valid policy, or held in a load of it, is not waited for. A drain begins when
+  the step `run` is in ends. Against a hub that does not answer, that step waits for its hub calls, each given
+  up after 40 s, and `state` and `status` go on saying `run` runs. But a request being
+  decided can wait on a folder of the policy that is a stalled network mount (containment looks at it), and
+  then the drain waits with it: a shell's last resort is `SIGKILL`, which can leave an operation's process
+  group running without its time limit ([THREAT_MODEL.md](../THREAT_MODEL.md), "Known gaps").
+
+### 13.4 `--exit-on-stdin-eof`
+
+- `run` reads its standard input, and discards what it reads. At its end it drains exactly as on its first
+  `SIGTERM` ([PROTOCOL.md](PROTOCOL.md) §16): the running operation finishes and its reply is posted, nothing
+  new starts, and an operation decided and not yet started is `failed` with `interrupted`. It then writes
+  `stopped` `drained` with `cause` `stdin_end`, and exits 0. A Ctrl-C after that kills the running
+  operation, as a second Ctrl-C does.
+- The end of standard input is: every holder of the pipe's write end closed it (a shell that quits, crashes
+  or is force-quit); a read error; or no standard input at all (fd 0 closed when `run` started). A read end
+  handed over non-blocking is made blocking.
+- Before `run` serves, the end stops it between two of its start checks: `stopped` `drained`, with no
+  `ready`. So does the first `SIGTERM`, `SIGHUP` or Ctrl-C, once the profile's name is checked, with `cause`
+  `signal`, with or without this option; a Ctrl-C then kills nothing, since nothing runs. A start check that
+  waits (on macOS, a Keychain prompt; a state file on a stalled mount) is not cut short: the end, or the
+  signal, is seen once it returns.
+- With `--json-events` too, a standard output that nobody reads any more (a write fails, or 1000 objects
+  wait) drains `run` the same way, with `cause` `stdout_gone`. Without `--exit-on-stdin-eof`, such a standard
+  output only stops the events; `run` goes on, and exits with the code it chose.
+- Without `--exit-on-stdin-eof`, `run` never reads its standard input, so a `run` started under `nohup`, or
+  with its standard input closed, keeps running.
+- With a terminal as standard input, Ctrl-D drains. In the background of a shell with job control, where
+  reading the terminal would stop the whole process, `run` does not read it and goes on; in the foreground
+  again, Ctrl-D drains. The option is meant for a pipe.
+- A shell that wants the running operation stopped, not finished, runs `lucille-host kill`, which also
+  pauses.
+
+### 13.5 The local policy while `run` runs
+
+- `run` loads the policy file before each decision, so a change applies to the next request, with no
+  restart and no signal: a folder removed is refused `path_outside_root`, an operation turned off
+  `not_enabled`.
+- While the file is invalid, `run` acts on nothing: it accepts no work room (and finishes no accept a stop
+  interrupted), writes no request down, decides, runs and answers nothing, and starts reading no room. A reply
+  it decided before is still posted. It keeps the pair (it resolves and touches it, and leaves a room that
+  fails its checks or that a move gives up), and the controls work. `state` says `policy` `invalid`, and
+  `status` why. Lucille's requests wait on the hub, as for a computer that is off, and expire if the file is
+  not made valid in time.
+- From when `run` notices: it looks at the file once a second, and again right before it accepts a room
+  (a step can wait on the hub). A valid file that changed holds the offers until a load of it says it is
+  still valid (`state` says `policy` `checking`), and one that is invalid by what it holds (not TOML, an
+  unknown key) is `invalid` at once, even while an operation runs; an invalid file stays `invalid` until a
+  load of it says it is valid. A file that is invalid only by a folder (one that became the home folder,
+  through a link, the file unchanged) is found by the next load: before the next decision, and every 30 s
+  between `run`'s steps, while an operation runs too. A step that waits on the hub can last longer than
+  that, so `run` accepts no room under a load that began 30 s ago or more: the offer waits for a new load
+  (`checking`).
+- When the file is valid again, by `policy reset` or by hand, `run` goes on, with no restart. `ops` and
+  `roots` refuse with `policy_invalid` while the file is invalid: they change it only once `policy reset` has.
+- `run` never rewrites the file. `policy reset` sets an invalid one aside.
+
+### 13.6 Downgrades
+
+- `run` keeps, in `state/last_version.json`, the newest release that has started `run` on this profile, and
+  refuses to start when it is older (exit 25, `stopped` `downgrade` with that release). An older release can
+  be a vulnerable one.
+- Releases are ordered as [PROTOCOL.md](PROTOCOL.md) §10 orders a host's version against `min_host_version`:
+  by the numeric triple a version starts with; a version with anything after the triple comes before the same
+  triple; a version that does not start with a triple comes before every other. The record holds only a
+  release, `MAJOR.MINOR.PATCH` and nothing else, and never goes below it in that order. A build with
+  anything after the triple (a development build) is checked against the record, and never recorded.
+- So every release is a plain `MAJOR.MINOR.PATCH`, and a fix is a new PATCH, never a `.postN` or `+local`
+  version, which would come before the release it fixes. The first release that keeps the record must ship
+  with it: a release from before it does not read the record.
+- The record says which release started `run`, not which one served: it is written once the run lock is held
+  and the release is not refused, before the store and the pair are looked at.
+- `run --allow-downgrade` starts all the same, and says so on standard error. The record keeps the newer
+  release, so the next start of the older one is refused again.
+- The record is per profile: a profile's `run` never refuses because another profile ran a newer release.
+- The record is a file the user's account can change. It stops an older release by mistake, not on purpose.
+
+## 14. Not in version 1
+
+- `diagnostics` and removing the host's data ([decisions/0002-macos-app.md](../decisions/0002-macos-app.md)
+  §8).
 - The typed pairing gate and the Connect flow (decisions/0002 §11.2 and §11.4): proposals, not built.
 - A typed history of what the host did, for a shell to show in words. `log_line` carries text only, which a
   shell shows as it is.
@@ -625,4 +934,6 @@ Each fixture is one command line and what it writes:
 
 ## Changes
 
-- **1.0** (no release yet): the first version.
+- **1.0** (no release yet): the first version, with `run`'s event stream and exit codes, and `policy reset`.
+  A build of the repository's development version is not a release, and writes contract 1.0 whatever it
+  holds.

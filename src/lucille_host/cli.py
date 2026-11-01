@@ -19,7 +19,10 @@ verbs:
   confirmed;
 - ``run``: the long-running host (``loop.py``): it keeps the pair, takes the work rooms Lucille
   offers over it, and reads and answers Lucille's requests there, once the local gate is open.
-  The first SIGTERM, SIGHUP or Ctrl-C drains it; it also stops, exiting 0, when the pair ends;
+  The first SIGTERM, SIGHUP or Ctrl-C drains it; it also stops, exiting 0, when the pair ends.
+  ``--json-events`` writes its events on stdout, ``--exit-on-stdin-eof`` drains it when stdin
+  ends, and ``--allow-downgrade`` starts a release older than one that ran on the profile
+  before. It has exit codes of its own (:data:`RUN_EXITS`, spec/CLI.md section 13);
 - ``status``: the version, the local policy, the pair, the work rooms, and what ``run`` last saw
   of the hub and the clock, read from the profile's files with no hub call (``report.py``);
 - ``log [--limit N]``: the last lines of the audit log, oldest first, across its rotated files;
@@ -33,7 +36,8 @@ verbs:
   ``roots add --suggest-alias PATH`` suggests an alias for a folder and changes nothing; ``roots
   check`` says whether the host can open each folder and read an entry in it;
 - ``policy previous``: the operations and folders of the last policy a pairing set aside (a
-  pairing sets aside only a policy that is not the fresh one);
+  pairing sets aside only a policy that is not the fresh one); ``policy reset``: set an invalid
+  policy file aside, and start from the fresh policy;
 - ``pause``, ``resume`` and ``kill``: the local controls.
 
 Each verb is dispatched by name; one with no handler is refused, never run as another verb.
@@ -47,6 +51,8 @@ of ``spec/CLI.md`` instead of its text, one per line, with the same exit codes; 
 is. A failure ends with an ``error`` object, and a usage error writes one too. Each verb writes its
 text and its objects at the same points, from the same values, so that they say the same. With
 ``--json``, ``pair`` takes the code only on stdin, with ``--code-stdin``, and asks nothing.
+``run``'s JSON form is ``run --json-events`` (``--json`` beside it adds nothing): one writer thread
+writes its events (:class:`_Events`), and ``stopped`` is the last.
 
 A verb that changes the policy holds the profile's policy lock from reading the file to writing
 it, so that two verbs run at once do not lose a change; on a filesystem that cannot lock, it
@@ -57,12 +63,14 @@ controls' lock the same way, and go ahead without it where it cannot be had (``c
 from __future__ import annotations
 
 import argparse
+import collections
 import contextlib
 import json
 import os
 import re
 import sys
 import termios
+import threading
 from collections.abc import Callable, Iterator, Sequence
 from dataclasses import replace
 from types import MappingProxyType
@@ -105,6 +113,54 @@ USAGE_MESSAGE: Final = "the command line could not be parsed; standard error say
 INTERNAL_MESSAGE: Final = "an unexpected error; standard error holds its traceback"
 # Unpaired surrogates, as a file name that is not UTF-8 reaches the host: written as U+FFFD.
 _SURROGATES: Final = re.compile("[\ud800-\udfff]")
+# `run`'s exit codes, by the reason its `stopped` object gives (spec/CLI.md section 13.3). Each
+# reason has one exit code. 22 is not used.
+RUN_EXITS: Final = MappingProxyType(
+    {
+        "drained": 0,
+        "forgotten": 0,
+        "ended": 0,
+        "not_paired": 20,
+        "no_gate": 20,
+        "several_pairs": 20,
+        "pair_unusable": 20,
+        "leaked": 20,
+        "expired": 20,
+        "already_running": 21,
+        "insecure_keyring": 23,
+        "store_error": 23,
+        "startup_refused": 24,
+        "downgrade": 25,
+        "failed": 1,
+    }
+)
+# The reasons a pairing word of `link.Stopped` gives, by its code, when `run` stops for it.
+_STOPPED_REASONS: Final = {
+    "several_pairs": "several_pairs",
+    "no_gate": "no_gate",
+    "pair_unusable": "pair_unusable",
+    "leaked": "leaked",
+    "expired": "expired",
+}
+# The codes a `stopped` object of reason `failed` gives (spec/CLI.md section 10).
+RUN_FAILURES: Final = frozenset(
+    {
+        "internal",
+        "bad_profile",
+        "unsupported_platform",
+        "os_error",
+        "state_invalid",
+        "runtime_folder",
+        "lock_failed",
+        "room_not_left",
+        "store_error",
+        "hub_error",
+    }
+)
+# How many events may wait for a reader that has stopped reading, before standard output counts as
+# one nobody reads; and how long `run` waits, at its end, for its events to be written.
+EVENTS_QUEUE: Final = 1000
+EVENTS_FLUSH: Final = 5.0
 
 
 class _Refused(Exception):
@@ -200,6 +256,192 @@ class _Out:
 
     def version(self) -> None:
         self.say(version_line(), "version", host_version=__version__, contract=CONTRACT)
+
+
+def _line(type_name: str, fields: dict[str, Any]) -> str:
+    """One object as a line of spec/CLI.md section 4.1, without its newline."""
+    return json.dumps(
+        _valid({"v": 1, "type": type_name, **fields}),
+        ensure_ascii=True,
+        allow_nan=False,
+        separators=(",", ":"),
+    )
+
+
+def _quiet(fd: int) -> None:
+    """Put /dev/null on ``fd``, so that nothing written there later fails."""
+    with contextlib.suppress(OSError):
+        null = os.open(os.devnull, os.O_WRONLY)
+        try:
+            os.dup2(null, fd)
+        finally:
+            os.close(null)
+
+
+def _err(line: str) -> None:
+    """A line on stderr that cannot fail ``run``: a stderr nobody reads is put on /dev/null."""
+    try:
+        print(line, file=sys.stderr, flush=True)
+    except (OSError, ValueError, AttributeError):
+        _quiet(2)
+
+
+def _warn_quietly(line: str) -> None:
+    _err(f"lucille-host: warning: {line}")
+
+
+class _Events:
+    """The events of ``run --json-events``: each object is serialized by the thread that has it,
+    and written, whole, by one writer thread of its own, so that a shell that reads slowly holds up
+    no thread of ``run``. The writer flushes each line. A standard output that fails a write (a
+    shell that is gone), or that has :data:`EVENTS_QUEUE` objects waiting (a shell that stopped
+    reading), gets nothing more, and ``on_broken`` is called. Once :meth:`close` has queued
+    ``stopped``, nothing else is written."""
+
+    def __init__(self, stream: Any, *, most: int = EVENTS_QUEUE) -> None:
+        self._stream = stream
+        self._most = most
+        self._cv = threading.Condition()
+        self._queue: collections.deque[str] = collections.deque()
+        self._closed = False
+        self.broken = False
+        self.on_broken: Callable[[], None] | None = None
+        self._thread = threading.Thread(
+            target=self._write_loop, name="lucille-host events", daemon=True
+        )
+        self._thread.start()
+
+    def emit(self, type_name: str, **fields: Any) -> None:
+        """Queue one object; nothing waits for it to be written."""
+        line = _line(type_name, fields)
+        with self._cv:
+            if self._closed or self.broken:
+                return
+            overflow = len(self._queue) >= self._most
+            if not overflow:
+                self._queue.append(line)
+            self._cv.notify_all()
+        if overflow:
+            self._gone()
+
+    def tell(self, type_name: str, fields: dict[str, Any]) -> None:
+        self.emit(type_name, **fields)
+
+    def close(self, type_name: str, **fields: Any) -> None:
+        """Queue the last object; any later is dropped."""
+        line = _line(type_name, fields)
+        with self._cv:
+            if self._closed:
+                return
+            self._closed = True
+            if not self.broken:
+                self._queue.append(line)
+            self._cv.notify_all()
+
+    def finish(self, timeout: float) -> bool:
+        """Wait up to ``timeout`` seconds for what is queued to be written; whether it was."""
+        self._thread.join(timeout)
+        return not self._thread.is_alive()
+
+    def _gone(self) -> None:
+        with self._cv:
+            if self.broken:
+                return
+            self.broken = True
+            self._queue.clear()
+            self._cv.notify_all()
+        try:
+            fd = self._stream.fileno()
+        except (AttributeError, OSError, ValueError):
+            fd = None
+        if fd is not None:
+            _quiet(fd)
+        if self.on_broken is not None:
+            self.on_broken()
+
+    def _write_loop(self) -> None:
+        while True:
+            with self._cv:
+                while not self._queue and not self._closed and not self.broken:
+                    self._cv.wait()
+                if not self._queue:
+                    if self._closed or self.broken:
+                        return
+                    continue
+                line = self._queue.popleft()
+            try:
+                self._stream.write(line + "\n")
+                self._stream.flush()
+            except Exception:  # noqa: BLE001 - any failure to write is a stdout nobody reads
+                self._gone()
+
+
+class _Descriptor:
+    """A text stream onto a file descriptor of its own, written whole with ``os.write``."""
+
+    def __init__(self, fd: int) -> None:
+        self._fd = fd
+
+    def fileno(self) -> int:
+        return self._fd
+
+    def write(self, text: str) -> int:
+        view = memoryview(text.encode("ascii"))
+        while view:
+            view = view[os.write(self._fd, view) :]
+        return len(text)
+
+    def flush(self) -> None:
+        pass
+
+
+class _Stdout:
+    """Standard output, taken for ``run --json-events``: the events are written on a private
+    duplicate of its descriptor, made blocking, and the descriptor itself, and ``sys.stdout``,
+    are pointed at standard error until ``run`` ends. So nothing but the events' writer reaches
+    the shell's stdout pipe: neither a line a library prints, nor ``run``'s own text."""
+
+    def __init__(self) -> None:
+        self._saved = sys.stdout
+        self._fd: int | None = None
+        self._real: int | None = None
+        try:
+            real = self._saved.fileno()
+        except (AttributeError, OSError, ValueError):
+            real = None
+        if real is not None:
+            with contextlib.suppress(OSError, ValueError):
+                self._saved.flush()
+            try:
+                self._fd = os.dup(real)
+            except OSError:
+                self._fd = None
+            if self._fd is not None:
+                with contextlib.suppress(OSError):
+                    os.set_blocking(self._fd, True)
+                try:
+                    os.dup2(2, real)
+                    self._real = real
+                except OSError:
+                    self._real = None
+        self.stream: Any = _Descriptor(self._fd) if self._fd is not None else self._saved
+        sys.stdout = sys.stderr
+
+    def give_back(self, *, broken: bool, written: bool) -> None:
+        """Standard output as it was: on /dev/null if it broke. The private descriptor stays open
+        while the writer may still be in a write (``written`` false)."""
+        sys.stdout = self._saved
+        if self._fd is None:
+            return
+        if broken:
+            _quiet(self._fd)
+        if self._real is not None:
+            with contextlib.suppress(OSError, ValueError):
+                self._saved.flush()
+            with contextlib.suppress(OSError):
+                os.dup2(self._fd, self._real)
+        if written:
+            os.close(self._fd)
 
 
 def version_line() -> str:
@@ -329,10 +571,26 @@ def build_parser() -> argparse.ArgumentParser:
             "Keeps the pair, takes the work rooms Lucille offers over it, and runs the requests "
             "it posts there that the local policy allows. Nothing is accepted, posted or run "
             "before the SAS is confirmed. The first Ctrl-C, SIGTERM or SIGHUP lets the running "
-            "operation finish and stops; a second Ctrl-C kills it. It has no --json form yet."
+            "operation finish and stops; a second Ctrl-C kills it. Its exit codes are its own "
+            "(spec/CLI.md section 13)."
         ),
     )
     _json_option(run)
+    run.add_argument(
+        "--json-events",
+        action="store_true",
+        help="write the events of spec/CLI.md section 13 on stdout, one JSON object per line",
+    )
+    run.add_argument(
+        "--exit-on-stdin-eof",
+        action="store_true",
+        help="drain, as on the first SIGTERM, when standard input ends",
+    )
+    run.add_argument(
+        "--allow-downgrade",
+        action="store_true",
+        help="start although a newer release has started `run` on this profile before",
+    )
 
     status = verbs.add_parser(
         "status",
@@ -367,13 +625,20 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _json_option(forget)
 
-    policy_verb = verbs.add_parser("policy", help="show the last policy a pairing set aside")
+    policy_verb = verbs.add_parser(
+        "policy", help="show the last policy a pairing set aside, or reset an invalid one"
+    )
     _json_option(policy_verb)
     policy_verbs = policy_verb.add_subparsers(dest="policy_verb", metavar="ACTION", required=True)
     _json_option(
         policy_verbs.add_parser(
             "previous",
             help="list the operations and folders of the last policy a pairing set aside",
+        )
+    )
+    _json_option(
+        policy_verbs.add_parser(
+            "reset", help="set aside an invalid policy file, and start from the fresh policy"
         )
     )
 
@@ -385,12 +650,13 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def _wants_json(argv: Sequence[str]) -> bool:
-    """Whether the command line holds ``--json`` before any ``--``: what a usage error, which has
-    no parsed line to look in, and ``--version``, which ends the line, go by."""
+    """Whether the command line holds ``--json`` or ``--json-events`` before any ``--``: what a
+    usage error, which has no parsed line to look in, and ``--version``, which ends the line, go
+    by."""
     for word in argv:
         if word == "--":
             return False
-        if word == "--json":
+        if word in ("--json", "--json-events"):
             return True
     return False
 
@@ -399,8 +665,8 @@ def _check_usage(parser: argparse.ArgumentParser, args: argparse.Namespace) -> N
     """The forms the parser takes and the command does not: they are usage errors too."""
     as_json = getattr(args, "json", False)
     forms = getattr(parser, "forms", {})
-    if args.verb == "run" and as_json:
-        forms["run"].error("run has no --json form in this version")
+    if args.verb == "run" and as_json and not args.json_events:
+        forms["run"].error("run writes its JSON with --json-events")
     if args.verb == "pair" and as_json and args.code is None and not args.code_stdin:
         forms["pair"].error("with --json, pair reads the code with --code-stdin")
     if args.verb == "roots" and args.roots_verb == "add":
@@ -658,6 +924,31 @@ def _policy_previous(args: argparse.Namespace, dirs: paths.Dirs, out: _Out) -> N
         out.text(line)
 
 
+def _policy_reset(dirs: paths.Dirs, out: _Out) -> None:
+    """``policy reset``: set an invalid policy file aside, under the policy lock, and write the
+    fresh policy. A valid file, and no file, are left as they are."""
+    with _policy_lock(dirs):
+        moved = policy.set_aside_invalid(dirs.policy_file, dirs.invalid_policy_file)
+    if not moved:
+        raise _Refused(
+            "not_invalid",
+            "the local policy is not invalid: `lucille-host policy reset` sets aside only a "
+            "policy file that is invalid",
+        )
+    out.say(
+        f"reset: the invalid policy file is set aside as {dirs.invalid_policy_file}; only "
+        "host.describe is enabled, and no folder is held",
+        "policy_reset",
+    )
+
+
+def _policy_verb(args: argparse.Namespace, dirs: paths.Dirs, out: _Out) -> None:
+    if args.policy_verb == "reset":
+        _policy_reset(dirs, out)
+    else:
+        _policy_previous(args, dirs, out)
+
+
 def _say(line: str) -> None:
     print(line, flush=True)
 
@@ -877,12 +1168,153 @@ def _answer(
         ) from None
 
 
-def _run(args: argparse.Namespace, dirs: paths.Dirs, out: _Out) -> None:
-    session = link.open_session(dirs, host_state.load_host_config(dirs), say=_say, warn=_warn)
-    controls = Controls(paths.ensure_dir(dirs.state))
-    said = loop.run(dirs, session, controls=controls, say=_say)
-    if said:
-        print(said)
+def _stdin_fd() -> int:
+    """Standard input's descriptor, or -1 when there is none: it ended before ``run`` started."""
+    try:
+        return sys.stdin.fileno()
+    except (AttributeError, OSError, ValueError):
+        return -1
+
+
+class _EndedEarly(Exception):
+    """The lifeline ended before ``run`` started serving."""
+
+
+def _serve(
+    args: argparse.Namespace,
+    events: _Events | None,
+    lifeline: loop.Lifeline | None,
+    made: list[loop.Runner],
+    restores: list[Callable[[], None]],
+) -> tuple[str, dict[str, Any], str]:
+    """``run``'s start checks, in the order spec/CLI.md section 13.3 gives, each before the next
+    can write or read anything; then the runner. Returns the reason ``run`` stopped for, the
+    ``stopped`` object's other fields, and the text line; raises for any other end. From the
+    profile's name on, the first SIGTERM, SIGHUP or Ctrl-C drains, until ``run`` has written its
+    last object: it stops the start checks between two of them, as the end of the lifeline does,
+    and ``restores`` gets what puts the previous handlers back."""
+
+    def ended() -> None:
+        if controls.draining.is_set() or (lifeline is not None and lifeline.ended.is_set()):
+            raise _EndedEarly
+
+    say = _say if events is None else (lambda _line: None)
+    try:
+        dirs = _dirs(args.profile)
+        # Nothing is written for it, and before ``run`` serves a signal only drains.
+        controls = Controls(dirs.state)
+        if threading.current_thread() is threading.main_thread():
+            restores.append(controls.install_handlers(kill=False))
+        if lifeline is not None:
+            lifeline.attach(controls.drain)
+        config = host_state.load_host_config(dirs)
+        host_state.startup_checks()
+        ended()
+        with loop.one_run(dirs.state):
+            ended()
+            loop.check_version(dirs, allow=args.allow_downgrade, warn=_warn_quietly)
+            ended()
+            session = link.open_session(dirs, config, say=say, warn=_warn_quietly)
+            ended()
+            runner = loop.Runner(
+                dirs,
+                session,
+                controls=controls,
+                say=say,
+                tell=None if events is None else events.tell,
+                lifeline=lifeline,
+            )
+            made.append(runner)
+            said = runner.serve()
+    except _EndedEarly:
+        cause = controls.drain_cause or (lifeline.cause if lifeline is not None else None)
+        return "drained", {"cause": cause or "signal"}, "drained: run stopped"
+    reason = runner.outcome or "drained"
+    fields = {"cause": controls.drain_cause or "signal"} if reason == "drained" else {}
+    return reason, fields, said
+
+
+def _run_failure(exc: Exception, ready: bool) -> tuple[str, dict[str, Any], str | None]:
+    """Why ``run`` stopped, for an exception: its reason, the ``stopped`` object's other fields,
+    and the line stderr shows (None for a bug, whose traceback is shown)."""
+    if isinstance(exc, loop.Downgrade):
+        return "downgrade", {"last_version": exc.recorded}, f"lucille-host: {exc}"
+    if not isinstance(exc, _FAILURES):
+        return "failed", {"code": "internal"}, None
+    line = _failure(exc)[0]
+    if isinstance(exc, link.Stopped):
+        if exc.code == "none":
+            return ("forgotten" if ready else "not_paired"), {}, line
+        reason = _STOPPED_REASONS.get(exc.code)
+        if reason is not None:
+            return reason, {}, line
+        code = exc.code if exc.code in RUN_FAILURES else "internal"
+        return "failed", {"code": code}, line
+    if isinstance(exc, loop.Failed):
+        if exc.code == "busy":
+            return "already_running", {}, line
+        code = exc.code
+        if code == "internal" and exc.__cause__ is not None:
+            cause = exc.__cause__
+            code = next((name for kind, name in FAILURE_CODES if isinstance(cause, kind)), code)
+        if code == "internal":
+            return "failed", {"code": "internal"}, None
+        return "failed", {"code": code if code in RUN_FAILURES else "internal"}, line
+    if isinstance(exc, _switchboard.PairFailed):
+        return "pair_unusable", {}, line
+    if isinstance(exc, store.InsecureKeyring):
+        return "insecure_keyring", {}, line
+    if isinstance(exc, host_state.Refused):
+        return "startup_refused", {}, line
+    if isinstance(exc, store.StoreError):
+        if ready:
+            return "failed", {"code": "store_error"}, line
+        return "store_error", {}, line
+    code = _failure(exc)[1]
+    return "failed", {"code": code if code in RUN_FAILURES else "internal"}, line
+
+
+def _run(args: argparse.Namespace) -> int:
+    """``lucille-host run``: its start checks, then the runner (``loop.py``). It ends with a
+    ``stopped`` object under ``--json-events``, and returns its exit code (:data:`RUN_EXITS`); an
+    unexpected error is raised once ``stopped`` is written, so that its traceback is shown."""
+    taken = _Stdout() if args.json_events else None
+    events = None if taken is None else _Events(taken.stream)
+    raised: Exception | None = None
+    restores: list[Callable[[], None]] = []
+    try:
+        lifeline = None
+        if args.exit_on_stdin_eof:
+            lifeline = loop.Lifeline(_stdin_fd())
+            if events is not None:
+                cut = lifeline.cut
+                events.on_broken = lambda: cut(loop.STDOUT_GONE)
+            lifeline.start()
+        made: list[loop.Runner] = []
+        try:
+            reason, fields, said = _serve(args, events, lifeline, made, restores)
+            line = None
+        except Exception as exc:  # noqa: BLE001 - every end of run is reported, then judged
+            ready = bool(made) and made[0].ready_sent
+            reason, fields, line = _run_failure(exc, ready)
+            said = None
+            if line is None:
+                raised = exc
+        if line is not None:
+            _err(line)
+        if events is not None:
+            events.close("stopped", reason=reason, **fields)
+            events.finish(EVENTS_FLUSH)
+        elif said:
+            print(said, flush=True)
+    finally:
+        if taken is not None and events is not None:
+            taken.give_back(broken=events.broken, written=events.finish(0))
+        for restore in restores:
+            restore()
+    if raised is not None:
+        raise raised
+    return RUN_EXITS[reason]
 
 
 def _status(args: argparse.Namespace, dirs: paths.Dirs, out: _Out) -> None:
@@ -980,15 +1412,16 @@ def _control(verb: str) -> Callable[[argparse.Namespace, paths.Dirs, _Out], None
 
 
 # Every verb the parser knows, and what runs it.
-VERBS: Final[dict[str, Callable[[argparse.Namespace, paths.Dirs, _Out], None]]] = {
+VERBS: Final[dict[str, Callable[..., Any]]] = {
     "pair": _pair,
+    # Dispatched on its own, before the other verbs: it has exit codes of its own.
     "run": _run,
     "status": _status,
     "log": _log,
     "forget": _forget,
     "ops": _ops_verb,
     "roots": _roots_verb,
-    "policy": _policy_previous,
+    "policy": _policy_verb,
     "pause": _control("pause"),
     "resume": _control("resume"),
     "kill": _control("kill"),
@@ -1052,6 +1485,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.verb is None:
         out.version()
         return 0
+    if args.verb == "run":
+        return _run(args)
     try:
         dirs = _dirs(args.profile)
         verb = VERBS.get(args.verb)

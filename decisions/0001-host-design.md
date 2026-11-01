@@ -5,11 +5,14 @@ for this public repository 2026-10-27; the protocol it describes was written out
 [spec/PROTOCOL.md](../spec/PROTOCOL.md) on 2026-10-28. Status: **draft.** Built so far: the package
 skeleton, the guards, CI, the protocol spec (its prose, schemas and fixtures), and, on 2026-10-29: "The
 closed operation set" without `files.search` or limits tightened in the policy; "Execution rules";
-"Local policy and upgrades", except reloading on a local signal; "Audit log"; and, of "Pause, kill and
-shutdown", `pause`, `resume`, `kill` and drain. On 2026-10-30: "Pairing" and its stores, "The read loop"
-(with the envelope checks, dedupe, expiry, restarts and reply posting), what the host does on removal on
-the Lucille side, and `status`, `log` and `forget`, tested against Switchboard's in-process hub and a
-stand-in for Lucille; "Choices made in building pairing and the read loop" lists what that build chose.
+"Local policy and upgrades"; "Audit log"; and, of "Pause, kill and shutdown", `pause`, `resume`, `kill`
+and drain. On 2026-10-30: "Pairing" and its stores, "The read loop" (with the envelope checks, dedupe,
+expiry, restarts and reply posting), what the host does on removal on the Lucille side, and `status`,
+`log` and `forget`, tested against Switchboard's in-process hub and a stand-in for Lucille; "Choices made
+in building pairing and the read loop" lists what that build chose. On 2026-11-01: supervising `run` (its
+events, the lifeline on standard input, its exit codes, reloading the policy as it changes and idling
+while it is invalid, `policy reset`, and refusing a downgrade); "Choices made in supervising run" lists
+what that build chose.
 Not built: the conformance suite, `files.search`, the release workflow and `lucille-host verify`.
 
 This record describes the program in this repository, and it governs the host's code. A pull request that
@@ -480,11 +483,24 @@ policy changed. A plain hash would let anyone holding it confirm a guessed folde
 
 - **One file.** The policy is one TOML file in the platform config dir, read with stdlib `tomllib`. Only
   the local CLI verbs change it.
-  - An invalid file stops the host (fail closed).
-  - The file is reloaded only on restart or on a local signal.
+  - `run` loads it before each decision, so a change applies to the next request, with no restart and no
+    signal.
+  - An invalid file fails closed. `run` acts on nothing: it accepts no work room, writes no request down,
+    decides, runs and answers nothing, and starts reading no room, from when it notices (within a second
+    for a file invalid by what it holds; at the next load for one invalid only by a folder). It says so
+    (`policy` `invalid`), and goes on once the file is valid again. It keeps the pair and its controls
+    meanwhile, and posts the replies it decided before. The other verbs that read the policy refuse
+    (`policy_invalid`).
+  - `policy reset` sets an invalid file aside as `policy.invalid.toml`, which nothing reads, and writes
+    the fresh policy.
   - No protocol message has a field that maps onto policy.
 - **Upgrades.** Each enabled entry is stored with the hash of its catalog definition. If an upgrade
   changes an enabled entry, the host disables it until the user re-enables it.
+- **Downgrades.** `run` refuses to start below the newest release that has started `run` on the profile
+  (exit 25), by the order of `min_host_version` (spec/PROTOCOL.md §10), recorded in
+  `state/last_version.json`. Only a release (`MAJOR.MINOR.PATCH` and nothing else) is recorded, and the
+  record never goes below it in that order. `run --allow-downgrade` overrides it, and the record keeps the
+  newer release. The record is per profile.
 - **No confirmations yet.** Every v0.1 op is read-only. Confirm-before-mutation and "allow for N minutes"
   grants arrive with the first mutating op.
 
@@ -499,6 +515,9 @@ policy changed. A plain hash would let anyone holding it confirm a guessed folde
   - **execution:** how it ended, exit code, duration, output sizes, with the binary, its sha256 and the
     argv again;
   - **sent:** the sha256 and size of the exact bytes about to be posted.
+- `run` also logs, among its own lines, the local policy file turning invalid and valid again while it
+  runs (`policy`), an offer not taken meanwhile, and the end of its standard input or of a standard output
+  nobody reads, under `--exit-on-stdin-eof` (`lifeline`).
 - Output bodies are kept only when the user sets `log_results = true`.
 - Files rotate by size and are never edited. No key is ever written.
 - The log is user-writable. It records; it proves nothing against someone with the user's privileges.
@@ -513,7 +532,7 @@ policy changed. A plain hash would let anyone holding it confirm a guessed folde
 - **`kill`** (or a second Ctrl-C) also sets the flag. It kills the in-flight process group, and replies
   `failed` with `killed_locally`.
 - **The first SIGTERM, SIGHUP or Ctrl-C drains** (a signal ignored when the host started, as SIGHUP is
-  under `nohup`, stays ignored). The running op finishes and replies, and nothing new starts, an op
+  under `nohup`, stays ignored), and so does the end of standard input under `run --exit-on-stdin-eof`. The running op finishes and replies, and nothing new starts, an op
   decided but not yet started included (`failed` with `interrupted`). Only a running host enforces a
   time limit or a kill: if the host is killed or crashes while an op runs, the op keeps running without
   either (THREAT_MODEL.md, "Known gaps").
@@ -551,12 +570,15 @@ policy changed. A plain hash would let anyone holding it confirm a guessed folde
 ## CLI verbs (v0.1)
 
 `pair [CODE] [--code-stdin] [--hub URL] [--store-file]`, `pair status`, `pair confirm`, `pair reject`,
-`run`, `status`, `log [--limit N]`, `forget`, `ops list|enable|disable`, `roots list|add|remove`,
-`policy previous`, `pause`, `resume`, `kill`, and, for an app that drives the command line,
-`roots add --suggest-alias PATH` and `roots check [ALIAS]`. They print text, with the state word first
+`run [--json-events] [--exit-on-stdin-eof] [--allow-downgrade]`, `status`, `log [--limit N]`, `forget`,
+`ops list|enable|disable`, `roots list|add|remove`, `policy previous|reset`, `pause`, `resume`, `kill`,
+and, for an app that drives the command line, `roots add --suggest-alias PATH` and
+`roots check [ALIAS]`. They print text, with the state word first
 where there is one (`waiting`, `sas_pending`, `confirmed`, `leaked`, `expired`, ...).
 - `--json` makes every verb but `run` write the JSON objects of [spec/CLI.md](../spec/CLI.md) on stdout
-  instead of its text, one per line, with the same exit codes; stderr stays as it is. A shell never parses
+  instead of its text, one per line, with the same exit codes; stderr stays as it is. `run`'s JSON form
+  is its event stream, `run --json-events`, and `run` has exit codes of its own (spec/CLI.md §13): an app
+  supervises it with `--exit-on-stdin-eof`, which drains it when its standard input ends. A shell never parses
   the text, and never writes the host's files. With `--json`, `pair` reads the code only with
   `--code-stdin`, and asks nothing: it stops once the SAS is shown. Its `sas_pending` object carries the
   SAS and the deadline, as the text does, and so does `pair status`'s: under this record's gate the user
@@ -572,9 +594,9 @@ where there is one (`waiting`, `sas_pending`, `confirmed`, `leaked`, `expired`, 
   state past ±300 s.
 - `log` prints the last lines of the audit log, oldest first, across its rotated files.
 - `run` holds `state/.run.lock` (`os.lockf`, taken without waiting) for as long as it runs: a second `run`
-  of the profile, in another shell or the same process, refuses at once (exit 1) and changes nothing,
+  of the profile, in another shell or the same process, refuses at once (exit 21) and changes nothing,
   since two would each read and answer every request. `run` refuses a pair with no gate record, which
-  can never be confirmed on the host, as `pair status` and `pair confirm` do.
+  can never be confirmed on the host, as `pair status` and `pair confirm` do (exit 20).
 - `forget` leaves the pair's work rooms, then calls `pairing.forget`, which deletes the pair from the
   store and then tells Lucille, best effort. It prints whether Lucille was told. It marks every room
   abandoned in the room record before the first leave, and holds the record lock until it is done,
@@ -891,9 +913,9 @@ The spec and the sections above leave these to the host. Each was made with the 
   set aside over an earlier one. Before the answer, not after, so that a stop between the two never leaves
   the old folders enabled for the new pair; a code the library then refuses has still reset the policy.
 - **Exit codes:** 0 when `pair` stops at `sas_pending` (with `--code-stdin`, when stdin ends, or when
-  what was typed ahead at the terminal cannot be discarded) or the gate opens, and when `run` is drained
-  or the pair ends; 1 for every refusal and every pairing that ends early, `n` at `pair`'s prompt among
-  them (`rejected`), with the state word first on stderr.
+  what was typed ahead at the terminal cannot be discarded) or the gate opens; 1 for every refusal and
+  every pairing that ends early, `n` at `pair`'s prompt among them (`rejected`), with the state word first
+  on stderr. `run` has its own (spec/CLI.md §13.3): 0, 20, 21, 23, 24, 25, and 1 for a failure.
 - **The startup checks** (not root, no `SWITCHBOARD_*` variable, a keyring backend that stores, a private
   runtime folder) run for the pairing verbs, `run`, `status` and `forget`; the other verbs touch no store
   and no hub.
@@ -981,12 +1003,94 @@ The spec and the sections above leave these to the host. Each was made with the 
   stopped in `run` as soon as one of its threads reads the mark, without the leave, which is that
   command's.
 - **Draining** drops the pages queued, lets the running operation finish, and gives the reply thread 30 s;
-  what it has not posted by then is left to the next start.
-- **A thread of `run` that meets an error it does not expect stops `run`,** which exits 1.
+  what it has not posted by then is left to the next start. The end of standard input, under
+  `--exit-on-stdin-eof`, sets the same flag as the first signal.
+- **A thread of `run` that meets an error it does not expect stops `run`,** which exits 1 (`stopped`
+  `failed`).
 
-**Output.** Text only. The state words (`accepted`, `waiting`, `sas_ready`, `sas_pending`, `confirmed`,
-`leaked`, `expired`) are the ones a machine-readable form, not built here, would use. `sas_ready` is a SAS
-that has reached the host and that no command has shown; `sas_pending`, one shown and not yet confirmed.
+**Output.** Text, or with `--json` the objects of spec/CLI.md; `run` writes its events with
+`--json-events`. The state words (`accepted`, `waiting`, `sas_ready`, `sas_pending`, `confirmed`,
+`leaked`, `expired`) are the ones the JSON uses. `sas_ready` is a SAS that has reached the host and that
+no command has shown; `sas_pending`, one shown and not yet confirmed.
+
+## Choices made in supervising run
+
+The spec and the sections above leave these to the host. Each was made with the code on 2026-11-01, and
+each could be made another way in a later pull request that updates this list.
+
+- **One writer thread for the events.** Each object is serialized by the thread that has it, and queued;
+  one thread writes each line whole and flushes it. So a shell that reads slowly holds up no thread of
+  `run`: not the worker between its last check and an operation's start, and not main, which drains and
+  takes the signals. `ready` and `state` come from main, a request's objects from the worker, each right
+  after the audit line it mirrors, and `stopped` from the command once `run` has ended. Nothing is written
+  after `stopped`.
+- **Standard output is taken for the events.** They go to a private duplicate of its descriptor, made
+  blocking, while the descriptor itself and `sys.stdout` point at standard error, so a line a library
+  prints never reaches the shell's stdout pipe, nor does `run`'s own text, which `--json-events` replaces.
+  A write that fails, or 1000 objects waiting, counts as a standard output nobody reads: `/dev/null` takes
+  its place, so the exit code stays the one `run` chose, and under `--exit-on-stdin-eof` `run` drains.
+- **The lifeline** is a thread that reads standard input to its end with `os.read` and calls for the drain
+  the first signal calls for; the drain is set before anything else, so a lifeline whose audit line cannot
+  be written still stops `run`. A read end handed over non-blocking is made blocking. No standard input
+  counts as its end. It starts before the start checks, which look at it between them: a shell gone before
+  `run` served ends it there, with no hub call. It blocks SIGTTIN for its own thread alone, so that in the
+  background of a shell with job control its read of the terminal fails rather than stopping the whole
+  process; it then reads again each tick, and a terminal brought back to the foreground ends it with
+  Ctrl-D as before.
+- **The start checks** run in this order, each before the next can write or read anything: the environment
+  (24), the run lock (21), the version record (25), the store (23), the digest key (1), the pair, its
+  record in the store and its gate record (20, or 23 for a record the store cannot read). So root writes
+  nothing, a second `run` changes nothing, and an older release reads no secret. Reading the pair's record
+  here, as `status` does with no hub call, makes a damaged file store a refusal at start, not a `failed`
+  after `ready` at every start. The first SIGTERM, SIGHUP or Ctrl-C during the checks drains, as the
+  lifeline's end does: the command installs handlers once the profile's name is checked, writing nothing for
+  them, and keeps them until it has written `stopped`. Until `ready` they only drain, a second Ctrl-C too,
+  through the runner's own checks of the digest key and the pair, since nothing runs that a kill could stop
+  and nothing may be written yet: a kill would leave the profile paused for the next `run`.
+- **A pair whose SAS is not confirmed yet does not stop `run` at start,** rather than exiting 20 as a
+  computer that holds no pair does. `run` writes `ready` and `state` (`confirmed` false), takes no room and
+  runs nothing, and serves once `pair confirm` opens the gate. At start, 20 comes only for a pair with no
+  gate record (`no_gate`), which can never be confirmed here; while `run` waits, it comes as `expired` once
+  the SAS deadline passes, as `leaked` if the pairing ends early, and as `pair_unusable` if the pairing
+  library refuses the pair, as for a confirmed pair. This keeps the pairing design already merged, in
+  which nothing runs before the local SAS confirmation and `pair confirm` may come while `run` runs,
+  which then follows it; and a shell starts `run` only once `status` says the pair is `confirmed`
+  (spec/CLI.md §13.1), so the wait matters only to a `run` started by hand. The maintainer accepted this
+  on 2026-11-01, in the pull request that built supervision.
+- **`state`'s `rooms` lists the rooms `run` reads now,** rather than every room held. While the policy is
+  not valid `run` starts reading no room, so a room held at start, or one whose reading stopped, is not
+  listed until the policy is valid, and none is once `run` drains. A shell's Connected means requests are
+  being read, and `status`'s `work_rooms` says which rooms are held.
+- **The run lock keeps its name**, `.run.lock`, as this record and earlier documents name it.
+- **The version record** is JSON, as every state file is (`state/last_version.json`), holds only a release,
+  and is written before the store is opened: it says which release started `run`, not which served.
+- **Two threads load the policy, and never main**: the thread that handles requests, before each decision,
+  and a loader, when main asks: when main sees the file change (by device, inode, size, and modification
+  and change times), and every 30 s. So an ask is answered while an operation runs, and a folder that turns
+  into the home folder is found within 30 s then too. Loading looks at every folder in the policy, and a
+  folder on a stalled mount would otherwise stop the thread that drains. Main checks a changed file by what
+  it holds alone, looking at no folder, so a file made invalid holds the offers at once; a changed file
+  valid by what it holds holds them as well (`checking`) until a load of it says it is valid, and the
+  session asks again right before it accepts a room, since a step can wait long on the hub. Main asks only
+  between steps, so the 30 s are counted between them; a step that waits longer on the hub accepts no room
+  under a load that began 30 s ago or more, and waits for a new one (`checking`), rather than main asking
+  from inside a step. An invalid file that changed stays `invalid` until a load says it is valid, so that no
+  `policy valid` line is written before one does. Main takes a verdict only from a load asked after the
+  file last changed, and begun after the last load whose verdict it took, so a load held up on a slow
+  folder cannot undo a later one. A request waiting while the file is invalid is not written down, so it is
+  decided afresh, under the policy that is valid then, as soon as main asks again; and a drain does not
+  wait for it.
+- **A drain waits for the request being decided or run**, and for its reply to reach the poster, and goes on
+  writing `status.json` and `state` meanwhile, so a shell that finds the run lock held can tell a `run`
+  finishing its operation from one that stopped without saying so.
+- **A heartbeat thread writes `status.json` and `state` again while main waits in a step**, on a hub that
+  takes a connection and never answers (each call is given up after 40 s, and a step can make several) or
+  on the record lock another command holds. It writes what main last wrote, and nothing else. So a shell
+  reads such a `run` as out of reach of the hub, from `last_hub_contact`, not as stuck. It stops after 300 s
+  of one step, so that a step that never ends still reads as stuck. The first `state` comes before the first
+  hub call, once the loader's first look at the policy is in or a tick has passed.
+- **The digest key** is read before `run` serves: a damaged key stops `run` (`state_invalid`), and is not
+  taken for an invalid policy.
 
 ## Not decided yet
 

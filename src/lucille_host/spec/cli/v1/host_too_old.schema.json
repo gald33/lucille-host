@@ -1,0 +1,55 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/gald33/lucille-host/blob/main/src/lucille_host/spec/cli/v1/host_too_old.schema.json",
+  "title": "lucille-host --json: host_too_old",
+  "description": "Lucille asked for a newer release: the request is refused host_too_old.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "v",
+    "type",
+    "job_id",
+    "min_host_version",
+    "host_version"
+  ],
+  "properties": {
+    "v": {
+      "const": 1
+    },
+    "type": {
+      "const": "host_too_old"
+    },
+    "job_id": {
+      "$ref": "#/$defs/job_id"
+    },
+    "min_host_version": {
+      "$ref": "#/$defs/min_host_version"
+    },
+    "host_version": {
+      "$ref": "#/$defs/host_version"
+    }
+  },
+  "$defs": {
+    "job_id": {
+      "description": "Lucille's id for the job: a lowercase UUID in 8-4-4-4-12 form.",
+      "type": "string",
+      "minLength": 36,
+      "maxLength": 36,
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    },
+    "min_host_version": {
+      "description": "The oldest host release that may run this request: MAJOR.MINOR.PATCH, digits only, no suffix.",
+      "type": "string",
+      "minLength": 5,
+      "maxLength": 32,
+      "pattern": "^(0|[1-9][0-9]{0,8})\\.(0|[1-9][0-9]{0,8})\\.(0|[1-9][0-9]{0,8})$"
+    },
+    "host_version": {
+      "description": "The host release's version string.",
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 32,
+      "pattern": "^[0-9][0-9A-Za-z.+_-]{0,31}$"
+    }
+  }
+}

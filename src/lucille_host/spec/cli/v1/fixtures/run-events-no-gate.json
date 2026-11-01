@@ -1,0 +1,15 @@
+{
+  "description": "run, with a pair whose local gate record is gone",
+  "argv": [
+    "run",
+    "--json-events"
+  ],
+  "exit": 20,
+  "stdout": [
+    {
+      "v": 1,
+      "type": "stopped",
+      "reason": "no_gate"
+    }
+  ]
+}

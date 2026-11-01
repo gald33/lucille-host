@@ -13,8 +13,11 @@ what it records:
 - ``sent``: the sha256 and size of the exact bytes about to be posted.
 
 The read loop (``loop.py``) adds lines of its own: what it ignored and why, a message it could not
-open, a room it could read no further in, each reply posted or not posted, and the pair's and the
-rooms' events (``link.py``). No line holds the pairing code, the SAS, or a key.
+open, a room it could read no further in, each reply posted or not posted, the local policy turning
+invalid and valid again (``policy``), the end of its standard input under
+``--exit-on-stdin-eof`` (``lifeline``), and the pair's and the rooms' events (``link.py``), an
+offer held while the policy is invalid among them. No line holds the pairing code, the SAS, or a
+key.
 
 The files rotate by size (``audit.log`` becomes ``audit.log.1``, and so on, keeping
 :data:`KEEP` old files) and are never edited. One lock, for every log in the process, keeps the

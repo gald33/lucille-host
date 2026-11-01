@@ -19,6 +19,7 @@ import re
 import select
 import subprocess
 import sys
+import threading
 import time
 import unicodedata
 from collections.abc import Callable, Iterator
@@ -36,6 +37,7 @@ from switchboard.testing import hub
 from lucille_host import (
     __version__,
     _switchboard,
+    cli,
     gate,
     link,
     paths,
@@ -50,6 +52,7 @@ from lucille_host.ops import OPERATIONS, Operation
 from tests._cli import HostCli, collecting
 from tests._host import HostEnv, lock_held
 from tests._keyring import MemoryKeyring
+from tests._run import fast
 from tests.spec import _support
 
 pytestmark = pytest.mark.filterwarnings(
@@ -71,6 +74,9 @@ SAMPLE_GENERATION = 1
 TIME = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z")
 PROFILES = ("default", "mac-app")
 USAGE_MESSAGE = "the command line could not be parsed; standard error says why"
+# The sizes and the duration a `request` object reports, which depend on the version string, the
+# clock and each system's own tool: the samples the fixtures hold in their place.
+SAMPLE_SIZES = {"duration_ms": 5, "stdout_bytes": 100, "stderr_bytes": 2, "reply_bytes": 300}
 
 # What a test patched away, so that a second set-up in the same test starts from the real thing.
 _OPEN_LINK = _switchboard.open_link
@@ -102,6 +108,7 @@ class World:
         monkeypatch: pytest.MonkeyPatch,
         *,
         with_hub: bool = False,
+        live: bool = False,
     ) -> None:
         self.root = root
         self.stack = stack
@@ -119,12 +126,24 @@ class World:
         monkeypatch.setattr(link.Session, "held", _HELD)
         self.cli: HostCli | None = None
         if with_hub:
-            h = stack.enter_context(hub())
+            # A run that reads and answers needs a hub whose clock is the wall clock, and short
+            # long-polls; the other commands are run on the hub's own clock.
+            h = stack.enter_context(hub(start=time.time()) if live else hub())
             env = HostEnv(home=self.home, dirs=paths.dirs(), keyring=self.keyring)
             self.cli = HostCli(h, env, root, capsys, monkeypatch)
             stack.callback(self.cli.stopping.set)
+            if live:
+                fast(monkeypatch)
+                monkeypatch.setattr(
+                    "lucille_host._switchboard.open_link",
+                    lambda dirs, config, **_: _OPEN_LINK(
+                        dirs, config, client_class=h.client_class()
+                    ),
+                )
         self.lucille: Any = None
         self.stdin = ""
+        # A standard input with a file descriptor behind it, for `run`'s lifeline.
+        self.stdin_file: Any = None
         self.during: Callable[[], contextlib.AbstractContextManager[Any]] = contextlib.nullcontext
 
     @property
@@ -142,7 +161,8 @@ class World:
 
     def run(self, *argv: str, stdin: str = "") -> Ran:
         self.capsys.readouterr()
-        self.monkeypatch.setattr("sys.stdin", io.StringIO(stdin))
+        source = self.stdin_file if self.stdin_file is not None else io.StringIO(stdin)
+        self.monkeypatch.setattr("sys.stdin", source)
         try:
             rc = main(list(argv))
         except SystemExit as exc:
@@ -322,6 +342,95 @@ def _paused(w: World) -> None:
     w.ok("pause")
 
 
+REQUESTS = [f"00000000-0000-4000-8000-00000000000{n}" for n in range(1, 5)]
+
+
+def _run_requests(w: World) -> None:
+    w.paired(confirm=True)
+    w.ok("ops", "enable", "files.sha256")
+    docs = w.folder("Documents")
+    Path(docs, "a.txt").write_text("a\n")
+    w.ok("roots", "add", "docs", docs)
+    lucille = w.lucille
+    lucille.offer("work-1")
+    not_after = int(time.time()) + 600
+    asked = [
+        ("host.describe", {}, {}),
+        ("files.sha256", {"root": "docs", "path": "a.txt"}, {}),
+        ("files.sha256", {"root": "docs", "path": "/etc/hostname"}, {}),
+        ("host.describe", {}, {"min_host_version": "999.0.0"}),
+    ]
+    for job_id, (op, args, extra) in zip(REQUESTS, asked, strict=True):
+        sent = {
+            "v": "lucille.exec/1",
+            "dir": "request",
+            "job_id": job_id,
+            "op": op,
+            "args": args,
+            "not_after": not_after,
+            **extra,
+        }
+        lucille.request("work-1", sent)
+    read, write = os.pipe()
+    w.stdin_file = os.fdopen(read, "rb")
+
+    @contextlib.contextmanager
+    def closing() -> Iterator[None]:
+        # Standard input closes once the fourth reply is posted, as a shell that quits.
+        stop = threading.Event()
+
+        def watch() -> None:
+            deadline = time.monotonic() + 60
+            while not stop.is_set() and time.monotonic() < deadline:
+                if all(lucille.reply("work-1", job_id) for job_id in REQUESTS):
+                    break
+                stop.wait(0.1)
+            os.close(write)
+
+        thread = threading.Thread(target=watch, daemon=True)
+        thread.start()
+        try:
+            yield
+        finally:
+            stop.set()
+            thread.join(70)
+            w.stdin_file.close()
+
+    w.during = closing
+
+
+def _run_locked(w: World) -> None:
+    lock = paths.ensure_dir(w.dirs.state) / ".run.lock"
+    w.during = lambda: lock_held(lock)
+
+
+def _run_downgrade(w: World) -> None:
+    paths.ensure_dir(w.dirs.state)
+    (w.dirs.state / "last_version.json").write_text('{"v": 1, "version": "999.0.0"}\n')
+
+
+def _pair_file_damaged(w: World, *, folder: bool) -> None:
+    w.lucille = w.host.lucille()
+    w.host.paired(w.lucille, "--store-file")
+    w.ok("pair", "confirm")
+    record = w.dirs.store_files / f"{w.lucille.name}.json"
+    record.unlink()
+    if folder:
+        record.mkdir()
+    else:
+        record.write_text("{nope")
+
+
+def _digest_key_damaged(w: World) -> None:
+    paths.ensure_dir(w.dirs.state)
+    (w.dirs.state / policy.KEY_FILE).write_bytes(b"abc")
+
+
+def _not_toml(w: World) -> None:
+    paths.ensure_dir(w.dirs.config)
+    w.dirs.policy_file.write_text("this is not toml\n")
+
+
 SETUPS: dict[str, Callable[[World], None]] = {
     "ops-list": lambda w: w.every_executable(),
     "ops-list-every-state": _ops_every_state,
@@ -346,6 +455,24 @@ SETUPS: dict[str, Callable[[World], None]] = {
     "pair-confirm": lambda w: w.paired(),
     "pair-reject": lambda w: w.paired(),
     "policy-previous": _policy_previous,
+    "policy-reset": _not_toml,
+    "run-events-requests": _run_requests,
+    "run-events-no-gate": lambda w: _no_gate(w),
+    "run-events-already-running": _run_locked,
+    "run-events-insecure-keyring": lambda w: w.monkeypatch.setattr(
+        "keyring.core._keyring_backend", FailKeyring()
+    ),
+    "run-events-startup-refused": lambda w: w.monkeypatch.setenv(
+        "SWITCHBOARD_URL", "https://hub.example"
+    ),
+    "run-events-downgrade": _run_downgrade,
+    "run-events-several-pairs": lambda w: _two_pairs(w),
+    "run-events-pair-unusable": lambda w: _pair_file_damaged(w, folder=False),
+    "run-events-store-error": lambda w: _pair_file_damaged(w, folder=True),
+    "run-events-failed": _digest_key_damaged,
+    "run-events-expired": lambda w: _expired(w),
+    "run-events-ended": lambda w: _ended(w),
+    "run-events-leaked": lambda w: _resolve_leaks(w),
 }
 # The cases whose set-up pairs, or whose command reaches the hub.
 HUB_CASES = frozenset(
@@ -359,8 +486,17 @@ HUB_CASES = frozenset(
         "pair-status-confirmed",
         "pair-confirm",
         "pair-reject",
+        "run-events-requests",
+        "run-events-no-gate",
+        "run-events-pair-unusable",
+        "run-events-store-error",
+        "run-events-expired",
+        "run-events-ended",
+        "run-events-leaked",
     }
 )
+# The cases whose command reads and answers: on the wall clock, with short long-polls.
+LIVE_CASES = frozenset({"run-events-requests"})
 
 
 # --- putting the sample values in place -----------------------------------------------------------
@@ -398,6 +534,8 @@ def _sampled(value: Any, w: World, key: str | None = None) -> Any:
         return [_sampled(v, w) for v in value]
     if key == "generation" and isinstance(value, int):
         return SAMPLE_GENERATION
+    if key in SAMPLE_SIZES and isinstance(value, int) and not isinstance(value, bool):
+        return SAMPLE_SIZES[key]
     if not isinstance(value, str):
         return value
     if TIME.fullmatch(value):
@@ -421,10 +559,11 @@ def _real_argv(argv: list[str], w: World) -> list[str]:
 
 
 def _without_json(argv: list[str]) -> list[str]:
+    flags = ("--json", "--json-events")
     if "--" in argv:
         cut = argv.index("--")
-        return [word for word in argv[:cut] if word != "--json"] + argv[cut:]
-    return [word for word in argv if word != "--json"]
+        return [word for word in argv[:cut] if word not in flags] + argv[cut:]
+    return [word for word in argv if word not in flags]
 
 
 @pytest.fixture
@@ -441,7 +580,9 @@ def _run_case(
     capsys: pytest.CaptureFixture[str],
     monkeypatch: pytest.MonkeyPatch,
 ) -> tuple[Ran, World]:
-    world = World(root, stack, capsys, monkeypatch, with_hub=case in HUB_CASES)
+    world = World(
+        root, stack, capsys, monkeypatch, with_hub=case in HUB_CASES, live=case in LIVE_CASES
+    )
     SETUPS.get(case, lambda _w: None)(world)
     with world.during():
         ran = world.run(*_real_argv(argv, world), stdin=world.stdin)
@@ -541,11 +682,22 @@ def test_cli_json_matches_schema(
     ran, world = _run_case(case, argv, tmp_path / "json", stack, capsys, monkeypatch)
     assert ran.rc == fixture["exit"], ran.err
     objects = assert_objects(ran)
-    assert _sampled(objects, world) == fixture["stdout"]
+    expected = fixture["stdout"]
+    sampled = _sampled(objects, world)
+    events = "--json-events" in argv
+    if events:
+        # When `run` writes a state object depends on timing: each is checked against its schema
+        # (above), and the others are compared, in order. `stopped` is last, and its reason
+        # gives the exit code.
+        sampled = [found for found in sampled if found["type"] != "state"]
+        expected = [found for found in expected if found["type"] != "state"]
+        assert objects and objects[-1]["type"] == "stopped"
+        assert ran.rc == cli.RUN_EXITS[objects[-1]["reason"]]
+    assert sampled == expected
     # Written with their fields in the fixture's order, which is spec/CLI.md section 6's.
-    in_order = [_support.compact(found) for found in _sampled(objects, world)]
-    assert in_order == [_support.compact(found) for found in fixture["stdout"]]
-    if ran.rc != 0:
+    in_order = [_support.compact(found) for found in sampled]
+    assert in_order == [_support.compact(found) for found in expected]
+    if ran.rc != 0 and not events:
         assert objects and objects[-1]["type"] == "error"
         assert_listed(argv, objects[-1]["code"])
     # The same line, without --json, from the same set-up made again: the same exit and stderr.
@@ -557,6 +709,20 @@ def test_cli_json_matches_schema(
     )
     assert text.rc == ran.rc, text.err
     assert _sampled(text.err, text_world) == _sampled(ran.err, world)
+
+
+def test_every_run_reason_has_a_fixture_but_those_the_spec_names() -> None:
+    reasons = set()
+    for path in (SOURCE / "fixtures").glob("run-*.json"):
+        last = json.loads(path.read_text(encoding="ascii"))["stdout"][-1]
+        if last["type"] == "stopped":
+            reasons.add(last["reason"])
+    text = _cli_md()
+    start = text.index("- Every `stopped` reason has a fixture of `run`, except")
+    bullet = text[start : text.index("\n- ", start + 1)]
+    named = {word for word in re.findall(r"`([a-z_]+)`", bullet) if word in cli.RUN_EXITS}
+    assert named and not reasons & named
+    assert reasons | named == set(cli.RUN_EXITS)
 
 
 # --- ops ------------------------------------------------------------------------------------------
@@ -1120,9 +1286,17 @@ def test_json_usage_errors_exit_2(
         assert (ran.rc, text.rc) == (2, 2), argv
         assert ran.objects == usage, argv
         assert text.out == "" and ran.err == text.err and "error:" in ran.err, argv
-    # Forms version 1 does not have: run has no JSON form, and pair reads its code only with
-    # --code-stdin.
-    for argv in (["--json", "run"], ["run", "--json"], ["pair", "--json"]):
+    # Forms the contract does not have: run's JSON form is --json-events, not --json; pair reads
+    # its code only with --code-stdin; and the options of run belong to run alone.
+    for argv in (
+        ["--json", "run"],
+        ["run", "--json"],
+        ["pair", "--json"],
+        ["--json", "pair", "--exit-on-stdin-eof"],
+        ["--json", "status", "--json-events"],
+        ["status", "--json-events"],
+        ["run", "--json-events", "--no-such-flag"],
+    ):
         ran = w.run(*argv)
         assert ran.rc == 2 and ran.objects == usage, argv
         assert ran.err.startswith("usage: lucille-host"), argv
@@ -1165,8 +1339,6 @@ def test_every_failure_has_a_code(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     import ast
-
-    from lucille_host import cli
 
     enum = error_codes()
     source = REPO_ROOT / "src" / "lucille_host"
@@ -1380,6 +1552,17 @@ def _resolve_fails(w: World) -> None:
 
     def failing(_link: Any, _name: str) -> Any:
         raise _switchboard.PairFailed("aborted_here", "the library refused the pair")
+
+    w.monkeypatch.setattr(_switchboard.Link, "resolve", failing)
+
+
+def _resolve_leaks(w: World) -> None:
+    """A pair, and the pairing library saying at the first resolve that its handshake was
+    interfered with: a set-up cannot do that on the hub."""
+    w.paired()
+
+    def failing(_link: Any, _name: str) -> Any:
+        raise _switchboard.PairFailed("aborted", "the pairing ended early")
 
     w.monkeypatch.setattr(_switchboard.Link, "resolve", failing)
 
@@ -1984,8 +2167,6 @@ def test_json_never_writes_a_value_that_is_not_json(
     capsys: pytest.CaptureFixture[str],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from lucille_host import cli
-
     w = World(tmp_path, stack, capsys, monkeypatch)
     monkeypatch.setitem(
         cli.VERBS, "pause", lambda _args, _dirs, out: out.obj("controls", paused=float("nan"))

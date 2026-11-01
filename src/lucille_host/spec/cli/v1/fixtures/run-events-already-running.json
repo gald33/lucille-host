@@ -1,0 +1,15 @@
+{
+  "description": "run, while another process holds the profile's run lock",
+  "argv": [
+    "run",
+    "--json-events"
+  ],
+  "exit": 21,
+  "stdout": [
+    {
+      "v": 1,
+      "type": "stopped",
+      "reason": "already_running"
+    }
+  ]
+}

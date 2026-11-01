@@ -29,12 +29,13 @@ import pytest
 from switchboard import pairing, sharing, signing
 from switchboard.testing import hub
 
-from lucille_host import _switchboard, cli, jobs, link, loop
+from lucille_host import _switchboard, cli, jobs, link, loop, policy, rooms
 from lucille_host.controls import Controls
 from tests import _audit_hook
 from tests._host import HostEnv, lock_held
 from tests._lucille import EXEC, FakeLucille
 from tests._run import RunHost, body, counting, fast, nothing, until
+from tests._supervise import Supervised
 
 pytestmark = pytest.mark.filterwarnings(
     "ignore:Using `httpx` with `starlette.testclient` is deprecated"
@@ -54,6 +55,7 @@ def h() -> Iterator[Any]:
 def _runs_stopped(h: Any) -> Iterator[None]:
     """Every run a test started is drained before its hub closes, even when the test fails."""
     yield
+    Supervised.stop_all()
     RunHost.stop_all()
 
 
@@ -1296,7 +1298,7 @@ def test_status_file_says_what_run_sees(host: RunHost) -> None:
 
 
 def test_run_refuses_with_no_pair(host_env: HostEnv, capsys: pytest.CaptureFixture[str]) -> None:
-    assert cli.main(["run"]) == 1
+    assert cli.main(["run"]) == 20
     assert capsys.readouterr().err.startswith("none: ")
     assert not host_env.dirs.status_file.exists()
 
@@ -1336,41 +1338,78 @@ def test_run_through_the_command(
     assert lines[-1] == "drained: run stopped"
 
 
-def test_run_fails_closed_on_an_invalid_policy(
-    host_env: HostEnv,
-    h: Any,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
+def test_invalid_policy_idles(
+    host_env: HostEnv, h: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # A policy file that is not valid TOML, with the gate open and a room taken: `run` decides
-    # nothing, runs nothing and posts nothing, and stops by itself with the policy's error.
+    # A policy file that is not valid TOML, with the gate open: `run` fails closed by acting on
+    # nothing, and no longer stops. It accepts no room, writes no request down, decides, runs and
+    # posts nothing, and never rewrites the file. Once the file is valid again, it goes on, with
+    # no restart. (Replaces test_run_fails_closed_on_an_invalid_policy, which held `run` to
+    # stopping with exit 1.)
     fast(monkeypatch)
     host = RunHost(h, host_env, tmp_path)
-    real = _switchboard.open_link
-    monkeypatch.setattr(
-        "lucille_host._switchboard.open_link",
-        lambda dirs, config, **_: real(dirs, config, client_class=h.client_class()),
-    )
+    accepts = counting(monkeypatch, _switchboard.Link, "accept_room")
     host.dirs.config.mkdir(parents=True, exist_ok=True)
     host.dirs.policy_file.write_text("this is not toml\n")
     before = host.dirs.policy_file.read_bytes()
-    result: dict[str, int] = {}
     with _audit_hook.recording() as events:
-        thread = threading.Thread(target=lambda: result.update(rc=cli.main(["run"])), daemon=True)
-        thread.start()
+        run = Supervised(monkeypatch, ("run", "--json-events", "--exit-on-stdin-eof"), host=host)
+        run.ready()
+        until(lambda: (run.state() or {}).get("policy") == "invalid", what="a state: invalid")
+        # With no offer, no offer is said to be held.
+        time.sleep(QUIET)
+        assert host.events("offer", event="refused", check=rooms.CHECK_POLICY) == []
         host.lucille.offer("work-1")
-        until(lambda: host.record().held, what="the room taken")
+        until(
+            lambda: host.events("offer", event="refused", check=rooms.CHECK_POLICY),
+            what="the offer held",
+        )
+        until(lambda: run.state()["offers_waiting"] == 1, what="a state: an offer waits")
         job_id = host.request("work-1")
-        thread.join(30)
-    assert not thread.is_alive(), "run did not stop by itself"
-    assert result == {"rc": 1}
-    err = capsys.readouterr().err
-    assert err.splitlines()[-1] == f"lucille-host: {host.dirs.policy_file} is not valid TOML"
-    assert host.lucille.replies("work-1") == []
-    entry = host.journal().get(job_id)
-    assert entry is not None and entry.decision is None
-    for kind in ("received", "decision", "start", "execution", "sent"):
-        assert host.events(kind, job_id=job_id) == [], kind
-    assert _audit_hook.spawns(events) == []
-    assert host.dirs.policy_file.read_bytes() == before
+        time.sleep(QUIET)
+        assert run.running
+        assert accepts["accept_room"] == 0
+        held = host.events("offer", event="refused", check=rooms.CHECK_POLICY)
+        assert all(line["offers"] == 1 for line in held), held
+        assert host.record().offers and host.record().held == {}
+        assert host.journal().get(job_id) is None
+        for kind in ("received", "decision", "start", "execution", "sent"):
+            assert host.events(kind, job_id=job_id) == [], kind
+        assert _audit_hook.spawns(events) == []
+        assert host.dirs.policy_file.read_bytes() == before
+    # `policy reset`, while the offer and the request wait: the room is taken, and the request
+    # answered.
+    assert cli.main(["policy", "reset"]) == 0
+    until(lambda: run.state()["policy"] == "ok", what="a state: ok")
+    assert host.reply("work-1", job_id)["body"]["status"] == "done"
+    assert accepts["accept_room"] == 1
+    assert [line["event"] for line in host.events("policy")] == ["invalid", "valid"]
+    # The file broken while a room is read and an operation runs: its reply is still posted, and
+    # a request posted then waits, unwritten, until the file is valid; then it is answered once.
+    host.enable("host.sleep")
+    running = body(op="host.sleep", args={"n": 2})
+    host.request("work-1", running)
+    until(lambda: host.events("start", job_id=running["job_id"]), what="the child started")
+    host.dirs.policy_file.write_text("[[not a policy\n")
+    until(lambda: run.state()["policy"] == "invalid", what="a state: invalid again")
+    waiting = host.request("work-1")
+    assert host.reply("work-1", running["job_id"])["body"]["status"] == "done"
+    # The waiting request is decided once the policy is valid: until then the worker loads it
+    # again only when main asks, and does not spin.
+    loads = counting(monkeypatch, policy, "load")
+    time.sleep(QUIET)
+    assert loads["load"] <= 5, loads
+    assert host.journal().get(waiting) is None
+    assert host.events("received", job_id=waiting) == []
+    assert host.lucille.reply("work-1", waiting) is None
+    host.dirs.policy_file.write_text(policy.dumps(policy.fresh()))
+    assert host.reply("work-1", waiting)["body"]["status"] == "done"
+    assert len(host.events("received", job_id=waiting)) == 1
+    run.close_stdin()
+    assert run.wait() == 0
+    assert run.out.objects()[-1] == {
+        "v": 1,
+        "type": "stopped",
+        "reason": "drained",
+        "cause": "stdin_end",
+    }

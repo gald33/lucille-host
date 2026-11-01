@@ -1,0 +1,21 @@
+{
+  "description": "run, with a pair whose pairing the library reports ended early (aborted) at run's first hub call: the handshake on the hub is not interfered with, the library's answer is stubbed. Each state object is checked against its schema, not compared",
+  "argv": [
+    "run",
+    "--json-events"
+  ],
+  "exit": 20,
+  "stdout": [
+    {
+      "v": 1,
+      "type": "ready",
+      "host_version": "0.1.0.dev0",
+      "pair": "pair-abcdef"
+    },
+    {
+      "v": 1,
+      "type": "stopped",
+      "reason": "leaked"
+    }
+  ]
+}

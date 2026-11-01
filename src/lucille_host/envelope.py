@@ -41,6 +41,8 @@ __all__ = [
     "TTL_MOST",
     "early_code",
     "ignored",
+    "is_op_name",
+    "is_release",
     "older",
     "prune_at",
     "reply_ttl",
@@ -129,6 +131,17 @@ def ignored(*, mine: bool, kind: str, thread: str | None, body: Any) -> str | No
     if not isinstance(job_id, str) or _JOB_ID.search(job_id) is None:
         return BAD_JOB_ID
     return None
+
+
+def is_op_name(text: str) -> bool:
+    """Whether ``text`` has the form of an operation name, within the protocol's length."""
+    return len(text) <= OP_MOST and _OP.search(text) is not None
+
+
+def is_release(version: str) -> bool:
+    """Whether ``version`` is a release's: ``MAJOR.MINOR.PATCH`` and nothing else, in the form a
+    ``min_host_version`` takes. A version with anything after the triple is not."""
+    return _MIN_HOST_VERSION.search(version) is not None
 
 
 def older(host_version: str, minimum: str) -> bool:

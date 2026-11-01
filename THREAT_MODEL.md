@@ -4,7 +4,8 @@
 execution with user values after `--`, path containment, the environment allowlist, the local policy, the
 audit log, `pause` and `kill`, and drain; pairing, its hub check and the local SAS gate; the read loop, and
 with it the envelope checks, dedupe and expiry; the private `XDG_RUNTIME_DIR` against a planted signer
-socket; and `forget`. Not built: the conformance suite; the release workflow and its provenance (protected
+socket; `forget`; and supervising `run`: its lifeline on standard input, the policy reloaded as it changes
+and acted on not at all while invalid, and the refusal of a downgrade. Not built: the conformance suite; the release workflow and its provenance (protected
 tags, the `pypi` environment, attestations); the check of Switchboard's release provenance; and
 `files.search`. No other protection below is built yet. Each protection not yet built is one the first
 release must have. The full design is [decisions/0001-host-design.md](decisions/0001-host-design.md).
@@ -50,6 +51,7 @@ release must have. The full design is [decisions/0001-host-design.md](decisions/
 | A compromised dependency, `agent-switchboard` included | Few dependencies, pinned exactly in the lock CI uses; Switchboard's own release provenance checked. For Capsule, the Mac app: the same pins, installed by hash from the list uv writes from the lock; uv pinned by version; the embedded Python runtime pinned by sha256; the build backend pinned by hash. | Dependency code runs with the host's privileges. An install with `pipx` or `uv tool` resolves the declared ranges on the day it runs, so it can get versions CI never ran. Capsule runs the embedded runtime, and code the runner's toolchain compiled, with the host's privileges. |
 | Malware running as your user | Out of scope, and stated. | It can read the host's stores, edit the installed package and rewrite the log. |
 | Another local user planting a signer socket for the Switchboard client | A private `XDG_RUNTIME_DIR` for the host's process, set before it builds any Switchboard client, pairing's included. That is the measure that covers every client: none finds a socket at its signer path. A freshly generated signing identity is also set on every client it builds. | Not tested across users: the test that plants a socket runs as one user. |
+| An older release with a known flaw, started again | `run` refuses to start below the newest release that started `run` on the profile (exit 25), by the order of `min_host_version`. | `run --allow-downgrade`; another profile; the record is a file your account can change. |
 | Hazards in the external programs an operation runs (config files, flags) | Each catalog entry is reviewed; executables by absolute path; the environment allowlist; `rg --no-config`. | Each new operation widens this surface. |
 
 ## Out of scope
@@ -77,7 +79,9 @@ release must have. The full design is [decisions/0001-host-design.md](decisions/
   covers when it runs as your user.
 - A root is stored as the path you typed, so a root that is a symbolic link is followed to wherever it
   points when a request comes. A link repointed while the host runs (at your home folder, say) is
-  checked against the flag for home folders only when the policy is next loaded.
+  checked against the flag for home folders only when the policy is next loaded: before the next decision,
+  and every 30 s between `run`'s steps, an operation running or not. A step that waits on the hub can last
+  longer, so `run` accepts no work room under a load that began 30 s ago or more.
 - Whether a folder holds your home folder (and so needs the explicit flag) is decided by its path, by
   device and inode, through any other mount of the same filesystem that Linux's mount table lists (the
   source of a bind mount, a btrfs top level), and through macOS's Data volume; when the folder is added,
@@ -96,10 +100,19 @@ release must have. The full design is [decisions/0001-host-design.md](decisions/
   SIGKILL, say) or crashes while an operation runs, the operation keeps running without its time limit,
   and `kill` cannot reach it; the audit log then ends at that operation's `start` line. Closing the
   terminal drains instead (SIGHUP is handled as SIGTERM is), unless the host was started with SIGHUP
-  ignored, as `nohup` does, when it keeps running.
+  ignored, as `nohup` does, when it keeps running. Under `run --exit-on-stdin-eof`, the end of standard
+  input drains it too: an app that quits, crashes or is force-quit leaves no host running, as long as no
+  other process holds the write end of that pipe. An app whose drain does not end sends `SIGKILL` last
+  (spec/CLI.md §13.3), and that leaves this gap.
 - A stalled network or FUSE mount inside an enabled folder can hang the host: checking a path there, or
   waiting for an operation stuck on it, blocks in the kernel. The host gives up waiting for a killed
-  operation after 10 s, but checking a path has no time limit, and `kill` is not seen while it waits.
+  operation after 10 s, but checking a path has no time limit, and `kill` is not seen while it waits. A
+  drain, the end of standard input's included, then waits too: only a request still waiting for the
+  policy, or held in a load of it, is not waited for. Loading the policy looks at each folder, so while
+  `run` runs only the thread that handles requests and a loader thread of its own load it, never the one
+  that drains. A start check of
+  `run` that waits (a state file on a stalled mount, or on macOS a Keychain prompt) is not cut short by the
+  end of standard input either.
 - A process an operation starts that leaves the operation's process group (by calling `setpgid` or
   `setsid` itself) is not killed with the operation. The v0.1 operations start no such process.
 - Exact dependency pins reach CI through `uv.lock`, but not yet a user's install (see "Who the host

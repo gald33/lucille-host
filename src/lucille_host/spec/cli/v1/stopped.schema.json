@@ -1,0 +1,156 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/gald33/lucille-host/blob/main/src/lucille_host/spec/cli/v1/stopped.schema.json",
+  "title": "lucille-host --json: stopped",
+  "description": "Why run ended. It is the last object run writes.",
+  "oneOf": [
+    {
+      "$ref": "#/$defs/stopped.drained"
+    },
+    {
+      "$ref": "#/$defs/stopped.plain"
+    },
+    {
+      "$ref": "#/$defs/stopped.downgrade"
+    },
+    {
+      "$ref": "#/$defs/stopped.failed"
+    }
+  ],
+  "$defs": {
+    "release": {
+      "description": "A release's version: MAJOR.MINOR.PATCH, digits only, no suffix.",
+      "type": "string",
+      "minLength": 5,
+      "maxLength": 32,
+      "pattern": "^(0|[1-9][0-9]{0,8})\\.(0|[1-9][0-9]{0,8})\\.(0|[1-9][0-9]{0,8})$"
+    },
+    "stopped.drained": {
+      "description": "Stopped on purpose; cause says what began the drain.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "v",
+        "type",
+        "reason",
+        "cause"
+      ],
+      "properties": {
+        "v": {
+          "const": 1
+        },
+        "type": {
+          "const": "stopped"
+        },
+        "reason": {
+          "const": "drained"
+        },
+        "cause": {
+          "type": "string",
+          "enum": [
+            "signal",
+            "stdin_end",
+            "stdout_gone"
+          ]
+        }
+      }
+    },
+    "stopped.plain": {
+      "description": "Every other reason that carries no field of its own.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "v",
+        "type",
+        "reason"
+      ],
+      "properties": {
+        "v": {
+          "const": 1
+        },
+        "type": {
+          "const": "stopped"
+        },
+        "reason": {
+          "type": "string",
+          "enum": [
+            "forgotten",
+            "ended",
+            "not_paired",
+            "no_gate",
+            "several_pairs",
+            "pair_unusable",
+            "leaked",
+            "expired",
+            "already_running",
+            "insecure_keyring",
+            "store_error",
+            "startup_refused"
+          ]
+        }
+      }
+    },
+    "stopped.downgrade": {
+      "description": "This release is older than one that started run on this profile before.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "v",
+        "type",
+        "reason",
+        "last_version"
+      ],
+      "properties": {
+        "v": {
+          "const": 1
+        },
+        "type": {
+          "const": "stopped"
+        },
+        "reason": {
+          "const": "downgrade"
+        },
+        "last_version": {
+          "$ref": "#/$defs/release"
+        }
+      }
+    },
+    "stopped.failed": {
+      "description": "Anything else run met and stopped for.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "v",
+        "type",
+        "reason",
+        "code"
+      ],
+      "properties": {
+        "v": {
+          "const": 1
+        },
+        "type": {
+          "const": "stopped"
+        },
+        "reason": {
+          "const": "failed"
+        },
+        "code": {
+          "type": "string",
+          "enum": [
+            "internal",
+            "bad_profile",
+            "unsupported_platform",
+            "os_error",
+            "state_invalid",
+            "runtime_folder",
+            "lock_failed",
+            "room_not_left",
+            "store_error",
+            "hub_error"
+          ]
+        }
+      }
+    }
+  }
+}

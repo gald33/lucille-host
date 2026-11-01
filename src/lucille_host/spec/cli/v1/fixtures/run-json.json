@@ -1,5 +1,5 @@
 {
-  "description": "run, which has no JSON form in version 1",
+  "description": "run with --json alone: a usage error, since run's JSON form is --json-events",
   "argv": [
     "--json",
     "run"

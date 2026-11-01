@@ -49,17 +49,7 @@ STALE_AFTER: Final = 3 * loop.STATUS_EVERY
 
 # Why a room was abandoned, or left, as ``--json`` names it: a word to branch on, where the text
 # says it in words.
-WHY: Final = {
-    rooms.REPLACED: "replaced",
-    rooms.LUCILLE_LEFT: "left_by_lucille",
-    rooms.MOVED: "pair_moved",
-    rooms.NOT_LISTED: "not_over_current_pair",
-    rooms.PAIR_OVER: "pair_over",
-    rooms.GONE: "gone",
-    rooms.CHECK_HUB: "check_3",
-    rooms.CHECK_TOKEN: "check_4",
-    rooms.LEFT_BEFORE: "left_before",
-}
+WHY: Final = rooms.WORDS
 
 _RECORD_KEYS: Final = frozenset(
     {
@@ -233,21 +223,22 @@ def _rooms(
 
 def _clock(seen: dict[str, Any] | None) -> tuple[str, dict[str, Any]]:
     window = _switchboard.SKEW_WINDOW
-    skew = None if seen is None else seen["skew"]
-    if seen is not None and (seen["skewed"] or (skew is not None and abs(skew) > window)):
+    found = loop.clock_view(
+        None if seen is None else seen["skew"], seen is not None and seen["skewed"]
+    )
+    if found["state"] == "skewed":
         return (
             f"clock: skewed: this computer's clock is more than {window} s from the hub's, so the "
             "hub refuses what the host writes; set the clock right"
-        ), {"state": "skewed", "skew_s": skew}
-    if skew is None:
-        return "clock: unknown: `run` measures it against the hub on each reply it posts", {
-            "state": "unknown"
-        }
+        ), found
+    if found["state"] == "unknown":
+        return "clock: unknown: `run` measures it against the hub on each reply it posts", found
+    skew = found["skew_s"]
     side = "behind" if skew > 0 else "ahead of"
     return (
         f"clock: ok: {abs(skew):.1f} s {side} the hub's, on the last reply posted (the hub "
         f"refuses posts past {window} s)"
-    ), {"state": "ok", "skew_s": skew}
+    ), found
 
 
 def _run(seen: dict[str, Any] | None, live: bool) -> tuple[list[str], dict[str, Any]]:

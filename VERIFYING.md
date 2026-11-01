@@ -184,7 +184,8 @@ enforces.
      environment variable, its configuration file or an installed entry point names, when the host
      first asks it for a password. Tests with an audit hook find that the host's pairing and sharing
      calls, and `run`, start no process on the paths they take, against Switchboard's in-process hub
-     ([CLAIMS.md](CLAIMS.md), C1); a path no test takes is not checked;
+     ([CLAIMS.md](CLAIMS.md), C1), `run`'s events and lifeline included; a path no test takes is not
+     checked;
    - files it does not parse: configuration, data and shell scripts.
 
    Review covers the rest.
@@ -313,15 +314,17 @@ and `tests/test_rooms.py` runs the host's checks 3 and 4 of the accept policy (`
 
 **The command line's contract.** [spec/CLI.md](spec/CLI.md) is the contract between the `lucille-host`
 command line and any app that drives it, such as the Mac app: with `--json`, every verb but `run` writes
-JSON objects on stdout instead of text, with the same exit codes. Its JSON Schemas and golden fixtures ship
-in the wheel beside the protocol's, under `lucille_host/spec/cli/v1/`.
+JSON objects on stdout instead of text, with the same exit codes, and `run --json-events` writes `run`'s
+events, with `run`'s own exit codes, for an app that supervises it. Its JSON Schemas and golden fixtures
+ship in the wheel beside the protocol's, under `lucille_host/spec/cli/v1/`.
 - `tests/spec/test_cli_schemas.py` walks those schemas as `test_schemas.py` walks the protocol's, and
   checks that every fixture validates.
 - `tests/test_cli_json.py` runs every fixture's command line, each in a home set up for it, and holds
   what it writes to the schemas and to the fixture; runs it again without `--json` and checks that the
   exit code and stderr are the same; and triggers each failure it can reach and checks its code against
   spec/CLI.md's list for that verb. `tests/test_pair.py` and `tests/test_status.py` hold the pairing verbs,
-  `status`, `log` and `forget` to it.
+  `status`, `log` and `forget` to it, and `tests/test_supervision.py` holds `run`'s events, its lifeline,
+  its exit codes, the policy while it runs, `policy reset` and the version record to section 13.
 - `tests/test_catalog.py` checks that the words a shell shows for each operation are outside its
   definition hash, and say nothing [PRIVACY.md](PRIVACY.md) says this project must never claim.
 

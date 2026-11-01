@@ -1,0 +1,17 @@
+{
+  "description": "policy reset, with no policy file: the fresh policy, which is valid",
+  "argv": [
+    "policy",
+    "reset",
+    "--json"
+  ],
+  "exit": 1,
+  "stdout": [
+    {
+      "v": 1,
+      "type": "error",
+      "code": "not_invalid",
+      "message": "the local policy is not invalid: `lucille-host policy reset` sets aside only a policy file that is invalid"
+    }
+  ]
+}

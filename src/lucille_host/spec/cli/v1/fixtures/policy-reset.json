@@ -1,0 +1,15 @@
+{
+  "description": "policy reset, with a policy file that is not TOML",
+  "argv": [
+    "policy",
+    "reset",
+    "--json"
+  ],
+  "exit": 0,
+  "stdout": [
+    {
+      "v": 1,
+      "type": "policy_reset"
+    }
+  ]
+}

@@ -19,7 +19,10 @@ before the act it records: ``received`` before deciding, ``decision`` before run
 bytes are handed back to be posted. A refusal the read loop already decided is passed in as
 ``earlier_code``. The read loop's ``decided`` hook is called right after the ``decision`` line and
 before anything runs, with the decision and, for a refusal, the reply's bytes, so that its journal
-holds them before the host acts.
+holds them before the host acts. The context's ``observe`` hook, when there is one, is told each
+step right after the audit line that records it (``received``, ``decided``, ``started`` and
+``finished``): ``run --json-events`` writes its ``request`` objects from it (``loop.py``). It hands
+them on without waiting for any reader, so it holds up neither the decision nor the start.
 
 While the host drains (the first SIGTERM, SIGHUP or Ctrl-C), :func:`process` starts nothing: it
 raises :class:`Draining` before it records anything, and the read loop stops reading. The pause flag
@@ -96,6 +99,9 @@ class Context:
     # True once the request's room is abandoned: nothing more starts, a running child is killed,
     # and no reply is built.
     stop: Callable[[], bool] | None = None
+    # Told each step of the request, right after its audit line: ("received"), ("decided",
+    # decision, code), ("started") and ("finished", outcome, reply size).
+    observe: Callable[..., None] | None = None
 
 
 @dataclass(frozen=True)
@@ -246,6 +252,8 @@ def execute(ready: Ready, ctx: Context) -> Outcome:
             executable_sha256=executable_sha256,
             argv=list(command.argv),
         )
+        if ctx.observe is not None:
+            ctx.observe("started")
 
     def kill_requested() -> bool:
         return ctx.controls.kill_requested() or stop()
@@ -347,20 +355,28 @@ def process(
     """
     if ctx.controls.draining.is_set():
         raise Draining
+    observe = ctx.observe if ctx.observe is not None else _ignore
     ctx.audit.received(job.job_id, job.seq, job.op, job.args)
+    observe("received")
     verdict = earlier_code if earlier_code is not None else check(job, ctx)
     if isinstance(verdict, str):
         ctx.audit.decision(job.job_id, "refused", verdict)
-        data = encode(
-            reply_body(job.job_id, Outcome(status="refused", code=verdict), ctx.policy_digest)
-        )
+        outcome = Outcome(status="refused", code=verdict)
+        data = encode(reply_body(job.job_id, outcome, ctx.policy_digest))
         if decided is not None:
             decided("refused", verdict, data)
+        observe("decided", "refused", verdict)
     else:
         ctx.audit.decision(job.job_id, "run")
         if decided is not None:
             decided("run", None, None)
+        observe("decided", "run", None)
         outcome = execute(verdict, ctx)
         data = encode(reply_body(job.job_id, outcome, ctx.policy_digest))
     ctx.audit.sent(job.job_id, hashlib.sha256(data).hexdigest(), len(data))
+    observe("finished", outcome, len(data))
     return data
+
+
+def _ignore(*_: Any) -> None:
+    """No one observes the request."""

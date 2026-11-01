@@ -1,0 +1,441 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/gald33/lucille-host/blob/main/src/lucille_host/spec/cli/v1/request.schema.json",
+  "title": "lucille-host --json: request",
+  "description": "One request, at each step: what it asked for, what was decided, and how it ended. Never an absolute path, never output.",
+  "oneOf": [
+    {
+      "$ref": "#/$defs/request.received"
+    },
+    {
+      "$ref": "#/$defs/request.decided_run"
+    },
+    {
+      "$ref": "#/$defs/request.decided_refused"
+    },
+    {
+      "$ref": "#/$defs/request.started"
+    },
+    {
+      "$ref": "#/$defs/request.finished_done"
+    },
+    {
+      "$ref": "#/$defs/request.finished_refused"
+    },
+    {
+      "$ref": "#/$defs/request.finished_failed"
+    },
+    {
+      "$ref": "#/$defs/request.finished_abandoned"
+    }
+  ],
+  "$defs": {
+    "job_id": {
+      "description": "Lucille's id for the job: a lowercase UUID in 8-4-4-4-12 form.",
+      "type": "string",
+      "minLength": 36,
+      "maxLength": 36,
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    },
+    "op_name": {
+      "description": "An operation name: namespaced, lowercase, at most 64 characters.",
+      "type": "string",
+      "minLength": 3,
+      "maxLength": 64,
+      "pattern": "^[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*)+$"
+    },
+    "root": {
+      "description": "A folder alias from the host's local policy. Never a path.",
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 32,
+      "pattern": "^[a-z][a-z0-9_-]{0,31}$"
+    },
+    "request_path": {
+      "description": "The path Lucille asked for, inside a folder alias: never one that starts with /, nor one with a control, reordering or separator character. It names no file on this computer.",
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 1024,
+      "pattern": "^[^/\\u0000][^\\u0000]*$"
+    },
+    "refused_code": {
+      "type": "string",
+      "enum": [
+        "unknown_op",
+        "not_enabled",
+        "bad_request",
+        "bad_args",
+        "path_outside_root",
+        "expired",
+        "paused",
+        "host_too_old"
+      ]
+    },
+    "failed_code": {
+      "type": "string",
+      "enum": [
+        "timeout",
+        "killed_locally",
+        "interrupted"
+      ]
+    },
+    "exit_code": {
+      "description": "The exit status the OS reported; negative when the child was killed by that signal.",
+      "type": "integer",
+      "minimum": -255,
+      "maximum": 255
+    },
+    "duration_ms": {
+      "description": "How long the operation ran, in milliseconds.",
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 2147483647
+    },
+    "stream_bytes": {
+      "description": "A stream's size in the reply, measured as the protocol measures it: its JSON-encoded string, both quotes included.",
+      "type": "integer",
+      "minimum": 2,
+      "maximum": 65536
+    },
+    "reply_bytes": {
+      "description": "The size of the reply as posted.",
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 262144
+    },
+    "request.received": {
+      "description": "The request was written to the audit log, before it is decided.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "v",
+        "type",
+        "phase",
+        "job_id",
+        "op",
+        "root",
+        "path"
+      ],
+      "properties": {
+        "v": {
+          "const": 1
+        },
+        "type": {
+          "const": "request"
+        },
+        "phase": {
+          "const": "received"
+        },
+        "job_id": {
+          "$ref": "#/$defs/job_id"
+        },
+        "op": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/op_name"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "root": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/root"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "path": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/request_path"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "request.decided_run": {
+      "description": "It is to run.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "v",
+        "type",
+        "phase",
+        "job_id",
+        "decision"
+      ],
+      "properties": {
+        "v": {
+          "const": 1
+        },
+        "type": {
+          "const": "request"
+        },
+        "phase": {
+          "const": "decided"
+        },
+        "job_id": {
+          "$ref": "#/$defs/job_id"
+        },
+        "decision": {
+          "const": "run"
+        }
+      }
+    },
+    "request.decided_refused": {
+      "description": "It is refused.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "v",
+        "type",
+        "phase",
+        "job_id",
+        "decision",
+        "code"
+      ],
+      "properties": {
+        "v": {
+          "const": 1
+        },
+        "type": {
+          "const": "request"
+        },
+        "phase": {
+          "const": "decided"
+        },
+        "job_id": {
+          "$ref": "#/$defs/job_id"
+        },
+        "decision": {
+          "const": "refused"
+        },
+        "code": {
+          "$ref": "#/$defs/refused_code"
+        }
+      }
+    },
+    "request.started": {
+      "description": "The process it runs is about to start.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "v",
+        "type",
+        "phase",
+        "job_id"
+      ],
+      "properties": {
+        "v": {
+          "const": 1
+        },
+        "type": {
+          "const": "request"
+        },
+        "phase": {
+          "const": "started"
+        },
+        "job_id": {
+          "$ref": "#/$defs/job_id"
+        }
+      }
+    },
+    "request.finished_done": {
+      "description": "It ran, and its reply is built.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "v",
+        "type",
+        "phase",
+        "job_id",
+        "status",
+        "exit_code",
+        "duration_ms",
+        "stdout_bytes",
+        "stderr_bytes",
+        "reply_bytes"
+      ],
+      "properties": {
+        "v": {
+          "const": 1
+        },
+        "type": {
+          "const": "request"
+        },
+        "phase": {
+          "const": "finished"
+        },
+        "job_id": {
+          "$ref": "#/$defs/job_id"
+        },
+        "status": {
+          "const": "done"
+        },
+        "exit_code": {
+          "$ref": "#/$defs/exit_code"
+        },
+        "duration_ms": {
+          "$ref": "#/$defs/duration_ms"
+        },
+        "stdout_bytes": {
+          "$ref": "#/$defs/stream_bytes"
+        },
+        "stderr_bytes": {
+          "$ref": "#/$defs/stream_bytes"
+        },
+        "reply_bytes": {
+          "$ref": "#/$defs/reply_bytes"
+        }
+      }
+    },
+    "request.finished_refused": {
+      "description": "Its refusal is built.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "v",
+        "type",
+        "phase",
+        "job_id",
+        "status",
+        "code",
+        "reply_bytes"
+      ],
+      "properties": {
+        "v": {
+          "const": 1
+        },
+        "type": {
+          "const": "request"
+        },
+        "phase": {
+          "const": "finished"
+        },
+        "job_id": {
+          "$ref": "#/$defs/job_id"
+        },
+        "status": {
+          "const": "refused"
+        },
+        "code": {
+          "$ref": "#/$defs/refused_code"
+        },
+        "reply_bytes": {
+          "$ref": "#/$defs/reply_bytes"
+        }
+      }
+    },
+    "request.finished_failed": {
+      "description": "It was decided to run and did not finish.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "v",
+        "type",
+        "phase",
+        "job_id",
+        "status",
+        "code",
+        "exit_code",
+        "duration_ms",
+        "stdout_bytes",
+        "stderr_bytes",
+        "reply_bytes"
+      ],
+      "properties": {
+        "v": {
+          "const": 1
+        },
+        "type": {
+          "const": "request"
+        },
+        "phase": {
+          "const": "finished"
+        },
+        "job_id": {
+          "$ref": "#/$defs/job_id"
+        },
+        "status": {
+          "const": "failed"
+        },
+        "code": {
+          "$ref": "#/$defs/failed_code"
+        },
+        "exit_code": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/exit_code"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "duration_ms": {
+          "$ref": "#/$defs/duration_ms"
+        },
+        "stdout_bytes": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/stream_bytes"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "stderr_bytes": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/stream_bytes"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "reply_bytes": {
+          "$ref": "#/$defs/reply_bytes"
+        }
+      }
+    },
+    "request.finished_abandoned": {
+      "description": "Its work room was given up while it was decided or ran: it was stopped, and gets no reply.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "v",
+        "type",
+        "phase",
+        "job_id",
+        "status"
+      ],
+      "properties": {
+        "v": {
+          "const": 1
+        },
+        "type": {
+          "const": "request"
+        },
+        "phase": {
+          "const": "finished"
+        },
+        "job_id": {
+          "$ref": "#/$defs/job_id"
+        },
+        "status": {
+          "const": "abandoned"
+        }
+      }
+    }
+  }
+}

@@ -1334,8 +1334,10 @@ def test_forget_verb_with_nothing_left_of_a_dropped_pair_says_no_pair_is_held(
 ) -> None:
     # The library dropped a pair that held no work room, and no accept was interrupted: the room
     # record still names the pair, from `run`. `forget` has no room to leave, and says that no
-    # pair is held, not that it left the rooms still held over the pair.
+    # pair is held, not that it left the rooms still held over the pair. (A drain asked for before
+    # `run` serves stops it before its first step, so the test waits for that step.)
     host.start()
+    until(lambda: host.record().pair == host.name, what="the room record bound to the pair")
     host.stop()
     record = host.record()
     assert record.pair == host.name and record.held == {} and record.accepting is None
@@ -1746,7 +1748,7 @@ def test_run_refused_says_why(
             thread.join(30)
     assert len(outcome) == 1
     (ran,) = outcome
-    assert ran.rc == 1, ran
+    assert ran.rc == 21, ran
     assert ran.err == f"lucille-host: {loop.ALREADY_RUNNING}\n"
     assert ran.out == ""
 
