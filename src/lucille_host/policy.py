@@ -190,6 +190,8 @@ _FALLBACK: Final = "folder"
 def _fold(character: str) -> str:
     """One character of a folder's name, as an alias writes it (spec/CLI.md section 9.1)."""
     code = ord(character)
+    if 0x0300 <= code <= 0x036F:  # a combining mark, as a decomposed name carries: dropped
+        return ""
     if 0xFF01 <= code <= 0xFF5E:  # a full-width form: the ASCII character it stands for
         character = chr(code - 0xFEE0)
     if character.isascii():
@@ -203,11 +205,11 @@ def _fold(character: str) -> str:
 
 def suggest_alias(name: str, taken: Collection[str]) -> str:
     """A valid alias made from a folder's name that is not one of ``taken``: each character
-    folded to lowercase ASCII (Latin letters with a mark lose it, a full-width form is its ASCII
-    character, anything else is ``-``), each run of ``-`` made one, ``-`` and ``_`` taken off both
-    ends, ``folder-`` put first when it starts with a digit, and cut to 32 characters. ``folder``
-    when nothing is left. If ``taken`` holds it, ``-2``, ``-3`` and so on is added to the first that
-    is free, the alias cut first to make room."""
+    folded to lowercase ASCII (Latin letters with a mark lose it, a combining mark is dropped, a
+    full-width form is its ASCII character, anything else is ``-``), each run of ``-`` made one,
+    ``-`` and ``_`` taken off both ends, ``folder-`` put first when it starts with a digit, and cut
+    to 32 characters. ``folder`` when nothing is left. If ``taken`` holds it, ``-2``, ``-3`` and so
+    on is added to the first that is free, the alias cut first to make room."""
     folded = re.sub("-+", "-", "".join(_fold(character) for character in name)).strip("-_")
     if not folded:
         folded = _FALLBACK
@@ -414,6 +416,9 @@ def load(path: Path, *, home: str | None = None) -> Policy:
         data = tomllib.loads(raw.decode("utf-8"))
     except (UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
         raise PolicyError(f"{path} is not valid TOML") from exc
+    except RecursionError as exc:
+        # Nested past what the parser follows, which no policy the host writes is.
+        raise PolicyError(f"{path} nests too deep to be read") from exc
     return _parse(data, home)
 
 

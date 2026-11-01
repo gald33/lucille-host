@@ -273,7 +273,7 @@ class Item:
             return _empty()
         try:
             doc = json.loads(raw)
-        except ValueError:
+        except (ValueError, RecursionError):
             doc = None
         pairs = doc.get("pairs") if isinstance(doc, dict) else None
         if (
