@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/gald33/lucille-host/blob/main/src/lucille_host/spec/cli/v1/controls.schema.json",
+  "title": "lucille-host --json: controls",
+  "description": "The local controls, once pause, resume or kill is done.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "v",
+    "type",
+    "paused"
+  ],
+  "properties": {
+    "v": {
+      "const": 1
+    },
+    "type": {
+      "const": "controls"
+    },
+    "paused": {
+      "type": "boolean"
+    }
+  }
+}

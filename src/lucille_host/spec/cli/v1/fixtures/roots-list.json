@@ -1,0 +1,25 @@
+{
+  "description": "roots list with two folders",
+  "argv": [
+    "--json",
+    "roots",
+    "list"
+  ],
+  "exit": 0,
+  "stdout": [
+    {
+      "v": 1,
+      "type": "root",
+      "alias": "docs",
+      "path": "/home/me/Documents",
+      "broad": false
+    },
+    {
+      "v": 1,
+      "type": "root",
+      "alias": "photos",
+      "path": "/home/me/Photos",
+      "broad": false
+    }
+  ]
+}

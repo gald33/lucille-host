@@ -1,0 +1,20 @@
+{
+  "description": "roots add of the home folder without --allow-home-or-root",
+  "argv": [
+    "--json",
+    "roots",
+    "add",
+    "home",
+    "/home/me"
+  ],
+  "exit": 1,
+  "stdout": [
+    {
+      "v": 1,
+      "type": "error",
+      "code": "broad_folder",
+      "message": "/home/me is your home folder, holds it, or is /; add --allow-home-or-root to mean it",
+      "kind": "home"
+    }
+  ]
+}

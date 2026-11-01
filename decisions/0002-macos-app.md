@@ -51,7 +51,9 @@ release, and it is for people developing the app.
   `macos/check_app.py` and the host's whole test suite on the trimmed runtime, and uploads the disk image as
   a 7-day artifact when every check passed.
 
-Not built yet: pairing, running in the background and opening at login, the JSON contract (§8), the Welcome
+Not built yet: pairing, running in the background and opening at login, the app's use of the JSON
+contract (§8; the host's command line has it, [spec/CLI.md](../spec/CLI.md), except `run`'s events and
+the verbs §8 lists for §10, §11.4, §15 and section 17), the Welcome
 and main windows, updates, **Remove Capsule…** (section 17), Developer ID signing and notarization, ripgrep,
 and the release jobs. The first build also departs from this record in these ways, among others;
 `macos/README.md`, under "Choices made for the first build", says why for most of them:
@@ -367,8 +369,9 @@ Capsule.app/Contents/
   `spec/CLI.md`; the schemas and golden fixtures ship in the wheel, beside the protocol's. Readers ignore an
   unknown `type`, so the contract can grow.
 - **The app never parses human text and never writes the host's files.** Every change goes through a verb.
-  The first build is the exception for now: until the JSON contract exists, it reads the verbs' human output
-  ("What is built today"; `macos/README.md`, "Choices made for the first build").
+  The first build is the exception for now: until it uses the JSON contract, which the host's command line
+  now has ([spec/CLI.md](../spec/CLI.md)), it reads the verbs' human output ("What is built today";
+  `macos/README.md`, "Choices made for the first build").
 - **Secrets never go on a command line.** A pairing code goes to `pair --code-stdin` on standard input. With the typed gate
   (§11.2, proposed, pending the maintainer's decision), the typed number goes to `pair confirm` on standard
   input.

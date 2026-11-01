@@ -1,0 +1,43 @@
+{
+  "description": "status where the keyring stores nothing: the pair cannot be read, and the rest is reported",
+  "argv": [
+    "--json",
+    "status"
+  ],
+  "exit": 0,
+  "stdout": [
+    {
+      "v": 1,
+      "type": "status",
+      "host_version": "0.1.0.dev0",
+      "policy": {
+        "state": "ok",
+        "file": null,
+        "enabled": [
+          "host.describe"
+        ],
+        "disabled": [],
+        "folders": []
+      },
+      "paused": true,
+      "store": "keyring",
+      "hub": "https://switchboard.lucille-ai.com",
+      "loopback_hub": null,
+      "pair": {
+        "state": "unreadable",
+        "code": "insecure_keyring",
+        "message": "the keyring backend here (Keyring) has no keyring to store in, so lucille-host cannot keep its pair in it; set up the system keyring, or pair with --store-file to keep the pair in a file instead, which is weaker"
+      },
+      "work_rooms": [],
+      "last_left_because": null,
+      "offers_waiting": 0,
+      "run": {
+        "state": "none"
+      },
+      "last_hub_contact": null,
+      "clock": {
+        "state": "unknown"
+      }
+    }
+  ]
+}

@@ -1,0 +1,17 @@
+{
+  "description": "roots remove",
+  "argv": [
+    "--json",
+    "roots",
+    "remove",
+    "docs"
+  ],
+  "exit": 0,
+  "stdout": [
+    {
+      "v": 1,
+      "type": "root_removed",
+      "alias": "docs"
+    }
+  ]
+}

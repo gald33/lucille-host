@@ -320,12 +320,14 @@ The design ([decisions/0002-macos-app.md](../decisions/0002-macos-app.md)) may c
   Apple allows only three numbers there. The exact version is in the `LucilleHostVersion` key, in
   `build-manifest.json`, and in the menu.
 - **macOS 15 or later, Apple silicon only.**
-- **The app reads the host's text output and the pause flag.** The design adds a versioned JSON output
-  to the host's command line, and an event stream from the running host; until then, `App/HostText.swift` follows the text, and
-  the Swift self-test checks it against the real command line on every build.
-- **The words for each ability are in the app** (`App/HostText.swift`). The design moves them into the
-  host's catalog, so that every app shows the same reviewed words. A test fails when the catalog has an
-  operation the app neither names nor leaves out of the menu.
+- **The app reads the host's text output and the pause flag.** The host's command line now has a
+  versioned JSON output ([spec/CLI.md](../spec/CLI.md)), and the design adds an event stream from the
+  running host; until the app uses them, `App/HostText.swift` follows the text, and the Swift self-test
+  checks it against the real command line on every build.
+- **The words for each ability are in the app** (`App/HostText.swift`). The host's catalog now carries
+  its own words for each operation (`ops list --json`), so that every app can show the same reviewed
+  words; the app does not use them yet. A test fails when the catalog has an operation the app neither
+  names nor leaves out of the menu.
 - **The app asks about the home folder before the user names it**, when it can tell from the path (the
   home folder, or a folder above it). The host still decides; when it refuses a folder the app did not
   recognise, such as `/System/Volumes/Data/Users`, which holds the home folder through the Data volume,

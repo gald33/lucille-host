@@ -1,0 +1,19 @@
+{
+  "description": "pair status once Lucille has collected the answer: it shows the SAS, which starts the deadline",
+  "argv": [
+    "pair",
+    "--json",
+    "status"
+  ],
+  "exit": 0,
+  "stdout": [
+    {
+      "v": 1,
+      "type": "pair",
+      "state": "sas_pending",
+      "name": "pair-abcdef",
+      "sas": "1234-5678",
+      "deadline": "2026-11-01T12:00:00Z"
+    }
+  ]
+}

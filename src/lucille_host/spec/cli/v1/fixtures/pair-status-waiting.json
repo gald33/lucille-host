@@ -1,0 +1,17 @@
+{
+  "description": "pair status after a pair that was interrupted before Lucille collected the answer",
+  "argv": [
+    "pair",
+    "status",
+    "--json"
+  ],
+  "exit": 0,
+  "stdout": [
+    {
+      "v": 1,
+      "type": "pair",
+      "state": "waiting",
+      "name": "pair-abcdef"
+    }
+  ]
+}

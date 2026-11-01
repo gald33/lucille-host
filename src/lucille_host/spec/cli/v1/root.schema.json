@@ -1,0 +1,47 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/gald33/lucille-host/blob/main/src/lucille_host/spec/cli/v1/root.schema.json",
+  "title": "lucille-host --json: root",
+  "description": "One folder alias of the local policy.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "v",
+    "type",
+    "alias",
+    "path",
+    "broad"
+  ],
+  "properties": {
+    "v": {
+      "const": 1
+    },
+    "type": {
+      "const": "root"
+    },
+    "alias": {
+      "$ref": "#/$defs/root"
+    },
+    "path": {
+      "$ref": "#/$defs/path"
+    },
+    "broad": {
+      "type": "boolean"
+    }
+  },
+  "$defs": {
+    "root": {
+      "description": "A folder alias from the host's local policy. Never a path.",
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 32,
+      "pattern": "^[a-z][a-z0-9_-]{0,31}$"
+    },
+    "path": {
+      "description": "An absolute path. A byte of a file name that is not UTF-8 is U+FFFD.",
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^/[^\\u0000]*$"
+    }
+  }
+}

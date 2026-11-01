@@ -1,0 +1,25 @@
+{
+  "description": "roots check with one folder that opens and one that is gone",
+  "argv": [
+    "--json",
+    "roots",
+    "check"
+  ],
+  "exit": 0,
+  "stdout": [
+    {
+      "v": 1,
+      "type": "root_check",
+      "alias": "docs",
+      "path": "/home/me/Documents",
+      "state": "ok"
+    },
+    {
+      "v": 1,
+      "type": "root_check",
+      "alias": "gone",
+      "path": "/home/me/Gone",
+      "state": "missing"
+    }
+  ]
+}

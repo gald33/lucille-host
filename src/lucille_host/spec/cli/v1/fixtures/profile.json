@@ -1,0 +1,17 @@
+{
+  "description": "pause in another profile: --profile comes before the verb",
+  "argv": [
+    "--profile",
+    "mac-app",
+    "--json",
+    "pause"
+  ],
+  "exit": 0,
+  "stdout": [
+    {
+      "v": 1,
+      "type": "controls",
+      "paused": true
+    }
+  ]
+}

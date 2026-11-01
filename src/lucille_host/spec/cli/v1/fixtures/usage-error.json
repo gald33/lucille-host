@@ -1,0 +1,16 @@
+{
+  "description": "a verb this release does not have",
+  "argv": [
+    "--json",
+    "nosuch"
+  ],
+  "exit": 2,
+  "stdout": [
+    {
+      "v": 1,
+      "type": "error",
+      "code": "usage",
+      "message": "the command line could not be parsed; standard error says why"
+    }
+  ]
+}

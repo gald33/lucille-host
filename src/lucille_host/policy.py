@@ -30,7 +30,10 @@ protocol message has a field that maps onto it. The file looks like this::
   the fresh policy in its place (:func:`archive`). Nothing reads the earlier policy but
   ``lucille-host policy previous``, which lists it; to use any of it again, the user enables it
   again. Because a fresh policy is never moved, trying a pairing twice keeps the earlier policy the
-  first try found.
+  first try found. The file set aside is stamped with the time it was set aside.
+
+For a shell (``spec/CLI.md`` section 9): :func:`suggest_alias` makes an alias from a folder's name,
+and :func:`check_root` says whether the host can open a folder and read an entry in it.
 
 The policy digest is HMAC-SHA256 of the canonical effective policy under a random key kept in the
 state directory, which never leaves the computer. The user can match a result to a policy, and
@@ -40,6 +43,7 @@ guessed folder path.
 
 from __future__ import annotations
 
+import errno
 import hmac
 import json
 import os
@@ -47,7 +51,7 @@ import re
 import secrets
 import tempfile
 import tomllib
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import MappingProxyType
@@ -63,6 +67,8 @@ __all__ = [
     "PolicyError",
     "Root",
     "archive",
+    "broad_kind",
+    "check_root",
     "digest",
     "digest_key",
     "effective",
@@ -71,6 +77,7 @@ __all__ = [
     "is_broad",
     "load",
     "save",
+    "suggest_alias",
     "valid_alias",
 ]
 
@@ -113,16 +120,128 @@ class Effective:
     enabled_ops: tuple[str, ...]
     roots: Mapping[str, Root]
     log_results: bool
-    # Enabled in the file but disabled here: the catalog definition changed since it was enabled.
+    # Enabled in the file but disabled here: the catalog definition changed since it was enabled,
+    # and this computer can run it, so enabling it again accepts the new definition.
     changed_by_upgrade: tuple[str, ...]
     # Enabled in the file but disabled here: not in this release's catalog.
     not_in_catalog: tuple[str, ...]
-    # Enabled in the file but disabled here: its executable is missing on this computer.
+    # Enabled in the file but disabled here: its executable is missing on this computer, whatever
+    # definition the file holds.
     unavailable: tuple[str, ...]
 
 
 def valid_alias(alias: str) -> bool:
     return _ALIAS.fullmatch(alias) is not None
+
+
+def _folds(plain: str, characters: str) -> dict[str, str]:
+    return {character: plain for character in characters}
+
+
+# What :func:`suggest_alias` writes for each Latin letter with a mark, and each Latin ligature, from
+# U+00C0 to U+017F: its plain letters, lowercase. The table maps both cases straight to lowercase
+# ASCII: str.lower() is never called on a character outside ASCII ("\u0130".lower() is two).
+_LATIN: Final = {
+    **_folds("a", "\u00c0\u00c1\u00c2\u00c3\u00c4\u00c5\u00e0\u00e1\u00e2\u00e3\u00e4\u00e5"),
+    **_folds("ae", "\u00c6\u00e6"),
+    **_folds("c", "\u00c7\u00e7"),
+    **_folds("e", "\u00c8\u00c9\u00ca\u00cb\u00e8\u00e9\u00ea\u00eb"),
+    **_folds("i", "\u00cc\u00cd\u00ce\u00cf\u00ec\u00ed\u00ee\u00ef"),
+    **_folds("d", "\u00d0\u00f0"),
+    **_folds("n", "\u00d1\u00f1"),
+    **_folds("o", "\u00d2\u00d3\u00d4\u00d5\u00d6\u00d8\u00f2\u00f3\u00f4\u00f5\u00f6\u00f8"),
+    **_folds("u", "\u00d9\u00da\u00db\u00dc\u00f9\u00fa\u00fb\u00fc"),
+    **_folds("y", "\u00dd\u00fd\u00ff"),
+    **_folds("th", "\u00de\u00fe"),
+    **_folds("ss", "\u00df"),
+    **{
+        chr(code): plain
+        for first, last, plain in (
+            (0x0100, 0x0105, "a"),
+            (0x0106, 0x010D, "c"),
+            (0x010E, 0x0111, "d"),
+            (0x0112, 0x011B, "e"),
+            (0x011C, 0x0123, "g"),
+            (0x0124, 0x0127, "h"),
+            (0x0128, 0x0131, "i"),
+            (0x0132, 0x0133, "ij"),
+            (0x0134, 0x0135, "j"),
+            (0x0136, 0x0138, "k"),
+            (0x0139, 0x0142, "l"),
+            (0x0143, 0x014B, "n"),
+            (0x014C, 0x0151, "o"),
+            (0x0152, 0x0153, "oe"),
+            (0x0154, 0x0159, "r"),
+            (0x015A, 0x0161, "s"),
+            (0x0162, 0x0167, "t"),
+            (0x0168, 0x0173, "u"),
+            (0x0174, 0x0175, "w"),
+            (0x0176, 0x0178, "y"),
+            (0x0179, 0x017E, "z"),
+            (0x017F, 0x017F, "s"),
+        )
+        for code in range(first, last + 1)
+    },
+}
+_ALIAS_MOST: Final = 32
+_FALLBACK: Final = "folder"
+
+
+def _fold(character: str) -> str:
+    """One character of a folder's name, as an alias writes it (spec/CLI.md section 9.1)."""
+    code = ord(character)
+    if 0xFF01 <= code <= 0xFF5E:  # a full-width form: the ASCII character it stands for
+        character = chr(code - 0xFEE0)
+    if character.isascii():
+        if character.isalpha():
+            return character.lower()
+        if character.isdigit() or character in "-_":
+            return character
+        return "-"
+    return _LATIN.get(character, "-")
+
+
+def suggest_alias(name: str, taken: Collection[str]) -> str:
+    """A valid alias made from a folder's name that is not one of ``taken``: each character
+    folded to lowercase ASCII (Latin letters with a mark lose it, a full-width form is its ASCII
+    character, anything else is ``-``), each run of ``-`` made one, ``-`` and ``_`` taken off both
+    ends, ``folder-`` put first when it starts with a digit, and cut to 32 characters. ``folder``
+    when nothing is left. If ``taken`` holds it, ``-2``, ``-3`` and so on is added to the first that
+    is free, the alias cut first to make room."""
+    folded = re.sub("-+", "-", "".join(_fold(character) for character in name)).strip("-_")
+    if not folded:
+        folded = _FALLBACK
+    elif not folded[0].isalpha():
+        folded = f"{_FALLBACK}-{folded}"
+    alias = folded[:_ALIAS_MOST].rstrip("-_")
+    if alias not in taken:
+        return alias
+    number = 2
+    while True:
+        suffix = f"-{number}"
+        candidate = alias[: _ALIAS_MOST - len(suffix)].rstrip("-_") + suffix
+        if candidate not in taken and valid_alias(candidate):
+            return candidate
+        number += 1
+
+
+def check_root(path: str, family: str) -> tuple[str, str | None]:
+    """Whether the host can open the folder ``path`` and read one entry in it, as an operation
+    working there would: ``ok``, ``denied_by_macos`` (EPERM on macOS, where its privacy protection
+    refuses it), ``denied`` (EACCES, or EPERM on Linux), ``missing`` (ENOENT or ENOTDIR), or
+    ``error`` with the error's name. Sends nothing, and writes nothing."""
+    try:
+        with os.scandir(path) as entries:
+            next(entries, None)
+    except OSError as exc:
+        if exc.errno == errno.EPERM:
+            return ("denied_by_macos" if family == "macos" else "denied"), None
+        if exc.errno == errno.EACCES:
+            return "denied", None
+        if exc.errno in (errno.ENOENT, errno.ENOTDIR):
+            return "missing", None
+        return "error", errno.errorcode.get(exc.errno or 0, f"E{exc.errno}")
+    return "ok", None
 
 
 def fresh() -> Policy:
@@ -220,6 +339,17 @@ def is_broad(path: str, *, home: str | None = None, look_below: bool = False) ->
     """Whether a folder is ``$HOME`` or holds it, by :func:`holds`; ``/`` holds it too."""
     target = home if home is not None else str(Path.home())
     return holds(path, target, look_below=look_below)
+
+
+def broad_kind(path: str, *, home: str | None = None) -> str:
+    """Of a folder :func:`is_broad` found broad: ``root`` for ``/``, ``home`` for the home folder
+    itself, by real path or another spelling of it, else ``holds_home``."""
+    target = home if home is not None else str(Path.home())
+    if os.path.realpath(path) == "/":
+        return "root"
+    if os.path.realpath(path) == os.path.realpath(target) or _same(path, target):
+        return "home"
+    return "holds_home"
 
 
 def _require(condition: bool, message: str) -> None:
@@ -349,13 +479,15 @@ def archive(path: Path, previous: Path) -> bool:
 
     Nothing is moved when there is no policy file, or when it holds the fresh policy, so an earlier
     ``previous`` is never replaced by a fresh one. A file that is invalid is moved as it is: the new
-    pair still starts from the fresh policy."""
+    pair still starts from the fresh policy. The file moved is stamped with the time it was moved,
+    which ``policy previous`` reports as when it was set aside."""
     try:
         if load(path) == fresh():
             return False
     except PolicyError:
         pass
     os.replace(path, previous)
+    os.utime(previous)
     _sync_dir(path.parent)
     save(path, fresh())
     return True
@@ -379,10 +511,10 @@ def effective(policy: Policy, family: str) -> Effective:
         op = OPERATIONS.get(name)
         if op is None:
             unknown.append(name)
-        elif definition != op.definition_hash:
-            changed.append(name)
         elif not op.available(family):
             unavailable.append(name)
+        elif definition != op.definition_hash:
+            changed.append(name)
         else:
             enabled.append(name)
     return Effective(

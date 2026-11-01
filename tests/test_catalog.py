@@ -13,9 +13,17 @@ import pytest
 
 from lucille_host import _exec, spec
 from lucille_host.jobs import Context, Job, Ready, check
-from lucille_host.ops import CATALOG_VERSION, MAX_TIMEOUT_S, OPERATIONS, args_valid
+from lucille_host.ops import (
+    CATALOG_VERSION,
+    MAX_TIMEOUT_S,
+    OPERATIONS,
+    Operation,
+    args_valid,
+    catalog_version,
+)
 from tests._host import MakeContext
 
+REPO_ROOT = Path(__file__).resolve().parents[1]
 PLACEHOLDER = re.compile(r"\{[a-z_][a-z0-9_]*\}")
 
 
@@ -127,6 +135,90 @@ def test_definition_hash_covers_operands_schema_limits_and_environment(
     monkeypatch.undo()
     monkeypatch.setattr("lucille_host.ops.MAX_TIMEOUT_S", 301)
     assert sha.definition_hash != before
+
+
+# This release's hashes, from before the catalog carried words for shells: adding the words changed
+# none of them, so no install's enabled entry turned off.
+HASHES = {
+    "host.describe": "734b854a4e4e0fb7128dc9cce6147de7e7386c20a92b44cf77086031240cc0c4",
+    "host.sleep": "868830c4433044a8d4cb3e3a39ab7985d44a6cce394362a23ae7fcfaa79a5e8d",
+    "files.sha256": "1c29598400572d7e1f93e5cc3ee6df17edfad5be1a78c7e33432a2704bfdddea",
+}
+VERSION_BEFORE_WORDS = "06fe2f327b0916227970e377eaad94b064a7631bd7ff2696b3cef675bd607f35"
+
+
+def _with_about(op: Operation, **changes: Any) -> Operation:
+    return dataclasses.replace(op, about=dataclasses.replace(op.about, **changes))
+
+
+def test_copy_fields_outside_definition_hash() -> None:
+    assert {name: op.definition_hash for name, op in OPERATIONS.items()} == HASHES
+    assert CATALOG_VERSION == VERSION_BEFORE_WORDS == catalog_version(tuple(OPERATIONS.values()))
+    # summary, sends and diagnostic describe an entry and decide nothing: changing them leaves
+    # every hash, and the catalog version, as they are.
+    reworded = []
+    for op in OPERATIONS.values():
+        for changes in (
+            {"summary": "Other words"},
+            {"sends": "Lucille gets other words."},
+            {"diagnostic": not op.about.diagnostic},
+        ):
+            assert _with_about(op, **changes).definition_hash == op.definition_hash, changes
+        reworded.append(
+            _with_about(op, summary="Other words", sends="Other words.", diagnostic=True)
+        )
+    assert catalog_version(tuple(reworded)) == CATALOG_VERSION
+    # sends_file_content is what a shell's consent rests on, so it is part of the definition when
+    # it is true: a release that makes an entry send file contents turns it off until enabled
+    # again. False is not written, which is why the hashes above did not change.
+    sha = OPERATIONS["files.sha256"]
+    assert "sends_file_content" not in sha._definition()
+    flipped = _with_about(sha, sends_file_content=True)
+    assert flipped.definition_hash != sha.definition_hash
+    others = tuple(op for op in OPERATIONS.values() if op.name != sha.name)
+    assert catalog_version((*others, flipped)) != CATALOG_VERSION
+    # What decides what the entry does is still in it.
+    assert dataclasses.replace(sha, timeout_s=31).definition_hash != sha.definition_hash
+
+
+def _must_never_claim() -> list[str]:
+    text = (REPO_ROOT / "PRIVACY.md").read_text(encoding="utf-8")
+    section = text.split("## What this project must never claim", 1)[1].split("\n## ", 1)[0]
+    # A phrase the file wraps across lines is one phrase.
+    phrases = [" ".join(found.split()) for found in re.findall(r'"([^"]+)"', section)]
+    assert len(phrases) >= 15, phrases
+    return phrases
+
+
+def test_catalog_copy_must_not_claim() -> None:
+    phrases = _must_never_claim()
+    for name, op in OPERATIONS.items():
+        for words in (op.about.summary, op.about.sends):
+            for phrase in phrases:
+                found = re.search(rf"(?<![\w-]){re.escape(phrase)}(?![\w-])", words, re.IGNORECASE)
+                assert found is None, (name, phrase, words)
+        assert 0 < len(op.about.summary) <= 60 and 0 < len(op.about.sends) <= 300
+        assert op.about.summary.isascii() and op.about.sends.isascii()
+    sha = OPERATIONS["files.sha256"].about
+    assert sha.summary == "Check a file's fingerprint"
+    assert sha.sends == (
+        "Lucille gets a code that identifies the file's exact contents, not the contents."
+    )
+    # host.sleep is the one diagnostic entry, and no entry in this release sends file contents.
+    assert [n for n, op in OPERATIONS.items() if op.about.diagnostic] == ["host.sleep"]
+    assert not any(op.about.sends_file_content for op in OPERATIONS.values())
+
+
+def test_the_spec_and_the_catalog_say_the_same_words() -> None:
+    # spec/CLI.md section 8 lists each entry's words, as the catalog holds them.
+    text = (REPO_ROOT / "spec" / "CLI.md").read_text(encoding="utf-8")
+    for name, op in OPERATIONS.items():
+        about = op.about
+        row = (
+            f"| `{name}` | {about.summary} | {about.sends} | "
+            f"{str(about.sends_file_content).lower()} | {str(about.diagnostic).lower()} |"
+        )
+        assert row in text, row
 
 
 def test_no_time_limit_passes_300_s() -> None:

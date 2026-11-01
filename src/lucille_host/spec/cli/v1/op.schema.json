@@ -1,0 +1,281 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/gald33/lucille-host/blob/main/src/lucille_host/spec/cli/v1/op.schema.json",
+  "title": "lucille-host --json: op",
+  "description": "One catalog operation as this computer and its local policy have it, or a name the local policy holds that this release's catalog does not.",
+  "oneOf": [
+    {
+      "$ref": "#/$defs/op.enabled"
+    },
+    {
+      "$ref": "#/$defs/op.disabled"
+    },
+    {
+      "$ref": "#/$defs/op.disabled_by_upgrade"
+    },
+    {
+      "$ref": "#/$defs/op.unavailable"
+    },
+    {
+      "$ref": "#/$defs/op.not_in_catalog"
+    }
+  ],
+  "$defs": {
+    "op_name": {
+      "description": "An operation name: namespaced, lowercase, at most 64 characters.",
+      "type": "string",
+      "minLength": 3,
+      "maxLength": 64,
+      "pattern": "^[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*)+$"
+    },
+    "policy_op_name": {
+      "description": "An operation name as the local policy may hold it: in this release's catalog or not.",
+      "type": "string",
+      "minLength": 3,
+      "pattern": "^[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*)+$"
+    },
+    "path": {
+      "description": "An absolute path. A byte of a file name that is not UTF-8 is U+FFFD.",
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^/[^\\u0000]*$"
+    },
+    "op.enabled": {
+      "description": "The local policy enables it, and this computer can run it.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "v",
+        "type",
+        "name",
+        "state",
+        "enabled",
+        "summary",
+        "sends",
+        "sends_file_content",
+        "diagnostic"
+      ],
+      "properties": {
+        "v": {
+          "const": 1
+        },
+        "type": {
+          "const": "op"
+        },
+        "name": {
+          "$ref": "#/$defs/op_name"
+        },
+        "state": {
+          "const": "enabled"
+        },
+        "enabled": {
+          "const": true
+        },
+        "summary": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 60,
+          "pattern": "^[^\\u0000]*$"
+        },
+        "sends": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 300,
+          "pattern": "^[^\\u0000]*$"
+        },
+        "sends_file_content": {
+          "type": "boolean"
+        },
+        "diagnostic": {
+          "type": "boolean"
+        }
+      }
+    },
+    "op.disabled": {
+      "description": "The local policy does not enable it, and this computer could run it.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "v",
+        "type",
+        "name",
+        "state",
+        "enabled",
+        "summary",
+        "sends",
+        "sends_file_content",
+        "diagnostic"
+      ],
+      "properties": {
+        "v": {
+          "const": 1
+        },
+        "type": {
+          "const": "op"
+        },
+        "name": {
+          "$ref": "#/$defs/op_name"
+        },
+        "state": {
+          "const": "disabled"
+        },
+        "enabled": {
+          "const": false
+        },
+        "summary": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 60,
+          "pattern": "^[^\\u0000]*$"
+        },
+        "sends": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 300,
+          "pattern": "^[^\\u0000]*$"
+        },
+        "sends_file_content": {
+          "type": "boolean"
+        },
+        "diagnostic": {
+          "type": "boolean"
+        }
+      }
+    },
+    "op.disabled_by_upgrade": {
+      "description": "The local policy enabled it under a definition this release changed.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "v",
+        "type",
+        "name",
+        "state",
+        "enabled",
+        "summary",
+        "sends",
+        "sends_file_content",
+        "diagnostic"
+      ],
+      "properties": {
+        "v": {
+          "const": 1
+        },
+        "type": {
+          "const": "op"
+        },
+        "name": {
+          "$ref": "#/$defs/op_name"
+        },
+        "state": {
+          "const": "disabled_by_upgrade"
+        },
+        "enabled": {
+          "const": false
+        },
+        "summary": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 60,
+          "pattern": "^[^\\u0000]*$"
+        },
+        "sends": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 300,
+          "pattern": "^[^\\u0000]*$"
+        },
+        "sends_file_content": {
+          "type": "boolean"
+        },
+        "diagnostic": {
+          "type": "boolean"
+        }
+      }
+    },
+    "op.unavailable": {
+      "description": "This computer cannot run it; enabled says whether the local policy enables it.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "v",
+        "type",
+        "name",
+        "state",
+        "enabled",
+        "summary",
+        "sends",
+        "sends_file_content",
+        "diagnostic",
+        "missing_executable"
+      ],
+      "properties": {
+        "v": {
+          "const": 1
+        },
+        "type": {
+          "const": "op"
+        },
+        "name": {
+          "$ref": "#/$defs/op_name"
+        },
+        "state": {
+          "const": "unavailable"
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "summary": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 60,
+          "pattern": "^[^\\u0000]*$"
+        },
+        "sends": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 300,
+          "pattern": "^[^\\u0000]*$"
+        },
+        "sends_file_content": {
+          "type": "boolean"
+        },
+        "diagnostic": {
+          "type": "boolean"
+        },
+        "missing_executable": {
+          "$ref": "#/$defs/path"
+        }
+      }
+    },
+    "op.not_in_catalog": {
+      "description": "The local policy names an operation this release does not have.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "v",
+        "type",
+        "name",
+        "state",
+        "enabled"
+      ],
+      "properties": {
+        "v": {
+          "const": 1
+        },
+        "type": {
+          "const": "op"
+        },
+        "name": {
+          "$ref": "#/$defs/policy_op_name"
+        },
+        "state": {
+          "const": "not_in_catalog"
+        },
+        "enabled": {
+          "const": false
+        }
+      }
+    }
+  }
+}

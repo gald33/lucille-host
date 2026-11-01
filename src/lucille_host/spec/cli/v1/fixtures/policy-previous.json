@@ -1,0 +1,28 @@
+{
+  "description": "policy previous with a policy set aside",
+  "argv": [
+    "policy",
+    "previous",
+    "--json"
+  ],
+  "exit": 0,
+  "stdout": [
+    {
+      "v": 1,
+      "type": "previous_policy",
+      "state": "found",
+      "set_aside_at": "2026-11-01T12:00:00Z",
+      "ops": [
+        "files.sha256",
+        "host.sleep"
+      ],
+      "folders": [
+        {
+          "alias": "docs",
+          "path": "/home/me/Documents",
+          "broad": false
+        }
+      ]
+    }
+  ]
+}

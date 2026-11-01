@@ -1,0 +1,21 @@
+{
+  "description": "roots add, with -- before the alias and the path",
+  "argv": [
+    "--json",
+    "roots",
+    "add",
+    "--",
+    "docs",
+    "/home/me/Documents"
+  ],
+  "exit": 0,
+  "stdout": [
+    {
+      "v": 1,
+      "type": "root",
+      "alias": "docs",
+      "path": "/home/me/Documents",
+      "broad": false
+    }
+  ]
+}

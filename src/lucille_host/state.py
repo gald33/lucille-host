@@ -3,7 +3,8 @@
 - Each file is JSON, mode 0600, written whole: a temporary file in the same folder, synced, then
   renamed over the old one, and the folder synced. A file that is missing reads as nothing; one
   that cannot be read, or holds something else, stops the host (it fails closed), as an invalid
-  policy does.
+  policy does. A time in one is a number of seconds from 1970 to the end of the year 9999
+  (:func:`valid_time`): never NaN, never infinite, and always one the host can write as a date.
 - Every wait for a lock file of the host's own (``os.lockf``) goes through :func:`wait_for_lock`,
   so that a signal whose handler returns, as ``run``'s do, does not end the wait.
 - ``config/host.json`` says where the pair is kept (``keyring``, the default, or ``file`` under
@@ -54,6 +55,7 @@ __all__ = [
     "save_host_config",
     "startup_checks",
     "valid_loopback_hub",
+    "valid_time",
     "wait_for_lock",
     "write_json",
 ]
@@ -62,6 +64,9 @@ STORE_KINDS: Final = ("keyring", "file")
 ENV_PREFIX: Final = "SWITCHBOARD_"
 _LOOPBACK_HUB = re.compile(r"http://(?:127\.0\.0\.1|localhost):([1-9][0-9]{0,4})", re.ASCII)
 _HOST_KEYS = frozenset({"v", "hub", "store"})
+# The latest time a file of the host's own may hold: the last second of the year 9999, the last
+# that can be written as a date.
+LATEST: Final = 253402300799
 
 
 class StateError(RuntimeError):
@@ -139,6 +144,12 @@ def read_json(path: Path) -> Any:
         return json.loads(text)
     except ValueError as exc:
         raise StateError(f"{path} is not valid JSON ({exc})") from exc
+
+
+def valid_time(value: Any) -> bool:
+    """Whether ``value`` is a time a file of the host's own may hold: a number, not a boolean,
+    from 0 to :data:`LATEST`. NaN and the infinities are not."""
+    return isinstance(value, int | float) and not isinstance(value, bool) and 0 <= value <= LATEST
 
 
 def valid_loopback_hub(url: str) -> bool:

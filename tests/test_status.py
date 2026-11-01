@@ -7,6 +7,7 @@ side: a profile paired through the ``pair`` verbs (``tests/_cli.py``), or paired
 
 from __future__ import annotations
 
+import dataclasses
 import errno
 import json
 import os
@@ -14,9 +15,10 @@ import re
 import signal
 import threading
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any
 
 import httpx
@@ -24,14 +26,27 @@ import pytest
 from switchboard import pairing, writekey
 from switchboard.testing import hub
 
-from lucille_host import __version__, _switchboard, audit, gate, link, loop, paths, rooms, state
+from lucille_host import (
+    __version__,
+    _switchboard,
+    audit,
+    gate,
+    link,
+    loop,
+    paths,
+    policy,
+    rooms,
+    state,
+)
 from lucille_host.audit import AuditLog
 from lucille_host.cli import main
 from lucille_host.controls import Controls
+from lucille_host.ops import OPERATIONS, Operation
 from tests import _elsewhere
 from tests._cli import HostCli, collecting
 from tests._host import HostEnv, lock_free, lock_held
 from tests._run import RunHost, body, fast, nothing, until
+from tests.spec import _support
 
 pytestmark = pytest.mark.filterwarnings(
     "ignore:Using `httpx` with `starlette.testclient` is deprecated"
@@ -144,6 +159,125 @@ def _line(out: str, label: str) -> str:
 
 def _status(host: RunHost) -> dict[str, Any]:
     return json.loads(host.dirs.status_file.read_text())
+
+
+def _objects(out: str) -> list[dict[str, Any]]:
+    """What a command run with ``--json`` wrote: one object per line, each held to its schema."""
+    return _support.cli_objects(out)
+
+
+# The text of each word status --json gives for why a room was abandoned or left.
+WHY = {
+    "replaced": rooms.REPLACED,
+    "left_by_lucille": rooms.LUCILLE_LEFT,
+    "pair_moved": rooms.MOVED,
+    "not_over_current_pair": rooms.NOT_LISTED,
+    "pair_over": rooms.PAIR_OVER,
+    "gone": rooms.GONE,
+    "check_3": rooms.CHECK_HUB,
+    "check_4": rooms.CHECK_TOKEN,
+    "left_before": rooms.LEFT_BEFORE,
+}
+
+
+# The text of each word status --json gives for why the policy holds an operation disabled.
+DISABLED = {
+    "disabled_by_upgrade": ": an upgrade changed it; `lucille-host ops enable ",
+    "unavailable": ": not on this computer",
+    "not_in_catalog": ": not in this release's catalog",
+}
+
+
+def _agree(command: Callable[..., Ran]) -> dict[str, Any]:
+    """``status`` and ``status --json`` run one after the other, and each field of the object says
+    what the matching line of the text says. Returns the object."""
+    text = command("status")
+    ran = command("status", "--json")
+    assert (text.rc, ran.rc) == (0, 0), (text.err, ran.err)
+    (found,) = _objects(ran.out)
+    lines = text.lines
+    assert lines[0] == f"lucille-host {found['host_version']}"
+    checked = found["policy"]
+    if checked["state"] == "ok":
+        where = checked["file"] or "no file yet: the fresh policy"
+        assert _line(text.out, "policy") == f"policy: ok ({where})"
+        assert _line(text.out, "enabled") == "enabled: " + (", ".join(checked["enabled"]) or "none")
+        disabled = [line for line in lines if line.startswith("disabled: ")]
+        assert len(disabled) == len(checked["disabled"])
+        for line, entry in zip(disabled, checked["disabled"], strict=True):
+            assert line.startswith(f"disabled: {entry['name']}{DISABLED[entry['why']]}"), line
+        assert _line(text.out, "folders") == "folders: " + (", ".join(checked["folders"]) or "none")
+    else:
+        assert _line(text.out, "policy") == f"policy: invalid: {checked['error']}"
+    assert _line(text.out, "controls").startswith(
+        "controls: paused: " if found["paused"] else "controls: not paused"
+    )
+    if found["store"] == "keyring":
+        assert _line(text.out, "store") == "store: the OS keyring"
+    else:
+        assert found["store"] == "file" and _line(text.out, "store").startswith("store: files in ")
+    # The loopback hub is in the object exactly when the line names one, and is the one it names.
+    hub_line = f"hub: {found['hub']}"
+    if found["loopback_hub"] is not None:
+        hub_line += (
+            f", and the loopback hub {found['loopback_hub']} that `lucille-host pair --hub` named"
+        )
+    assert _line(text.out, "hub") == hub_line
+    word = {"several_pairs": "error"}.get(found["pair"]["state"], found["pair"]["state"])
+    assert _line(text.out, "pair").startswith(f"pair: {word}: ")
+    if "name" in found["pair"]:
+        assert found["pair"]["name"] in _line(text.out, "pair")
+    if found["pair"]["state"] == "confirmed":
+        generation = found["pair"]["generation"]
+        assert _line(text.out, "pair") == f"pair: confirmed: pair {found['pair']['name']}" + (
+            f" (generation {generation})" if generation is not None else ""
+        )
+    held = [line for line in lines if line.startswith("work room: ")]
+    if not found["work_rooms"]:
+        assert held[0].startswith("work room: none: ")
+        if found["last_left_because"] is not None:
+            assert f": {WHY[found['last_left_because']]}: " in held[0]
+        else:
+            assert held == [NO_ROOM]
+    else:
+        assert len(held) == len(found["work_rooms"])
+        for line, room in zip(held, found["work_rooms"], strict=True):
+            assert line.startswith(f"work room: {room['name']} ("), line
+            if room["state"] != "accept_interrupted":
+                assert f"(accepted {room['accepted_at']}" in line
+            notes = {
+                "reading": "; read by `run`)",
+                "read_stuck": "; read_stuck: ",
+                "pair_gone": "the pair it was taken over is gone from this computer",
+                "accept_interrupted": "an accept a stop interrupted may have kept it",
+            }
+            if room["state"] == "abandoned":
+                assert f"abandoned ({WHY[room['why']]})" in line
+            elif room["state"] == "not_read":
+                assert line.endswith(f"(accepted {room['accepted_at']})")
+            else:
+                assert notes[room["state"]] in line
+    offers = [line for line in lines if line.startswith("offers: ")]
+    if found["offers_waiting"]:
+        assert offers[0].startswith(f"offers: {found['offers_waiting']} waiting")
+    else:
+        assert offers == []
+    run = found["run"]
+    expected_run = {
+        "none": "run: no record: ",
+        "running": f"run: running (pid {run.get('pid')}), as of {run.get('as_of')}",
+        "not_seen": f"run: not seen since {run.get('as_of')} (pid {run.get('pid')}): ",
+        "stopped": f"run: stopped at {run.get('as_of')}",
+    }[run["state"]]
+    assert _line(text.out, "run").startswith(expected_run)
+    contact = found["last_hub_contact"] or "none recorded"
+    assert _line(text.out, "last hub contact") == f"last hub contact: {contact}"
+    clock = found["clock"]
+    assert _line(text.out, "clock").startswith(f"clock: {clock['state']}: ")
+    if clock["state"] == "ok":
+        side = "behind" if clock["skew_s"] > 0 else "ahead of"
+        assert f"{abs(clock['skew_s']):.1f} s {side}" in _line(text.out, "clock")
+    return found
 
 
 # --- status ---------------------------------------------------------------------------------------
@@ -363,6 +497,26 @@ def test_pair_says_when_the_hub_refuses_its_answer_for_the_clock(
     lines = [json.loads(line) for line in cli.audit().splitlines()]
     (accepted,) = [line for line in lines if line.get("event") == "accepted"]
     assert (accepted["sent"], accepted["skewed"]) == (False, True)
+    # With --json, the accepted object says so, and stderr warns the same.
+    ahead[0] = True
+    second = cli.lucille()
+    listened = cli.listens
+    running = cli.start(
+        "--profile", "json", "--json", "pair", "--code-stdin", stdin=second.start() + "\n"
+    )
+    until(lambda: cli.listens > listened, what="the wait")
+    ahead[0] = False
+    with collecting(second):
+        ran = running.wait(30)
+    assert ran.rc == 0, ran.text
+    assert _objects(ran.out)[1] == {
+        "v": 1,
+        "type": "pair",
+        "state": "accepted",
+        "name": second.name,
+        "clock_skewed": True,
+    }
+    assert ran.err == f"lucille-host: warning: {link.SKEWED}\n"
 
 
 def test_status_never_shows_sas(cli: HostCli) -> None:
@@ -426,6 +580,305 @@ def test_status_shows_no_sas_the_host_has_not_shown(cli: HostCli) -> None:
     assert '"sas_shown"' not in cli.audit()
 
 
+def test_status_json_never_shows_sas(cli: HostCli) -> None:
+    lucille = cli.lucille()
+    cli.interrupted(lucille.start())
+    outputs = []
+
+    def pair_of_status() -> dict[str, Any]:
+        ran = cli.run("status", "--json")
+        assert ran.rc == 0, ran.text
+        outputs.append(ran.text)
+        (found,) = _objects(ran.out)
+        return found["pair"]
+
+    assert pair_of_status() == {"state": "waiting", "name": lucille.name}
+    assert lucille.collect().state == "paired"
+    # The SAS has reached the host (`pair confirm` resolved, and refused), and no command has
+    # shown it: status --json says so, shows none, and starts no deadline.
+    assert cli.run("pair", "confirm").rc == 1
+    assert pair_of_status() == {"state": "sas_ready", "name": lucille.name}
+    found = cli.gate()
+    assert found is not None and (found.shown_at, found.deadline) == (None, None)
+    assert '"sas_shown"' not in cli.audit()
+    # Shown by `pair status`: status --json gives the deadline, and still no SAS.
+    sas = lucille.sas()
+    assert sas in cli.run("pair", "status").out
+    found = cli.gate()
+    assert found is not None and found.deadline is not None
+    assert pair_of_status() == {
+        "state": "sas_pending",
+        "name": lucille.name,
+        "deadline": link.iso(found.deadline),
+    }
+    cli.h.advance(86400 + 1)
+    assert pair_of_status() == {
+        "state": "expired",
+        "name": lucille.name,
+        "deadline": link.iso(found.deadline),
+    }
+    assert cli.gate() == found
+    for text in outputs:
+        assert sas not in text and sas.replace("-", "") not in text
+
+
+def test_status_json_reports_no_generation_past_the_bound(cli: HostCli) -> None:
+    # Lucille's side can raise the pair's generation, and the library takes any integer from 0.
+    # One past the bound is reported as unknown, and status still answers, as text and as JSON.
+    lucille = cli.lucille()
+    cli.paired(lucille)
+    assert cli.run("pair", "confirm").rc == 0
+    for generation, reported in (
+        (link.GENERATION_MOST, link.GENERATION_MOST),
+        (link.GENERATION_MOST + 1, None),
+        (2**70, None),
+    ):
+        record = lucille.pairs.get(lucille.name)
+        record.generation = generation
+        lucille.pairs.save(record)
+        lucille.resolve()
+        assert cli.run("pair", "status", "--json").rc == 0
+        kept = _switchboard.open_link(cli.dirs, state.load_host_config(cli.dirs)).kept(lucille.name)
+        assert kept is not None and kept.generation == generation
+        found = _agree(_through(cli))
+        assert found["pair"] == {"state": "confirmed", "name": lucille.name, "generation": reported}
+
+
+def test_status_json_matches_text(host: RunHost, command: Commands, tmp_path: Path) -> None:
+    state.save_host_config(host.dirs, state.HostConfig(hub=LOOPBACK))
+    host.enable("host.sleep")
+    folder = tmp_path / "docs"
+    folder.mkdir()
+    assert command("roots", "add", "docs", str(folder)).rc == 0
+    found = _agree(command)
+    assert found["pair"]["state"] == "confirmed" and found["run"] == {"state": "none"}
+    assert found["pair"]["generation"] == host.lucille.resolve().generation
+    assert (found["store"], found["loopback_hub"]) == ("keyring", LOOPBACK)
+    # A room taken and read, a reply posted, and the controls paused.
+    host.start()
+    room = host.offer("work-1")
+    host.reply("work-1", host.request("work-1"))
+    until(lambda: _status(host)["skew"] is not None, what="a skew measured")
+    assert command("pause").rc == 0
+    found = _agree(command)
+    assert found["paused"] and found["run"]["state"] == "running"
+    assert found["work_rooms"] == [
+        {
+            "state": "reading",
+            "name": room,
+            "accepted_at": link.iso(host.record().held[room].accepted_at),
+        }
+    ]
+    assert found["clock"]["state"] == "ok"
+    host.stop()
+    found = _agree(command)
+    assert found["run"]["state"] == "stopped" and found["work_rooms"][0]["state"] == "not_read"
+    # Abandoned; offers waiting; the clock skewed; a run that stopped without saying so.
+    record = host.record()
+    record.held[room].abandoned = rooms.REPLACED
+    record.offers = {"work-2": 1.0, "work-3": 2.0}
+    rooms.save(host.dirs.rooms_file, record)
+    seen = _status(host)
+    state.write_json(
+        host.dirs.status_file,
+        {**seen, "running": True, "written_at": time.time() - 4 * loop.STATUS_EVERY},
+    )
+    found = _agree(command)
+    assert found["work_rooms"][0]["why"] == "replaced" and found["offers_waiting"] == 2
+    assert found["run"]["state"] == "not_seen"
+    state.write_json(host.dirs.status_file, {**seen, "skewed": True})
+    assert _agree(command)["clock"] == {"state": "skewed", "skew_s": seen["skew"]}
+    # No room held, the last one left on its own; an invalid policy.
+    rooms.save(host.dirs.rooms_file, rooms.Record(pair=record.pair, made=record.made))
+    record = host.record()
+    record.no_room = rooms.CHECK_TOKEN
+    rooms.save(host.dirs.rooms_file, record)
+    host.dirs.policy_file.write_text("enabled = 3\n")
+    found = _agree(command)
+    assert found["work_rooms"] == [] and found["last_left_because"] == "check_4"
+    assert found["policy"]["state"] == "invalid"
+
+
+def _through(cli: HostCli) -> Callable[..., Ran]:
+    """The command run through ``cli``, as :func:`_agree` runs it."""
+
+    def command(*argv: str) -> Ran:
+        ran = cli.run(*argv)
+        return Ran(ran.rc, ran.out, ran.err)
+
+    return command
+
+
+def test_status_json_matches_text_with_no_pair_held(
+    cli: HostCli, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # No pair held: a room left over from a pair the library dropped, the room of an accept a stop
+    # interrupted, and a room abandoned for each reason. No folder, and an operation disabled for
+    # each reason.
+    monkeypatch.setattr(Operation, "available", lambda op, _family: op.name != "files.sha256")
+    paths.ensure_dir(cli.dirs.config)
+    enabled = {
+        "host.sleep": "0" * 64,
+        "files.sha256": OPERATIONS["files.sha256"].definition_hash,
+        "host.nothing": "1" * 64,
+    }
+    policy.save(cli.dirs.policy_file, policy.Policy(enabled=MappingProxyType(enabled)))
+    held = {"left-over": rooms.Held("workspace-0", 1.0)}
+    for word, why in WHY.items():
+        held[word.replace("_", "-")] = rooms.Held(f"workspace-{word}", 2.0, why)
+    paths.ensure_dir(cli.dirs.state)
+    interrupted = rooms.Accepting("offer-1", "room-9", ())
+    rooms.save(
+        cli.dirs.rooms_file,
+        rooms.Record(pair="pair-x", made=1.0, held=held, accepting=interrupted),
+    )
+    found = _agree(_through(cli))
+    assert found["pair"] == {"state": "none"}
+    assert found["policy"]["folders"] == [] and found["policy"]["disabled"] == [
+        {"name": "host.sleep", "why": "disabled_by_upgrade"},
+        {"name": "files.sha256", "why": "unavailable"},
+        {"name": "host.nothing", "why": "not_in_catalog"},
+    ]
+    abandoned = {
+        word.replace("_", "-"): {
+            "state": "abandoned",
+            "name": word.replace("_", "-"),
+            "accepted_at": link.iso(2.0),
+            "why": word,
+        }
+        for word in WHY
+    }
+    left_over = {"state": "pair_gone", "name": "left-over", "accepted_at": link.iso(1.0)}
+    assert found["work_rooms"] == [
+        *[{**abandoned, "left-over": left_over}[name] for name in sorted(held)],
+        {"state": "accept_interrupted", "name": "room-9"},
+    ]
+
+
+def test_status_json_matches_text_for_the_rooms_run_reads(cli: HostCli) -> None:
+    # A pair held, with a room `run` reads and one where it stopped reading; `run` has not reached
+    # the hub yet.
+    lucille = cli.lucille()
+    cli.paired(lucille)
+    assert cli.run("pair", "confirm").rc == 0
+    now = cli.h.now
+    held = {"room-1": rooms.Held("workspace-1", now), "room-2": rooms.Held("workspace-2", now)}
+    rooms.save(cli.dirs.rooms_file, rooms.Record(pair=lucille.name, made=now, held=held))
+    state.write_json(
+        cli.dirs.status_file,
+        {
+            "v": 1,
+            "running": True,
+            "pid": 4242,
+            "written_at": now,
+            "last_contact": None,
+            "skew": None,
+            "skewed": False,
+            "reading": ["room-1"],
+            "read_stuck": ["room-2"],
+        },
+    )
+    found = _agree(_through(cli))
+    accepted = link.iso(now)
+    assert found["work_rooms"] == [
+        {"state": "reading", "name": "room-1", "accepted_at": accepted},
+        {"state": "read_stuck", "name": "room-2", "accepted_at": accepted},
+    ]
+    assert found["run"] == {"state": "running", "pid": 4242, "as_of": accepted}
+    assert found["last_hub_contact"] is None
+
+
+def test_status_json_names_each_check_the_last_room_failed(cli: HostCli) -> None:
+    paths.ensure_dir(cli.dirs.state)
+    words = {
+        rooms.CHECK_HUB: "check_3",
+        rooms.CHECK_TOKEN: "check_4",
+        rooms.LEFT_BEFORE: "left_before",
+    }
+    assert set(words) == set(rooms.CHECKS)
+    for check, word in words.items():
+        rooms.save(cli.dirs.rooms_file, rooms.Record(no_room=check))
+        found = _agree(_through(cli))
+        assert (found["work_rooms"], found["last_left_because"]) == ([], word)
+
+
+def test_status_json_matches_text_with_the_file_store(cli: HostCli) -> None:
+    # The pair kept in files, through the states of the pair the tests above do not reach, and a
+    # clock the hub refused before any skew was measured.
+    lucille = cli.lucille()
+    cli.paired(lucille, "--store-file")
+    found = _agree(_through(cli))
+    assert (found["store"], found["loopback_hub"]) == ("file", None)
+    assert found["pair"]["state"] == "sas_pending"
+    # No gate record: it can never be confirmed here.
+    cli.dirs.gate_file.unlink()
+    found = _agree(_through(cli))
+    assert found["pair"] == {"state": "refused", "name": lucille.name}
+    assert cli.run("pair", "reject").rc == 0
+    second = cli.lucille()
+    cli.paired(second, "--store-file")
+    assert cli.run("pair", "confirm").rc == 0
+    found = _agree(_through(cli))
+    assert found["store"] == "file"
+    assert found["pair"] == {"state": "confirmed", "name": second.name, "generation": 0}
+    # Lucille moves the pair to a new generation, and `pair status` resolves it.
+    second.heal()
+    assert cli.run("pair", "status").rc == 0
+    found = _agree(_through(cli))
+    assert second.resolve().generation == 1
+    assert found["pair"] == {"state": "confirmed", "name": second.name, "generation": 1}
+    # A kept pair whose generation the store does not say.
+    real = _switchboard.Link.kept
+
+    def no_generation(link_: Any, name: str) -> Any:
+        kept = real(link_, name)
+        return None if kept is None else dataclasses.replace(kept, generation=None)
+
+    with cli.monkeypatch.context() as patch:
+        patch.setattr(_switchboard.Link, "kept", no_generation)
+        found = _agree(_through(cli))
+    assert found["pair"] == {"state": "confirmed", "name": second.name, "generation": None}
+    # The hub refused a write for the clock before any reply measured a skew.
+    now = cli.h.now
+    state.write_json(
+        cli.dirs.status_file,
+        {
+            "v": 1,
+            "running": False,
+            "pid": 4242,
+            "written_at": now,
+            "last_contact": None,
+            "skew": None,
+            "skewed": True,
+            "reading": [],
+            "read_stuck": [],
+        },
+    )
+    found = _agree(_through(cli))
+    assert found["clock"] == {"state": "skewed", "skew_s": None}
+    assert found["run"] == {"state": "stopped", "as_of": link.iso(now)}
+
+
+def test_status_refuses_a_room_record_it_cannot_report(cli: HostCli) -> None:
+    # A rooms file that holds a value no status could report is a file of the host's own that
+    # holds something else: it stops the command, as every other such file does.
+    good = rooms.Record(pair="pair-abc", made=1.0, held={"room-1": rooms.Held("workspace", 1.0)})
+    for bad in (
+        dataclasses.replace(good, held={"room-1": rooms.Held("workspace", 1.0, "no idea")}),
+        dataclasses.replace(good, held={"Room 1": rooms.Held("workspace", 1.0)}),
+        dataclasses.replace(good, pair="Pair ABC"),
+        dataclasses.replace(good, accepting=rooms.Accepting("offer", "Room!", ())),
+    ):
+        paths.ensure_dir(cli.dirs.state)
+        rooms.save(cli.dirs.rooms_file, bad)
+        ran = cli.run("--json", "status")
+        assert ran.rc == 1, bad
+        assert [found["code"] for found in _objects(ran.out)] == ["state_invalid"]
+        assert "not a lucille-host room record" in ran.err
+    rooms.save(cli.dirs.rooms_file, good)
+    assert cli.run("--json", "status").rc == 0
+
+
 # --- log ------------------------------------------------------------------------------------------
 
 
@@ -460,7 +913,63 @@ def test_log_prints_last_lines(home: Path, capsys: pytest.CaptureFixture[str]) -
         assert "--limit takes a number of lines" in capsys.readouterr().err
 
 
+def test_log_json_lines_oldest_first(home: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    folder = paths.ensure_dir(paths.dirs().state)
+    assert main(["log", "--json"]) == 0
+    out, err = capsys.readouterr()
+    assert out == "" and "the audit log has no lines yet" in err
+    log = AuditLog(folder, max_bytes=700)
+    for index in range(30):
+        log.write("test", n=index)
+    with (folder / "audit.log").open("ab") as handle:
+        handle.write(b'{"kind":"x","note":"\x1b[2J\xe2\x80\xae"}\n')
+    assert main(["log", "--limit", "3"]) == 0
+    printed = capsys.readouterr().out.splitlines()
+    assert main(["log", "--limit", "3", "--json"]) == 0
+    out = capsys.readouterr().out
+    assert out.isascii()
+    assert _objects(out) == [{"v": 1, "type": "log_line", "text": line} for line in printed]
+    assert [json.loads(found["text"]).get("n") for found in _objects(out)] == [28, 29, None]
+    assert _objects(out)[-1]["text"] == '{"kind":"x","note":"?[2J???"}'
+    # Across the rotated files, oldest first.
+    assert main(["--json", "log", "--limit", "25"]) == 0
+    texts = [found["text"] for found in _objects(capsys.readouterr().out)]
+    assert [json.loads(text).get("n") for text in texts[:-1]] == list(range(6, 30))
+    for bad in ("0", "-1"):
+        assert main(["log", "--limit", bad, "--json"]) == 1
+        out, err = capsys.readouterr()
+        assert [found["code"] for found in _objects(out)] == ["bad_limit"]
+        assert "--limit takes a number of lines" in err
+
+
 # --- forget ---------------------------------------------------------------------------------------
+
+
+def test_forget_json_says_whether_lucille_was_told(cli: HostCli) -> None:
+    ran = cli.run("forget", "--json")
+    assert ran.rc == 1
+    assert _objects(ran.out) == [
+        {"v": 1, "type": "error", "code": "none", "message": "this computer holds no pair"}
+    ]
+    lucille = cli.lucille()
+    cli.paired(lucille)
+    assert cli.run("pair", "confirm").rc == 0
+    ran = cli.run("--json", "forget")
+    assert ran.rc == 0, ran.text
+    assert _objects(ran.out) == [
+        {"v": 1, "type": "forget", "state": "forgotten", "name": lucille.name, "lucille_told": True}
+    ]
+    assert cli.held() == []
+    # The hub out of reach: forgotten here all the same, and Lucille was not told.
+    second = cli.lucille()
+    cli.paired(second)
+    cli.client_class = Down(cli.h)
+    ran = cli.run("forget", "--json")
+    assert ran.rc == 0, ran.text
+    assert _objects(ran.out) == [
+        {"v": 1, "type": "forget", "state": "forgotten", "name": second.name, "lucille_told": False}
+    ]
+    assert cli.held() == [] and second.resolve().state == "paired"
 
 
 def test_forget_reports_whether_told(cli: HostCli) -> None:
@@ -631,12 +1140,14 @@ def test_forget_verb_leaves_the_rooms_of_a_pair_the_library_dropped(
         "abandoned (pair over): nothing is taken from it, and `lucille-host forget` leaves it)"
     ), line
     monkeypatch.setattr(_switchboard.Link, "leave_room", real)
-    ran = command("forget")
+    found = _objects(command("status", "--json").out)[0]
+    assert found["pair"] == {"state": "none"}
+    assert [(r["name"], r["state"], r.get("why")) for r in found["work_rooms"]] == [
+        (room, "abandoned", "pair_over")
+    ]
+    ran = command("forget", "--json")
     assert ran.rc == 0, ran.err
-    assert ran.out == (
-        f"left: pair {host.name} was gone from this computer already, and the work rooms still "
-        "held over it are left now\n"
-    )
+    assert _objects(ran.out) == [{"v": 1, "type": "forget", "state": "left", "name": host.name}]
     (stored,) = host_env.keyring.items.values()
     assert config.key not in stored and config.write_key not in stored
     record = host.record()
@@ -645,6 +1156,83 @@ def test_forget_verb_leaves_the_rooms_of_a_pair_the_library_dropped(
     assert not host.dirs.cursors_file.exists()
     ran = command("forget")
     assert ran.rc == 1 and ran.err == "none: this computer holds no pair\n"
+
+
+def test_forget_verb_says_it_left_the_rooms_of_a_pair_the_library_dropped(
+    host: RunHost, command: Commands, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The text of `forget` once the library dropped the pair and a room could not be left then.
+    host.start()
+    host.offer("work-1")
+    host.stop()
+    kept = host.opened.pairs.get(host.name)
+    assert kept is not None
+    host.opened.forget(host.name)
+    host.opened.pairs.save(kept)
+    real = _switchboard.Link.leave_room
+
+    def cannot(opened: _switchboard.Link, name: str) -> _switchboard.RoomLeft:
+        raise _switchboard.RoomError("store", "the share store could not be written")
+
+    monkeypatch.setattr(_switchboard.Link, "leave_room", cannot)
+    ran = command("pair", "status", "--json")
+    assert ran.rc == 1
+    assert [found["code"] for found in _objects(ran.out)] == ["room_not_left"]
+    monkeypatch.setattr(_switchboard.Link, "leave_room", real)
+    ran = command("forget")
+    assert ran.rc == 0, ran.err
+    assert ran.out == (
+        f"left: pair {host.name} was gone from this computer already, and the work rooms still "
+        "held over it are left now\n"
+    )
+
+
+def test_forget_json_says_a_room_could_not_be_left(
+    host: RunHost, command: Commands, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    host.start()
+    host.offer("work-1")
+    host.stop()
+    real = _switchboard.Link.leave_room
+
+    def cannot(opened: _switchboard.Link, name: str) -> _switchboard.RoomLeft:
+        raise _switchboard.RoomError("store", "the share store could not be written")
+
+    # The pair still held: it is kept, and the same command can be tried again.
+    monkeypatch.setattr(_switchboard.Link, "leave_room", cannot)
+    kept = (
+        f"pair {host.name} is kept on this computer: a work room held over it could not be left, "
+        "and its keys would stay behind; try again"
+    )
+    ran = command("forget", "--json")
+    assert ran.rc == 1 and ran.err == f"error: {kept}\n"
+    assert _objects(ran.out) == [
+        {"v": 1, "type": "error", "code": "room_not_left", "message": kept}
+    ]
+    assert host.opened.names() == [host.name]
+
+    # The leave has the library drop the pair, and then fails: the pair is gone here, and
+    # `forget` leaves the room.
+    def dropped(opened: _switchboard.Link, name: str) -> _switchboard.RoomLeft:
+        with host.opened.pairs.lock():
+            host.opened.pairs.delete(host.name)
+        return cannot(opened, name)
+
+    monkeypatch.setattr(_switchboard.Link, "leave_room", dropped)
+    stranded = (
+        f"pair {host.name} is gone from this computer, and a work room held over it could not be "
+        "left: its keys stay in the share store until `lucille-host forget` leaves it"
+    )
+    ran = command("--json", "forget")
+    assert ran.rc == 1 and ran.err == f"error: {stranded}\n"
+    assert _objects(ran.out) == [
+        {"v": 1, "type": "error", "code": "room_not_left", "message": stranded}
+    ]
+    assert host.opened.names() == [] and host.gate() is None
+    monkeypatch.setattr(_switchboard.Link, "leave_room", real)
+    ran = command("--json", "forget")
+    assert ran.rc == 0, ran.err
+    assert _objects(ran.out) == [{"v": 1, "type": "forget", "state": "left", "name": host.name}]
 
 
 def test_forget_verb_with_nothing_left_of_a_dropped_pair_says_no_pair_is_held(

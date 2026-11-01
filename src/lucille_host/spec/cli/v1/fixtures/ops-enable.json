@@ -1,0 +1,23 @@
+{
+  "description": "ops enable, with --json after the action",
+  "argv": [
+    "ops",
+    "enable",
+    "host.sleep",
+    "--json"
+  ],
+  "exit": 0,
+  "stdout": [
+    {
+      "v": 1,
+      "type": "op",
+      "name": "host.sleep",
+      "state": "enabled",
+      "enabled": true,
+      "summary": "Wait up to 4 minutes, for testing",
+      "sends": "Lucille gets how long the wait took and how it ended.",
+      "sends_file_content": false,
+      "diagnostic": true
+    }
+  ]
+}

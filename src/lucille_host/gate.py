@@ -25,7 +25,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
-from typing import Any, Final
+from typing import Final
 
 from lucille_host import state
 
@@ -65,10 +65,6 @@ class Gate:
     touched_at: float | None = None
 
 
-def _number(value: Any) -> bool:
-    return isinstance(value, int | float) and not isinstance(value, bool)
-
-
 def load(path: Path) -> Gate | None:
     """The gate in ``path``, or None when there is none. Anything else stops the host
     (:class:`state.StateError`)."""
@@ -81,8 +77,8 @@ def load(path: Path) -> Gate | None:
     valid = (
         isinstance(fields["pair"], str)
         and isinstance(fields["hub"], str)
-        and _number(fields["created_at"])
-        and all(fields[key] is None or _number(fields[key]) for key in _TIMES)
+        and state.valid_time(fields["created_at"])
+        and all(fields[key] is None or state.valid_time(fields[key]) for key in _TIMES)
         and (fields["shown_at"] is None) == (fields["deadline"] is None)
         and (fields["opened_at"] is None or fields["shown_at"] is not None)
     )

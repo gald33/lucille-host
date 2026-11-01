@@ -130,4 +130,9 @@ The first version.
   - A deeply nested body is a point v1 leaves open; meanwhile the host reads a body nested more than 64
     levels deep as one it cannot open, and posts nothing for it
     ([PROTOCOL.md §19](PROTOCOL.md#19-not-specified-in-v1)).
+- **Revised in the draft, with the command line's `--json` contract** ([CLI.md](CLI.md)).
+  - Editorial: `catalog_version` is said to change whenever any entry's definition, or whether a fresh
+    install enables it, changes ([PROTOCOL.md §11](PROTOCOL.md#11-replies), and the description in
+    `host.describe.schema.json`). Each catalog entry now carries words for a shell, which are outside it.
+    The value is what it was: this changes nothing either side may send.
 - First accepted by: no host release yet. Lucille: not yet.

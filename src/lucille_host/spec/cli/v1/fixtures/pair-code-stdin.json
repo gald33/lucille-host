@@ -1,0 +1,43 @@
+{
+  "description": "pair --code-stdin from a policy that is not the fresh one, until the SAS is shown",
+  "argv": [
+    "pair",
+    "--code-stdin",
+    "--json"
+  ],
+  "exit": 0,
+  "stdout": [
+    {
+      "v": 1,
+      "type": "pair_code",
+      "name": "pair-abcdef",
+      "hub": "https://switchboard.lucille-ai.com",
+      "note": ""
+    },
+    {
+      "v": 1,
+      "type": "policy_reset"
+    },
+    {
+      "v": 1,
+      "type": "pair",
+      "state": "accepted",
+      "name": "pair-abcdef",
+      "clock_skewed": false
+    },
+    {
+      "v": 1,
+      "type": "pair",
+      "state": "waiting",
+      "name": "pair-abcdef"
+    },
+    {
+      "v": 1,
+      "type": "pair",
+      "state": "sas_pending",
+      "name": "pair-abcdef",
+      "sas": "1234-5678",
+      "deadline": "2026-11-01T12:00:00Z"
+    }
+  ]
+}

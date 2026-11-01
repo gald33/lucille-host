@@ -14,6 +14,8 @@
   (``spec/PROTOCOL.md``, section 6), and :func:`largest_host_describe` and
   :func:`shortest_host_describe` build the largest and the shortest document
   ``host.describe.schema.json`` allows.
+- :func:`cli_objects` reads what a command run with ``--json`` wrote, and holds each object to
+  the command line's schemas (``spec/CLI.md``).
 """
 
 from __future__ import annotations
@@ -86,6 +88,33 @@ def schema_accepts(name: str, instance: Any, schema: Mapping[str, Any] | None = 
 def serialized_size(value: Any) -> int:
     """Bytes of ``value`` serialized with every non-ASCII character escaped and no whitespace."""
     return len(json.dumps(value, ensure_ascii=True, separators=(",", ":")))
+
+
+def compact(value: Any) -> str:
+    """``value`` as spec/CLI.md section 4.1 writes an object: ASCII, no whitespace, its fields in
+    the order they come."""
+    return json.dumps(value, ensure_ascii=True, separators=(",", ":"))
+
+
+def cli_objects(out: str) -> list[dict[str, Any]]:
+    """What a command run with ``--json`` wrote on standard output: one object per line, each
+    written compactly, with ``"v": 1``, a type of the command line contract, and accepted by that
+    type's schema (spec/CLI.md)."""
+    objects = []
+    for line in out.splitlines():
+        found = json.loads(line)
+        if line != compact(found):
+            raise AssertionError(f"not written compactly: {line}")
+        if not (isinstance(found, dict) and found.get("v") == 1):
+            raise AssertionError(f"not an object of version 1: {line}")
+        if found.get("type") not in spec.CLI_TYPES:
+            raise AssertionError(f"not a type of the contract: {line}")
+        schema = spec.load_cli_schema(found["type"])
+        errors = [error.message for error in validator_for(schema).iter_errors(found)]
+        if errors:
+            raise AssertionError(f"{line}: {errors}")
+        objects.append(found)
+    return objects
 
 
 def walk(value: Any) -> Iterator[Any]:

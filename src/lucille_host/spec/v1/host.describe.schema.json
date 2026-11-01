@@ -29,7 +29,7 @@
       ]
     },
     "catalog_version": {
-      "description": "Identifies the release's catalog; it changes whenever any entry does.",
+      "description": "Identifies the release's catalog; it changes whenever any entry's definition, or whether a fresh install enables it, changes. The words a shell shows for an entry are outside it.",
       "type": "string",
       "minLength": 1,
       "maxLength": 64,

@@ -1,0 +1,41 @@
+{
+  "description": "status on a fresh install",
+  "argv": [
+    "--json",
+    "status"
+  ],
+  "exit": 0,
+  "stdout": [
+    {
+      "v": 1,
+      "type": "status",
+      "host_version": "0.1.0.dev0",
+      "policy": {
+        "state": "ok",
+        "file": null,
+        "enabled": [
+          "host.describe"
+        ],
+        "disabled": [],
+        "folders": []
+      },
+      "paused": false,
+      "store": "keyring",
+      "hub": "https://switchboard.lucille-ai.com",
+      "loopback_hub": null,
+      "pair": {
+        "state": "none"
+      },
+      "work_rooms": [],
+      "last_left_because": null,
+      "offers_waiting": 0,
+      "run": {
+        "state": "none"
+      },
+      "last_hub_contact": null,
+      "clock": {
+        "state": "unknown"
+      }
+    }
+  ]
+}

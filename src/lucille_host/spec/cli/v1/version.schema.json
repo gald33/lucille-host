@@ -1,0 +1,41 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/gald33/lucille-host/blob/main/src/lucille_host/spec/cli/v1/version.schema.json",
+  "title": "lucille-host --json: version",
+  "description": "This release's version, and the version of this contract it writes.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "v",
+    "type",
+    "host_version",
+    "contract"
+  ],
+  "properties": {
+    "v": {
+      "const": 1
+    },
+    "type": {
+      "const": "version"
+    },
+    "host_version": {
+      "$ref": "#/$defs/host_version"
+    },
+    "contract": {
+      "description": "The version of this contract: 1.<minor>.",
+      "type": "string",
+      "minLength": 3,
+      "maxLength": 6,
+      "pattern": "^1\\.(0|[1-9][0-9]{0,3})$"
+    }
+  },
+  "$defs": {
+    "host_version": {
+      "description": "The host release's version string.",
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 32,
+      "pattern": "^[0-9][0-9A-Za-z.+_-]{0,31}$"
+    }
+  }
+}

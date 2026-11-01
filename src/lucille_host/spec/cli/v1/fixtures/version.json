@@ -1,0 +1,16 @@
+{
+  "description": "--version with --json before it",
+  "argv": [
+    "--json",
+    "--version"
+  ],
+  "exit": 0,
+  "stdout": [
+    {
+      "v": 1,
+      "type": "version",
+      "host_version": "0.1.0.dev0",
+      "contract": "1.0"
+    }
+  ]
+}

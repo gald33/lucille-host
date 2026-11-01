@@ -1,0 +1,17 @@
+{
+  "description": "forget a confirmed pair, with the hub reachable",
+  "argv": [
+    "--json",
+    "forget"
+  ],
+  "exit": 0,
+  "stdout": [
+    {
+      "v": 1,
+      "type": "forget",
+      "state": "forgotten",
+      "name": "pair-abcdef",
+      "lucille_told": true
+    }
+  ]
+}

@@ -1,0 +1,17 @@
+{
+  "description": "pair confirm once the SAS is shown",
+  "argv": [
+    "--json",
+    "pair",
+    "confirm"
+  ],
+  "exit": 0,
+  "stdout": [
+    {
+      "v": 1,
+      "type": "pair",
+      "state": "confirmed",
+      "name": "pair-abcdef"
+    }
+  ]
+}

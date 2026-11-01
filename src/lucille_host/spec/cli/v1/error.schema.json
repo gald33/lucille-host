@@ -1,0 +1,131 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/gald33/lucille-host/blob/main/src/lucille_host/spec/cli/v1/error.schema.json",
+  "title": "lucille-host --json: error",
+  "description": "A verb that failed or refused. It is the last object a command writes.",
+  "oneOf": [
+    {
+      "$ref": "#/$defs/error.other"
+    },
+    {
+      "$ref": "#/$defs/error.broad_folder"
+    }
+  ],
+  "$defs": {
+    "message": {
+      "description": "A sentence for people. A shell shows it and never branches on it.",
+      "type": "string",
+      "pattern": "^[^\\u0000]*$"
+    },
+    "error.other": {
+      "description": "What failed, and the sentence standard error shows.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "v",
+        "type",
+        "code",
+        "message"
+      ],
+      "properties": {
+        "v": {
+          "const": 1
+        },
+        "type": {
+          "const": "error"
+        },
+        "code": {
+          "type": "string",
+          "enum": [
+            "usage",
+            "internal",
+            "bad_profile",
+            "unsupported_platform",
+            "os_error",
+            "startup_refused",
+            "insecure_keyring",
+            "store_error",
+            "runtime_folder",
+            "state_invalid",
+            "policy_invalid",
+            "policy_lock_failed",
+            "not_in_catalog",
+            "unavailable",
+            "not_enabled",
+            "bad_alias",
+            "alias_taken",
+            "too_many_roots",
+            "not_a_folder",
+            "own_folder",
+            "on_proc",
+            "unstorable_path",
+            "no_such_alias",
+            "previous_invalid",
+            "bad_limit",
+            "bad_options",
+            "code_in_argv",
+            "bad_hub",
+            "busy",
+            "lock_failed",
+            "held",
+            "no_code",
+            "bad_code",
+            "wrong_hub",
+            "code_has_token",
+            "no_gate",
+            "already_confirmed",
+            "answer_failed",
+            "hub_error",
+            "leaked",
+            "expired",
+            "ended",
+            "none",
+            "waiting",
+            "sas_ready",
+            "interrupted",
+            "pair_unusable",
+            "room_not_left",
+            "several_pairs"
+          ]
+        },
+        "message": {
+          "$ref": "#/$defs/message"
+        }
+      }
+    },
+    "error.broad_folder": {
+      "description": "roots add refused a folder that is the home folder, holds it, or is /.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "v",
+        "type",
+        "code",
+        "message",
+        "kind"
+      ],
+      "properties": {
+        "v": {
+          "const": 1
+        },
+        "type": {
+          "const": "error"
+        },
+        "code": {
+          "const": "broad_folder"
+        },
+        "message": {
+          "$ref": "#/$defs/message"
+        },
+        "kind": {
+          "type": "string",
+          "enum": [
+            "home",
+            "holds_home",
+            "root"
+          ]
+        }
+      }
+    }
+  }
+}

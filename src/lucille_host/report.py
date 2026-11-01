@@ -24,20 +24,40 @@ name (``pair: confirmed: ...``, ``clock: skewed: ...``):
   :data:`STALE_AFTER` was left by a ``run`` that stopped without saying so.
 
 A file of the host's own that holds something else stops the command, as it stops every other verb.
+A store that cannot be read does not: the pair is reported as ``unreadable``, and the rest as it is,
+so that a shell learns whether the host is paused even where the keyring cannot be used.
+
+The lines and the ``--json`` object (``status``, spec/CLI.md section 6) are made together, from the
+same values read once (:func:`collect`), so that they cannot disagree.
 """
 
 from __future__ import annotations
 
+import time
 from typing import Any, Final
 
-from lucille_host import __version__, _switchboard, link, loop, paths, policy, rooms, state
+from lucille_host import __version__, _switchboard, link, loop, paths, policy, rooms, state, store
 from lucille_host.controls import Controls
 
-__all__ = ["STALE_AFTER", "run_record", "status"]
+__all__ = ["STALE_AFTER", "collect", "run_record", "snapshot", "status", "unreadable"]
 
 # A running ``run`` writes its record at least every minute: one older than this was left by a
 # ``run`` that stopped without saying so.
 STALE_AFTER: Final = 3 * loop.STATUS_EVERY
+
+# Why a room was abandoned, or left, as ``--json`` names it: a word to branch on, where the text
+# says it in words.
+WHY: Final = {
+    rooms.REPLACED: "replaced",
+    rooms.LUCILLE_LEFT: "left_by_lucille",
+    rooms.MOVED: "pair_moved",
+    rooms.NOT_LISTED: "not_over_current_pair",
+    rooms.PAIR_OVER: "pair_over",
+    rooms.GONE: "gone",
+    rooms.CHECK_HUB: "check_3",
+    rooms.CHECK_TOKEN: "check_4",
+    rooms.LEFT_BEFORE: "left_before",
+}
 
 _RECORD_KEYS: Final = frozenset(
     {
@@ -54,8 +74,21 @@ _RECORD_KEYS: Final = frozenset(
 )
 
 
-def _number(value: Any) -> bool:
-    return isinstance(value, int | float) and not isinstance(value, bool)
+# The largest process id the host's systems give.
+_PID_MOST: Final = 2**31 - 1
+
+
+def _skew(value: Any) -> bool:
+    """A skew in seconds: a number, not a boolean, never NaN or infinite."""
+    return (
+        isinstance(value, int | float)
+        and not isinstance(value, bool)
+        and -state.LATEST <= value <= state.LATEST
+    )
+
+
+def _pid(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and 1 <= value <= _PID_MOST
 
 
 def _names(value: Any) -> bool:
@@ -64,7 +97,8 @@ def _names(value: Any) -> bool:
 
 def run_record(dirs: paths.Dirs) -> dict[str, Any] | None:
     """What the latest ``run`` wrote in ``state/status.json``; None when it wrote nothing. A file
-    that holds something else is a :class:`state.StateError`."""
+    that holds something else, a value ``run`` never writes included (a pid out of range, a time
+    that is not one, a skew that is NaN), is a :class:`state.StateError`."""
     data = state.read_json(dirs.status_file)
     if data is None:
         return None
@@ -73,10 +107,10 @@ def run_record(dirs: paths.Dirs) -> dict[str, Any] | None:
         and set(data) == _RECORD_KEYS
         and data["v"] == 1
         and isinstance(data["running"], bool)
-        and isinstance(data["pid"], int)
-        and _number(data["written_at"])
-        and (data["last_contact"] is None or _number(data["last_contact"]))
-        and (data["skew"] is None or _number(data["skew"]))
+        and _pid(data["pid"])
+        and state.valid_time(data["written_at"])
+        and (data["last_contact"] is None or state.valid_time(data["last_contact"]))
+        and (data["skew"] is None or _skew(data["skew"]))
         and isinstance(data["skewed"], bool)
         and _names(data["reading"])
         and _names(data["read_stuck"])
@@ -86,12 +120,13 @@ def run_record(dirs: paths.Dirs) -> dict[str, Any] | None:
     return data
 
 
-def _policy(dirs: paths.Dirs) -> list[str]:
+def _policy(dirs: paths.Dirs) -> tuple[list[str], dict[str, Any]]:
     try:
         current = policy.load(dirs.policy_file)
     except policy.PolicyError as exc:
-        return [f"policy: invalid: {exc}"]
-    where = dirs.policy_file if dirs.policy_file.exists() else "no file yet: the fresh policy"
+        return [f"policy: invalid: {exc}"], {"state": "invalid", "error": str(exc)}
+    exists = dirs.policy_file.exists()
+    where = dirs.policy_file if exists else "no file yet: the fresh policy"
     eff = policy.effective(current, paths.os_family())
     lines = [f"policy: ok ({where})", "enabled: " + (", ".join(eff.enabled_ops) or "none")]
     lines += [
@@ -100,43 +135,77 @@ def _policy(dirs: paths.Dirs) -> list[str]:
     ]
     lines += [f"disabled: {name}: not on this computer" for name in eff.unavailable]
     lines += [f"disabled: {name}: not in this release's catalog" for name in eff.not_in_catalog]
-    lines.append("folders: " + (", ".join(sorted(eff.roots)) or "none"))
-    return lines
+    folders = sorted(eff.roots)
+    lines.append("folders: " + (", ".join(folders) or "none"))
+    disabled = [
+        {"name": name, "why": why}
+        for names, why in (
+            (eff.changed_by_upgrade, "disabled_by_upgrade"),
+            (eff.unavailable, "unavailable"),
+            (eff.not_in_catalog, "not_in_catalog"),
+        )
+        for name in names
+    ]
+    found = {
+        "state": "ok",
+        "file": str(dirs.policy_file) if exists else None,
+        "enabled": list(eff.enabled_ops),
+        "disabled": disabled,
+        "folders": folders,
+    }
+    return lines, found
 
 
-def _rooms(dirs: paths.Dirs, live: dict[str, Any] | None, paired: bool) -> list[str]:
+def _rooms(
+    dirs: paths.Dirs, live: dict[str, Any] | None, paired: bool | None
+) -> tuple[list[str], dict[str, Any]]:
+    """The work room lines, and the fields of the object they make. ``paired`` is None when the
+    store that keeps the pair could not be read: no room is then said to be over a pair gone."""
     record = rooms.load(dirs.rooms_file)
     reading = set(live["reading"]) if live is not None else set()
     stuck = set(live["read_stuck"]) if live is not None else set()
+    gone = paired is False
     # With no pair held, nothing tries a leave again on its own: `forget` leaves what is left.
-    again = "its leave is tried again" if paired else "`lucille-host forget` leaves it"
+    again = "`lucille-host forget` leaves it" if gone else "its leave is tried again"
     lines = []
+    held_rooms: list[dict[str, Any]] = []
     for name, held in sorted(record.held.items()):
-        notes = [f"accepted {link.iso(held.accepted_at)}"]
+        accepted = link.iso(held.accepted_at)
+        notes = [f"accepted {accepted}"]
+        room: dict[str, Any] = {"name": name, "accepted_at": accepted}
         if held.abandoned is not None:
             notes.append(f"abandoned ({held.abandoned}): nothing is taken from it, and {again}")
-        elif not paired:
+            room = {"state": "abandoned", **room, "why": WHY[held.abandoned]}
+        elif gone:
             # Left by a process that stopped after the library dropped the pair, before it left
             # the pair's rooms.
             notes.append(
                 "the pair it was taken over is gone from this computer: nothing is taken from it, "
                 f"and {again}"
             )
+            room = {"state": "pair_gone", **room}
         elif name in stuck:
             notes.append(
                 "read_stuck: a message there cannot be opened, and `run` reads no further there"
             )
+            room = {"state": "read_stuck", **room}
         elif name in reading:
             notes.append("read by `run`")
+            room = {"state": "reading", **room}
+        else:
+            room = {"state": "not_read", **room}
         lines.append(f"work room: {name} ({'; '.join(notes)})")
+        held_rooms.append(room)
     kept = record.accepting
-    if kept is not None and kept.room not in record.held and not paired:
+    left_because = None
+    if kept is not None and kept.room not in record.held and gone:
         # An accept a stop interrupted, and then the library dropped the pair: no start will judge
         # that room now, and `forget` leaves it, if the accept kept it.
         lines.append(
             f"work room: {kept.room} (an accept a stop interrupted may have kept it; the pair it "
             f"was taken over is gone from this computer: nothing is taken from it, and {again})"
         )
+        held_rooms.append({"state": "accept_interrupted", "name": kept.room})
     elif not record.held:
         line = "work room: none: this computer holds no work room"
         if record.no_room is not None:
@@ -144,6 +213,7 @@ def _rooms(dirs: paths.Dirs, live: dict[str, Any] | None, paired: bool) -> list[
                 f"; it left its last one on its own: {record.no_room}: "
                 f"{rooms.CHECKS[record.no_room]}"
             )
+            left_because = WHY[record.no_room]
         lines.append(line)
     if record.offers:
         count = len(record.offers)
@@ -151,52 +221,99 @@ def _rooms(dirs: paths.Dirs, live: dict[str, Any] | None, paired: bool) -> list[
             f"offers: {count} waiting"
             + (", and none is taken while more than one waits" if count > 1 else "")
         )
-    return lines
+    found = {
+        "work_rooms": held_rooms,
+        "last_left_because": left_because,
+        "offers_waiting": len(record.offers),
+    }
+    return lines, found
 
 
-def _clock(seen: dict[str, Any] | None) -> str:
+def _clock(seen: dict[str, Any] | None) -> tuple[str, dict[str, Any]]:
     window = _switchboard.SKEW_WINDOW
     skew = None if seen is None else seen["skew"]
     if seen is not None and (seen["skewed"] or (skew is not None and abs(skew) > window)):
         return (
             f"clock: skewed: this computer's clock is more than {window} s from the hub's, so the "
             "hub refuses what the host writes; set the clock right"
-        )
+        ), {"state": "skewed", "skew_s": skew}
     if skew is None:
-        return "clock: unknown: `run` measures it against the hub on each reply it posts"
+        return "clock: unknown: `run` measures it against the hub on each reply it posts", {
+            "state": "unknown"
+        }
     side = "behind" if skew > 0 else "ahead of"
     return (
         f"clock: ok: {abs(skew):.1f} s {side} the hub's, on the last reply posted (the hub "
         f"refuses posts past {window} s)"
-    )
+    ), {"state": "ok", "skew_s": skew}
 
 
-def _run(seen: dict[str, Any] | None, live: bool) -> list[str]:
+def _run(seen: dict[str, Any] | None, live: bool) -> tuple[list[str], dict[str, Any]]:
+    clock, clock_found = _clock(seen)
     if seen is None:
         return [
             "run: no record: `lucille-host run` writes one while it runs",
             "last hub contact: none recorded",
-            _clock(None),
-        ]
+            clock,
+        ], {"run": {"state": "none"}, "last_hub_contact": None, "clock": clock_found}
     at = link.iso(seen["written_at"])
     if live:
         line = f"run: running (pid {seen['pid']}), as of {at}"
+        run = {"state": "running", "pid": seen["pid"], "as_of": at}
     elif seen["running"]:
         line = f"run: not seen since {at} (pid {seen['pid']}): it stopped without saying so"
+        run = {"state": "not_seen", "pid": seen["pid"], "as_of": at}
     else:
         line = f"run: stopped at {at}"
+        run = {"state": "stopped", "as_of": at}
     contact = seen["last_contact"]
+    contact_at = link.iso(contact) if contact is not None else None
     return [
         line,
-        f"last hub contact: {link.iso(contact) if contact is not None else 'none recorded'}",
-        _clock(seen),
-    ]
+        f"last hub contact: {contact_at or 'none recorded'}",
+        clock,
+    ], {"run": run, "last_hub_contact": contact_at, "clock": clock_found}
 
 
-def status(dirs: paths.Dirs, session: link.Session, config: state.HostConfig) -> list[str]:
-    """The lines ``lucille-host status`` prints. Makes no hub call."""
+def unreadable(exc: BaseException) -> tuple[str, str] | None:
+    """The code and the sentence for a store that cannot be read, which ``status`` reports in its
+    ``pair`` rather than stopping; None for any other error."""
+    if isinstance(exc, store.InsecureKeyring):
+        return "insecure_keyring", str(exc)
+    if isinstance(exc, store.StoreError):
+        return "store_error", exc.strerror or str(exc)
+    if isinstance(exc, _switchboard.PairFailed):
+        return "pair_unusable", f"the pair cannot be used here ({exc.state})"
+    return None
+
+
+def _pair(view: link.PairView) -> dict[str, Any]:
+    found: dict[str, Any] = {"state": view.word}
+    if view.word == "several_pairs":
+        found["message"] = view.message
+        return found
+    if view.word != "none":
+        found["name"] = view.name
+    if view.word in ("sas_pending", "expired"):
+        found["deadline"] = link.iso(view.deadline or 0)
+    if view.word == "confirmed":
+        found["generation"] = view.generation
+    return found
+
+
+def collect(
+    dirs: paths.Dirs,
+    session: link.Session | None,
+    config: state.HostConfig,
+    *,
+    failure: BaseException | None = None,
+) -> tuple[list[str], dict[str, Any]]:
+    """The lines ``lucille-host status`` prints, and the ``status`` object of ``--json``, from the
+    same values. ``session`` is None when the store could not be opened (``failure`` says why).
+    Makes no hub call."""
     lines = [f"lucille-host {__version__}"]
-    lines += _policy(dirs)
+    policy_lines, policy_found = _policy(dirs)
+    lines += policy_lines
     paused = Controls(dirs.state).paused()
     lines.append(
         "controls: paused: nothing starts until `lucille-host resume`"
@@ -211,14 +328,56 @@ def status(dirs: paths.Dirs, session: link.Session, config: state.HostConfig) ->
     if config.hub is not None:
         hub += f", and the loopback hub {config.hub} that `lucille-host pair --hub` named"
     lines.append(hub)
-    word, detail = session.pair_state()
-    lines.append(f"pair: {word}: {detail}")
+    paired: bool | None = None
+    view: link.PairView | None = None
+    cannot = None
+    if session is None:
+        cannot = unreadable(failure) if failure is not None else None
+        if cannot is None:
+            raise ValueError("status needs the session, or the store error that kept it shut")
+    else:
+        try:
+            view = session.pair_view()
+            paired = bool(session.held())
+        except (store.StoreError, _switchboard.PairFailed) as exc:
+            cannot = unreadable(exc)
+    pair_found: dict[str, Any]
+    if view is None or cannot is not None:
+        code, message = cannot or ("store_error", "")
+        lines.append(f"pair: unreadable: {message}")
+        pair_found = {"state": "unreadable", "code": code, "message": message}
+    else:
+        word, detail = link.pair_words(view)
+        lines.append(f"pair: {word}: {detail}")
+        pair_found = _pair(view)
     seen = run_record(dirs)
-    live = (
-        seen is not None
-        and seen["running"]
-        and session.link.now() - seen["written_at"] <= STALE_AFTER
-    )
-    lines += _rooms(dirs, seen if live else None, bool(session.held()))
-    lines += _run(seen, live)
-    return lines
+    now = session.link.now() if session is not None else time.time()
+    live = seen is not None and seen["running"] and now - seen["written_at"] <= STALE_AFTER
+    room_lines, rooms_found = _rooms(dirs, seen if live else None, paired)
+    lines += room_lines
+    run_lines, run_found = _run(seen, live)
+    lines += run_lines
+    found = {
+        "host_version": __version__,
+        "policy": policy_found,
+        "paused": paused,
+        "store": config.store,
+        "hub": _switchboard.LUCILLE_HUB,
+        "loopback_hub": config.hub,
+        "pair": pair_found,
+        **rooms_found,
+        "run": run_found["run"],
+        "last_hub_contact": run_found["last_hub_contact"],
+        "clock": run_found["clock"],
+    }
+    return lines, found
+
+
+def status(dirs: paths.Dirs, session: link.Session, config: state.HostConfig) -> list[str]:
+    """The lines ``lucille-host status`` prints. Makes no hub call."""
+    return collect(dirs, session, config)[0]
+
+
+def snapshot(dirs: paths.Dirs, session: link.Session, config: state.HostConfig) -> dict[str, Any]:
+    """The ``status`` object of ``lucille-host status --json``. Makes no hub call."""
+    return collect(dirs, session, config)[1]

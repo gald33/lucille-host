@@ -1,0 +1,191 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/gald33/lucille-host/blob/main/src/lucille_host/spec/cli/v1/root_check.schema.json",
+  "title": "lucille-host --json: root_check",
+  "description": "Whether the host can open one folder of the local policy and read an entry in it.",
+  "oneOf": [
+    {
+      "$ref": "#/$defs/root_check.ok"
+    },
+    {
+      "$ref": "#/$defs/root_check.denied_by_macos"
+    },
+    {
+      "$ref": "#/$defs/root_check.denied"
+    },
+    {
+      "$ref": "#/$defs/root_check.missing"
+    },
+    {
+      "$ref": "#/$defs/root_check.error"
+    }
+  ],
+  "$defs": {
+    "root": {
+      "description": "A folder alias from the host's local policy. Never a path.",
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 32,
+      "pattern": "^[a-z][a-z0-9_-]{0,31}$"
+    },
+    "path": {
+      "description": "An absolute path. A byte of a file name that is not UTF-8 is U+FFFD.",
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^/[^\\u0000]*$"
+    },
+    "root_check.ok": {
+      "description": "The folder opened, and one entry could be read.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "v",
+        "type",
+        "alias",
+        "path",
+        "state"
+      ],
+      "properties": {
+        "v": {
+          "const": 1
+        },
+        "type": {
+          "const": "root_check"
+        },
+        "alias": {
+          "$ref": "#/$defs/root"
+        },
+        "path": {
+          "$ref": "#/$defs/path"
+        },
+        "state": {
+          "const": "ok"
+        }
+      }
+    },
+    "root_check.denied_by_macos": {
+      "description": "On macOS, EPERM: macOS's privacy protection refuses it.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "v",
+        "type",
+        "alias",
+        "path",
+        "state"
+      ],
+      "properties": {
+        "v": {
+          "const": 1
+        },
+        "type": {
+          "const": "root_check"
+        },
+        "alias": {
+          "$ref": "#/$defs/root"
+        },
+        "path": {
+          "$ref": "#/$defs/path"
+        },
+        "state": {
+          "const": "denied_by_macos"
+        }
+      }
+    },
+    "root_check.denied": {
+      "description": "EACCES, or EPERM on Linux: the folder's permissions refuse it.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "v",
+        "type",
+        "alias",
+        "path",
+        "state"
+      ],
+      "properties": {
+        "v": {
+          "const": 1
+        },
+        "type": {
+          "const": "root_check"
+        },
+        "alias": {
+          "$ref": "#/$defs/root"
+        },
+        "path": {
+          "$ref": "#/$defs/path"
+        },
+        "state": {
+          "const": "denied"
+        }
+      }
+    },
+    "root_check.missing": {
+      "description": "ENOENT or ENOTDIR: nothing is there, or not a folder.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "v",
+        "type",
+        "alias",
+        "path",
+        "state"
+      ],
+      "properties": {
+        "v": {
+          "const": 1
+        },
+        "type": {
+          "const": "root_check"
+        },
+        "alias": {
+          "$ref": "#/$defs/root"
+        },
+        "path": {
+          "$ref": "#/$defs/path"
+        },
+        "state": {
+          "const": "missing"
+        }
+      }
+    },
+    "root_check.error": {
+      "description": "Any other error.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "v",
+        "type",
+        "alias",
+        "path",
+        "state",
+        "errno"
+      ],
+      "properties": {
+        "v": {
+          "const": 1
+        },
+        "type": {
+          "const": "root_check"
+        },
+        "alias": {
+          "$ref": "#/$defs/root"
+        },
+        "path": {
+          "$ref": "#/$defs/path"
+        },
+        "state": {
+          "const": "error"
+        },
+        "errno": {
+          "description": "The error's name, as errno.errorcode has it.",
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 16,
+          "pattern": "^E[A-Z0-9]{1,15}$"
+        }
+      }
+    }
+  }
+}

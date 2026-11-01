@@ -1,0 +1,44 @@
+{
+  "description": "ops list on a fresh install, where every operation's executable is present",
+  "argv": [
+    "--json",
+    "ops",
+    "list"
+  ],
+  "exit": 0,
+  "stdout": [
+    {
+      "v": 1,
+      "type": "op",
+      "name": "host.describe",
+      "state": "enabled",
+      "enabled": true,
+      "summary": "Describe this computer's host",
+      "sends": "Lucille gets the host's version and protocol, the operating system family, which release's catalog it has, which operations are on, the names you gave your folders (never where they are), and a fingerprint of the local policy.",
+      "sends_file_content": false,
+      "diagnostic": false
+    },
+    {
+      "v": 1,
+      "type": "op",
+      "name": "host.sleep",
+      "state": "disabled",
+      "enabled": false,
+      "summary": "Wait up to 4 minutes, for testing",
+      "sends": "Lucille gets how long the wait took and how it ended.",
+      "sends_file_content": false,
+      "diagnostic": true
+    },
+    {
+      "v": 1,
+      "type": "op",
+      "name": "files.sha256",
+      "state": "disabled",
+      "enabled": false,
+      "summary": "Check a file's fingerprint",
+      "sends": "Lucille gets a code that identifies the file's exact contents, not the contents.",
+      "sends_file_content": false,
+      "diagnostic": false
+    }
+  ]
+}

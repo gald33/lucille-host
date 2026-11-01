@@ -24,8 +24,10 @@ What ``lucille-host pair`` and its sub-verbs do, made of the calls in ``_switchb
   the deadline forget the pair. A pair with no gate record is refused (``refused``), and ``pair
   confirm`` refuses a SAS no command has shown (``sas_ready``). ``lucille-host status`` reports
   these words from what this computer holds, with no hub call and without the SAS
-  (:meth:`Session.pair_state`). Once the code is answered, the gate's record is changed, and its
-  deadline judged, only under the record lock, which ``run`` holds through each step.
+  (:meth:`Session.pair_state`). Each command reports a :class:`PairView`, which its text and its
+  ``--json`` object (spec/CLI.md) are both made from. Once the code is answered, the gate's
+  record is changed, and its deadline judged, only under the record lock, which ``run`` holds
+  through each step.
 - **Forgetting** (``lucille-host forget``, :meth:`Session.forget`). Every work room held is left
   first, then the pair is forgotten here and Lucille is told, best effort; the gate's record and how
   far each room was read go too. The journal of requests stays: a job id is answered once per
@@ -105,7 +107,7 @@ import re
 import secrets
 import time
 from collections.abc import Callable
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from typing import Final
 
 from lucille_host import _switchboard, gate, paths, rooms, state, store
@@ -115,6 +117,7 @@ __all__ = [
     "LEAKED",
     "LONG_POLL",
     "PAIR_AGAIN",
+    "PairView",
     "RESOLVE_AT_LEAST",
     "RESOLVE_EVERY",
     "SET_BACK",
@@ -143,6 +146,9 @@ BACKOFF_MOST: Final = 30.0
 LONG_POLL: Final = 25.0
 # The longest note shown.
 NOTE_LIMIT: Final = 200
+# The largest generation `status` reports: the largest integer every JSON reader keeps exactly.
+# Lucille's side can raise a pair's generation, and the pairing library takes any integer from 0.
+GENERATION_MOST: Final = 2**53 - 1
 # What the host says when the hub refuses a write for this computer's clock.
 SKEWED: Final = (
     "this computer's clock is more than 300 s from the hub's, so the hub refuses what the host "
@@ -210,11 +216,29 @@ _NOT_HELD: Final = frozenset({"unknown", "left", "offered"})
 
 
 class Stopped(Exception):
-    """A pairing that ended, or a verb that cannot go on. ``state`` is the word printed first."""
+    """A pairing that ended, or a verb that cannot go on. ``state`` is the word printed first;
+    ``code`` is what ``--json`` calls it (spec/CLI.md section 10), the word itself unless one word
+    covers several failures a shell must tell apart."""
 
-    def __init__(self, word: str, message: str) -> None:
+    def __init__(self, word: str, message: str, *, code: str | None = None) -> None:
         super().__init__(message)
         self.state = word
+        self.code = code or word
+
+
+@dataclass(frozen=True)
+class PairView:
+    """Where the pair is, as ``pair status`` and ``lucille-host status`` report it: ``word`` is its
+    state. ``sas`` is set only by ``pair status``, which shows it; ``generation`` and ``message``
+    only by ``status``. ``generation`` is None when the store does not say, or says one that is
+    not an integer from 0 to :data:`GENERATION_MOST`."""
+
+    word: str
+    name: str | None = None
+    sas: str | None = None
+    deadline: float | None = None
+    generation: int | None = None
+    message: str | None = None
 
 
 def sanitize(text: str, limit: int = NOTE_LIMIT) -> str:
@@ -248,6 +272,49 @@ def _replaced(seen: gate.Gate | None, found: gate.Gate | None) -> bool:
     ``seen``, the record a command found when it looked for the pair held: the pair was forgotten
     and paired again under the same name meanwhile."""
     return seen is not None and found is not None and found.created_at != seen.created_at
+
+
+def _pending(name: str, sas: str, deadline: float | None) -> str:
+    """What ``pair`` and ``pair status`` say of a pair whose SAS is shown and not confirmed."""
+    before = f" before {iso(deadline)}" if deadline is not None else ""
+    return (
+        f"pair {name}: the SAS is {sas}. If Lucille's page shows the same, confirm it with "
+        f"`lucille-host pair confirm`{before}; if not, `lucille-host pair reject`"
+    )
+
+
+def pair_words(view: PairView) -> tuple[str, str]:
+    """A :class:`PairView` as the text says it: the state word, and the sentence after it. Where
+    ``status`` has a SAS waiting to be confirmed, it points to ``pair status``, which shows it."""
+    name = view.name
+    if view.word == "none":
+        return "none", "this computer holds no pair"
+    if view.word == "several_pairs":
+        return "error", view.message or ""
+    if view.word == "confirmed":
+        generation = f" (generation {view.generation})" if view.generation is not None else ""
+        return "confirmed", f"pair {name}{generation}"
+    if view.word == "waiting":
+        return "waiting", f"pair {name}: Lucille has not collected this computer's answer yet"
+    if view.word == "refused":
+        return "refused", _NO_GATE.format(name=name)
+    if view.word == "sas_ready":
+        return "sas_ready", (
+            f"pair {name}: the SAS has reached this computer, and no command has shown it "
+            "yet: `lucille-host pair status` shows it to compare with Lucille's page"
+        )
+    deadline = iso(view.deadline or 0)
+    if view.word == "expired":
+        return "expired", (
+            f"pair {name}: the SAS was not confirmed before {deadline}; the next "
+            "`lucille-host pair status`, `lucille-host pair confirm` or `run` forgets it"
+        )
+    if view.sas is not None:
+        return "sas_pending", _pending(str(name), view.sas, view.deadline)
+    return "sas_pending", (
+        f"pair {name}: `lucille-host pair status` shows the SAS to compare with Lucille's "
+        f"page, and `lucille-host pair confirm` confirms it before {deadline}"
+    )
 
 
 def told_sentence(told: _switchboard.Told) -> str:
@@ -347,6 +414,7 @@ class Session:
         raise Stopped(
             "error",
             f"this profile holds {len(names)} pairs ({', '.join(names)}), and the host keeps one",
+            code="several_pairs",
         )
 
     def _record_lock(self) -> contextlib.AbstractContextManager[None]:
@@ -382,7 +450,7 @@ class Session:
         command forgot it), or it is held with no record (``pair reject`` forgets it)."""
         if name not in self.held():
             return Stopped("none", _GONE.format(name=name))
-        return Stopped("refused", _NO_GATE.format(name=name))
+        return Stopped("refused", _NO_GATE.format(name=name), code="no_gate")
 
     def _remove_gate(self, found: gate.Gate) -> None:
         """Delete the gate's record if it is still ``found``: the same pair, made at the same
@@ -457,7 +525,7 @@ class Session:
         try:
             self._leave_all(name)
         except (Stopped, store.StoreError):
-            raise Stopped("error", _STRANDED.format(name=name)) from None
+            raise Stopped("error", _STRANDED.format(name=name), code="room_not_left") from None
         finally:
             if found is not None:
                 self._remove_gate(found)
@@ -476,7 +544,7 @@ class Session:
                 raise
             if found is not None:
                 self._remove_gate(found)
-            raise Stopped("error", _STRANDED.format(name=name)) from None
+            raise Stopped("error", _STRANDED.format(name=name), code="room_not_left") from None
 
     def _found_held(self) -> tuple[str, gate.Gate | None]:
         """:meth:`_require`, and the gate record of that pair as read just before it looked
@@ -542,7 +610,9 @@ class Session:
                 return self.link.resolve(name)
             except _switchboard.PairFailed as exc:
                 if outcome(exc.state) == "error":
-                    raise Stopped("error", f"pair {name} cannot be used ({exc.state})") from None
+                    raise Stopped(
+                        "error", f"pair {name} cannot be used ({exc.state})", code="pair_unusable"
+                    ) from None
                 raise self._end(name, exc.state) from None
 
     # --- a new code ----------------------------------------------------------------------
@@ -552,7 +622,7 @@ class Session:
         try:
             code = _switchboard.decode_code(text)
         except _switchboard.BadCode as exc:
-            raise Stopped("refused", str(exc)) from None
+            raise Stopped("refused", str(exc), code="bad_code") from None
         allowed = [_switchboard.LUCILLE_HUB] + ([config.hub] if config.hub else [])
         if not any(code.url.rstrip("/") == hub.rstrip("/") for hub in allowed):
             if state.valid_loopback_hub(code.url):
@@ -560,15 +630,18 @@ class Session:
                     "refused",
                     "this code names a hub on this computer, which is accepted only when "
                     "`lucille-host pair --hub` names it",
+                    code="wrong_hub",
                 )
             raise Stopped(
                 "refused",
                 f"this code is for another hub, not Lucille's ({_switchboard.LUCILLE_HUB})",
+                code="wrong_hub",
             )
         if code.carries_token:
             raise Stopped(
                 "refused",
                 "this code carries a hub token, and the host takes only codes that do not",
+                code="code_has_token",
             )
         return code
 
@@ -598,13 +671,17 @@ class Session:
                 self._remove_gate(saved)
                 word = outcome(exc.state)
                 if word == "error":
-                    raise Stopped("error", f"the code was not answered ({exc.state})") from None
+                    raise Stopped(
+                        "error", f"the code was not answered ({exc.state})", code="answer_failed"
+                    ) from None
                 self.link.forget(code.name)
                 raise Stopped(word, f"{_STOPPED_MESSAGES[word]} ({exc.state})") from None
             except _switchboard.HubError as exc:
                 self._remove_gate(saved)
                 raise Stopped(
-                    "error", f"{exc}: nothing was answered, and the code can be tried again"
+                    "error",
+                    f"{exc}: nothing was answered, and the code can be tried again",
+                    code="hub_error",
                 ) from None
         self.audit.write("pair", event="accepted", pair=name, sent=True)
         return name
@@ -693,21 +770,21 @@ class Session:
 
     def pending(self, name: str, sas: str, found: gate.Gate) -> str:
         """What ``pair`` and ``pair status`` say of a pair whose SAS is shown and not confirmed."""
-        before = f" before {iso(found.deadline)}" if found.deadline is not None else ""
-        return (
-            f"pair {name}: the SAS is {sas}. If Lucille's page shows the same, confirm it with "
-            f"`lucille-host pair confirm`{before}; if not, `lucille-host pair reject`"
-        )
+        return _pending(name, sas, found.deadline)
 
     def confirm(self) -> str:
+        """``pair confirm``: what :meth:`confirm_pair` says."""
+        return self.confirm_pair()[1]
+
+    def confirm_pair(self) -> tuple[str, str]:
         """``pair confirm``, the ``y`` given after ``pair`` has exited: resolve once, then open
         the gate on the SAS this computer showed. Under the record lock from the resolve to the
-        judgement, as :meth:`status` is."""
+        judgement, as :meth:`status` is. Returns the pair's name, and what to print."""
         name = self._require()
         with self._record_lock():
             found = self.gate(name)
             if found is not None and found.opened_at is not None:
-                return f"pair {name} is already confirmed"
+                return name, f"pair {name} is already confirmed"
             try:
                 known = self.resolve(name).sas_known
             except _switchboard.HubError:
@@ -718,9 +795,14 @@ class Session:
                     f"pair {name}: Lucille has not collected this computer's answer yet, so "
                     "there is no SAS to confirm",
                 )
-            return self.open_gate(name)
+            return name, self.open_gate(name)
 
     def status(self) -> tuple[str, str]:
+        """``pair status``: :meth:`status_view`, in words."""
+        view = self.status_view()
+        return view.word, pair_words(view)[1]
+
+    def status_view(self) -> PairView:
         """``pair status``: resolve once, and say where the pair is: ``none``, ``waiting``,
         ``sas_pending`` or ``confirmed``. While the gate is shut and the SAS is known, it shows
         the SAS, which starts the deadline the first time. A pair with no gate record, which
@@ -728,7 +810,7 @@ class Session:
         does; so does one past its deadline (``expired``), which is forgotten."""
         name = self.current()
         if name is None:
-            return "none", "this computer holds no pair"
+            return PairView("none")
         # Under the record lock from the resolve, which takes it too, to the judgement: a
         # `forget`, `pair reject`, `pair confirm` or `run` step in another process changes the
         # pair or its gate record only under that lock, so it waits for both, or was done before
@@ -741,11 +823,9 @@ class Session:
             known = pair.sas_known if pair is not None else self.link.sas(name) is not None
             found = self.gate(name)
             if found is not None and found.opened_at is not None:
-                return "confirmed", f"pair {name}"
+                return PairView("confirmed", name)
             if not known:
-                return "waiting", (
-                    f"pair {name}: Lucille has not collected this computer's answer yet"
-                )
+                return PairView("waiting", name)
             if found is None:
                 raise self.no_gate(name)
             if gate.past_deadline(found, self.link.now()):
@@ -753,7 +833,8 @@ class Session:
             shown = self.show(name)
             if shown is None:
                 raise self.no_gate(name)
-            return "sas_pending", self.pending(name, *shown)
+            sas, found = shown
+            return PairView("sas_pending", name, sas=sas, deadline=found.deadline)
 
     def reject(self) -> _switchboard.Told:
         """``pair reject``, and ``n`` at ``pair``'s prompt: forget a pair whose gate has not
@@ -768,46 +849,49 @@ class Session:
                 raise Stopped(
                     "refused",
                     f"pair {name} is confirmed on this computer; `lucille-host forget` ends it",
+                    code="already_confirmed",
                 )
             return self._forget(name, why="rejected", seen=seen)
 
     def pair_state(self) -> tuple[str, str]:
+        """``lucille-host status``: :meth:`pair_view`, in words."""
+        return pair_words(self.pair_view())
+
+    def pair_view(self) -> PairView:
         """``lucille-host status``: where the pair is, from this computer's store and the gate's
         record alone, with no hub call. The words are ``pair status``'s (``none``, ``waiting``,
-        ``sas_pending`` with the deadline, ``confirmed``), and three more: ``sas_ready`` while
+        ``sas_pending`` with the deadline, ``confirmed``), and four more: ``sas_ready`` while
         the SAS has reached this computer and no command has shown it, ``refused`` for a pair
-        with no gate record, which cannot be confirmed here, and ``expired`` for a SAS not
-        confirmed by the deadline, which the next command that resolves the pair forgets. It
-        never shows the SAS, and so never starts the deadline: ``pair status`` does both."""
+        with no gate record, which cannot be confirmed here, ``expired`` for a SAS not
+        confirmed by the deadline, which the next command that resolves the pair forgets, and
+        ``several_pairs`` for a profile that holds more than one. It never shows the SAS, and so
+        never starts the deadline: ``pair status`` does both."""
         try:
             name = self.current()
         except Stopped as exc:
-            return exc.state, str(exc)
+            return PairView("several_pairs", message=str(exc))
         if name is None:
-            return "none", "this computer holds no pair"
+            return PairView("none")
         kept = self.link.kept(name)
         found = self.gate(name)
         if found is not None and found.opened_at is not None:
-            generation = f" (generation {kept.generation})" if kept is not None else ""
-            return "confirmed", f"pair {name}{generation}"
+            generation = kept.generation if kept is not None else None
+            if (
+                isinstance(generation, bool)
+                or not isinstance(generation, int)
+                or not 0 <= generation <= GENERATION_MOST
+            ):
+                generation = None
+            return PairView("confirmed", name, generation=generation)
         if kept is None or not kept.sas_known:
-            return "waiting", f"pair {name}: Lucille has not collected this computer's answer yet"
+            return PairView("waiting", name)
         if found is None:
-            return "refused", _NO_GATE.format(name=name)
+            return PairView("refused", name)
         if found.shown_at is None or found.deadline is None:
-            return "sas_ready", (
-                f"pair {name}: the SAS has reached this computer, and no command has shown it "
-                "yet: `lucille-host pair status` shows it to compare with Lucille's page"
-            )
+            return PairView("sas_ready", name)
         if gate.past_deadline(found, self.link.now()):
-            return "expired", (
-                f"pair {name}: the SAS was not confirmed before {iso(found.deadline)}; the next "
-                "`lucille-host pair status`, `lucille-host pair confirm` or `run` forgets it"
-            )
-        return "sas_pending", (
-            f"pair {name}: `lucille-host pair status` shows the SAS to compare with Lucille's "
-            f"page, and `lucille-host pair confirm` confirms it before {iso(found.deadline)}"
-        )
+            return PairView("expired", name, deadline=found.deadline)
+        return PairView("sas_pending", name, deadline=found.deadline)
 
     def _require(self) -> str:
         name = self.current()
@@ -827,7 +911,7 @@ class Session:
         name = self._require()
         found = self.gate(name)
         if found is None:
-            raise Stopped("refused", _NO_GATE.format(name=name))
+            raise Stopped("refused", _NO_GATE.format(name=name), code="no_gate")
         self._name, self._made = name, found.created_at
         self._want_resolve("start")
         self._wanted |= {_TOUCH, _JUDGE, _CONSIDER}
@@ -1264,6 +1348,7 @@ class Session:
                 "error",
                 f"pair {name} is kept on this computer: a work room held over it could not be "
                 "left, and its keys would stay behind; try again",
+                code="room_not_left",
             )
         if record != rooms.Record(left=record.left, named=record.named):
             self._keep(rooms.Record(left=record.left, named=record.named))

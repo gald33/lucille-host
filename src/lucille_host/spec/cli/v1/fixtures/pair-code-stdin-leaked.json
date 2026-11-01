@@ -1,0 +1,24 @@
+{
+  "description": "pair --code-stdin with a code another computer answered first",
+  "argv": [
+    "--json",
+    "pair",
+    "--code-stdin"
+  ],
+  "exit": 1,
+  "stdout": [
+    {
+      "v": 1,
+      "type": "pair_code",
+      "name": "pair-abcdef",
+      "hub": "https://switchboard.lucille-ai.com",
+      "note": ""
+    },
+    {
+      "v": 1,
+      "type": "error",
+      "code": "leaked",
+      "message": "the pairing code leaked: another computer answered it, or somebody holding it interfered with the pairing, so this computer's half is gone. Start again in Lucille with a fresh code, and share it with nobody (already_redeemed)"
+    }
+  ]
+}

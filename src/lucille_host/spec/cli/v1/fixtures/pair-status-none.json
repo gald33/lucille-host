@@ -1,0 +1,16 @@
+{
+  "description": "pair status with no pair",
+  "argv": [
+    "--json",
+    "pair",
+    "status"
+  ],
+  "exit": 0,
+  "stdout": [
+    {
+      "v": 1,
+      "type": "pair",
+      "state": "none"
+    }
+  ]
+}

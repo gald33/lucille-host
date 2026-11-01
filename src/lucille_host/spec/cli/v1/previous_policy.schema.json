@@ -1,0 +1,124 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/gald33/lucille-host/blob/main/src/lucille_host/spec/cli/v1/previous_policy.schema.json",
+  "title": "lucille-host --json: previous_policy",
+  "description": "The last policy a pairing set aside, read only.",
+  "oneOf": [
+    {
+      "$ref": "#/$defs/previous_policy.none"
+    },
+    {
+      "$ref": "#/$defs/previous_policy.found"
+    }
+  ],
+  "$defs": {
+    "policy_op_name": {
+      "description": "An operation name as the local policy may hold it: in this release's catalog or not.",
+      "type": "string",
+      "minLength": 3,
+      "pattern": "^[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*)+$"
+    },
+    "root": {
+      "description": "A folder alias from the host's local policy. Never a path.",
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 32,
+      "pattern": "^[a-z][a-z0-9_-]{0,31}$"
+    },
+    "path": {
+      "description": "An absolute path. A byte of a file name that is not UTF-8 is U+FFFD.",
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^/[^\\u0000]*$"
+    },
+    "time": {
+      "description": "A time, UTC, ISO 8601, to the second.",
+      "type": "string",
+      "minLength": 20,
+      "maxLength": 20,
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"
+    },
+    "folder": {
+      "description": "One folder alias of a policy.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "alias",
+        "path",
+        "broad"
+      ],
+      "properties": {
+        "alias": {
+          "$ref": "#/$defs/root"
+        },
+        "path": {
+          "$ref": "#/$defs/path"
+        },
+        "broad": {
+          "type": "boolean"
+        }
+      }
+    },
+    "previous_policy.none": {
+      "description": "No pairing has set a policy aside.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "v",
+        "type",
+        "state"
+      ],
+      "properties": {
+        "v": {
+          "const": 1
+        },
+        "type": {
+          "const": "previous_policy"
+        },
+        "state": {
+          "const": "none"
+        }
+      }
+    },
+    "previous_policy.found": {
+      "description": "The last policy a pairing set aside. Nothing uses it.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "v",
+        "type",
+        "state",
+        "set_aside_at",
+        "ops",
+        "folders"
+      ],
+      "properties": {
+        "v": {
+          "const": 1
+        },
+        "type": {
+          "const": "previous_policy"
+        },
+        "state": {
+          "const": "found"
+        },
+        "set_aside_at": {
+          "$ref": "#/$defs/time"
+        },
+        "ops": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/policy_op_name"
+          }
+        },
+        "folders": {
+          "type": "array",
+          "maxItems": 64,
+          "items": {
+            "$ref": "#/$defs/folder"
+          }
+        }
+      }
+    }
+  }
+}
