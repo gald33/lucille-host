@@ -409,6 +409,23 @@ def _run_downgrade(w: World) -> None:
     (w.dirs.state / "last_version.json").write_text('{"v": 1, "version": "999.0.0"}\n')
 
 
+def _pair_file_damaged(w: World, *, folder: bool) -> None:
+    w.lucille = w.host.lucille()
+    w.host.paired(w.lucille, "--store-file")
+    w.ok("pair", "confirm")
+    record = w.dirs.store_files / f"{w.lucille.name}.json"
+    record.unlink()
+    if folder:
+        record.mkdir()
+    else:
+        record.write_text("{nope")
+
+
+def _digest_key_damaged(w: World) -> None:
+    paths.ensure_dir(w.dirs.state)
+    (w.dirs.state / policy.KEY_FILE).write_bytes(b"abc")
+
+
 def _not_toml(w: World) -> None:
     paths.ensure_dir(w.dirs.config)
     w.dirs.policy_file.write_text("this is not toml\n")
@@ -449,6 +466,13 @@ SETUPS: dict[str, Callable[[World], None]] = {
         "SWITCHBOARD_URL", "https://hub.example"
     ),
     "run-events-downgrade": _run_downgrade,
+    "run-events-several-pairs": lambda w: _two_pairs(w),
+    "run-events-pair-unusable": lambda w: _pair_file_damaged(w, folder=False),
+    "run-events-store-error": lambda w: _pair_file_damaged(w, folder=True),
+    "run-events-failed": _digest_key_damaged,
+    "run-events-expired": lambda w: _expired(w),
+    "run-events-ended": lambda w: _ended(w),
+    "run-events-leaked": lambda w: _resolve_leaks(w),
 }
 # The cases whose set-up pairs, or whose command reaches the hub.
 HUB_CASES = frozenset(
@@ -464,6 +488,11 @@ HUB_CASES = frozenset(
         "pair-reject",
         "run-events-requests",
         "run-events-no-gate",
+        "run-events-pair-unusable",
+        "run-events-store-error",
+        "run-events-expired",
+        "run-events-ended",
+        "run-events-leaked",
     }
 )
 # The cases whose command reads and answers: on the wall clock, with short long-polls.
@@ -680,6 +709,20 @@ def test_cli_json_matches_schema(
     )
     assert text.rc == ran.rc, text.err
     assert _sampled(text.err, text_world) == _sampled(ran.err, world)
+
+
+def test_every_run_reason_has_a_fixture_but_those_the_spec_names() -> None:
+    reasons = set()
+    for path in (SOURCE / "fixtures").glob("run-*.json"):
+        last = json.loads(path.read_text(encoding="ascii"))["stdout"][-1]
+        if last["type"] == "stopped":
+            reasons.add(last["reason"])
+    text = _cli_md()
+    start = text.index("- Every `stopped` reason has a fixture of `run`, except")
+    bullet = text[start : text.index("\n- ", start + 1)]
+    named = {word for word in re.findall(r"`([a-z_]+)`", bullet) if word in cli.RUN_EXITS}
+    assert named and not reasons & named
+    assert reasons | named == set(cli.RUN_EXITS)
 
 
 # --- ops ------------------------------------------------------------------------------------------
@@ -1509,6 +1552,17 @@ def _resolve_fails(w: World) -> None:
 
     def failing(_link: Any, _name: str) -> Any:
         raise _switchboard.PairFailed("aborted_here", "the library refused the pair")
+
+    w.monkeypatch.setattr(_switchboard.Link, "resolve", failing)
+
+
+def _resolve_leaks(w: World) -> None:
+    """A pair, and the pairing library saying at the first resolve that its handshake was
+    interfered with: a set-up cannot do that on the hub."""
+    w.paired()
+
+    def failing(_link: Any, _name: str) -> Any:
+        raise _switchboard.PairFailed("aborted", "the pairing ended early")
 
     w.monkeypatch.setattr(_switchboard.Link, "resolve", failing)
 

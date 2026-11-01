@@ -1185,18 +1185,28 @@ def _serve(
     events: _Events | None,
     lifeline: loop.Lifeline | None,
     made: list[loop.Runner],
+    restores: list[Callable[[], None]],
 ) -> tuple[str, dict[str, Any], str]:
     """``run``'s start checks, in the order spec/CLI.md section 13.3 gives, each before the next
     can write or read anything; then the runner. Returns the reason ``run`` stopped for, the
-    ``stopped`` object's other fields, and the text line; raises for any other end."""
+    ``stopped`` object's other fields, and the text line; raises for any other end. From the
+    profile's name on, the first SIGTERM, SIGHUP or Ctrl-C drains, until ``run`` has written its
+    last object: it stops the start checks between two of them, as the end of the lifeline does,
+    and ``restores`` gets what puts the previous handlers back."""
 
     def ended() -> None:
-        if lifeline is not None and lifeline.ended.is_set():
+        if controls.draining.is_set() or (lifeline is not None and lifeline.ended.is_set()):
             raise _EndedEarly
 
     say = _say if events is None else (lambda _line: None)
     try:
         dirs = _dirs(args.profile)
+        # Nothing is written for it, and before ``run`` serves a signal only drains.
+        controls = Controls(dirs.state)
+        if threading.current_thread() is threading.main_thread():
+            restores.append(controls.install_handlers(kill=False))
+        if lifeline is not None:
+            lifeline.attach(controls.drain)
         config = host_state.load_host_config(dirs)
         host_state.startup_checks()
         ended()
@@ -1206,7 +1216,6 @@ def _serve(
             ended()
             session = link.open_session(dirs, config, say=say, warn=_warn_quietly)
             ended()
-            controls = Controls(paths.ensure_dir(dirs.state))
             runner = loop.Runner(
                 dirs,
                 session,
@@ -1218,8 +1227,8 @@ def _serve(
             made.append(runner)
             said = runner.serve()
     except _EndedEarly:
-        assert lifeline is not None
-        return "drained", {"cause": lifeline.cause}, "drained: run stopped"
+        cause = controls.drain_cause or (lifeline.cause if lifeline is not None else None)
+        return "drained", {"cause": cause or "signal"}, "drained: run stopped"
     reason = runner.outcome or "drained"
     fields = {"cause": controls.drain_cause or "signal"} if reason == "drained" else {}
     return reason, fields, said
@@ -1272,6 +1281,7 @@ def _run(args: argparse.Namespace) -> int:
     taken = _Stdout() if args.json_events else None
     events = None if taken is None else _Events(taken.stream)
     raised: Exception | None = None
+    restores: list[Callable[[], None]] = []
     try:
         lifeline = None
         if args.exit_on_stdin_eof:
@@ -1282,7 +1292,7 @@ def _run(args: argparse.Namespace) -> int:
             lifeline.start()
         made: list[loop.Runner] = []
         try:
-            reason, fields, said = _serve(args, events, lifeline, made)
+            reason, fields, said = _serve(args, events, lifeline, made, restores)
             line = None
         except Exception as exc:  # noqa: BLE001 - every end of run is reported, then judged
             ready = bool(made) and made[0].ready_sent
@@ -1300,6 +1310,8 @@ def _run(args: argparse.Namespace) -> int:
     finally:
         if taken is not None and events is not None:
             taken.give_back(broken=events.broken, written=events.finish(0))
+        for restore in restores:
+            restore()
     if raised is not None:
         raise raised
     return RUN_EXITS[reason]

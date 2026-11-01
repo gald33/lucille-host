@@ -1,0 +1,21 @@
+{
+  "description": "run, with a pair whose SAS was shown and not confirmed, a day and a second later: past its deadline. Each state object is checked against its schema, not compared",
+  "argv": [
+    "run",
+    "--json-events"
+  ],
+  "exit": 20,
+  "stdout": [
+    {
+      "v": 1,
+      "type": "ready",
+      "host_version": "0.1.0.dev0",
+      "pair": "pair-abcdef"
+    },
+    {
+      "v": 1,
+      "type": "stopped",
+      "reason": "expired"
+    }
+  ]
+}

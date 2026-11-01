@@ -11,9 +11,10 @@
 - The first SIGTERM, SIGHUP (the terminal closed) or Ctrl-C drains: the operation in flight
   finishes and replies, and nothing new starts. So does the end of standard input under ``run
   --exit-on-stdin-eof``, and, with ``--json-events`` too, a standard output nobody reads any more
-  (``loop.Lifeline``). A Ctrl-C while draining kills, as ``kill`` does. A signal that was ignored
-  when the handlers were installed stays ignored, so a host started with ``nohup`` keeps running
-  when its terminal closes. The handler takes no lock: it runs between two steps of the main
+  (``loop.Lifeline``). A Ctrl-C while draining kills, as ``kill`` does, once ``run`` serves; during
+  its start checks, when nothing runs yet, it only drains. A signal that was ignored when the
+  handlers were installed stays ignored, so a host started with ``nohup`` keeps running when its
+  terminal closes. The handler takes no lock: it runs between two steps of the main
   thread, which may hold one. What began the drain is kept (:attr:`Controls.drain_cause`): the
   ``stopped`` event says it.
 
@@ -43,11 +44,18 @@ from typing import Any, Final
 
 from lucille_host import state
 
-__all__ = ["Controls"]
+__all__ = ["Controls", "no_terminal_stop"]
 
 PAUSE_FILE: Final = "paused"
 KILL_FILE: Final = "kill-request"
 LOCK_FILE: Final = ".controls.lock"
+
+
+def no_terminal_stop() -> None:
+    """Block SIGTTIN in the calling thread alone: a read of the controlling terminal from the
+    background of a shell with job control then fails (``EIO``), rather than stopping the whole
+    process (``loop.Lifeline``)."""
+    signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGTTIN})
 
 
 def _remove(path: Path) -> None:
@@ -174,11 +182,17 @@ class Controls:
             self._kill.set()
         self.drain("signal")
 
-    def install_handlers(self) -> Callable[[], None]:
+    def _drain_only(self, _signum: int, _frame: Any) -> None:
+        self.drain("signal")
+
+    def install_handlers(self, *, kill: bool = True) -> Callable[[], None]:
         """Handle SIGTERM, SIGHUP and SIGINT (from the main thread), except one that is ignored
-        (as ``nohup`` ignores SIGHUP). Returns a function that puts the previous handlers back."""
+        (as ``nohup`` ignores SIGHUP). Without ``kill``, each only drains, a Ctrl-C while
+        draining too: before ``run`` serves, nothing runs that a kill could stop, and nothing may
+        be written yet. Returns a function that puts the previous handlers back."""
+        handler = self.on_signal if kill else self._drain_only
         previous = {
-            signum: signal.signal(signum, self.on_signal)
+            signum: signal.signal(signum, handler)
             for signum in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT)
             if signal.getsignal(signum) is not signal.SIG_IGN
         }

@@ -373,8 +373,9 @@ its own: the answer was kept, and is sent again while `pair` waits, but the cloc
 | `pair` | string, `^[a-z0-9][a-z0-9-]{0,31}$` | The pair `run` serves. |
 
 `run` passed its start checks (section 13.3) and serves the pair. It is written once, first, before `run`
-first calls the hub, and a `state` follows it. After it, `run` ends only with a `stopped` reason of exit 0, 1
-or 20.
+first calls the hub, and a `state` follows it, unless `run` stops at once: a state file of the profile that
+cannot be read (`rooms.json`, say) makes `stopped` `failed` follow `ready` directly. After it, `run` ends
+only with a `stopped` reason of exit 0, 1 or 20.
 
 ### `state`: what a running `run` sees now
 
@@ -383,10 +384,10 @@ or 20.
 | `pair` | string | The pair `run` serves, as in `ready`. |
 | `confirmed` | boolean | The local gate is open: the SAS was confirmed on this computer. Until then `run` touches nothing, accepts nothing, posts nothing and runs nothing. |
 | `paused` | boolean | The pause flag is set. |
-| `policy` | `ok`, `invalid` or `checking` | The local policy: valid; invalid, so `run` acts on nothing until it is valid again (section 13.5), and `status` says why; or not checked yet, just after `run` started, when `run` accepts nothing either. |
+| `policy` | `ok`, `invalid` or `checking` | The local policy: valid; invalid, so `run` acts on nothing until it is valid again (section 13.5), and `status` says why; or not checked yet, when `run` accepts nothing either: just after `run` started; after a valid file changed, until a load of it says it is still valid; and when `run` would accept a room under a load that began 30 s ago or more, until a new load answers. An invalid file that changed stays `invalid` until a load of it says it is valid. |
 | `last_hub_contact` | string (a time) or null | When `run` last reached the hub. |
 | `clock` | object | As in `status`: `ok` with `skew_s`, `skewed` with `skew_s` (a number or null), or `unknown`. |
-| `rooms` | array of objects, by name, at most 2 | The work rooms `run` reads now: `{"name", "state"}`, `state` being `reading`, or `read_stuck` when a message there cannot be opened and `run` reads no further there. Empty while it reads none. |
+| `rooms` | array of objects, by name, at most 2 | The work rooms `run` reads now: `{"name", "state"}`, `state` being `reading`, or `read_stuck` when a message there cannot be opened and `run` reads no further there. Empty while it reads none. A room held and not read is not listed: while the policy is not `ok`, `run` starts reading no room, so one held when `run` starts, or whose reading stopped, is listed only once the policy is `ok`; and none is listed once `run` drains. `status` says which rooms are held. |
 | `offers_waiting` | integer | Offers of a room that wait to be judged. |
 | `last_left_because` | `check_3`, `check_4`, `left_before` or null | As in `status`: when no room is held and the host left its last one on its own, the check that room failed. |
 
@@ -698,6 +699,11 @@ Each fixture is one command line and what it writes:
   exit code and standard error are the same.
 - `ops-list-sends-file-content` is written with a catalog entry stubbed to send file contents, so that a
   shell's decoder sees `sends_file_content` true. No operation in this release does.
+- Every `stopped` reason has a fixture of `run`, except `forgotten`: only another command forgetting the pair
+  while `run` runs gives it, at a moment one command line does not fix, and a pair forgotten before `run`
+  starts leaves none to serve. The tests make it another way.
+- `run-events-leaked` is written with the pairing library's answer at `run`'s first hub call stubbed to say
+  the handshake was interfered with (`aborted`), which a set-up cannot do on the hub.
 - A fixture of `run` has `--json-events` in its `argv`, and its last object is `stopped`, whose reason gives
   the exit code. `run` writes a `state` object when what it sees changes, at moments the test does not set,
   so the tests check each `state` against its schema and compare the other objects, in order. The sizes and
@@ -749,7 +755,10 @@ lucille-host --profile <name> run --json-events --exit-on-stdin-eof
 - Standard output and standard error: pipes the shell reads, each on a thread or queue that does nothing
   else, until the process has exited, during a quit and a logout too.
 - A shell starts `run` only when the computer is paired and its gate is open (`status`: `pair`
-  `confirmed`).
+  `confirmed`). A `run` started before that does not stop at start: it writes `ready` and `state`
+  (`confirmed` false), takes no room and runs nothing, and goes on once `pair confirm` opens the gate.
+  Meanwhile it stops with 20 only as `expired` once the SAS deadline passes, as `leaked` if the pairing ends
+  early, or as `pair_unusable` if the pairing library refuses the pair (section 13.3).
 - `run` writes its events from a queue of its own, so a shell that reads slowly holds up no thread of `run`:
   nothing waits for it, a drain and a `SIGTERM` included. A shell that stops reading altogether lets 1000
   objects wait, and then counts as a standard output nobody reads (section 13.4). Standard error is written
@@ -765,13 +774,14 @@ lucille-host --profile <name> run --json-events --exit-on-stdin-eof
   order: `received`, `decided`, then `host_too_old` for that refusal, `started` for an operation that starts
   a process, and `finished`. The first `state` comes before any `request`. A `request` with no `finished`
   before `stopped`, or before the process exits, ended there: a shell closes it as stopped.
-- `state` comes right after `ready`, before `run` first calls the hub, again whenever what it says changes (a
-  room read or left, the gate, the pause flag, the policy, the clock's state, an offer), and at least every
-  60 s whatever changed. A hub that takes a connection and never answers holds `run` in each call until the
-  call is given up, after 40 s, and a step can make several: meanwhile `state` still comes every 60 s, saying
-  what `run` saw last, for up to 300 s of one step. So no `state` for 120 s means `run` is not stepping, and
-  the shell treats it as stuck. The hub is out of reach when `last_hub_contact` is more than 120 s older than
-  the shell's own clock (the same computer's): `run` reaches it at least every 25 s while it can.
+- `state` comes right after `ready` (unless `run` stops at once, section 6), before `run` first calls the
+  hub, again whenever what it says changes (a room read or left, the gate, the pause flag, the policy, the
+  clock's state, an offer), and at least every 60 s whatever changed. A hub that takes a connection and
+  never answers holds `run` in each call until the call is given up, after 40 s, and a step can make
+  several: meanwhile `state` still comes every 60 s, saying what `run` saw last, for up to 300 s of one
+  step. So no `state` for 120 s means `run` is not stepping, and the shell treats it as stuck. The hub is
+  out of reach when `last_hub_contact` is more than 120 s older than the shell's own clock (the same
+  computer's): `run` reaches it at least every 25 s while it can.
 - Events carry no time. A shell stamps each with its own clock as it arrives. `finished` says the request
   finished on this computer, not that Lucille received the reply.
 - A line a shell cannot use (not JSON, longer than the bound) it drops, notes for diagnostics, and keeps
@@ -801,12 +811,18 @@ lucille-host --profile <name> run --json-events --exit-on-stdin-eof
 - `run`'s start checks come in this order, each before the next can write or read anything: the profile and
   its host configuration (1); the environment (24); the run lock (21); the version record (25); the store
   (23); the policy digest key, which a damaged file makes `failed` `state_invalid` rather than an invalid
-  policy (1); the pair and its gate record, read on this computer (20); then `ready`, and the first hub
-  call. So root writes nothing, a second `run` changes nothing, and an older release reads no secret.
-- 21, 23, 24 and 25 come only before `ready`, and so do `not_paired`, `no_gate`, `several_pairs` and
-  `pair_unusable` unless the pair goes while `run` runs. After `ready`, a store that cannot be read is
-  `failed` with `store_error`: a shell starts `run` again, and a store that still cannot be used then gives
-  23. 22 is not used.
+  policy (1); the pair, its record in the store and its gate record, read on this computer (20, or 23 for a
+  record the store cannot read); then `ready`, and the first hub call. So root writes nothing, a second
+  `run` changes nothing, and an older release reads no secret.
+- A pair whose SAS is not confirmed yet is not refused at start: `run` serves it, and waits for `pair
+  confirm` (section 13.1). Of the gate, only a pair with no gate record, which can never be confirmed here,
+  gives 20 at start (`no_gate`). While `run` waits, `expired` comes once the SAS deadline passes, and
+  `leaked` and `pair_unusable` as for a confirmed pair.
+- 21, 23, 24 and 25 come only before `ready`, and so do `not_paired`, `no_gate` and `several_pairs` unless
+  the pair goes while `run` runs. `pair_unusable` comes before `ready` for a record in the store the
+  library refuses, and after it when the library refuses the pair at a hub call. After `ready`, a store
+  that cannot be read is `failed` with `store_error`: a shell starts `run` again, and a store that still
+  cannot be used then gives 23. 22 is not used.
 - **How `run` ended comes first.** 20 to 25 are also signal numbers on macOS (`SIGCHLD` 20, `SIGTTIN` 21,
   `SIGTTOU` 22, `SIGIO` 23, `SIGXCPU` 24, `SIGXFSZ` 25), and `SIGXCPU` and `SIGXFSZ` end a process. So a
   shell checks that `run` exited (Foundation's `terminationReason` is `.exit`) before it reads the number, as
@@ -844,15 +860,18 @@ lucille-host --profile <name> run --json-events --exit-on-stdin-eof
   or is force-quit); a read error; or no standard input at all (fd 0 closed when `run` started). A read end
   handed over non-blocking is made blocking.
 - Before `run` serves, the end stops it between two of its start checks: `stopped` `drained`, with no
-  `ready`. A start check that waits (on macOS, a Keychain prompt; a state file on a stalled mount) is not cut
-  short: the end is seen once it returns.
+  `ready`. So does the first `SIGTERM`, `SIGHUP` or Ctrl-C, once the profile's name is checked, with `cause`
+  `signal`, with or without this option; a Ctrl-C then kills nothing, since nothing runs. A start check that
+  waits (on macOS, a Keychain prompt; a state file on a stalled mount) is not cut short: the end, or the
+  signal, is seen once it returns.
 - With `--json-events` too, a standard output that nobody reads any more (a write fails, or 1000 objects
   wait) drains `run` the same way, with `cause` `stdout_gone`. Without `--exit-on-stdin-eof`, such a standard
   output only stops the events; `run` goes on, and exits with the code it chose.
 - Without `--exit-on-stdin-eof`, `run` never reads its standard input, so a `run` started under `nohup`, or
   with its standard input closed, keeps running.
-- With a terminal as standard input, Ctrl-D drains. The option is meant for a pipe: in the background of a
-  shell with job control, the terminal stops a process that reads from it.
+- With a terminal as standard input, Ctrl-D drains. In the background of a shell with job control, where
+  reading the terminal would stop the whole process, `run` does not read it and goes on; in the foreground
+  again, Ctrl-D drains. The option is meant for a pipe.
 - A shell that wants the running operation stopped, not finished, runs `lucille-host kill`, which also
   pauses.
 
@@ -867,10 +886,15 @@ lucille-host --profile <name> run --json-events --exit-on-stdin-eof
   fails its checks or that a move gives up), and the controls work. `state` says `policy` `invalid`, and
   `status` why. Lucille's requests wait on the hub, as for a computer that is off, and expire if the file is
   not made valid in time.
-- From when `run` notices: it looks at the file once a second, and a file that is invalid by what it holds
-  (not TOML, an unknown key) holds the offers at once, even while an operation runs. A file that is invalid
-  only by a folder (one that became the home folder, through a link) is found by the next load: before the
-  next decision, and at least every 30 s.
+- From when `run` notices: it looks at the file once a second, and again right before it accepts a room
+  (a step can wait on the hub). A valid file that changed holds the offers until a load of it says it is
+  still valid (`state` says `policy` `checking`), and one that is invalid by what it holds (not TOML, an
+  unknown key) is `invalid` at once, even while an operation runs; an invalid file stays `invalid` until a
+  load of it says it is valid. A file that is invalid only by a folder (one that became the home folder,
+  through a link, the file unchanged) is found by the next load: before the next decision, and every 30 s
+  between `run`'s steps, while an operation runs too. A step that waits on the hub can last longer than
+  that, so `run` accepts no room under a load that began 30 s ago or more: the offer waits for a new load
+  (`checking`).
 - When the file is valid again, by `policy reset` or by hand, `run` goes on, with no restart. `ops` and
   `roots` refuse with `policy_invalid` while the file is invalid: they change it only once `policy reset` has.
 - `run` never rewrites the file. `policy reset` sets an invalid one aside.

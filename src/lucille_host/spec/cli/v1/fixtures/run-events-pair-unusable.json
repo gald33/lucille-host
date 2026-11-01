@@ -1,0 +1,15 @@
+{
+  "description": "run, with the pair kept in files (pair --store-file) and confirmed, and the pair's file then holding text that is not JSON",
+  "argv": [
+    "run",
+    "--json-events"
+  ],
+  "exit": 20,
+  "stdout": [
+    {
+      "v": 1,
+      "type": "stopped",
+      "reason": "pair_unusable"
+    }
+  ]
+}

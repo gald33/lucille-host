@@ -1,0 +1,21 @@
+{
+  "description": "run, with a pair Lucille ended before run started: run finds it ended at its first hub call, and forgets it here. Each state object is checked against its schema, not compared",
+  "argv": [
+    "run",
+    "--json-events"
+  ],
+  "exit": 0,
+  "stdout": [
+    {
+      "v": 1,
+      "type": "ready",
+      "host_version": "0.1.0.dev0",
+      "pair": "pair-abcdef"
+    },
+    {
+      "v": 1,
+      "type": "stopped",
+      "reason": "ended"
+    }
+  ]
+}

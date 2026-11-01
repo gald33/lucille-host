@@ -1033,19 +1033,53 @@ each could be made another way in a later pull request that updates this list.
   the first signal calls for; the drain is set before anything else, so a lifeline whose audit line cannot
   be written still stops `run`. A read end handed over non-blocking is made blocking. No standard input
   counts as its end. It starts before the start checks, which look at it between them: a shell gone before
-  `run` served ends it there, with no hub call.
+  `run` served ends it there, with no hub call. It blocks SIGTTIN for its own thread alone, so that in the
+  background of a shell with job control its read of the terminal fails rather than stopping the whole
+  process; it then reads again each tick, and a terminal brought back to the foreground ends it with
+  Ctrl-D as before.
 - **The start checks** run in this order, each before the next can write or read anything: the environment
-  (24), the run lock (21), the version record (25), the store (23), the digest key (1), the pair (20). So
-  root writes nothing, a second `run` changes nothing, and an older release reads no secret.
+  (24), the run lock (21), the version record (25), the store (23), the digest key (1), the pair, its
+  record in the store and its gate record (20, or 23 for a record the store cannot read). So root writes
+  nothing, a second `run` changes nothing, and an older release reads no secret. Reading the pair's record
+  here, as `status` does with no hub call, makes a damaged file store a refusal at start, not a `failed`
+  after `ready` at every start. The first SIGTERM, SIGHUP or Ctrl-C during the checks drains, as the
+  lifeline's end does: the command installs handlers once the profile's name is checked, writing nothing for
+  them, and keeps them until it has written `stopped`. Until `ready` they only drain, a second Ctrl-C too,
+  through the runner's own checks of the digest key and the pair, since nothing runs that a kill could stop
+  and nothing may be written yet: a kill would leave the profile paused for the next `run`.
+- **A pair whose SAS is not confirmed yet does not stop `run` at start,** rather than exiting 20 as a
+  computer that holds no pair does. `run` writes `ready` and `state` (`confirmed` false), takes no room and
+  runs nothing, and serves once `pair confirm` opens the gate. At start, 20 comes only for a pair with no
+  gate record (`no_gate`), which can never be confirmed here; while `run` waits, it comes as `expired` once
+  the SAS deadline passes, as `leaked` if the pairing ends early, and as `pair_unusable` if the pairing
+  library refuses the pair, as for a confirmed pair. This keeps the pairing design already merged, in
+  which nothing runs before the local SAS confirmation and `pair confirm` may come while `run` runs,
+  which then follows it; and a shell starts `run` only once `status` says the pair is `confirmed`
+  (spec/CLI.md §13.1), so the wait matters only to a `run` started by hand. The maintainer accepted this
+  on 2026-11-01, in the pull request that built supervision.
+- **`state`'s `rooms` lists the rooms `run` reads now,** rather than every room held. While the policy is
+  not valid `run` starts reading no room, so a room held at start, or one whose reading stopped, is not
+  listed until the policy is valid, and none is once `run` drains. A shell's Connected means requests are
+  being read, and `status`'s `work_rooms` says which rooms are held.
 - **The run lock keeps its name**, `.run.lock`, as this record and earlier documents name it.
 - **The version record** is JSON, as every state file is (`state/last_version.json`), holds only a release,
   and is written before the store is opened: it says which release started `run`, not which served.
-- **Only the thread that handles requests loads the policy**, before each decision and when main asks: when
-  main sees the file change (by device, inode, size, and modification and change times), and every 30 s.
-  Loading looks at every folder in the policy, and a folder on a stalled mount would otherwise stop the
-  thread that drains. Main checks a changed file by what it holds alone, looking at no folder, so a file
-  made invalid holds the offers at once. A request waiting while the file is invalid is not written down,
-  so it is decided afresh, under the policy that is valid then; and a drain does not wait for it.
+- **Two threads load the policy, and never main**: the thread that handles requests, before each decision,
+  and a loader, when main asks: when main sees the file change (by device, inode, size, and modification
+  and change times), and every 30 s. So an ask is answered while an operation runs, and a folder that turns
+  into the home folder is found within 30 s then too. Loading looks at every folder in the policy, and a
+  folder on a stalled mount would otherwise stop the thread that drains. Main checks a changed file by what
+  it holds alone, looking at no folder, so a file made invalid holds the offers at once; a changed file
+  valid by what it holds holds them as well (`checking`) until a load of it says it is valid, and the
+  session asks again right before it accepts a room, since a step can wait long on the hub. Main asks only
+  between steps, so the 30 s are counted between them; a step that waits longer on the hub accepts no room
+  under a load that began 30 s ago or more, and waits for a new one (`checking`), rather than main asking
+  from inside a step. An invalid file that changed stays `invalid` until a load says it is valid, so that no
+  `policy valid` line is written before one does. Main takes a verdict only from a load asked after the
+  file last changed, and begun after the last load whose verdict it took, so a load held up on a slow
+  folder cannot undo a later one. A request waiting while the file is invalid is not written down, so it is
+  decided afresh, under the policy that is valid then, as soon as main asks again; and a drain does not
+  wait for it.
 - **A drain waits for the request being decided or run**, and for its reply to reach the poster, and goes on
   writing `status.json` and `state` meanwhile, so a shell that finds the run lock held can tell a `run`
   finishing its operation from one that stopped without saying so.
@@ -1054,7 +1088,7 @@ each could be made another way in a later pull request that updates this list.
   on the record lock another command holds. It writes what main last wrote, and nothing else. So a shell
   reads such a `run` as out of reach of the hub, from `last_hub_contact`, not as stuck. It stops after 300 s
   of one step, so that a step that never ends still reads as stuck. The first `state` comes before the first
-  hub call, once the worker's first look at the policy is in or a tick has passed.
+  hub call, once the loader's first look at the policy is in or a tick has passed.
 - **The digest key** is read before `run` serves: a damaged key stops `run` (`state_invalid`), and is not
   taken for an invalid policy.
 

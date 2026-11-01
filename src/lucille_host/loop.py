@@ -9,13 +9,16 @@ refuses, changing nothing, since two would each answer every request. The thread
   pairing and sharing call, through the :class:`link.Session` that keeps the pair and takes the
   work rooms Lucille offers over it: the session's rules decide when to resolve and touch, and
   what to accept, leave or abandon. Main feeds it the other threads' events (a note on the pair
-  channel, a hub error, a room that failed its checks, the worker's verdict on the local policy)
-  and a wake from sleep, which it finds by the wall clock jumping ahead of the monotonic one,
-  which stops while the computer sleeps. It starts a reader for each room the session says may be
+  channel, a hub error, a room that failed its checks, a verdict on the local policy) and a
+  wake from sleep, which it finds by the wall clock jumping ahead of the monotonic one, which
+  stops while the computer sleeps. It starts a reader for each room the session says may be
   read, writes ``state/status.json``, and, for ``run --json-events``, the ``ready`` and ``state``
   objects (spec/CLI.md section 13). It never loads the local policy, which looks at each of its
   folders: it stats the file once a tick, checks a file that changed without looking at any
-  folder (``policy.check_file``), and asks the worker to load it.
+  folder (``policy.check_file``), holds the offers until a load of the changed file says it is
+  valid, and asks the loader to load it. The session looks again, through main, just before it
+  accepts a room (``Session.offers_held``): a step can wait long on the hub, so the offers then wait
+  too when the last load began :data:`RECONCILE_EVERY` seconds ago or more, for a new one.
 - **The heartbeat.** While main is in a step, where it can wait on a hub that does not answer
   (each call given up after ``_switchboard.CLIENT_TIMEOUT``) or on the record lock, it writes
   ``state/status.json`` and the ``state`` object again as main last wrote them, at least every
@@ -38,14 +41,19 @@ refuses, changing nothing, since two would each answer every request. The thread
   same time.
 - **The worker.** One request at a time, in the order they were read, so in sequence order within
   a room: the messages that get no reply are logged (``envelope.ignored``); a job id already in
-  the journal gets nothing (dedupe, across rooms); the local policy is loaded, and while it is
-  invalid the request waits, unwritten; the journal entry is written; steps 2 to 4 of the
-  refusal order (``envelope.early_code``) and then ``jobs.process``, in a context built from
-  that load, so that a change of the local policy applies to the next request; the decision goes
-  to the journal as soon as it is made. Each message's cursor is written to
-  ``state/cursors.json`` only after its audit lines and its journal entry. It also loads the
-  policy when main asks, and tells main whether it is valid. For ``run --json-events`` it writes
-  each request's ``request`` objects, right after the audit lines they mirror.
+  the journal gets nothing (dedupe, across rooms); the local policy is loaded, main is told
+  whether it is valid, and while it is invalid the request waits, unwritten; the journal entry is
+  written; steps 2 to 4 of the refusal order (``envelope.early_code``) and then
+  ``jobs.process``, in a context built from that load, so that a change of the local policy
+  applies to the next request; the decision goes to the journal as soon as it is made. Each
+  message's cursor is written to ``state/cursors.json`` only after its audit lines and its
+  journal entry. For ``run --json-events`` it writes each request's ``request`` objects, right
+  after the audit lines they mirror.
+- **The loader.** Loads the local policy each time main asks (when the file changed, and every
+  :data:`RECONCILE_EVERY` seconds), and tells main whether it is valid, so that main's asks are
+  answered while the worker runs an operation. It decides nothing. A load held up on a folder of a
+  stalled mount holds up only the thread that makes it, never main; main takes each verdict only
+  from a load that began after the last one it took.
 - **The poster.** Each reply is posted as a note with no thread and an explicit TTL
   (``envelope.reply_ttl``), after the room is checked again; a failed post is tried again with a
   back-off until its TTL would have run out, and a transport failure never becomes a ``failed``
@@ -96,8 +104,8 @@ A Ctrl-C while draining kills the running child, as ``lucille-host kill`` does. 
 reach the worker through ``jobs.process``.
 
 **The local policy while ``run`` runs** (spec/CLI.md section 13.5). While the file is invalid,
-or not checked yet at start, ``run`` acts on nothing: the session accepts no room
-(``Session.hold_offers``), no reader starts, and the worker writes no request down. Replies
+or not checked yet (at start, and after it changed), ``run`` acts on nothing: the session accepts
+no room (``Session.hold_offers``), no reader starts, and the worker writes no request down. Replies
 decided before are still posted, and the pair is kept. Once the file is valid, ``run`` goes on.
 
 Nothing here starts a process, opens a listening socket, or writes outside the profile's own
@@ -133,7 +141,7 @@ from lucille_host import (
     state,
 )
 from lucille_host.audit import AuditLog
-from lucille_host.controls import Controls
+from lucille_host.controls import Controls, no_terminal_stop
 from lucille_host.journal import Entry, Journal
 from lucille_host.ops import OPERATIONS, args_valid
 
@@ -151,6 +159,7 @@ __all__ = [
     "Downgrade",
     "Failed",
     "Lifeline",
+    "LOADER",
     "Runner",
     "check_version",
     "clock_view",
@@ -183,8 +192,10 @@ STATUS_EVERY: Final = 60.0
 WAIT_MOST: Final = 300.0
 # At the end, how long main waits for a reader still in its last read.
 READER_GRACE: Final = 1.0
-# The thread that handles requests, and alone loads the local policy.
+# The threads that load the local policy: the one that handles requests, before each, and the
+# one that loads it when main asks.
 WORKER: Final = "lucille-host worker"
+LOADER: Final = "lucille-host policy loader"
 # What ends the lifeline: standard input at its end, or a standard output nobody reads.
 STDIN_END: Final = "stdin_end"
 STDOUT_GONE: Final = "stdout_gone"
@@ -351,9 +362,12 @@ class Lifeline:
     reads, and the end drains ``run`` as its first SIGTERM does. The end is ``b""`` (every holder
     of the pipe's write end closed it: a shell that quits, crashes or is force-quit), a read error,
     or no standard input at all (``fd`` -1). A read end handed over non-blocking is made blocking
-    and read again. With ``--json-events``, a standard output nobody reads ends it too
-    (:meth:`cut`, :data:`STDOUT_GONE`). It never closes standard input, writes nothing, and calls
-    no signal function; it may end before ``run`` starts serving, and ``run`` stops then."""
+    and read again. A terminal whose foreground is another process group (``run`` is a background
+    job of a shell) is not read until ``run`` is in the foreground again: the thread blocks
+    SIGTTIN for itself alone (:func:`controls.no_terminal_stop`), so the read fails rather than
+    stopping the whole process, and is tried again each tick. With ``--json-events``, a standard
+    output nobody reads ends it too (:meth:`cut`, :data:`STDOUT_GONE`). It never closes standard
+    input and writes nothing; it may end before ``run`` starts serving, and ``run`` stops then."""
 
     def __init__(self, fd: int) -> None:
         self.fd = fd
@@ -374,11 +388,17 @@ class Lifeline:
 
     def _watch(self) -> None:
         try:
+            no_terminal_stop()
             while True:
                 try:
                     data = os.read(self.fd, _LIFELINE_READ)
                 except BlockingIOError:
                     os.set_blocking(self.fd, True)
+                    continue
+                except OSError as exc:
+                    if exc.errno != errno.EIO or not _in_background(self.fd):
+                        raise
+                    time.sleep(TICK)
                     continue
                 if not data:
                     return
@@ -405,6 +425,14 @@ class Lifeline:
             cause = self.cause
         if cause is not None:
             handler(cause)
+
+
+def _in_background(fd: int) -> bool:
+    """Whether ``fd`` is a terminal whose foreground is a process group other than this one's."""
+    try:
+        return os.tcgetpgrp(fd) != os.getpgrp()
+    except OSError:
+        return False
 
 
 class Backoff:
@@ -639,16 +667,22 @@ class Runner:
         # The gate's record and the room record as main last read them.
         self._seen_gate: gate.Gate | None = None
         self._seen_record: rooms.Record | None = None
-        # The local policy, as main knows it: ``ok``, ``invalid``, or ``checking`` until the
-        # worker's first load. Main asks the worker to load it (``_recheck``), numbering each ask;
-        # a verdict from a load asked before the file last changed counts for nothing.
+        # The local policy, as main knows it: ``ok``, ``invalid``, or ``checking`` until a load
+        # of the file as it is now answers (at start, and after a change). Main asks the loader to
+        # load it (``_recheck``), numbering each ask; a verdict from a load asked before the file
+        # last changed counts for nothing. Each load is numbered too, in the order loads began:
+        # main takes a verdict only from a load that began after the last one it took, and keeps
+        # when that load began (monotonic).
         self._policy_state = "checking"
         self._policy_sig: tuple[int, ...] | None = None
         self._policy_asked = 0.0
         self._policy_seq = 0
         self._policy_changed_at = 0
         self._recheck = True
-        # The worker's last good load: the effective policy and its digest.
+        self._loads = 0
+        self._verdict = 0
+        self._verdict_at = 0.0
+        # The last good load: the effective policy and its digest.
         self._loaded: tuple[policy.Effective, str] | None = None
         self._digest_key = b""
         # Set while the worker decides or runs a request it has written down.
@@ -681,6 +715,9 @@ class Runner:
         )
         self._worker = threading.Thread(
             target=self._guarded(self._work_loop), name=WORKER, daemon=True
+        )
+        self._loader = threading.Thread(
+            target=self._guarded(self._load_loop), name=LOADER, daemon=True
         )
         self._poster = threading.Thread(
             target=self._guarded(self._post_loop), name="lucille-host poster", daemon=True
@@ -747,11 +784,15 @@ class Runner:
 
     def serve(self) -> str:
         """:meth:`run`, for a caller that holds the run lock already (the command, which takes it
-        before its other start checks)."""
-        restore = None
-        if threading.current_thread() is threading.main_thread():
-            restore = self.controls.install_handlers()
+        before its other start checks). Until ``ready``, a stop signal only drains, a second
+        Ctrl-C too, as the command's own start checks have it: nothing runs that a kill could
+        stop, and nothing may be written yet."""
+        on_main = threading.current_thread() is threading.main_thread()
+        restores: list[Callable[[], None]] = []
+        if on_main:
+            restores.append(self.controls.install_handlers(kill=False))
         self.session.stop_room = self._stop_room
+        self.session.offers_held = self._policy_moved
         self.session.hold_offers = True
         try:
             try:
@@ -763,11 +804,14 @@ class Runner:
             self._name = name
             if self.lifeline is not None:
                 self.lifeline.attach(self._lifeline_ended)
-                if self.lifeline.ended.is_set():
-                    # Its shell was gone before it served: nothing was read, written down or
-                    # started, and no hub was called.
-                    self.outcome = "drained"
-                    return "drained: run stopped"
+            if self.controls.draining.is_set():
+                # Its shell was gone, or a stop signal came, before it served: nothing was read,
+                # written down or started, and no hub was called.
+                self.outcome = "drained"
+                return "drained: run stopped"
+            if on_main:
+                # From here on a Ctrl-C while draining kills the running child.
+                restores.append(self.controls.install_handlers())
             self.say(f"running: pair {name}; Ctrl-C stops once the running operation ends")
             self._tell("ready", host_version=__version__, pair=name)
             self.ready_sent = True
@@ -775,10 +819,11 @@ class Runner:
             self._policy_sig = policy.signature(self.dirs.policy_file)
             self._policy_asked = time.monotonic()
             self._worker.start()
+            self._loader.start()
             self._poster.start()
             self._beat.start()
             try:
-                # The first status and ``state``, before any hub call, once the worker's first
+                # The first status and ``state``, before any hub call, once the loader's first
                 # look at the policy is in, or a tick has passed: the heartbeat writes them again
                 # while the first calls wait.
                 self._snapshot_now()
@@ -808,7 +853,7 @@ class Runner:
             return "drained: run stopped"
         finally:
             self._shutdown()
-            if restore is not None:
+            for restore in reversed(restores):
                 restore()
 
     def _next_events(self) -> list[tuple[str, Any]]:
@@ -891,9 +936,11 @@ class Runner:
                 self.session.check_room(value)
                 changed = True
             elif kind == "policy":
-                asked, ok, why = value
-                # A load asked for before the file last changed says nothing of the file now.
-                if asked >= self._policy_changed_at:
+                asked, ticket, began, ok, why = value
+                # A load asked for before the file last changed says nothing of the file now; one
+                # that began before the last load whose verdict was taken says nothing newer.
+                if asked >= self._policy_changed_at and ticket > self._verdict:
+                    self._verdict, self._verdict_at = ticket, began
                     changed = self._set_policy("ok" if ok else "invalid", why) or changed
         return changed
 
@@ -902,9 +949,11 @@ class Runner:
     def _watch_policy(self) -> bool:
         """Main's look at the policy file, once a tick. It never loads it: it stats it, and
         when the file changed checks what it holds without looking at any folder, so that a file
-        made invalid holds the offers at once, even while the worker runs an operation. Either
-        way, and every :data:`RECONCILE_EVERY` seconds, it asks the worker to load it. Whether
-        the policy turned valid."""
+        made invalid holds the offers at once, even while the worker runs an operation; a changed
+        file valid by what it holds holds them too, ``checking`` if it was valid and ``invalid``
+        still if it was not, until a load of it says it is valid. Either way, and every
+        :data:`RECONCILE_EVERY` seconds, it asks the loader to load it. Whether the policy turned
+        valid."""
         now = time.monotonic()
         sig = policy.signature(self.dirs.policy_file)
         changed = sig != self._policy_sig
@@ -922,7 +971,25 @@ class Runner:
                 policy.check_file(self.dirs.policy_file)
             except policy.PolicyError as exc:
                 self._set_policy("invalid", str(exc))
+            else:
+                if self._policy_state == "ok":
+                    self._set_policy("checking", None)
         return False
+
+    def _policy_moved(self) -> bool:
+        """The session's look, on main, just before it accepts a room or completes an accept a
+        stop interrupted, at the end of a step that may have waited long on the hub: whether the
+        policy file changed since main last looked at it, or the last load whose verdict main
+        took began :data:`RECONCILE_EVERY` seconds ago or more (a folder may have turned into the
+        home folder since, the file unchanged). The offers then wait: main looks at the file at
+        its next tick, as :meth:`_watch_policy` says; for a load that old, until a new load says
+        the file is valid (``checking``)."""
+        if policy.signature(self.dirs.policy_file) != self._policy_sig:
+            return True
+        if time.monotonic() - self._verdict_at < RECONCILE_EVERY:
+            return False
+        self._set_policy("checking", None)
+        return True
 
     def _set_policy(self, new: str, why: str | None) -> bool:
         """The policy as main knows it is now ``new``: the session holds offers unless it is
@@ -1008,8 +1075,8 @@ class Runner:
         for job_id, entry in self.journal.pending(room.workspace):
             if entry.decision == "run":
                 outcome = jobs.Outcome(status="failed", code="interrupted", duration_ms=0)
-                # The digest of the worker's last good load: main never loads the policy, and
-                # rooms are read only while it is valid.
+                # The digest of the last good load: main never loads the policy, and rooms are
+                # read only while it is valid.
                 assert self._loaded is not None
                 data = jobs.encode(jobs.reply_body(job_id, outcome, self._loaded[1]))
                 self.audit.write("restart", job_id=job_id, room=room.name, reply="interrupted")
@@ -1155,7 +1222,9 @@ class Runner:
         for thread in (self._worker, self._poster, self._beat):
             if thread.is_alive():
                 thread.join(KILL_WAIT)
-        readers = [room.thread for room in self._rooms.values()]
+        # The loader may be held in a load on a stalled mount: it is waited for no longer than a
+        # reader in its last read.
+        readers = [self._loader, *(room.thread for room in self._rooms.values())]
         if self._pair is not None:
             readers.append(self._pair.thread)
         ends = time.monotonic() + READER_GRACE
@@ -1405,15 +1474,12 @@ class Runner:
     def _work_loop(self) -> None:
         while True:
             with self._cv:
-                while not (self._work or self._threads_stop or self._recheck):
+                while not (self._work or self._threads_stop):
                     self._cv.wait()
                 if self._threads_stop:
                     return
-                item = self._work.popleft() if self._work else None
+                item = self._work.popleft()
                 self._current = item
-            if item is None:
-                self._load_policy()
-                continue
             finished = False
             try:
                 if isinstance(item, _Batch):
@@ -1426,21 +1492,35 @@ class Runner:
                     self._current = None
                     self._cv.notify_all()
 
+    def _load_loop(self) -> None:
+        """The loader: each time main asks, load the policy and tell main whether it is valid."""
+        while True:
+            with self._cv:
+                while not (self._recheck or self._threads_stop):
+                    self._cv.wait()
+                if self._threads_stop:
+                    return
+            self._load_policy()
+
     def _load_policy(self) -> tuple[policy.Effective, str] | None:
         """Load the local policy, and tell main whether it is valid; the effective policy and
-        its digest, or None while it is invalid. Only the worker loads it: loading looks at each
-        folder, and a folder on a stalled mount holds up whoever loads it."""
+        its digest, or None while it is invalid. Only the worker and the loader load it, never
+        main: loading looks at each folder, and a folder on a stalled mount holds up whoever loads
+        it."""
         with self._cv:
             self._recheck = False
             asked = self._policy_seq
+            self._loads += 1
+            ticket = self._loads
+            began = time.monotonic()
         try:
             eff = policy.effective(policy.load(self.dirs.policy_file), paths.os_family())
         except policy.PolicyError as exc:
-            self._event("policy", (asked, False, str(exc)))
+            self._event("policy", (asked, ticket, began, False, str(exc)))
             return None
         loaded = (eff, policy.digest(eff, self._digest_key))
         self._loaded = loaded
-        self._event("policy", (asked, True, None))
+        self._event("policy", (asked, ticket, began, True, None))
         return loaded
 
     def _await_policy(self, room: _Room) -> tuple[policy.Effective, str] | None:
@@ -1450,6 +1530,8 @@ class Runner:
         while True:
             if self._closing or self.controls.draining.is_set() or self._halted(room):
                 return None
+            with self._cv:
+                seen = self._policy_seq
             loaded = self._load_policy()
             if self._closing or self.controls.draining.is_set():
                 return None
@@ -1457,7 +1539,7 @@ class Runner:
                 return loaded
             with self._cv:
                 while not (
-                    self._recheck
+                    self._policy_seq != seen
                     or self._closing
                     or self.controls.draining.is_set()
                     or room.name in self._abandoned

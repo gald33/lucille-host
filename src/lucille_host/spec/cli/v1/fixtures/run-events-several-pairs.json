@@ -1,0 +1,15 @@
+{
+  "description": "run, with a profile that holds two pairs",
+  "argv": [
+    "run",
+    "--json-events"
+  ],
+  "exit": 20,
+  "stdout": [
+    {
+      "v": 1,
+      "type": "stopped",
+      "reason": "several_pairs"
+    }
+  ]
+}

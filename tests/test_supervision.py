@@ -16,6 +16,7 @@ import errno
 import hashlib
 import json
 import os
+import queue
 import re
 import signal
 import subprocess
@@ -46,6 +47,7 @@ from lucille_host import (
     rooms,
     spec,
 )
+from lucille_host import state as host_state
 from lucille_host.controls import Controls
 from lucille_host.ops import OPERATIONS
 from tests import _audit_hook
@@ -150,6 +152,8 @@ def test_request_events_carry_no_absolute_path(
         "absolute": body(op="files.sha256", args={"root": "docs", "path": "/etc/hostname"}),
         "double": body(op="files.sha256", args={"root": "docs", "path": "//x"}),
         "control": body(op="files.sha256", args={"root": "docs", "path": "\u0001/etc/passwd"}),
+        "not_a_string": body(op="files.sha256", args={"root": "docs", "path": 5}),
+        "extra_key": body(op="files.sha256", args={"root": "docs", "path": "a.txt", "more": 1}),
         "describe": body(),
         "not_an_op": body(op="Not An Op"),
         "too_large": body(
@@ -198,6 +202,12 @@ def test_request_events_carry_no_absolute_path(
         assert found[name][1]["code"] == "path_outside_root", name
     # A path with a character a terminal must not show is not written either, whatever it names.
     assert (found["control"][0]["root"], found["control"][0]["path"]) == ("docs", None)
+    # Arguments that do not hold to the operation's schema: neither the folder nor the path is
+    # written, the request is refused, and `run` goes on answering the next.
+    for name in ("not_a_string", "extra_key"):
+        assert _phases(found[name]) == ["received", "decided", "finished"], name
+        assert (found[name][0]["root"], found[name][0]["path"]) == (None, None), name
+        assert found[name][1]["code"] == "bad_args", name
     assert _phases(found["describe"]) == ["received", "decided", "finished"]
     assert {k: found["describe"][0][k] for k in ("op", "root", "path")} == {
         "op": "host.describe",
@@ -540,6 +550,43 @@ def test_state_says_why_the_host_left_its_room(
     assert run.wait() == 0
 
 
+def test_state_says_a_room_is_read_stuck(
+    host: RunHost, supervise: Callable[..., Supervised], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A message in the room that no holder of its key can open, and none above the cursor in the
+    # recovery read: the host reads no further there, and `state` says so, as status.json does.
+    run = supervise(*EVENTS)
+    run.ready()
+    room = run.offer("work-1")
+    host.reply("work-1", host.request("work-1"))
+    monkeypatch.setattr(_switchboard.RoomClient, "recover", lambda *_a, **_k: [])
+    with host.lucille.client("work-1") as sealed:
+        channel = sealed.cipher.blind_channel(_switchboard.EXEC_CHANNEL)
+    with host.lucille.client("work-1", agent_id="stranger", key="") as plain:
+        plain.post(channel, {"garbage": True}, ttl=600)
+    until(lambda: host.events("read_stuck"), what="read_stuck logged")
+    stuck = [{"name": room, "state": "read_stuck"}]
+    until(lambda: run.state()["rooms"] == stuck, 5, what="a state saying read_stuck")
+    run.close_stdin()
+    assert run.wait() == 0
+
+
+def test_state_drops_a_room_no_longer_read(
+    host: RunHost, supervise: Callable[..., Supervised]
+) -> None:
+    # Lucille leaves the room the host reads: the host gives it up and stops reading it, and
+    # `state` says it reads no room.
+    run = supervise(*EVENTS)
+    run.ready()
+    run.offer("work-1")
+    host.reply("work-1", host.request("work-1"))
+    host.lucille.leave("work-1")
+    until(lambda: host.record().held == {}, what="the room given up")
+    until(lambda: run.state()["rooms"] == [], 5, what="a state reading no room")
+    run.close_stdin()
+    assert run.wait() == 0
+
+
 def test_state_rooms_bound_is_the_room_cap() -> None:
     schema = spec.load_cli_schema("state")
     assert schema["properties"]["rooms"]["maxItems"] == rooms.CAP
@@ -666,6 +713,138 @@ def test_lifeline_ending_during_the_start_checks_drains(
     assert [line["event"] for line in host.events("lifeline")] == ["stdin_end"]
 
 
+def test_lifeline_ending_while_the_store_opens_drains_before_the_next_check(
+    host: RunHost, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The shell quits while `run` opens the store (on macOS, a Keychain prompt): the end is seen
+    # once that check returns, and no later check runs, so `run` reads nothing more of the
+    # profile for a shell that is gone.
+    lifelines: list[loop.Lifeline] = []
+    made: list[Supervised] = []
+    checked: list[str] = []
+    real_start = loop.Lifeline.start
+    real_open = link.open_session
+    real_check = link.Session.check_ready
+
+    def start(lifeline: loop.Lifeline) -> loop.Lifeline:
+        lifelines.append(lifeline)
+        return real_start(lifeline)
+
+    def open_session(*args: Any, **options: Any) -> link.Session:
+        made[0].close_stdin()
+        assert lifelines[0].ended.wait(10)
+        return real_open(*args, **options)
+
+    def check_ready(session: link.Session) -> str:
+        checked.append("check_ready")
+        return real_check(session)
+
+    monkeypatch.setattr(loop.Lifeline, "start", start)
+    monkeypatch.setattr(link, "open_session", open_session)
+    monkeypatch.setattr(link.Session, "check_ready", check_ready)
+    made.append(Supervised(monkeypatch, EVENTS, host=host))
+    assert made[0].wait(30) == 0
+    assert made[0].out.objects() == [DRAINED]
+    assert checked == []
+
+
+def test_bytes_on_standard_input_are_read_and_discarded(
+    host: RunHost, supervise: Callable[..., Supervised]
+) -> None:
+    # A shell's stray newline, or a line typed at a terminal, including bytes that are not UTF-8:
+    # `run` reads them, discards them, and goes on answering. Only the end drains it.
+    run = supervise(*EVENTS)
+    run.ready()
+    run.offer("work-1")
+    os.write(run.stdin_write_end, b"hello\n" * 100 + b"\xff\xfe\x00\n")
+    time.sleep(QUIET)
+    assert run.running and host.events("lifeline") == []
+    assert host.reply("work-1", host.request("work-1"))["body"]["status"] == "done"
+    run.close_stdin()
+    assert run.wait() == 0
+    assert run.out.objects()[-1] == DRAINED
+
+
+# A shell with job control, as a session leader on a terminal of its own, that runs the lifeline
+# in a job of its own (another process group), in the background, then brings it to the
+# foreground. It prints what it sees of the job, and how often the job read its terminal in its
+# first second in the background, and exits as the job does.
+_JOB = r"""
+import fcntl, os, signal, sys, termios, time
+fcntl.ioctl(0, termios.TIOCSCTTY, 0)
+job = os.fork()
+if job == 0:
+    os.setpgid(0, 0)
+    from lucille_host import loop
+    reads = []
+    real_read = os.read
+    def read(fd, size):
+        reads.append(fd)
+        return real_read(fd, size)
+    os.read = read
+    lifeline = loop.Lifeline(0).start()
+    time.sleep(1.0)
+    print("background", lifeline.ended.is_set(), len(reads), flush=True)
+    while os.tcgetpgrp(0) != os.getpgrp():
+        time.sleep(0.05)
+    print("foreground", flush=True)
+    print("ended", lifeline.ended.wait(10), lifeline.cause, flush=True)
+    os._exit(0)
+os.setpgid(job, job)
+time.sleep(2.0)
+pid, status = os.waitpid(job, os.WUNTRACED | os.WNOHANG)
+if pid and os.WIFSTOPPED(status):
+    print("stopped", signal.Signals(os.WSTOPSIG(status)).name, flush=True)
+    os.kill(job, signal.SIGKILL)
+    os.waitpid(job, 0)
+    sys.exit(1)
+os.tcsetpgrp(0, job)
+pid, status = os.waitpid(job, 0)
+sys.exit(os.waitstatus_to_exitcode(status))
+"""
+
+
+def test_lifeline_of_a_background_job_waits_for_the_foreground() -> None:
+    # `run --exit-on-stdin-eof` started in the background of a shell with job control, its standard
+    # input the terminal. A read of the terminal from the background would stop the whole process
+    # (SIGTTIN), and with it every thread of `run`. The lifeline waits instead, not ended, reading
+    # again once a tick rather than spinning, and once the job is in the foreground, Ctrl-D ends
+    # it.
+    master, slave = os.openpty()
+    try:
+        job = subprocess.Popen(
+            [sys.executable, "-c", _JOB],
+            stdin=slave,
+            stdout=subprocess.PIPE,
+            start_new_session=True,
+        )
+    finally:
+        os.close(slave)
+    lines: queue.Queue[str] = queue.Queue()
+
+    def read() -> None:
+        assert job.stdout is not None
+        for line in job.stdout:
+            lines.put(line.decode("ascii").strip())
+
+    reader = threading.Thread(target=read, daemon=True)
+    reader.start()
+    try:
+        where, ended, reads = lines.get(timeout=20).split()
+        assert (where, ended) == ("background", "False")
+        assert 1 <= int(reads) <= 5, reads
+        assert lines.get(timeout=20) == "foreground"
+        os.write(master, b"\x04")  # Ctrl-D
+        assert lines.get(timeout=20) == "ended True stdin_end"
+        assert job.wait(20) == 0
+    finally:
+        if job.poll() is None:
+            job.kill()
+            job.wait(10)
+        os.close(master)
+        reader.join(10)
+
+
 def test_ctrl_c_after_stdin_eof_kills(host: RunHost, monkeypatch: pytest.MonkeyPatch) -> None:
     # `run` on the main thread, with its own handlers, as `lucille-host run` runs: standard input
     # ends while an operation runs, then Ctrl-C kills it, as a second Ctrl-C does.
@@ -719,6 +898,289 @@ def test_ctrl_c_after_stdin_eof_kills(host: RunHost, monkeypatch: pytest.MonkeyP
     assert (reply["body"]["status"], reply["body"]["code"]) == ("failed", "killed_locally")
     assert Controls(host.dirs.state).paused()
     assert out.objects()[-1] == DRAINED
+
+
+# Where a start check is held up, and what a test patches to send the signals from there: the
+# command's checks, then the runner's.
+_COMMAND_CHECKS = {
+    "config": (host_state, "load_host_config"),
+    "environment": (host_state, "startup_checks"),
+    "lock": (loop, "one_run"),
+    "version": (loop, "check_version"),
+    "store": (link, "open_session"),
+}
+_START_CHECKS = {
+    **_COMMAND_CHECKS,
+    "runner": (loop.Cursors, "__init__"),
+    "digest_key": (policy, "digest_key"),
+    "check_ready": (link.Session, "check_ready"),
+}
+
+
+@pytest.mark.parametrize("argv", [EVENTS, ("run", "--json-events")], ids=["lifeline", "none"])
+@pytest.mark.parametrize("where", list(_START_CHECKS))
+@pytest.mark.parametrize(
+    "signums",
+    [
+        (signal.SIGTERM,),
+        (signal.SIGINT,),
+        (signal.SIGINT, signal.SIGINT),
+        (signal.SIGTERM, signal.SIGINT),
+    ],
+    ids=["SIGTERM", "SIGINT", "SIGINT-SIGINT", "SIGTERM-SIGINT"],
+)
+def test_a_stop_signal_during_the_start_checks_drains(
+    host: RunHost,
+    monkeypatch: pytest.MonkeyPatch,
+    signums: tuple[int, ...],
+    where: str,
+    argv: tuple[str, ...],
+) -> None:
+    # `run` on the main thread, as `lucille-host run` runs, with or without the lifeline: a stop
+    # signal while it reads its host configuration (a state file on a stalled mount), checks its
+    # environment, takes the run lock, reads its version record, opens the store (on macOS, a
+    # Keychain prompt), reads its state files, reads its digest key, or reads the pair's record in
+    # the store, is seen once that step returns, and `run` stops there, as for the end of its
+    # standard input: `stopped` `drained`, with no `ready` and no hub call. A Ctrl-C after the
+    # first signal only drains too: nothing runs that it could kill, and it writes nothing, so
+    # the profile is not left paused.
+    assert threading.current_thread() is threading.main_thread()
+    real = _switchboard.open_link
+    monkeypatch.setattr(
+        "lucille_host._switchboard.open_link",
+        lambda dirs, config, **_: real(dirs, config, client_class=host.client_class),
+    )
+    main = threading.main_thread().ident
+    assert main is not None
+    owner, name = _START_CHECKS[where]
+    real_step = getattr(owner, name)
+    checked: list[str] = []
+    real_check = link.Session.check_ready
+
+    def held_up(*args: Any, **options: Any) -> Any:
+        for signum in signums:
+            signal.pthread_kill(main, signum)
+            # Each is handled before the next is sent.
+            time.sleep(0.05)
+        return real_step(*args, **options)
+
+    def check_ready(session: link.Session) -> str:
+        checked.append("check_ready")
+        return real_check(session)
+
+    monkeypatch.setattr(link.Session, "check_ready", check_ready)
+    if where == "check_ready":
+        real_step = check_ready
+    monkeypatch.setattr(owner, name, held_up)
+    read, write = os.pipe()
+    stdin = os.fdopen(read, "rb")
+    out, err = Lines(), Lines()
+    monkeypatch.setattr("sys.stdin", stdin)
+    monkeypatch.setattr("sys.stdout", out)
+    monkeypatch.setattr("sys.stderr", err)
+    inherited = {
+        signal.SIGTERM: signal.signal(signal.SIGTERM, nothing),
+        signal.SIGHUP: signal.signal(signal.SIGHUP, nothing),
+        signal.SIGINT: signal.signal(signal.SIGINT, signal.default_int_handler),
+    }
+    done = threading.Event()
+
+    def fallback() -> None:
+        # A `run` that went on serving is drained.
+        if not done.wait(15):
+            signal.pthread_kill(main, signal.SIGTERM)
+        os.close(write)
+
+    thread = threading.Thread(target=fallback, daemon=True)
+    thread.start()
+    try:
+        rc = cli.main(list(argv))
+        after = {stop: signal.getsignal(stop) for stop in inherited}
+    finally:
+        done.set()
+        thread.join(30)
+        for stop, handler in inherited.items():
+            signal.signal(stop, handler)
+        stdin.close()
+    assert rc == 0
+    assert out.objects() == [_stopped("drained", cause="signal")]
+    # Opening the store is the command's last check before the runner; the runner's own checks
+    # end with the pair's.
+    assert checked == ([] if where in _COMMAND_CHECKS else ["check_ready"])
+    assert not host.dirs.status_file.exists()
+    controls = Controls(host.dirs.state)
+    assert not controls.paused() and not controls.kill_requested()
+    # The handlers it found are back once it returns.
+    assert after == {
+        signal.SIGTERM: nothing,
+        signal.SIGHUP: nothing,
+        signal.SIGINT: signal.default_int_handler,
+    }
+
+
+@pytest.mark.parametrize("first", ["signal", "stdin_end"])
+def test_a_stop_signal_and_the_end_of_stdin_say_which_came_first(
+    host: RunHost, monkeypatch: pytest.MonkeyPatch, first: str
+) -> None:
+    # A shell that sends SIGTERM and closes its end of the pipe, in either order, both while `run`
+    # opens the store: `stopped` says what came first, which began the drain.
+    real = _switchboard.open_link
+    monkeypatch.setattr(
+        "lucille_host._switchboard.open_link",
+        lambda dirs, config, **_: real(dirs, config, client_class=host.client_class),
+    )
+    main = threading.main_thread().ident
+    assert main is not None
+    real_open = link.open_session
+    lifelines: list[loop.Lifeline] = []
+    real_start = loop.Lifeline.start
+    read, write = os.pipe()
+    closed: list[bool] = []
+
+    def start(lifeline: loop.Lifeline) -> loop.Lifeline:
+        lifelines.append(lifeline)
+        return real_start(lifeline)
+
+    def stop() -> None:
+        signal.pthread_kill(main, signal.SIGTERM)
+        time.sleep(0.05)
+
+    def open_session(*args: Any, **options: Any) -> link.Session:
+        if first == "signal":
+            stop()
+        os.close(write)
+        closed.append(True)
+        assert lifelines[0].ended.wait(10)
+        if first == "stdin_end":
+            stop()
+        return real_open(*args, **options)
+
+    monkeypatch.setattr(loop.Lifeline, "start", start)
+    monkeypatch.setattr(link, "open_session", open_session)
+    stdin = os.fdopen(read, "rb")
+    out, err = Lines(), Lines()
+    monkeypatch.setattr("sys.stdin", stdin)
+    monkeypatch.setattr("sys.stdout", out)
+    monkeypatch.setattr("sys.stderr", err)
+    inherited = {
+        signal.SIGTERM: signal.signal(signal.SIGTERM, nothing),
+        signal.SIGHUP: signal.signal(signal.SIGHUP, nothing),
+        signal.SIGINT: signal.signal(signal.SIGINT, signal.default_int_handler),
+    }
+    try:
+        rc = cli.main(list(EVENTS))
+    finally:
+        if not closed:
+            os.close(write)
+        for stop, handler in inherited.items():
+            signal.signal(stop, handler)
+        stdin.close()
+    assert closed and lifelines[0].cause == loop.STDIN_END
+    assert rc == 0
+    assert out.objects() == [_stopped("drained", cause=first)]
+
+
+def test_runner_run_on_main_puts_the_handlers_back(host: RunHost) -> None:
+    # `loop.run` and `Runner.run` on the main thread, with no command around them: the runner
+    # installs its drain-only handlers, then those of a running `run`, and once it returns puts
+    # back the ones it found, in the reverse order.
+    main = threading.main_thread().ident
+    assert main is not None
+    inherited = {
+        signal.SIGTERM: signal.signal(signal.SIGTERM, nothing),
+        signal.SIGHUP: signal.signal(signal.SIGHUP, nothing),
+        signal.SIGINT: signal.signal(signal.SIGINT, signal.default_int_handler),
+    }
+    runner = loop.Runner(
+        host.dirs, host.session(), controls=Controls(host.dirs.state), say=lambda _line: None
+    )
+
+    def stopper() -> None:
+        until(lambda: runner.ready_sent, what="ready")
+        time.sleep(0.3)
+        signal.pthread_kill(main, signal.SIGTERM)
+
+    thread = threading.Thread(target=stopper, daemon=True)
+    thread.start()
+    try:
+        said = runner.run()
+        after = {stop: signal.getsignal(stop) for stop in inherited}
+    finally:
+        thread.join(10)
+        for stop, handler in inherited.items():
+            signal.signal(stop, handler)
+    assert said == "drained: run stopped"
+    assert after == {
+        signal.SIGTERM: nothing,
+        signal.SIGHUP: nothing,
+        signal.SIGINT: signal.default_int_handler,
+    }
+
+
+class _SlowLines(Lines):
+    """A standard output whose reader has stopped reading for now: a write waits until it is
+    released."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.waiting = threading.Event()
+        self.release = threading.Event()
+
+    def write(self, text: str) -> int:
+        self.waiting.set()
+        self.release.wait(10)
+        return super().write(text)
+
+
+def test_a_ctrl_c_while_stopped_waits_for_its_reader_changes_nothing(
+    host: RunHost, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # `run` stops at once (its standard input is at its end), and `stopped` waits for a shell
+    # that reads slowly. A Ctrl-C meanwhile neither escapes nor changes the exit code: the
+    # handlers stay until `stopped` is written.
+    main = threading.main_thread().ident
+    assert main is not None
+    read, write = os.pipe()
+    os.close(write)
+    stdin = os.fdopen(read, "rb")
+    out, err = _SlowLines(), Lines()
+    monkeypatch.setattr("sys.stdin", stdin)
+    monkeypatch.setattr("sys.stdout", out)
+    monkeypatch.setattr("sys.stderr", err)
+    inherited = {
+        signal.SIGTERM: signal.signal(signal.SIGTERM, nothing),
+        signal.SIGHUP: signal.signal(signal.SIGHUP, nothing),
+        signal.SIGINT: signal.signal(signal.SIGINT, signal.default_int_handler),
+    }
+    sent: list[bool] = []
+
+    def driver() -> None:
+        if out.waiting.wait(10):
+            time.sleep(0.2)
+            signal.pthread_kill(main, signal.SIGINT)
+            sent.append(True)
+            time.sleep(0.3)
+        out.release.set()
+
+    thread = threading.Thread(target=driver, daemon=True)
+    thread.start()
+    escaped: BaseException | None = None
+    rc = None
+    try:
+        rc = cli.main(list(EVENTS))
+    except KeyboardInterrupt as exc:
+        escaped = exc
+    finally:
+        out.release.set()
+        thread.join(10)
+        for stop, handler in inherited.items():
+            signal.signal(stop, handler)
+        stdin.close()
+    assert sent
+    assert escaped is None
+    assert rc == 0
+    assert out.objects() == [DRAINED]
+    assert not Controls(host.dirs.state).paused()
 
 
 class _Gone(Lines):
@@ -1073,6 +1535,43 @@ def test_run_exits_are_the_spec_s_table() -> None:
     assert 22 not in cli.RUN_EXITS.values()
 
 
+@pytest.mark.parametrize("gate_kept", [True, False], ids=["gate", "no_gate_record"])
+@pytest.mark.parametrize(
+    ("damage", "reason"), [("directory", "store_error"), ("not_json", "pair_unusable")]
+)
+def test_a_pair_record_that_cannot_be_used_stops_run_before_ready(
+    host_env: HostEnv,
+    h: Any,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    damage: str,
+    reason: str,
+    gate_kept: bool,
+) -> None:
+    # With the pair in files, its record cannot be read (the file is a folder) or the library
+    # refuses it (not JSON). `status` says so with no hub call, and so does `run`, before `ready`,
+    # at every start: 23 for a store that cannot be used, 20 for a pair that cannot be. The
+    # record in the store is checked before the gate record, so a pair with neither stops there.
+    fast(monkeypatch)
+    made = RunHost(h, host_env, tmp_path, config=host_state.HostConfig(store="file"))
+    host_state.save_host_config(made.dirs, made.config)
+    record = made.dirs.store_files / f"{made.name}.json"
+    assert record.is_file()
+    record.unlink()
+    if damage == "directory":
+        record.mkdir()
+    else:
+        record.write_text("{nope")
+    if not gate_kept:
+        gate.remove(host_env.dirs.gate_file)
+    for _ in range(2):
+        with monkeypatch.context() as patch:
+            run = Supervised(patch, ("run", "--json-events"), host=made)
+            assert run.wait(20) == cli.RUN_EXITS[reason]
+        assert run.out.objects() == [_stopped(reason)]
+    assert not made.dirs.status_file.exists()
+
+
 # --- the local policy while run runs ----------------------------------------------------------
 
 
@@ -1165,6 +1664,315 @@ def _refused_for_policy(host: RunHost) -> list[dict[str, Any]]:
     return host.events("offer", event="refused", check=rooms.CHECK_POLICY)
 
 
+def test_a_changed_file_holds_offers_until_it_is_loaded(
+    host: RunHost, supervise: Callable[..., Supervised], monkeypatch: pytest.MonkeyPatch, home: Path
+) -> None:
+    # While an operation runs, the file is edited by hand to add the home folder as a root without
+    # the flag for it: valid by what it holds, invalid once its folders are looked at. The offers
+    # wait from main's next look, and the loader finds it invalid while the operation still runs.
+    host.enable("host.sleep")
+    calls = counting(monkeypatch, _switchboard.Link, "accept_room")
+    run = supervise(*EVENTS)
+    run.ready()
+    run.offer("work-1")
+    sleeping = body(op="host.sleep", args={"n": 4})
+    host.request("work-1", sleeping)
+    until(lambda: "started" in _phases(run.requests(sleeping["job_id"])), what="the child started")
+    path = host.dirs.policy_file
+    path.write_text(path.read_text() + f'\n[roots.everything]\npath = "{home}"\n')
+    policy.check_file(path)
+    with pytest.raises(policy.PolicyError):
+        policy.load(path)
+    until(lambda: run.state()["policy"] == "invalid", 3, what="a state saying invalid")
+    assert "finished" not in _phases(run.requests(sleeping["job_id"]))
+    host.lucille.offer("work-2")
+    until(lambda: _refused_for_policy(host), what="the offer held")
+    time.sleep(QUIET)
+    assert calls["accept_room"] == 1
+    assert host.reply("work-1", sleeping["job_id"])["body"]["status"] == "done"
+    run.close_stdin()
+    assert run.wait() == 0
+
+
+def test_an_invalid_file_made_valid_stays_invalid_until_it_is_loaded(
+    host: RunHost, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The file is invalid, and is made valid by hand while loading it is held up (a slow folder).
+    # Main's look finds it valid by what it holds, but only a load says it is valid: the policy
+    # stays `invalid`, and no `policy valid` line is written, until the load answers.
+    host.enable("host.sleep")
+    path = host.dirs.policy_file
+    good = path.read_text()
+    _invalid(host)
+    run = Supervised(monkeypatch, EVENTS, host=host)
+    run.ready()
+    until(lambda: (run.state() or {}).get("policy") == "invalid", what="a state saying invalid")
+    release = threading.Event()
+    real = policy.load
+
+    def load(*args: Any, **options: Any) -> Any:
+        release.wait(30)
+        return real(*args, **options)
+
+    monkeypatch.setattr("lucille_host.policy.load", load)
+    try:
+        path.write_text(good)
+        policy.check_file(path)
+        time.sleep(QUIET)
+        assert [found["policy"] for found in run.objects("state")][-1] == "invalid"
+        assert host.events("policy", event="valid") == []
+    finally:
+        release.set()
+    until(lambda: run.state()["policy"] == "ok", what="a state saying ok")
+    assert [line["event"] for line in host.events("policy")] == ["invalid", "valid"]
+    assert "checking" not in [found["policy"] for found in run.objects("state")][1:]
+    run.close_stdin()
+    assert run.wait() == 0
+
+
+@pytest.mark.parametrize("busy", [False, True], ids=["idle", "operation"])
+def test_a_folder_turned_into_the_home_folder_is_found_within_the_period(
+    host: RunHost, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, home: Path, busy: bool
+) -> None:
+    # A root that is a link, repointed at the home folder while `run` runs: the file itself does
+    # not change, and the periodic load finds it invalid within a few periods, while an operation
+    # runs too. An offer meanwhile waits, and is taken once the link points back.
+    monkeypatch.setattr("lucille_host.loop.RECONCILE_EVERY", 0.5)
+    docs = tmp_path / "Documents"
+    docs.mkdir()
+    link = tmp_path / "docs-link"
+    link.symlink_to(docs)
+    host.enable("host.sleep")
+    folder(host.dirs, "docs", link)
+    calls = counting(monkeypatch, _switchboard.Link, "accept_room")
+    run = Supervised(monkeypatch, EVENTS, host=host)
+    run.ready()
+    run.offer("work-1")
+    sleeping = body(op="host.sleep", args={"n": 4})
+    if busy:
+        host.request("work-1", sleeping)
+        until(lambda: "started" in _phases(run.requests(sleeping["job_id"])), what="started")
+    link.unlink()
+    link.symlink_to(home)
+    until(lambda: run.state()["policy"] == "invalid", 3, what="a state saying invalid")
+    if busy:
+        assert "finished" not in _phases(run.requests(sleeping["job_id"]))
+    host.lucille.offer("work-2")
+    until(lambda: _refused_for_policy(host), what="the offer held")
+    time.sleep(QUIET)
+    assert calls["accept_room"] == 1
+    if busy:
+        assert host.reply("work-1", sleeping["job_id"])["body"]["status"] == "done"
+    link.unlink()
+    link.symlink_to(docs)
+    until(lambda: run.state()["policy"] == "ok", 3, what="a state saying ok")
+    until(lambda: calls["accept_room"] == 2, what="the offer taken")
+    run.close_stdin()
+    assert run.wait() == 0
+
+
+@pytest.mark.parametrize("valid", [False, True], ids=["not_toml", "valid"])
+def test_a_file_changed_while_main_waits_on_the_hub_holds_the_offer(
+    host: RunHost,
+    supervise: Callable[..., Supervised],
+    monkeypatch: pytest.MonkeyPatch,
+    valid: bool,
+) -> None:
+    # Main waits on a slow hub in a touch, and the file changes meanwhile; the touch then brings
+    # an offer. The step does not take it: it waits for main's look at the file, and, for a file
+    # still valid, for the load of it, and is taken then.
+    host.enable("host.sleep")
+    calls = counting(monkeypatch, _switchboard.Link, "accept_room")
+    run = supervise(*EVENTS)
+    run.ready()
+    run.offer("work-1")
+    real = _switchboard.Link.touch
+    armed = threading.Event()
+    changed = threading.Event()
+
+    def slow(opened: _switchboard.Link, *args: Any, **options: Any) -> Any:
+        if armed.is_set() and threading.current_thread() is not threading.main_thread():
+            armed.clear()
+            path = host.dirs.policy_file
+            if valid:
+                policy.save(path, policy.load(path))
+            else:
+                path.write_text("this is not toml\n")
+            changed.set()
+            time.sleep(QUIET)
+        return real(opened, *args, **options)
+
+    monkeypatch.setattr(_switchboard.Link, "touch", slow)
+    armed.set()
+    host.lucille.offer("work-2")
+    assert changed.wait(20)
+    until(lambda: _refused_for_policy(host), what="the offer held")
+    if valid:
+        until(lambda: calls["accept_room"] == 2, what="the offer taken")
+    else:
+        until(lambda: run.state()["policy"] == "invalid", what="a state saying invalid")
+        time.sleep(QUIET)
+        assert calls["accept_room"] == 1
+    run.close_stdin()
+    assert run.wait() == 0
+
+
+def test_a_folder_turned_into_the_home_folder_while_main_waits_on_the_hub_holds_the_offer(
+    host: RunHost, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, home: Path
+) -> None:
+    # Main waits on a slow hub in a touch for several periods, and meanwhile a root's link is
+    # repointed at the home folder: the file does not change, and no load is asked for while main
+    # waits. The touch then brings an offer. The step does not take it under a load that began a
+    # period ago: it waits for a new load (`checking`), which finds the file invalid, and the
+    # offer is taken once the link points back.
+    monkeypatch.setattr("lucille_host.loop.RECONCILE_EVERY", 0.5)
+    docs = tmp_path / "Documents"
+    docs.mkdir()
+    docs_link = tmp_path / "docs-link"
+    docs_link.symlink_to(docs)
+    folder(host.dirs, "docs", docs_link)
+    calls = counting(monkeypatch, _switchboard.Link, "accept_room")
+    run = Supervised(monkeypatch, EVENTS, host=host)
+    run.ready()
+    run.offer("work-1")
+    real = _switchboard.Link.touch
+    armed = threading.Event()
+    changed = threading.Event()
+
+    def slow(opened: _switchboard.Link, *args: Any, **options: Any) -> Any:
+        if armed.is_set() and threading.current_thread() is not threading.main_thread():
+            armed.clear()
+            docs_link.unlink()
+            docs_link.symlink_to(home)
+            changed.set()
+            time.sleep(3.0)
+        return real(opened, *args, **options)
+
+    monkeypatch.setattr(_switchboard.Link, "touch", slow)
+    armed.set()
+    host.lucille.offer("work-2")
+    assert changed.wait(20)
+    until(lambda: run.state()["policy"] == "invalid", 10, what="a state saying invalid")
+    assert _refused_for_policy(host)
+    time.sleep(QUIET)
+    assert calls["accept_room"] == 1
+    docs_link.unlink()
+    docs_link.symlink_to(docs)
+    until(lambda: run.state()["policy"] == "ok", 3, what="a state saying ok")
+    until(lambda: calls["accept_room"] == 2, what="the offer taken")
+    run.close_stdin()
+    assert run.wait() == 0
+
+
+def test_an_offer_held_for_an_old_load_is_taken_once_a_new_load_says_valid(
+    host: RunHost, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Main waits on a slow hub in a touch for several periods, the file unchanged and valid. The
+    # touch then brings an offer, which the step holds under a load that began a period ago:
+    # `state` says `checking`, and the offer is taken once a new load says the file is valid.
+    monkeypatch.setattr("lucille_host.loop.RECONCILE_EVERY", 0.5)
+    calls = counting(monkeypatch, _switchboard.Link, "accept_room")
+    run = Supervised(monkeypatch, EVENTS, host=host)
+    run.ready()
+    first = run.offer("work-1")
+    until(lambda: run.state()["policy"] == "ok", what="the policy checked")
+    seen = len(run.objects("state"))
+    real = _switchboard.Link.touch
+    armed = threading.Event()
+    slept = threading.Event()
+
+    def slow(opened: _switchboard.Link, *args: Any, **options: Any) -> Any:
+        if armed.is_set() and threading.current_thread() is not threading.main_thread():
+            armed.clear()
+            time.sleep(3.0)
+            slept.set()
+        return real(opened, *args, **options)
+
+    monkeypatch.setattr(_switchboard.Link, "touch", slow)
+    armed.set()
+    host.lucille.offer("work-2")
+    assert slept.wait(20)
+    until(lambda: calls["accept_room"] == 2, 5, what="the offer taken")
+
+    def read_from() -> int | None:
+        states = run.objects("state")[seen:]
+        return next(
+            (
+                at
+                for at, found in enumerate(states)
+                if {room["name"] for room in found["rooms"]} - {first}
+            ),
+            None,
+        )
+
+    taken = until(lambda: read_from(), 5, what="a state reading the room taken")
+    held = [found["policy"] for found in run.objects("state")[seen : seen + taken]]
+    assert "checking" in held
+    run.close_stdin()
+    assert run.wait() == 0
+
+
+def test_no_room_is_taken_under_a_load_that_began_a_period_ago(
+    host: RunHost, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, home: Path
+) -> None:
+    # A load looks at the folders (valid), and its verdict is then held up for more than a
+    # period before it reaches main; meanwhile a root's link is repointed at the home folder and
+    # Lucille offers a room. When the verdict comes, main lets the offer be considered: it is
+    # not taken under that load, which began a period ago, and waits for a new one.
+    monkeypatch.setattr("lucille_host.loop.RECONCILE_EVERY", 0.5)
+    docs = tmp_path / "Documents"
+    docs.mkdir()
+    docs_link = tmp_path / "docs-link"
+    docs_link.symlink_to(docs)
+    folder(host.dirs, "docs", docs_link)
+    calls = counting(monkeypatch, _switchboard.Link, "accept_room")
+    run = Supervised(monkeypatch, EVENTS, host=host)
+    run.ready()
+    run.offer("work-1")
+    until(lambda: run.state()["policy"] == "ok", what="the policy checked")
+    assert calls["accept_room"] == 1
+    real = policy.load
+    armed, entered, go, release = (threading.Event() for _ in range(4))
+    held: list[bool] = []
+
+    def load(*args: Any, **options: Any) -> Any:
+        if threading.current_thread().name != loop.LOADER:
+            return real(*args, **options)
+        if armed.is_set():
+            # This load sees the folders as they are, then its verdict waits for `go`.
+            armed.clear()
+            held.append(True)
+            try:
+                return real(*args, **options)
+            finally:
+                entered.set()
+                go.wait(30)
+        if held:
+            # Every later load waits for the test's end.
+            release.wait(30)
+        return real(*args, **options)
+
+    monkeypatch.setattr("lucille_host.policy.load", load)
+    try:
+        armed.set()
+        assert entered.wait(10)
+        docs_link.unlink()
+        docs_link.symlink_to(home)
+        host.lucille.offer("work-2")
+        time.sleep(1.5)
+        assert calls["accept_room"] == 1
+        go.set()
+        time.sleep(1.5)
+        taken = calls["accept_room"]
+    finally:
+        go.set()
+        release.set()
+    until(lambda: run.state()["policy"] == "invalid", 10, what="a state saying invalid")
+    run.close_stdin()
+    assert run.wait() == 0
+    assert taken == 1
+
+
 def test_an_offer_waiting_at_start_waits_for_a_valid_policy(
     host: RunHost, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1244,6 +2052,71 @@ def test_an_interrupted_accept_waits_for_a_valid_policy(
     assert run.wait() == 0
 
 
+def test_an_interrupted_accept_waits_when_the_file_changes_while_main_waits_on_the_hub(
+    host: RunHost, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A stop interrupted an accept after the hub took it, and `run` starts on a valid file. Its
+    # first step waits on a slow hub in the resolve, and the file stops being TOML meanwhile: the
+    # step does not complete the accept, which waits for main's look at the file, and stays
+    # waiting while the file is invalid.
+    session = host.session()
+    session.start()
+    real = _switchboard.Link.accept_room
+
+    def interrupted(opened: _switchboard.Link, *args: Any) -> Any:
+        real(opened, *args)
+        raise KeyboardInterrupt
+
+    with monkeypatch.context() as patch:
+        patch.setattr(_switchboard.Link, "accept_room", interrupted)
+        host.lucille.offer("work-1")
+        session.note(_switchboard.TAG_SHARED)
+        with pytest.raises(KeyboardInterrupt):
+            session.step()
+    accepting = host.record().accepting
+    assert accepting is not None and host.record().held == {}
+    # Main's first look takes the first load's verdict, so that its first step is the one that
+    # waits on the hub with the offers allowed.
+    real_next = loop.Runner._next_events
+    first: list[bool] = []
+
+    def next_events(runner: loop.Runner) -> list[tuple[str, Any]]:
+        events = real_next(runner)
+        if not first:
+            first.append(True)
+            while not any(kind == "policy" for kind, _ in events):
+                events += real_next(runner)
+        return events
+
+    real_resolve = link.Session.resolve
+    armed = threading.Event()
+    changed = threading.Event()
+    held: list[bool] = []
+
+    def slow(made: link.Session, *args: Any, **options: Any) -> Any:
+        if armed.is_set() and threading.current_thread() is not threading.main_thread():
+            armed.clear()
+            held.append(made.hold_offers)
+            _invalid(host)
+            changed.set()
+            time.sleep(QUIET)
+        return real_resolve(made, *args, **options)
+
+    monkeypatch.setattr(loop.Runner, "_next_events", next_events)
+    monkeypatch.setattr(link.Session, "resolve", slow)
+    armed.set()
+    run = Supervised(monkeypatch, EVENTS, host=host)
+    run.ready()
+    assert changed.wait(20)
+    assert held == [False]
+    until(lambda: (run.state() or {}).get("policy") == "invalid", what="a state saying invalid")
+    time.sleep(QUIET)
+    record = host.record()
+    assert record.accepting == accepting and record.held == {}
+    run.close_stdin()
+    assert run.wait() == 0
+
+
 def test_no_room_is_read_while_the_policy_is_invalid_at_start(
     host: RunHost, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1272,11 +2145,74 @@ def test_no_room_is_read_while_the_policy_is_invalid_at_start(
     assert run.wait() == 0
 
 
+def test_no_reader_starts_while_the_policy_is_invalid(
+    host: RunHost, supervise: Callable[..., Supervised], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A room is read, the file turns invalid, and then the room's reader stops (its check failed
+    # for a moment). While the file is invalid, `run` starts no reader again, and `state` says it
+    # reads no room; once the file is valid again, the room is read again.
+    run = supervise(*EVENTS)
+    run.ready()
+    room = run.offer("work-1")
+    host.reply("work-1", host.request("work-1"))
+    _invalid(host)
+    until(lambda: run.state()["policy"] == "invalid", what="a state saying invalid")
+    real = loop.Runner._check
+    once = threading.Event()
+
+    def check(runner: loop.Runner, name: str) -> Any:
+        # A reader's thread has no name of the host's own.
+        if not once.is_set() and not threading.current_thread().name.startswith("lucille-host"):
+            once.set()
+            return None
+        return real(runner, name)
+
+    monkeypatch.setattr(loop.Runner, "_check", check)
+    until(once.is_set, what="the reader's check failed once")
+    until(lambda: run.state()["rooms"] == [], what="the reader stopped")
+    time.sleep(QUIET)
+    assert run.state()["rooms"] == [] and run.state()["policy"] == "invalid"
+    assert cli.main(["policy", "reset"]) == 0
+    reading = [{"name": room, "state": "reading"}]
+    until(lambda: run.state()["rooms"] == reading, what="the room read again")
+    run.close_stdin()
+    assert run.wait() == 0
+
+
+def test_policy_reset_sets_aside_a_file_invalid_by_a_folder(
+    host: RunHost,
+    supervise: Callable[..., Supervised],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    # A file invalid only by a folder (a root's link now points at the home folder): `ops` and
+    # `roots` refuse while it is invalid, so `policy reset` sets it aside, and `run` goes on.
+    monkeypatch.setattr("lucille_host.loop.RECONCILE_EVERY", 0.5)
+    docs = tmp_path / "Documents"
+    docs.mkdir()
+    link = tmp_path / "docs-link"
+    link.symlink_to(docs)
+    folder(host.dirs, "docs", link)
+    held = host.dirs.policy_file.read_bytes()
+    run = supervise(*EVENTS)
+    run.ready()
+    until(lambda: (run.state() or {}).get("policy") == "ok", what="the policy checked")
+    link.unlink()
+    link.symlink_to(host.env.home)
+    until(lambda: run.state()["policy"] == "invalid", 5, what="a state saying invalid")
+    assert cli.main(["roots", "list"]) == 1
+    assert cli.main(["policy", "reset"]) == 0
+    assert host.dirs.invalid_policy_file.read_bytes() == held
+    until(lambda: run.state()["policy"] == "ok", what="a state saying ok")
+    run.close_stdin()
+    assert run.wait() == 0
+
+
 def test_a_verdict_on_an_earlier_file_counts_for_nothing(
     host: RunHost, supervise: Callable[..., Supervised], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # The worker loads a valid file and is held there; the file then turns invalid by what it
-    # holds, and main holds the offers. The worker's verdict on the earlier file comes after: it
+    # The loader loads a valid file and is held there; the file then turns invalid by what it
+    # holds, and main holds the offers. The loader's verdict on the earlier file comes after: it
     # says nothing of the file now, and lets no offer through.
     calls = counting(monkeypatch, _switchboard.Link, "accept_room")
     run = supervise(*EVENTS)
@@ -1290,7 +2226,7 @@ def test_a_verdict_on_an_earlier_file_counts_for_nothing(
     held: list[int] = []
 
     def load(*args: Any, **options: Any) -> Any:
-        if not holding.is_set() or threading.current_thread().name != loop.WORKER:
+        if not holding.is_set() or threading.current_thread().name != loop.LOADER:
             return real(*args, **options)
         index = len(held)
         if index >= 2:
@@ -1305,7 +2241,7 @@ def test_a_verdict_on_an_earlier_file_counts_for_nothing(
     monkeypatch.setattr("lucille_host.policy.load", load)
     try:
         holding.set()
-        host.enable("host.sleep")  # a valid change: main asks the worker to load it
+        host.enable("host.sleep")  # a valid change: main asks the loader to load it
         assert entered[0].wait(10)
         host.dirs.policy_file.write_text("this is not toml\n")
         until(lambda: run.state()["policy"] == "invalid", 5, what="a state saying invalid")
@@ -1321,6 +2257,90 @@ def test_a_verdict_on_an_earlier_file_counts_for_nothing(
     finally:
         release[0].set()
         release[1].set()
+    run.close_stdin()
+    assert run.wait() == 0
+
+
+def test_a_late_verdict_from_an_earlier_load_counts_for_nothing(
+    host: RunHost, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, home: Path
+) -> None:
+    # The loader loads the file, valid then, and is held there (a slow folder). Meanwhile a root's
+    # link is repointed at the home folder, the file unchanged, and the worker's load before a
+    # request finds the file invalid. The loader's verdict comes last, but its load began first:
+    # it says nothing newer, and the policy stays invalid.
+    docs = tmp_path / "Documents"
+    docs.mkdir()
+    link = tmp_path / "docs-link"
+    link.symlink_to(docs)
+    folder(host.dirs, "docs", link)
+    run = Supervised(monkeypatch, EVENTS, host=host)
+    run.ready()
+    run.offer("work-1")
+    until(lambda: run.state()["policy"] == "ok", what="the policy checked")
+    real = policy.load
+    armed, entered, release = threading.Event(), threading.Event(), threading.Event()
+
+    def load(*args: Any, **options: Any) -> Any:
+        try:
+            return real(*args, **options)
+        finally:
+            if armed.is_set() and threading.current_thread().name == loop.LOADER:
+                armed.clear()
+                entered.set()
+                release.wait(30)
+
+    monkeypatch.setattr("lucille_host.policy.load", load)
+    try:
+        armed.set()
+        host.enable("host.sleep")  # a valid change: main asks the loader to load it
+        assert entered.wait(10)
+        link.unlink()
+        link.symlink_to(home)
+        host.request("work-1")
+        until(lambda: run.state()["policy"] == "invalid", what="a state saying invalid")
+    finally:
+        release.set()
+    time.sleep(QUIET)
+    states = [found["policy"] for found in run.objects("state")]
+    assert states[states.index("invalid") :] == ["invalid"] * (
+        len(states) - states.index("invalid")
+    )
+    run.close_stdin()
+    assert run.wait() == 0
+
+
+def test_a_request_waiting_for_the_policy_goes_on_once_the_file_is_valid(
+    host: RunHost, supervise: Callable[..., Supervised], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A request waits while the file is invalid, and the worker's load of it is held up (a slow
+    # folder) while the file is made valid and the loader finds it so. Once its load returns, the
+    # worker loads again at once and decides the request, without waiting for main's next ask.
+    run = supervise(*EVENTS)
+    run.ready()
+    run.offer("work-1")
+    host.reply("work-1", host.request("work-1"))
+    _invalid(host)
+    until(lambda: run.state()["policy"] == "invalid", what="a state saying invalid")
+    real = policy.load
+    entered, release = threading.Event(), threading.Event()
+
+    def load(*args: Any, **options: Any) -> Any:
+        try:
+            return real(*args, **options)
+        finally:
+            if threading.current_thread().name == loop.WORKER and not entered.is_set():
+                entered.set()
+                release.wait(30)
+
+    monkeypatch.setattr("lucille_host.policy.load", load)
+    try:
+        job = host.request("work-1")
+        assert entered.wait(10)
+        assert cli.main(["policy", "reset"]) == 0
+        until(lambda: run.state()["policy"] == "ok", what="a state saying ok")
+    finally:
+        release.set()
+    assert host.reply("work-1", job, timeout=10)["body"]["status"] == "done"
     run.close_stdin()
     assert run.wait() == 0
 
@@ -1384,11 +2404,12 @@ def test_policy_signature_sees_every_change(home: Path) -> None:
     assert policy.signature(path) is None
 
 
-def test_policy_is_loaded_only_by_the_worker(
+def test_policy_is_never_loaded_by_main(
     host: RunHost, supervise: Callable[..., Supervised], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # Loading the policy looks at each of its folders, which may wait on a stalled mount: only the
-    # thread that handles requests does it, never the thread that drains.
+    # thread that handles requests (before each) and the loader (when main asks) do it, never the
+    # thread that drains.
     threads: list[str] = []
     real = policy.load
     current = policy.load(host.dirs.policy_file)
@@ -1414,7 +2435,7 @@ def test_policy_is_loaded_only_by_the_worker(
     host.reply("work-1", host.request("work-1"))
     run.close_stdin()
     assert run.wait() == 0
-    assert threads and set(threads) == {loop.WORKER}
+    assert set(threads) == {loop.WORKER, loop.LOADER}
 
 
 def test_a_stalled_policy_load_does_not_hold_up_the_drain(
@@ -1556,6 +2577,41 @@ def test_a_shut_gate_waits_and_expires_with_20(
     assert host.opened.names() == []
 
 
+@pytest.mark.parametrize(
+    ("state", "reason"), [("aborted", "leaked"), ("aborted_here", "pair_unusable")]
+)
+def test_a_shut_gate_waits_and_stops_with_20_when_the_pairing_ends(
+    host_env: HostEnv,
+    h: Any,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    state: str,
+    reason: str,
+) -> None:
+    # A pair whose SAS was shown and not confirmed, its deadline a day away: `run` serves it and
+    # waits. The pairing library then reports, at the first resolve, that the pairing ended early
+    # (`leaked`, and the pair is forgotten), or refuses the pair (`pair_unusable`, and it is
+    # kept): 20 after `ready`, before the deadline.
+    fast(monkeypatch)
+    host = RunHost(h, host_env, tmp_path, open_gate=False)
+    shown = host.session().show(host.name)
+    assert shown is not None
+    assert shown[1].deadline is not None and shown[1].deadline > time.time() + 3600
+
+    def failing(_link: Any, _name: str) -> Any:
+        raise _switchboard.PairFailed(state, "the pairing failed")
+
+    monkeypatch.setattr(_switchboard.Link, "resolve", failing)
+    run = Supervised(monkeypatch, EVENTS, host=host)
+    run.ready()
+    assert run.wait(20) == 20
+    found = run.out.objects()
+    assert [made["type"] for made in found] == ["ready", "state", "stopped"]
+    assert found[1]["confirmed"] is False
+    assert found[-1] == _stopped(reason)
+    assert host.opened.names() == ([] if reason == "leaked" else [host.name])
+
+
 def test_supervision_spawns_nothing(host: RunHost, supervise: Callable[..., Supervised]) -> None:
     host.enable("host.sleep")
     with _audit_hook.recording() as events:
@@ -1604,6 +2660,26 @@ def test_events_on_a_pipe_are_ascii(
     found = run.requests(sent["job_id"])
     assert _phases(found) == ["received", "decided", "started", "finished"]
     assert found[0]["path"] == "R\u00e9sum\u00e9.txt"
+
+
+def test_writes_on_the_stdout_descriptor_stay_off_the_events(
+    host: RunHost, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Something in the process writes on standard output's descriptor itself (a library, say)
+    # while `run --json-events` runs: it reaches standard error, never the shell's pipe, and
+    # every line there is still an event.
+    out = Piped()
+    try:
+        run = Supervised(monkeypatch, EVENTS, host=host, out=out)
+        run.ready()
+        os.write(out.fileno(), b"a line a library printed\n")
+        run.offer("work-1")
+        run.close_stdin()
+        assert run.wait() == 0
+    finally:
+        out.end()
+    assert b"a line a library printed" not in out.raw
+    assert _support.cli_objects(out.text)[-1] == DRAINED
 
 
 def test_every_event_line_is_within_the_bound() -> None:
@@ -1816,6 +2892,18 @@ def test_downgrade_refused(
         ran = unpaired("run", version=version)
         assert ran.wait(20) == exit_code, (version, recorded, ran.err.text)
         assert _recorded(dirs) == {"v": 1, "version": after}, (version, recorded)
+
+
+def test_the_version_record_is_checked_before_the_store(
+    host_env: HostEnv, unpaired: Callable[..., Supervised], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # An older release, on a computer whose keyring cannot be used: the version record comes
+    # first, so `run` is refused as a downgrade (25), not for the store (23).
+    _record(host_env.dirs, "0.2.0")
+    monkeypatch.setattr("keyring.core._keyring_backend", FailKeyring())
+    refused = unpaired("run", "--json-events", version="0.1.0")
+    assert refused.wait(20) == 25
+    assert refused.out.objects() == [_stopped("downgrade", last_version="0.2.0")]
 
 
 @pytest.mark.parametrize(

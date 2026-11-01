@@ -80,7 +80,8 @@ release must have. The full design is [decisions/0001-host-design.md](decisions/
 - A root is stored as the path you typed, so a root that is a symbolic link is followed to wherever it
   points when a request comes. A link repointed while the host runs (at your home folder, say) is
   checked against the flag for home folders only when the policy is next loaded: before the next decision,
-  and at least every 30 s while `run` runs.
+  and every 30 s between `run`'s steps, an operation running or not. A step that waits on the hub can last
+  longer, so `run` accepts no work room under a load that began 30 s ago or more.
 - Whether a folder holds your home folder (and so needs the explicit flag) is decided by its path, by
   device and inode, through any other mount of the same filesystem that Linux's mount table lists (the
   source of a bind mount, a btrfs top level), and through macOS's Data volume; when the folder is added,
@@ -107,8 +108,9 @@ release must have. The full design is [decisions/0001-host-design.md](decisions/
   waiting for an operation stuck on it, blocks in the kernel. The host gives up waiting for a killed
   operation after 10 s, but checking a path has no time limit, and `kill` is not seen while it waits. A
   drain, the end of standard input's included, then waits too: only a request still waiting for the
-  policy, or held in a load of it, is not waited for. Loading the policy looks at each folder, so only the
-  thread that handles requests loads it while `run` runs, never the one that drains. A start check of
+  policy, or held in a load of it, is not waited for. Loading the policy looks at each folder, so while
+  `run` runs only the thread that handles requests and a loader thread of its own load it, never the one
+  that drains. A start check of
   `run` that waits (a state file on a stalled mount, or on macOS a Keychain prompt) is not cut short by the
   end of standard input either.
 - A process an operation starts that leaves the operation's process group (by calling `setpgid` or
