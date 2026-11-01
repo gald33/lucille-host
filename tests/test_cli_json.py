@@ -377,7 +377,8 @@ def _replacements(w: World) -> list[tuple[str, str]]:
     """Real values and the samples the fixtures hold in their place, the longest paths first."""
     pairs: list[tuple[str, str]] = []
     for profile in PROFILES:
-        found = paths.dirs(profile, family=_family())
+        # This world's own home: HOME in the environment is the last world made.
+        found = paths.dirs(profile, family=_family(), environ={"HOME": str(w.home)})
         pairs.append((str(found.state), f"{SAMPLE_HOME}/.local/state/lucille-host/{profile}"))
         pairs.append((str(found.config), f"{SAMPLE_HOME}/.config/lucille-host/{profile}"))
     pairs.append((str(w.home), SAMPLE_HOME))
