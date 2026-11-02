@@ -1234,6 +1234,15 @@ def _serve(
     return reason, fields, said
 
 
+def _failed(code: str, line: str) -> tuple[str, dict[str, Any], str | None]:
+    """``stopped`` ``failed`` with ``code``, and the line stderr shows. A code ``run`` does not
+    give (:data:`RUN_FAILURES`) is ``internal``: an error ``run`` did not expect, which, as every
+    ``internal``, shows its traceback in place of a line (spec/CLI.md section 13.3)."""
+    if code == "internal" or code not in RUN_FAILURES:
+        return "failed", {"code": "internal"}, None
+    return "failed", {"code": code}, line
+
+
 def _run_failure(exc: Exception, ready: bool) -> tuple[str, dict[str, Any], str | None]:
     """Why ``run`` stopped, for an exception: its reason, the ``stopped`` object's other fields,
     and the line stderr shows (None for a bug, whose traceback is shown)."""
@@ -1248,8 +1257,7 @@ def _run_failure(exc: Exception, ready: bool) -> tuple[str, dict[str, Any], str 
         reason = _STOPPED_REASONS.get(exc.code)
         if reason is not None:
             return reason, {}, line
-        code = exc.code if exc.code in RUN_FAILURES else "internal"
-        return "failed", {"code": code}, line
+        return _failed(exc.code, line)
     if isinstance(exc, loop.Failed):
         if exc.code == "busy":
             return "already_running", {}, line
@@ -1257,9 +1265,7 @@ def _run_failure(exc: Exception, ready: bool) -> tuple[str, dict[str, Any], str 
         if code == "internal" and exc.__cause__ is not None:
             cause = exc.__cause__
             code = next((name for kind, name in FAILURE_CODES if isinstance(cause, kind)), code)
-        if code == "internal":
-            return "failed", {"code": "internal"}, None
-        return "failed", {"code": code if code in RUN_FAILURES else "internal"}, line
+        return _failed(code, line)
     if isinstance(exc, _switchboard.PairFailed):
         return "pair_unusable", {}, line
     if isinstance(exc, store.InsecureKeyring):
@@ -1268,10 +1274,9 @@ def _run_failure(exc: Exception, ready: bool) -> tuple[str, dict[str, Any], str 
         return "startup_refused", {}, line
     if isinstance(exc, store.StoreError):
         if ready:
-            return "failed", {"code": "store_error"}, line
+            return _failed("store_error", line)
         return "store_error", {}, line
-    code = _failure(exc)[1]
-    return "failed", {"code": code if code in RUN_FAILURES else "internal"}, line
+    return _failed(_failure(exc)[1], line)
 
 
 def _run(args: argparse.Namespace) -> int:

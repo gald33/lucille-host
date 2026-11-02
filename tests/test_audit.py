@@ -10,14 +10,16 @@ import stat
 import sys
 import threading
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
 from lucille_host import _exec, policy
-from lucille_host.audit import AuditLog
+from lucille_host.audit import AuditLog, tail
 from lucille_host.jobs import Job, Ready, check, execute, process
 from tests._host import MakeContext
+from tests._run import RunHost
 
 
 class Crash(Exception):
@@ -189,6 +191,38 @@ def test_audit_rotates_by_size_and_never_edits(state_dir: Path) -> None:
     for name in ("audit.log.3", "audit.log.2", "audit.log.1", "audit.log"):
         ids += [json.loads(line)["job_id"] for line in (state_dir / name).read_text().splitlines()]
     assert ids == sorted(ids) and ids[-1] == f"{39:08d}"
+
+
+def test_a_line_still_being_written_is_left_out_by_its_readers(state_dir: Path) -> None:
+    # `run` appends to the log from its own threads while a reader reads it, so a read can find
+    # the last line written in part. `tail` leaves it out, and so does the tests' reader of a
+    # running `run`'s log (tests/_run.py), rather than failing on it.
+    log = AuditLog(state_dir)
+    log.decision("job-1", "run")
+    log.decision("job-2", "run")
+    with log.path.open("ab") as handle:
+        handle.write(b'{"ts":"2026-11-01T00:00:00.000+00:00","kind":"decision","job_id":"jo')
+    reader = SimpleNamespace(dirs=SimpleNamespace(state=state_dir))
+    assert [line["job_id"] for line in RunHost.audit(reader)] == ["job-1", "job-2"]
+    assert [json.loads(line)["job_id"] for line in tail(state_dir, 10)] == ["job-1", "job-2"]
+    # Once the line is whole, both read it.
+    with log.path.open("ab") as handle:
+        handle.write(b'b-3","decision":"run"}\n')
+    assert [line["job_id"] for line in RunHost.audit(reader)] == ["job-1", "job-2", "job-3"]
+    assert [json.loads(line)["job_id"] for line in tail(state_dir, 10)] == [
+        "job-1",
+        "job-2",
+        "job-3",
+    ]
+    # Only the unfinished last line is left out. A whole line that is not JSON is damage, not a line
+    # being written: the tests' reader fails on it rather than skip it, and `tail` shows it.
+    with log.path.open("ab") as handle:
+        handle.write(b"not json\n")
+    log.decision("job-4", "run")
+    with pytest.raises(json.JSONDecodeError):
+        RunHost.audit(reader)
+    assert tail(state_dir, 2)[0] == "not json"
+    assert RunHost.audit(SimpleNamespace(dirs=SimpleNamespace(state=state_dir / "none"))) == []
 
 
 def test_audit_never_holds_the_digest_key(state_dir: Path, make_context: MakeContext) -> None:
