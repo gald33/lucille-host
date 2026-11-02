@@ -231,10 +231,14 @@ class RunHost:
         return Journal(self.dirs.journal_file, clock=self.now)
 
     def audit(self) -> list[dict[str, Any]]:
-        path = self.dirs.state / "audit.log"
-        if not path.exists():
+        """The audit log's lines, parsed. ``run`` appends to it from its own threads while a test
+        reads it, so a line still being written (no newline yet) is left out, as ``audit.tail``
+        leaves it out."""
+        try:
+            data = (self.dirs.state / "audit.log").read_bytes()
+        except FileNotFoundError:
             return []
-        return [json.loads(line) for line in path.read_text().splitlines()]
+        return [json.loads(line) for line in data.split(b"\n")[:-1]]
 
     def events(self, kind: str, **match: Any) -> list[dict[str, Any]]:
         return [
