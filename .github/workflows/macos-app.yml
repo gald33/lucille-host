@@ -49,6 +49,9 @@ jobs:
       - name: "Check: the embedded interpreter runs the host"
         if: ${{ !cancelled() }}
         run: uv run --no-project python macos/check_app.py host
+      - name: "Probe: the host's status, pair and run verbs as the app will run them (printed only)"
+        if: ${{ !cancelled() }}
+        run: uv run --no-project python macos/check_app.py probe
       - name: "Check: the app's Swift code against the real command line"
         if: ${{ !cancelled() }}
         run: uv run --no-project python macos/check_app.py swift

@@ -1398,6 +1398,60 @@ def check_dmg(dmgs: Sequence[Path], checker: Checker) -> None:
                     break
 
 
+PROBE_VERBS: Final = (
+    ("status", ["--json", "status"], None),
+    ("pair status", ["--json", "pair", "status"], None),
+    ("pair --code-stdin, not a code", ["pair", "--code-stdin", "--json"], "swbp1_not-a-code\n"),
+    ("run, standard input already ended", ["run", "--json-events", "--exit-on-stdin-eof"], ""),
+)
+
+
+def _probe_one(python: Path, home: Path, args: list[str], stdin: str | None) -> str:
+    env = {
+        "HOME": str(home),
+        "PATH": "/var/empty",
+        "LANG": "en_US.UTF-8",
+        "TMPDIR": os.environ.get("TMPDIR", "/tmp"),
+        "USER": os.environ.get("USER", ""),
+        "LOGNAME": os.environ.get("LOGNAME", ""),
+    }
+    started = time.monotonic()
+    try:
+        done = subprocess.run(
+            [str(python), "-I", "-B", "-m", "lucille_host", "--profile", "mac-app", *args],
+            input=stdin if stdin is not None else None,
+            stdin=None if stdin is not None else subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            env=env,
+            cwd="/",
+            timeout=60,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        return f"timed out after 60 s ({time.monotonic() - started:.1f} s)"
+    took = time.monotonic() - started
+    return f"{took:.1f} s, {_shown(done)[:2000]}"
+
+
+def check_probe(app: Path) -> None:
+    """Print what the verbs the app is about to use do on this runner. Printed only, never a gate.
+
+    Each runs as the app will run it: profile mac-app, PATH=/var/empty, working directory /. Once
+    under a fresh temporary HOME and once under the runner's own HOME, because whether macOS's
+    Keychain is usable under each is what the app's tests must be written for.
+    """
+    python = python_in(app)
+    for what in (["security", "list-keychains"], ["security", "default-keychain"]):
+        done = subprocess.run(what, capture_output=True, text=True, check=False)
+        print(f"{' '.join(what)}: {_shown(done)}")
+    with tempfile.TemporaryDirectory(prefix="probe-home-") as temporary:
+        for label, home in (("temporary HOME", Path(temporary)), ("runner HOME", Path.home())):
+            for name, args, stdin in PROBE_VERBS:
+                print(f"--- {label}: {name}")
+                print(_probe_one(python, home, args, stdin), flush=True)
+
+
 CHECKS: Final = (
     "host",
     "swift",
@@ -1408,6 +1462,7 @@ CHECKS: Final = (
     "ui",
     "gatekeeper",
     "dmg",
+    "probe",
 )
 
 
@@ -1449,6 +1504,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         check_ui(app, checker, work, args.require_driven)
     elif args.check == "gatekeeper":
         check_gatekeeper(app, dmgs)
+    elif args.check == "probe":
+        check_probe(app)
     else:
         check_dmg(dmgs, checker)
     if checker.failures:
