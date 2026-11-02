@@ -1,0 +1,916 @@
+import Foundation
+
+// Reading the host's JSON (spec/CLI.md, contract version 1): one object per line on standard
+// output. The app decides only on the fields of these objects, never on the words in them, which
+// are for people (spec/CLI.md §2). Foundation only, so the self-test runs it without a screen.
+
+/// One JSON value, as the host writes it. Decoding keeps a boolean a boolean and a number a
+/// number: `true` is never read as 1, nor 1 as `true`.
+enum JSONValue: Equatable, Sendable, Codable {
+    case null
+    case bool(Bool)
+    case number(Double)
+    case string(String)
+    case array([JSONValue])
+    case object([String: JSONValue])
+
+    init(from decoder: Decoder) throws {
+        let single = try decoder.singleValueContainer()
+        if single.decodeNil() {
+            self = .null
+        } else if let value = try? single.decode(Bool.self) {
+            self = .bool(value)
+        } else if let value = try? single.decode(Double.self) {
+            self = .number(value)
+        } else if let value = try? single.decode(String.self) {
+            self = .string(value)
+        } else if let value = try? single.decode([JSONValue].self) {
+            self = .array(value)
+        } else {
+            self = .object(try single.decode([String: JSONValue].self))
+        }
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var single = encoder.singleValueContainer()
+        switch self {
+        case .null:
+            try single.encodeNil()
+        case .bool(let value):
+            try single.encode(value)
+        case .number(let value):
+            try single.encode(value)
+        case .string(let value):
+            try single.encode(value)
+        case .array(let value):
+            try single.encode(value)
+        case .object(let value):
+            try single.encode(value)
+        }
+    }
+}
+
+/// The fields of one JSON object, read by name and type. A field of the wrong type reads as
+/// missing.
+struct JSONFields: Equatable, Sendable {
+    let values: [String: JSONValue]
+
+    func string(_ key: String) -> String? {
+        if case .string(let value)? = values[key] {
+            return value
+        }
+        return nil
+    }
+
+    func bool(_ key: String) -> Bool? {
+        if case .bool(let value)? = values[key] {
+            return value
+        }
+        return nil
+    }
+
+    func number(_ key: String) -> Double? {
+        if case .number(let value)? = values[key], value.isFinite {
+            return value
+        }
+        return nil
+    }
+
+    /// A whole number a JSON reader keeps exactly (at most 2^53 - 1 either way).
+    func int(_ key: String) -> Int? {
+        guard let value = number(key), value == value.rounded(), abs(value) <= 9_007_199_254_740_991 else {
+            return nil
+        }
+        return Int(value)
+    }
+
+    func isNull(_ key: String) -> Bool {
+        if case .null? = values[key] {
+            return true
+        }
+        return false
+    }
+
+    func object(_ key: String) -> JSONFields? {
+        if case .object(let value)? = values[key] {
+            return JSONFields(values: value)
+        }
+        return nil
+    }
+
+    func array(_ key: String) -> [JSONValue]? {
+        if case .array(let value)? = values[key] {
+            return value
+        }
+        return nil
+    }
+
+    /// A time the host wrote, in UTC to the second (`2026-11-01T12:00:00Z`, spec/CLI.md §4.1).
+    func time(_ key: String) -> Date? {
+        string(key).flatMap(HostJSON.time)
+    }
+
+    /// The strings of an array field; nil when it is missing or holds anything else.
+    func strings(_ key: String) -> [String]? {
+        guard let items = array(key) else {
+            return nil
+        }
+        var found: [String] = []
+        for item in items {
+            guard case .string(let value) = item else {
+                return nil
+            }
+            found.append(value)
+        }
+        return found
+    }
+}
+
+/// An `error` object: what failed (`code`, which a shell branches on) and the host's sentence
+/// (`message`, which a shell shows and never branches on).
+struct HostError: Equatable, Sendable {
+    let code: String
+    let message: String
+    let kind: String?
+}
+
+/// The `pair` type's states (spec/CLI.md §6, `pair`).
+enum PairState: Equatable, Sendable {
+    case noPair
+    case accepted(name: String, clockSkewed: Bool)
+    case waiting(name: String)
+    case sasPending(name: String, sas: String, deadline: Date)
+    case confirmed(name: String)
+    case rejected(name: String, lucilleTold: Bool)
+    /// A state this release does not know. The state is closed within version 1, so this is
+    /// never shown and never acted on.
+    case other(String)
+}
+
+/// Where the pair is, as `status` reports it, which never carries the SAS (spec/CLI.md §6,
+/// `status`).
+enum StatusPair: Equatable, Sendable {
+    case noPair
+    case waiting(name: String)
+    case sasReady(name: String)
+    case sasPending(name: String, deadline: Date)
+    case confirmed(name: String)
+    case refused(name: String)
+    case expired(name: String, deadline: Date)
+    case severalPairs
+    /// The store that keeps the pair could not be read: `insecure_keyring`, `store_error` or
+    /// `pair_unusable`.
+    case unreadable(code: String)
+    case other(String)
+}
+
+/// What the latest `run` last wrote, as `status` reports it.
+enum StatusRun: Equatable, Sendable {
+    case noRecord
+    case running(pid: Int)
+    case notSeen(pid: Int)
+    case stopped
+    case other(String)
+}
+
+/// The clock's state, in `status` and in `run`'s `state`. `skew` is in seconds, positive when
+/// this computer's clock is behind the hub's.
+enum ClockState: Equatable, Sendable {
+    case ok(skew: Double)
+    case skewed(skew: Double?)
+    case unknown
+
+    init(_ fields: JSONFields?) {
+        switch fields?.string("state") ?? "" {
+        case "ok":
+            self = .ok(skew: fields?.number("skew_s") ?? 0)
+        case "skewed":
+            self = .skewed(skew: fields?.number("skew_s"))
+        default:
+            self = .unknown
+        }
+    }
+}
+
+/// The fields of `status` the app needs.
+struct HostStatus: Equatable, Sendable {
+    var hostVersion: String
+    var paused: Bool
+    /// The local policy is valid. An invalid one, or a policy object this release cannot read,
+    /// is not.
+    var policyOK: Bool
+    /// The folders' aliases and the operations that run here, when the policy is valid.
+    var folders: [String]
+    var enabledOps: [String]
+    var pair: StatusPair
+    var run: StatusRun
+    var lastHubContact: Date?
+    var lastLeftBecause: String?
+    var clock: ClockState
+}
+
+/// One work room `run` reads now (`state`'s `rooms`).
+struct RunRoom: Equatable, Sendable {
+    enum Reading: Equatable, Sendable {
+        case reading
+        case readStuck
+        case other(String)
+    }
+
+    let name: String
+    let state: Reading
+}
+
+/// What a running `run` sees now (spec/CLI.md §6, `state`).
+struct RunState: Equatable, Sendable {
+    enum Policy: Equatable, Sendable {
+        case ok
+        case checking
+        /// Invalid, or a value this release does not know, which a reader treats as invalid
+        /// (spec/CLI.md §12).
+        case invalid
+    }
+
+    var pair: String
+    var confirmed: Bool
+    var paused: Bool
+    var policy: Policy
+    var lastHubContact: Date?
+    var clock: ClockState
+    var rooms: [RunRoom]
+    var offersWaiting: Int
+    var lastLeftBecause: String?
+}
+
+/// What began a drain of `run`.
+enum DrainCause: Equatable, Sendable {
+    case signal
+    case stdinEnd
+    case stdoutGone
+    /// A cause this release does not know, which a reader treats as a drain it did not ask for
+    /// (spec/CLI.md §12).
+    case other(String)
+}
+
+/// Why `run` ended: `stopped`'s `reason` (spec/CLI.md §6 and §13.3).
+enum StopReason: Equatable, Sendable {
+    case drained(cause: DrainCause)
+    case forgotten
+    case ended
+    case notPaired
+    case noGate
+    case severalPairs
+    case pairUnusable
+    case leaked
+    case expired
+    case alreadyRunning
+    case insecureKeyring
+    case storeError
+    case startupRefused
+    case downgrade(lastVersion: String)
+    case failed(code: String)
+    /// A reason this release does not know: a reader goes by the exit code (spec/CLI.md §12).
+    case other(String)
+
+    /// The exit code the contract gives this reason; nil for a reason this release does not know.
+    var exitCode: Int32? {
+        switch self {
+        case .drained, .forgotten, .ended:
+            return 0
+        case .notPaired, .noGate, .severalPairs, .pairUnusable, .leaked, .expired:
+            return 20
+        case .alreadyRunning:
+            return 21
+        case .insecureKeyring, .storeError:
+            return 23
+        case .startupRefused:
+            return 24
+        case .downgrade:
+            return 25
+        case .failed:
+            return 1
+        case .other:
+            return nil
+        }
+    }
+
+    /// The reason in the contract's words, for a diagnostic line.
+    var words: String {
+        switch self {
+        case .drained(let cause):
+            switch cause {
+            case .signal:
+                return "drained, signal"
+            case .stdinEnd:
+                return "drained, stdin_end"
+            case .stdoutGone:
+                return "drained, stdout_gone"
+            case .other(let word):
+                return "drained, \(word)"
+            }
+        case .forgotten:
+            return "forgotten"
+        case .ended:
+            return "ended"
+        case .notPaired:
+            return "not_paired"
+        case .noGate:
+            return "no_gate"
+        case .severalPairs:
+            return "several_pairs"
+        case .pairUnusable:
+            return "pair_unusable"
+        case .leaked:
+            return "leaked"
+        case .expired:
+            return "expired"
+        case .alreadyRunning:
+            return "already_running"
+        case .insecureKeyring:
+            return "insecure_keyring"
+        case .storeError:
+            return "store_error"
+        case .startupRefused:
+            return "startup_refused"
+        case .downgrade:
+            return "downgrade"
+        case .failed(let code):
+            return "failed, \(code)"
+        case .other(let word):
+            return word
+        }
+    }
+}
+
+/// What `forget` did (spec/CLI.md §6, `forget`).
+enum ForgetResult: Equatable, Sendable {
+    case forgotten(name: String, lucilleTold: Bool)
+    case left(name: String)
+    case other(String)
+}
+
+/// One object of the host's JSON output, for the types the app uses. Any other type is
+/// `unknown`, which a reader ignores (spec/CLI.md §2).
+enum HostObject: Equatable, Sendable {
+    /// An object of another major version of the contract: a reader stops trusting what it reads.
+    case otherVersion(Int)
+    /// A pairing code's pair name. The code's `note` is not kept: whoever made the code chose it.
+    case pairCode(name: String)
+    case policyReset
+    case pair(PairState)
+    case error(HostError)
+    case status(HostStatus)
+    case forget(ForgetResult)
+    case controls(paused: Bool)
+    case ready(pair: String, hostVersion: String)
+    case state(RunState)
+    case request(jobId: String, phase: String)
+    case hostTooOld(jobId: String, minVersion: String, hostVersion: String)
+    case stopped(StopReason)
+    case unknown(type: String)
+
+    /// The types this release reads. Every other type decodes as `unknown`.
+    static let knownTypes: Set<String> = [
+        "pair_code", "policy_reset", "pair", "error", "status", "forget", "controls", "ready",
+        "state", "request", "host_too_old", "stopped",
+    ]
+}
+
+/// Splits a stream into lines and reads each as one object, as spec/CLI.md §4.1 and §13.2 frame
+/// it. A line of `run`'s events is at most 16384 bytes, its newline included: a longer one is
+/// dropped while it streams, never kept whole. A short verb's output is read whole, with no bound
+/// (`limit` nil). A line that ends with a carriage return, or is not one JSON object, is dropped
+/// too, and so is a last fragment with no newline. Each dropped line becomes a note for
+/// diagnostics, which never holds the line itself.
+struct JSONLines: Sendable {
+    /// The bound on a line of `run`'s events, its newline included (spec/CLI.md §13.2).
+    static let maxLineBytes = 16_384
+
+    enum Item: Equatable, Sendable {
+        case object(HostObject)
+        case unusable(String)
+    }
+
+    /// The most bytes a line may have, its newline included; nil for no bound.
+    let limit: Int?
+    private var line: [UInt8] = []
+    private var overlong = false
+
+    init(limit: Int? = JSONLines.maxLineBytes) {
+        self.limit = limit
+    }
+
+    mutating func feed(_ data: Data) -> [Item] {
+        var items: [Item] = []
+        for byte in data {
+            if byte == 0x0A {
+                items.append(endLine())
+            } else if overlong {
+                continue
+            } else if let limit, line.count >= limit - 1 {
+                overlong = true
+                line.removeAll()
+            } else {
+                line.append(byte)
+            }
+        }
+        return items
+    }
+
+    /// The end of the stream: a fragment with no newline is discarded.
+    mutating func finish() -> [Item] {
+        defer {
+            line.removeAll()
+            overlong = false
+        }
+        if line.isEmpty && !overlong {
+            return []
+        }
+        return [.unusable("a last line with no newline, discarded")]
+    }
+
+    private mutating func endLine() -> Item {
+        defer {
+            line.removeAll(keepingCapacity: true)
+            overlong = false
+        }
+        if overlong {
+            return .unusable("a line longer than \(limit ?? 0) bytes")
+        }
+        if line.last == 0x0D {
+            return .unusable("a line that ends with a carriage return")
+        }
+        return HostObject.parse(line: Data(line))
+    }
+}
+
+extension HostObject {
+    /// One line, without its newline, read as one object.
+    static func parse(line: Data) -> JSONLines.Item {
+        guard let value = try? JSONDecoder().decode(JSONValue.self, from: line),
+              case .object(let map) = value
+        else {
+            return .unusable("a line that is not a JSON object")
+        }
+        let fields = JSONFields(values: map)
+        guard let version = fields.int("v") else {
+            return .unusable("an object with no version")
+        }
+        if version != 1 {
+            return .object(.otherVersion(version))
+        }
+        guard let type = fields.string("type") else {
+            return .unusable("an object with no type")
+        }
+        guard let object = HostObject(type: type, fields) else {
+            return .unusable("a \(type) object whose fields this release cannot read")
+        }
+        return .object(object)
+    }
+
+    /// The object of type `type`; nil when a field this release needs is missing or of the wrong
+    /// type, which the host's schemas never allow.
+    init?(type: String, _ fields: JSONFields) {
+        switch type {
+        case "pair_code":
+            guard let name = fields.string("name") else {
+                return nil
+            }
+            self = .pairCode(name: name)
+        case "policy_reset":
+            self = .policyReset
+        case "pair":
+            guard let state = HostObject.readPair(fields) else {
+                return nil
+            }
+            self = .pair(state)
+        case "error":
+            guard let code = fields.string("code"), let message = fields.string("message") else {
+                return nil
+            }
+            self = .error(HostError(code: code, message: message, kind: fields.string("kind")))
+        case "status":
+            guard let status = HostObject.readStatus(fields) else {
+                return nil
+            }
+            self = .status(status)
+        case "forget":
+            guard let result = HostObject.readForget(fields) else {
+                return nil
+            }
+            self = .forget(result)
+        case "controls":
+            guard let paused = fields.bool("paused") else {
+                return nil
+            }
+            self = .controls(paused: paused)
+        case "ready":
+            guard let pair = fields.string("pair"), let version = fields.string("host_version") else {
+                return nil
+            }
+            self = .ready(pair: pair, hostVersion: version)
+        case "state":
+            guard let state = HostObject.readRunState(fields) else {
+                return nil
+            }
+            self = .state(state)
+        case "request":
+            guard let job = fields.string("job_id"), let phase = fields.string("phase") else {
+                return nil
+            }
+            self = .request(jobId: job, phase: phase)
+        case "host_too_old":
+            guard let job = fields.string("job_id"), let least = fields.string("min_host_version"),
+                  let version = fields.string("host_version")
+            else {
+                return nil
+            }
+            self = .hostTooOld(jobId: job, minVersion: least, hostVersion: version)
+        case "stopped":
+            guard let reason = HostObject.readStopReason(fields) else {
+                return nil
+            }
+            self = .stopped(reason)
+        default:
+            self = .unknown(type: type)
+        }
+    }
+
+    /// Whether `text` is a SAS as the host writes one: four digits, `-`, four digits.
+    static func isSAS(_ text: String) -> Bool {
+        let scalars = Array(text.unicodeScalars)
+        guard scalars.count == 9 else {
+            return false
+        }
+        let digits: ClosedRange<Unicode.Scalar> = "0"..."9"
+        for (index, scalar) in scalars.enumerated() {
+            if index == 4 {
+                if scalar != "-" {
+                    return false
+                }
+            } else if !digits.contains(scalar) {
+                return false
+            }
+        }
+        return true
+    }
+
+    private static func readPair(_ fields: JSONFields) -> PairState? {
+        guard let state = fields.string("state") else {
+            return nil
+        }
+        if state == "none" {
+            return .noPair
+        }
+        let name = fields.string("name")
+        switch state {
+        case "accepted":
+            guard let name, let skewed = fields.bool("clock_skewed") else {
+                return nil
+            }
+            return .accepted(name: name, clockSkewed: skewed)
+        case "waiting":
+            guard let name else {
+                return nil
+            }
+            return .waiting(name: name)
+        case "sas_pending":
+            // A SAS of another shape, or no deadline, is never shown.
+            guard let name, let sas = fields.string("sas"), isSAS(sas), let deadline = fields.time("deadline") else {
+                return nil
+            }
+            return .sasPending(name: name, sas: sas, deadline: deadline)
+        case "confirmed":
+            guard let name else {
+                return nil
+            }
+            return .confirmed(name: name)
+        case "rejected":
+            guard let name, let told = fields.bool("lucille_told") else {
+                return nil
+            }
+            return .rejected(name: name, lucilleTold: told)
+        default:
+            return .other(state)
+        }
+    }
+
+    private static func readStatusPair(_ fields: JSONFields) -> StatusPair? {
+        guard let state = fields.string("state") else {
+            return nil
+        }
+        let name = fields.string("name")
+        switch state {
+        case "none":
+            return .noPair
+        case "waiting":
+            return name.map { StatusPair.waiting(name: $0) }
+        case "sas_ready":
+            return name.map { StatusPair.sasReady(name: $0) }
+        case "sas_pending":
+            guard let name, let deadline = fields.time("deadline") else {
+                return nil
+            }
+            return .sasPending(name: name, deadline: deadline)
+        case "confirmed":
+            return name.map { StatusPair.confirmed(name: $0) }
+        case "refused":
+            return name.map { StatusPair.refused(name: $0) }
+        case "expired":
+            guard let name, let deadline = fields.time("deadline") else {
+                return nil
+            }
+            return .expired(name: name, deadline: deadline)
+        case "several_pairs":
+            return .severalPairs
+        case "unreadable":
+            return fields.string("code").map { StatusPair.unreadable(code: $0) }
+        default:
+            return .other(state)
+        }
+    }
+
+    private static func readStatusRun(_ fields: JSONFields) -> StatusRun? {
+        guard let state = fields.string("state") else {
+            return nil
+        }
+        switch state {
+        case "none":
+            return .noRecord
+        case "running":
+            return fields.int("pid").map { StatusRun.running(pid: $0) }
+        case "not_seen":
+            return fields.int("pid").map { StatusRun.notSeen(pid: $0) }
+        case "stopped":
+            return .stopped
+        default:
+            return .other(state)
+        }
+    }
+
+    private static func readStatus(_ fields: JSONFields) -> HostStatus? {
+        guard let version = fields.string("host_version"),
+              let paused = fields.bool("paused"),
+              let policy = fields.object("policy"),
+              let pairFields = fields.object("pair"), let pair = readStatusPair(pairFields),
+              let runFields = fields.object("run"), let run = readStatusRun(runFields)
+        else {
+            return nil
+        }
+        let policyOK = policy.string("state") == "ok"
+        return HostStatus(
+            hostVersion: version,
+            paused: paused,
+            policyOK: policyOK,
+            folders: policyOK ? policy.strings("folders") ?? [] : [],
+            enabledOps: policyOK ? policy.strings("enabled") ?? [] : [],
+            pair: pair,
+            run: run,
+            lastHubContact: fields.time("last_hub_contact"),
+            lastLeftBecause: fields.string("last_left_because"),
+            clock: ClockState(fields.object("clock"))
+        )
+    }
+
+    private static func readRunState(_ fields: JSONFields) -> RunState? {
+        guard let pair = fields.string("pair"),
+              let confirmed = fields.bool("confirmed"),
+              let paused = fields.bool("paused"),
+              let roomValues = fields.array("rooms")
+        else {
+            return nil
+        }
+        let policy: RunState.Policy
+        switch fields.string("policy") ?? "" {
+        case "ok":
+            policy = .ok
+        case "checking":
+            policy = .checking
+        default:
+            policy = .invalid
+        }
+        var rooms: [RunRoom] = []
+        for value in roomValues {
+            guard case .object(let map) = value else {
+                return nil
+            }
+            let room = JSONFields(values: map)
+            guard let name = room.string("name"), let state = room.string("state") else {
+                return nil
+            }
+            let reading: RunRoom.Reading
+            switch state {
+            case "reading":
+                reading = .reading
+            case "read_stuck":
+                reading = .readStuck
+            default:
+                reading = .other(state)
+            }
+            rooms.append(RunRoom(name: name, state: reading))
+        }
+        return RunState(
+            pair: pair,
+            confirmed: confirmed,
+            paused: paused,
+            policy: policy,
+            lastHubContact: fields.time("last_hub_contact"),
+            clock: ClockState(fields.object("clock")),
+            rooms: rooms,
+            offersWaiting: fields.int("offers_waiting") ?? 0,
+            lastLeftBecause: fields.string("last_left_because")
+        )
+    }
+
+    private static func readStopReason(_ fields: JSONFields) -> StopReason? {
+        guard let reason = fields.string("reason") else {
+            return nil
+        }
+        switch reason {
+        case "drained":
+            let cause: DrainCause
+            switch fields.string("cause") ?? "" {
+            case "signal":
+                cause = .signal
+            case "stdin_end":
+                cause = .stdinEnd
+            case "stdout_gone":
+                cause = .stdoutGone
+            case let other:
+                cause = .other(other)
+            }
+            return .drained(cause: cause)
+        case "forgotten":
+            return .forgotten
+        case "ended":
+            return .ended
+        case "not_paired":
+            return .notPaired
+        case "no_gate":
+            return .noGate
+        case "several_pairs":
+            return .severalPairs
+        case "pair_unusable":
+            return .pairUnusable
+        case "leaked":
+            return .leaked
+        case "expired":
+            return .expired
+        case "already_running":
+            return .alreadyRunning
+        case "insecure_keyring":
+            return .insecureKeyring
+        case "store_error":
+            return .storeError
+        case "startup_refused":
+            return .startupRefused
+        case "downgrade":
+            return .downgrade(lastVersion: fields.string("last_version") ?? "")
+        case "failed":
+            return .failed(code: fields.string("code") ?? "")
+        default:
+            return .other(reason)
+        }
+    }
+
+    private static func readForget(_ fields: JSONFields) -> ForgetResult? {
+        guard let state = fields.string("state") else {
+            return nil
+        }
+        switch state {
+        case "forgotten":
+            guard let name = fields.string("name"), let told = fields.bool("lucille_told") else {
+                return nil
+            }
+            return .forgotten(name: name, lucilleTold: told)
+        case "left":
+            return fields.string("name").map { ForgetResult.left(name: $0) }
+        default:
+            return .other(state)
+        }
+    }
+}
+
+/// What a short verb did, read from its exit and its objects (spec/CLI.md §4.3). How it ended
+/// comes first: a signal is never read as an exit code.
+enum VerbOutcome: Equatable, Sendable {
+    /// Exit 0, with the objects it wrote.
+    case done([HostObject])
+    /// Exit 1 or 2, with an `error` object last.
+    case refused(HostError)
+    /// A signal ended it, or it exited 1 or 2 with no `error` object last, which means the same.
+    case signaled
+    case timedOut
+    case cancelled
+    /// The interpreter could not be started.
+    case notStarted
+    /// It was stopped, and had still not ended when the app stopped waiting.
+    case notFinished
+    /// Any other exit status.
+    case otherExit(Int32)
+
+    init(_ result: CLIResult) {
+        if result.status == CLIResult.notFinished {
+            self = .notFinished
+        } else if result.timedOut {
+            self = .timedOut
+        } else if result.cancelled {
+            self = .cancelled
+        } else if result.status == CLIResult.notStarted {
+            self = .notStarted
+        } else if result.terminationReason == .uncaughtSignal {
+            self = .signaled
+        } else {
+            let objects = HostJSON.objects(inOutput: result.stdout)
+            switch result.status {
+            case 0:
+                self = .done(objects)
+            case 1, 2:
+                if case .error(let error)? = objects.last {
+                    self = .refused(error)
+                } else {
+                    self = .signaled
+                }
+            default:
+                self = .otherExit(result.status)
+            }
+        }
+    }
+
+    /// The `status` object of a `status --json` that worked.
+    var status: HostStatus? {
+        guard case .done(let objects) = self else {
+            return nil
+        }
+        for object in objects {
+            if case .status(let status) = object {
+                return status
+            }
+        }
+        return nil
+    }
+
+    /// The last `pair` object of a pairing verb that worked.
+    var pair: PairState? {
+        guard case .done(let objects) = self else {
+            return nil
+        }
+        for object in objects.reversed() {
+            if case .pair(let state) = object {
+                return state
+            }
+        }
+        return nil
+    }
+
+    /// The `controls` object of `pause`, `resume` or `kill`.
+    var paused: Bool? {
+        guard case .done(let objects) = self else {
+            return nil
+        }
+        for object in objects {
+            if case .controls(let paused) = object {
+                return paused
+            }
+        }
+        return nil
+    }
+
+    /// The `forget` object of `forget --json`.
+    var forget: ForgetResult? {
+        guard case .done(let objects) = self else {
+            return nil
+        }
+        for object in objects {
+            if case .forget(let result) = object {
+                return result
+            }
+        }
+        return nil
+    }
+}
+
+enum HostJSON {
+    /// A time as the host writes it; nil for anything else.
+    static func time(_ text: String) -> Date? {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime]
+        return formatter.date(from: text)
+    }
+
+    /// The objects in a short verb's whole standard output, which is read whole, so no line bound
+    /// applies (that bound is `run`'s). A line that cannot be used is dropped, and so is a last
+    /// line with no newline.
+    static func objects(inOutput text: String) -> [HostObject] {
+        var lines = JSONLines(limit: nil)
+        var items = lines.feed(Data(text.utf8))
+        items += lines.finish()
+        var found: [HostObject] = []
+        for item in items {
+            if case .object(let object) = item {
+                found.append(object)
+            }
+        }
+        return found
+    }
+}

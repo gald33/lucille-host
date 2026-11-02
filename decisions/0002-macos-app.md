@@ -27,44 +27,61 @@ Python, and without Homebrew. Mac first; nothing here may block a Windows or Lin
 - **"Proposed, pending the maintainer's decision"** marks a part of this design that is not decided. Nothing
   builds on it until it is decided. Two parts carry it: the typed gate (§11.2) and the Connect flow (§11.4).
   Until they are decided, 0001's pairing gate stands: the host shows the SAS, and the user types `y` if it
-  matches Lucille's page.
+  matches Lucille's page. The app built today pairs on that gate: it shows the SAS, and the user clicks
+  **They Match** ("What is built today").
 
 ## What is built today
 
 The first build is in [`macos/`](../macos/README.md), and its README is the reference for it. It is not a
-release, and it is for people developing the app.
+release, and it is for people developing the app. Its builds stay ad hoc signed, for the repository owner's
+own Mac (§3.2).
 - **`Capsule.app`**, a menu bar app for Apple silicon Macs with macOS 15 or later, with no main window and no
   Dock icon; and **`Capsule-<version>-<commit>-adhoc-macOS-arm64.dmg`**, a disk image that holds it and a link
   to Applications.
 - **Inside it**, a python-build-standalone CPython 3.13 at `Contents/Resources/python`, pinned in
   `macos/runtime.toml` by URL and sha256, with the host's wheel built from the checkout and the exact wheels
   `uv.lock` pins, installed by hash.
-- **The app drives the host only through its command line**, as `python3 -I -B -m lucille_host <verb>`, with an
-  argv and a fixed environment. It reads the host's text output and its pause flag, writes none of the host's
-  files, and opens no network connection.
-- **The menu** shows the version and "Not connected to Lucille", and offers Pause and Resume, the abilities
-  (the operations, switched with `ops enable` and `ops disable`), Add a Folder…, the folders with Remove, and
-  Quit Capsule. "Connect to Lucille (coming soon)" is disabled: the host's command line can pair (`lucille-host pair`), but the app has no screen for it yet.
+- **The app drives the host only through its command line**, as
+  `python3 -I -B -m lucille_host --profile mac-app <verb>`, with an argv and a fixed environment
+  (`PATH=/var/empty`). It runs every verb on its own profile, `mac-app` (§9); builds before it used `default`,
+  and nothing moves from one to the other. It reads JSON (§8) from `status`, the pairing verbs, `forget`,
+  `kill`, `pause`, `resume` and `run`'s events, and the text of `--version`, `ops list` and `roots list`. It
+  reads and writes none of the host's files, and opens no network connection.
+- **Pairing by paste, on 0001's gate** (§11.3). The maintainer decided on 2026-11-02 to build it now on
+  [0001](0001-host-design.md)'s gate, not the typed one. The user pastes the code; the app passes it to
+  `pair --code-stdin --json` on standard input, shows the SAS from `sas_pending`, and the user clicks
+  **They Match** (`pair confirm --json`) only if Lucille's page shows the same number, or **They Differ**
+  (`pair reject --json`). The typed gate (§11.2) and the Connect flow (§11.4) stay proposed, and are not
+  built.
+- **Supervision of `run`** (§9): `run --json-events --exit-on-stdin-eof` as the app's child, with the
+  lifeline; the exit table; restarts with back-off, and the stop after five crashes in ten minutes; Quit and
+  logout with the drain ladder and **Stop now**; paused at the next launch after a `kill`, and never resumed
+  by the app on its own; **Disconnect from Lucille…**, which drains `run` before `forget --json`.
+- **The menu** shows the version and a status line read from `status --json` and `run`'s events, with a line
+  for what needs attention, and offers Pause and Resume, the abilities (the operations, switched with
+  `ops enable` and `ops disable`), Add a Folder…, the folders with Remove, the pairing items (Connect to
+  Lucille…, Finish Connecting…, Stop Connecting…, Disconnect from Lucille…), and Quit Capsule.
 - **It is signed ad hoc**, with the hardened runtime and no entitlements, and it is not notarized, so macOS
   refuses to open it normally.
 - **The `macos-app` workflow** builds it on GitHub's `macos-15` runner, runs each check in
-  `macos/check_app.py` and the host's whole test suite on the trimmed runtime, and uploads the disk image as
-  a 7-day artifact when every check passed.
+  `macos/check_app.py` and the host's whole test suite on the trimmed runtime, then an end-to-end check of
+  pairing and supervision with a local hub and a stand-in for Lucille. It uploads the disk image as a 3-day
+  artifact only from a run started by hand, and only when every check passed.
 
-Not built yet: pairing, running in the background and opening at login, the app's use of the JSON
-contract (§8; the host's command line has it, [spec/CLI.md](../spec/CLI.md), with `run`'s events and
-`policy reset`, except the verbs §8 lists for §11.4, §15 and section 17), the Welcome
-and main windows, updates, **Remove Capsule…** (section 17), Developer ID signing and notarization, ripgrep,
-and the release jobs. The first build also departs from this record in these ways, among others;
-`macos/README.md`, under "Choices made for the first build", says why for most of them:
+Not built yet: the typed gate and the Connect flow (§11.2, §11.4; proposed), opening at login, Activity,
+the restore list after a new pairing (§11.6, `policy previous`), Stop What's Running, Reset Settings
+(`policy reset`, §10), Download and Prepare to Update (§16), the app's use of the JSON contract for `ops`
+and `roots` (§8), the Welcome and main windows, updates, **Remove Capsule…** (section 17), Copy
+Diagnostics (§15), Developer ID signing and notarization, ripgrep, and the release jobs. The first build
+also departs from this record in these ways, among others; `macos/README.md`, under "Choices made for the
+first build", says why for most of them:
 - the interpreter is the runtime's own `python3`, not renamed. It is signed ad hoc with
   `--prefix com.lucille-ai.capsule.`, which gives it the identifier `com.lucille-ai.capsule.python3` (seen
   in CI), not the planned `com.lucille-ai.capsule.runtime` (§6). The runtime ships hash-checked `.pyc`
   files (§6);
-- the command line runs with `PATH=/usr/bin:/bin`, and without `-X utf8` (§6, §9);
+- the command line runs with `PATH=/var/empty`, but with `/` as its working directory and without
+  `-X utf8` (§6, §9);
 - the app opens from any folder, where the planned app runs only from `/Applications/Capsule.app` (§13);
-- the app uses the host's `default` profile, the one a `pipx` install uses, not its own `mac-app` profile
-  (§9);
 - there is no `MANIFEST.json`. The build writes `Contents/Resources/build-manifest.json` instead, with the
   commit, the host's exact version, the host wheel's name and sha256, the runtime's file name, URL and
   sha256, the name and version of each installed distribution, what the build removed from the runtime, the
@@ -79,8 +96,25 @@ and the release jobs. The first build also departs from this record in these way
   `/System/Volumes`, which hold the Data volume (§12). Here the first build allows less than this record;
 - the build scripts and their pins are in `macos/`, not `tools/macos/`, and the checks on the Swift sources
   are in `tests/test_macos_build.py` and `check_app.py links`, not in a `macos_lint` guard (§20);
-- the workflow is `macos-app.yml`, not a job in `ci.yml`, and it uploads the disk image on pushes and on the
-  repository's own pull requests, not only on a manual run (§18).
+- the workflow is `macos-app.yml`, not a job in `ci.yml` (§18);
+- the computer's gate is 0001's click, not the typed number of §11.2, which is proposed (above). The buttons
+  count only once the number is drawn in a window not wholly hidden, and **They Match** runs `pair confirm`
+  only after a `status` read shows the same pair and deadline still pending. `pair confirm` names no pair,
+  so a command run on profile `mac-app` from Terminal between that read and the confirm is not excluded;
+  the app's own store verbs run one at a time. After **They Differ**, They Match stays off for that pair
+  only while the app stays open: it keeps no memory of its own. A click gate does not protect the
+  computer's side against an attacker who can rewrite Lucille's page, which §11.2 is for: one more reason
+  the paste form stays on the owner's Mac (§11.1);
+- a profile that holds more than one pair (`several_pairs`) gets no Disconnect: `forget` refuses it too.
+  The app says it cannot end them, and `macos/README.md` gives the repair by hand (§9);
+- the app reads `pair status --json` only while its pairing window is open (§11.3);
+- the Quit question is asked only for the app's own Quit, and only while `run` lives and no Disconnect is
+  under way; a quit by Apple event, a logout included, never asks. A quit during a Disconnect finishes it:
+  `forget` runs once `run` has drained, before the app replies (§9);
+- when no `state` arrives for 120 s, the app only says so; it neither restarts `run` nor closes the
+  lifeline (§9);
+- the clock's fix is said in words, not offered as an **Open Date & Time Settings** button (§3.3), because
+  the first build's checks keep `NSWorkspace` out of the app (`macos/README.md`).
 
 Where this record says what the app does, it describes the planned app.
 
@@ -433,10 +467,11 @@ login ─► Capsule (menu bar; an "Open at Login" item)
   operation, replies, and exits. No host runs unseen. That holds only while no other process holds the
   pipe's write end: the app gives it to no other child, and that Foundation's `Pipe` and `Process` keep it
   out of the children the app starts later (some of which never end, such as a verb stuck on a stalled
-  drive) is not yet tested on a Mac. A check in `check_app.py` is to start `run`, start a long verb as
-  another child, drop the app's write end, and see `run` write `stopped` `drained` while the other child
-  lives; if it fails, the app sets `FD_CLOEXEC` on the write end itself, right after making the pipe. The
-  hardware tests check that a force-quit leaves no host process.
+  drive) is not yet tested on a Mac. The app sets `FD_CLOEXEC` on the ends it keeps itself, under one lock
+  held around every child it starts, so the question does not depend on Foundation. The Swift self-test
+  checks the effect on CI's Mac for one order: it starts a stand-in `run`, then a long verb as another
+  child, drops the app's write end, and sees the stand-in end while the other child lives. The hardware
+  tests check that a force-quit leaves no host process.
 - **One host per profile.** `run` holds `state/.run.lock` (`os.lockf`). A relaunched app, or a `run` from
   Terminal, finds it held: `run` exits 21 (`already_running`) and changes nothing.
 - **The app's own profile.** The app runs every verb with `--profile mac-app`, and so does the Terminal
@@ -458,7 +493,8 @@ login ─► Capsule (menu bar; an "Open at Login" item)
   `SIGTTIN`, `SIGTTOU`, `SIGIO`, `SIGXCPU`, `SIGXFSZ`), and `SIGXCPU` and `SIGXFSZ` end a process. A
   signal (`terminationReason` `.uncaughtSignal`) is a crash, except the one the app sent at its own last
   step below. An exit's number is checked against the `stopped` reason it read, and the reason decides
-  within a number. When `stopped` is missing after 0 or 20, the app asks `status --json` where the pair is.
+  within a number; a number that disagrees with the reason is a crash. When `stopped` is missing after 0
+  or 20, the app asks `status --json` where the pair is.
   - 0 `drained` the app asked for (Quit, Prepare to Update): done. 0 `drained` it did not ask for (a
     `SIGTERM` from elsewhere, a `stdin_end` or `stdout_gone` it did not cause), one within a few seconds of
     `ready` above all: a crash. 0 `forgotten` or `ended`: Not connected, and the login item is unregistered.
@@ -471,9 +507,10 @@ login ─► Capsule (menu bar; an "Open at Login" item)
     Capsule's host is running, and how to stop it.
   - 23: two reasons, in different words. `insecure_keyring` is permanent: Needs attention, "The Keychain
     cannot keep Capsule's pairing safely". `store_error` can pass (a locked Keychain, a Deny at a prompt):
-    "Capsule cannot open its Keychain item", with Try Again. A `failed` `store_error` after `ready` is the
-    same, not a crash; so is `status --json`'s `pair` `unreadable` with those codes, before the app first
-    starts `run`.
+    "Capsule cannot open its Keychain item", with Try Again. So is `status --json`'s `pair` `unreadable`
+    with those codes, before the app first starts `run`. A `failed` `store_error` after `ready` restarts
+    `run`, but counts toward the five crashes below, so that a store that fails after every start cannot
+    restart it forever.
   - 24: Needs attention (the app builds the environment, so this is a bug). 25: §16.
   - 2 (usage) can only be the app's own mistake against the host it ships: it is not retried; Needs
     attention, with standard error.
@@ -482,13 +519,22 @@ login ─► Capsule (menu bar; an "Open at Login" item)
   stops and shows "Capsule keeps stopping", with the last lines of standard error behind a disclosure. An
   unrequested `drained` counts as a crash, so that something that keeps draining `run` (a standard input that
   is not a live pipe, say) cannot loop it.
-- **Quit.** The menu asks first: "Your Mac will stop answering Lucille until you open Capsule again." Quit
-  from the menu, from the welcome alert, from an AppleScript or from Activity Monitor, and a logout, all reach
-  the app delegate's `applicationShouldTerminate`, which returns `.terminateLater`, drains, and then calls
-  `reply(toApplicationShouldTerminate:)`. While a `run` child lives, the app turns off sudden and automatic
-  termination (`ProcessInfo.disableSuddenTermination()` and `disableAutomaticTermination(_:)`), and turns
-  them on again once it has exited, so that a logout cannot end the app without its drain (not yet tested on
-  a Mac). The drain is a ladder; the app reads both pipes until `run` exits, at every step:
+- **Quit.** The app's own Quit (the menu, the welcome alert) asks first while `run` lives: "Your Mac will
+  stop answering Lucille until you open Capsule again." A quit by Apple event (an AppleScript, Activity
+  Monitor, a logout) never asks; the app tells a logout, restart or shutdown from a plain quit by the
+  event's `kAEQuitReason` (not yet tested on a Mac). Each reaches the app delegate's
+  `applicationShouldTerminate`, which returns `.terminateLater`, drains, and then calls
+  `reply(toApplicationShouldTerminate:)`. While any child lives, `pair` included, the app turns off sudden
+  and automatic termination (`ProcessInfo.disableSuddenTermination()` and `disableAutomaticTermination(_:)`),
+  and turns them on again once none does, so that a logout cannot end the app without its drain (not yet
+  tested on a Mac). A `pair` child gets SIGINT, which keeps the pair, then SIGTERM and SIGKILL, before the
+  app replies. Every timer runs on the main queue, which the run loop serves in every mode, a menu's
+  included. Every modal loop (a note, a question, the Open panel, and AppKit's wait to quit) starts in a
+  turn of the main run loop of its own, never inside a main-queue callout: the main queue is serial, and a
+  modal loop started inside one of its callouts would keep it from being served until the loop ended, so
+  no timer, no event of `run` and no reply to the quit could arrive. Started apart, they all go on while a
+  note is up and while the app waits to quit. The silence and crash windows count the time the Mac is
+  awake. The drain is a ladder; the app reads both pipes until `run` exits, at every step:
   1. It closes the pipe and shows "Finishing the current task…" with **Stop now**. `run` finishes its
      operation and its reply: up to the operation's time limit, at most 300 s, then 30 s.
   2. **Stop now**, or the bound passing, runs `kill`, which kills the operation's process group and sets the
@@ -506,8 +552,12 @@ login ─► Capsule (menu bar; an "Open at Login" item)
   "Known gaps").
 - **After a kill at Quit or log out**, the host is paused at the next launch, which the user did not choose
   after a log out. The app does not resume it on its own: a pause nobody asked for fails safe. The next
-  launch says "Capsule is paused. This happens when a task is stopped at Quit or log out." with
-  **Resume**.
+  launch says "Capsule is paused": "Lucille's requests are turned away until you resume. You paused
+  Capsule, or a task was stopped when Capsule quit or you logged out.", with **Resume**. It names both
+  causes, because the pause flag holds only a time (`controls.py`), and the app keeps no memory of its own.
+- **SIGTERM to the app** asks nothing and runs no `kill`: the app closes the lifeline, stops a `pair`
+  child as at a quit, and exits within a few seconds. `run` then drains on its own. The app handles it on a
+  dispatch queue of its own, never the main queue, which a note or the wait to quit may hold.
 - **The child's environment** is built, never copied: `HOME`, `USER`, `LOGNAME`, `TMPDIR` from the session,
   `LANG=en_US.UTF-8`, `PATH=/var/empty`, and the working directory inside the host's own state folder. agent-
   switchboard 2.6.0 runs `git` through `PATH` and treats a failure as "no value" (sb `client.py:117-131`); on a
@@ -609,6 +659,13 @@ answer that has not reached the hub), writes one event per state change, and exi
 maps to one sentence ("This code isn't from Lucille. Nothing was
 connected."). The two terminal messages of 0001 stay distinct: "This code may have been used by someone else.
 Remove this computer in Lucille and start again" and "The code expired. Click Add computer again."
+
+**Built, on 0001's gate.** The maintainer decided on 2026-11-02 to build the paste form now, with 0001's gate
+in place of §11.2's typed number ("What is built today"). After `sas_pending`, the app shows the number and
+asks whether Lucille's page shows the same; **They Match** runs `pair confirm --json`, and **They Differ**
+runs `pair reject --json`. The app reads `pair status --json` only while its pairing window is open: every
+5 s while the pair is `waiting`, and at the deadline. `macos/README.md`, "Connecting to Lucille", says
+what each screen does.
 
 ### 11.4 The final form: Connect from the computer
 

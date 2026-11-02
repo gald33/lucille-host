@@ -87,9 +87,13 @@ struct FolderPlace: Equatable, Sendable {
     var inCloud = false
 }
 
-/// Reading what the host's command line prints. It has no machine-readable output yet, so this
-/// follows its text exactly (`src/lucille_host/cli.py`); the self-test checks it against the
-/// real command line on every build.
+/// Reading the text the host's command line prints for the verbs the menu has run from the start:
+/// `--version`, `ops list` and `roots list`, and the failure lines on standard error of those and
+/// of `ops`, `roots`, `pause` and `resume`, which stay text with `--json` too. This follows that
+/// text exactly (`src/lucille_host/cli.py`); the self-test checks it against the real command line
+/// on every build. Pairing, `status`, `forget`, `kill`, `run`, and the pause state `pause` and
+/// `resume` report, are read as JSON (`HostJSON`); moving these verbs onto `--json` as well is a
+/// later change.
 enum HostText {
     private static let program = "lucille-host"
 
@@ -144,10 +148,14 @@ enum HostText {
     /// The menu's line while Lucille is paused.
     static let pausedNote = "Lucille's requests are turned away until you resume."
 
-    /// What the app says once a folder is added. Nothing can connect yet, so it says when the
-    /// folder becomes of use.
-    static func folderAdded(alias: String) -> String {
-        "Once this Mac is connected to Lucille, Lucille can use \u{201C}\(alias)\u{201D} for the abilities you turn on."
+    /// What the app says once a folder is added. `connected` is whether this Mac holds a pair,
+    /// confirmed or being confirmed. Without one, a new pairing sets the policy aside (spec/CLI.md
+    /// §6, `policy_reset`), so the folder is of use only once it is added again after that.
+    static func folderAdded(alias: String, connected: Bool = false) -> String {
+        if connected {
+            return "Lucille can use \u{201C}\(alias)\u{201D} for the abilities you turn on."
+        }
+        return "Once this Mac is connected to Lucille, Lucille can use \u{201C}\(alias)\u{201D} only after you add it again, because a new connection starts with no folders."
     }
 
     /// What the app says when macOS's privacy protection kept the host from a folder.

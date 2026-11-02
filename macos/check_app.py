@@ -11,7 +11,9 @@ Each check prints what it saw and exits 1 if anything is wrong:
   PYTHONHOME and PYTHONPATH point nowhere, which isolated mode must ignore.
 - ``swift``: compiles the app's Swift files that do not draw anything with a test driver
   (``macos/Tests/SelfTest.swift``), and runs it against the app. It makes the calls the menu
-  makes, through the same code.
+  makes, through the same code; reads the host's golden fixtures through the app's JSON reader
+  and its pairing and supervision state machines; and drives the child runner with fake children,
+  a shell script in place of the interpreter.
 - ``relocate``: copies the app to another folder, whose path has a space in it, and runs ``host``
   and ``swift`` on the copy.
 - ``links``: every library a Mach-O file in the bundle loads is macOS's own, or resolves, the
@@ -37,29 +39,55 @@ Each check prints what it saw and exits 1 if anything is wrong:
   submenu; chooses the home folder, which the app asks about first, picks Choose a Smaller Folder
   once, then adds it; chooses the Data volume, and then ``/`` through a link to it, which the app
   refuses each time with Choose a Smaller Folder and Cancel and no button that adds the folder,
-  and adds neither. It checks each step against the host's own state.
+  and adds neither. Then, with a code-shaped text on the pasteboard, it chooses Connect to
+  Lucille…: the code window opens with its field empty, and the field stays empty once it has the
+  focus, so the app read nothing from the pasteboard; a typed word gets the hint; Command-V, typed
+  through System Events, pastes exactly what was copied; Connect hands it to the host, which
+  refuses it as no code, and the app says so in its own words. It checks each step against the
+  host's own state, on the app's own profile (:data:`APP_PROFILE`).
   It uses the real HOME and leaves the host as it found it. Where macOS does not let System Events
   drive other apps, it says so and drives nothing, which is a failure with ``--require-driven``
   (CI passes it). Screenshots go to ``check/screens``.
+- ``pairing``: end to end, against a Switchboard hub it starts on a loopback port and a fake
+  Lucille (``tests/_lucille.py``). It needs Switchboard's hub and the test harness, which it
+  imports only when it runs: CI runs it in the environment the host suite's step made from the
+  app's own interpreter. It pairs the app's profile through the command line, as a test harness,
+  with ``--hub`` and ``--store-file`` (which the app never passes), and leaves the SAS pending.
+  Then it drives the app: the pairing window, opened from the menu, shows the number Lucille's
+  side shows, Return does nothing there, and They Match confirms; the app starts ``run``, which
+  reads the room Lucille offers; a ``files.sha256`` request on a folder added through the command
+  line is answered; ``run`` killed with SIGKILL is started again after the back-off; ``run``
+  drains when the app itself is killed; the app's own Quit asks first, shows the finishing panel,
+  and waits for ``run`` to drain; Stop now pauses the host, which the app never undoes on its own;
+  Disconnect drains ``run``, then forgets the pair. The app's profile, if there was one, is set
+  aside first and put back at the end. Screenshots go to ``check/screens``.
 - ``gatekeeper``: prints what ``spctl`` says about the app and the disk image. It never fails: an
   ad hoc signature is refused until the app is signed with a Developer ID and notarized.
 - ``dmg``: ``hdiutil verify`` passes, and the mounted image holds the app, with a valid signature,
   and a link to ``/Applications``.
+- ``probe``: prints what the verbs the app is about to use do on this runner, as the app runs
+  them. It gates nothing.
 """
 
 from __future__ import annotations
 
 import argparse
+import contextlib
+import dataclasses
+import hashlib
 import json
 import os
+import re
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
 import time
+import traceback
 from collections.abc import Callable, Sequence
 from pathlib import Path
-from typing import Final
+from typing import Any, Final
 
 if __package__ in (None, ""):  # run as a script: make ``macos`` importable
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -69,7 +97,20 @@ from macos import build_app  # noqa: E402
 TESTS_DIR: Final = build_app.MACOS_DIR / "Tests"
 ALIAS_VECTORS: Final = TESTS_DIR / "alias-vectors.json"
 # The app's Swift files that use Foundation only, so a test driver can run them without a screen.
-LOGIC_SOURCES: Final = ("Alias.swift", "HostCLI.swift", "HostText.swift")
+LOGIC_SOURCES: Final = (
+    "Alias.swift",
+    "HostCLI.swift",
+    "HostText.swift",
+    "HostJSON.swift",
+    "Pairing.swift",
+    "Supervisor.swift",
+    "ConnectionText.swift",
+)
+# The host's golden fixtures (spec/CLI.md section 11), which the self-test reads through the
+# app's JSON reader and its pairing and supervision state machines.
+CLI_FIXTURES: Final = build_app.REPO_ROOT.joinpath(
+    "src", "lucille_host", "spec", "cli", "v1", "fixtures"
+)
 # Where macOS keeps its own libraries. Most of them exist only in the system's shared cache, so
 # the links check does not look for them on disk. Every other library must be in the bundle.
 SYSTEM_LIBRARY_PREFIXES: Final = ("/usr/lib/", "/System/Library/")
@@ -139,6 +180,8 @@ FORBIDDEN_IMPORT_PREFIXES: Final = (
     "_OBJC_CLASS_$_NSXPCConnection",
     "_OBJC_CLASS_$_NSXPCListener",
     "_OBJC_CLASS_$_WKWebView",
+    # The app never reads the pasteboard: the user pastes into a field, through the field.
+    "_OBJC_CLASS_$_NSPasteboard",
 )
 # Swift names, as they appear inside a mangled symbol: Foundation's URLSession and URLRequest, and
 # Network's connection and listener types.
@@ -178,6 +221,10 @@ WHOLE_DISK_FOLDERS: Final = (Path("/System/Volumes/Data"), Path("/"))
 # The start of a button that would add the folder or allow it: Add Anyway, Add Folder, and the
 # Open panel's own button.
 ADDING_BUTTONS: Final = ("Add", "Allow")
+# The profile the app runs every verb on (``HostCLI.appProfile``): its own folders, abilities,
+# pause flag, Keychain item and run lock, apart from a command-line host's ``default``. The ui and
+# pairing checks read and change the host's state on this profile, as the app does.
+APP_PROFILE: Final = "mac-app"
 # Loads the native code of the runtime dependencies, the way the host will.
 NATIVE_PROBE: Final = """\
 import sys
@@ -351,8 +398,12 @@ def check_swift(app: Path, checker: Checker, work: Path) -> None:
                 build_app.host_version(),
                 "--vectors",
                 str(ALIAS_VECTORS),
+                "--fixtures",
+                str(CLI_FIXTURES),
             ],
-            timeout=300,
+            # The pairing checks give status, pair status and run a minute each, in case macOS's
+            # Keychain is slow to answer under the temporary HOME.
+            timeout=600,
             check=False,
         )
     checker.expect(done.returncode == 0, "the Swift self-test passes")
@@ -679,11 +730,24 @@ def _wait_until(test: Callable[[], bool], seconds: float) -> bool:
     return test()
 
 
+def _stop_earlier_copies(checker: Checker, name: str) -> bool:
+    """Stop a copy of the app that is still running, with SIGTERM. One that does not stop fails the
+    check, and is then killed: ``open`` would otherwise hand the next step that old copy, whose
+    output goes nowhere the check reads."""
+    if not _running(name):
+        return True
+    subprocess.run(["pkill", "-TERM", "-x", name], check=False)
+    stopped = _wait_until(lambda: not _running(name), 15)
+    checker.expect(stopped, "a copy of the app still running from before stops on SIGTERM")
+    if not stopped:
+        subprocess.run(["pkill", "-KILL", "-x", name], check=False)
+        _wait_until(lambda: not _running(name), 10)
+    return stopped
+
+
 def check_launch(app: Path, checker: Checker) -> None:
     name = build_app.load_pins().app_name
-    if _running(name):
-        subprocess.run(["pkill", "-x", name], check=False)
-        _wait_until(lambda: not _running(name), 10)
+    _stop_earlier_copies(checker, name)
     done = subprocess.run(["open", str(app)], capture_output=True, text=True, check=False)
     checker.expect(done.returncode == 0, "open starts the app", _shown(done))
     started = _wait_until(lambda: bool(_running(name)), 15)
@@ -721,16 +785,66 @@ def check_launch(app: Path, checker: Checker) -> None:
 STATUS_ITEM: Final = "menu bar item 1 of last menu bar"
 MENU: Final = f"menu 1 of {STATUS_ITEM}"
 LINES: Final = "set AppleScript's text item delimiters to linefeed\n"
-# The items the menu shows whatever the host's state, besides its first line.
+# The menu's item that opens the code window, while the app's profile holds no pair.
+CONNECT_ITEM: Final = "Connect to Lucille…"
+# The items the menu shows while the app's profile holds no pair, besides its first line.
 MENU_ITEMS: Final = (
     "Abilities",
     "Add a Folder…",
     "Folders",
-    "Connect to Lucille (coming soon)",
+    CONNECT_ITEM,
     f"Quit {APP_NAME}",
 )
-# The menu's status line. The app cannot pair yet, so it always says the Mac is not connected.
+# The menu's status line while the app's profile holds no pair.
 NOT_CONNECTED: Final = "Not connected to Lucille"
+# The app's words about connecting, as in App/ConnectionText.swift (tests/test_macos_build.py
+# checks that they agree). The menu's other items and status lines.
+FINISH_ITEM: Final = "Finish Connecting…"
+DISCONNECT_ITEM: Final = "Disconnect from Lucille…"
+CONNECTING: Final = "Connecting to Lucille…"
+CONNECTED: Final = "Connected to Lucille"
+# The code window: its title, the three sentences it says, the hint under a typed word that is no
+# code, and its button. Then what the app says when the host refuses a text as no code (bad_code).
+CODE_TITLE: Final = "Connect to Lucille"
+CODE_WORDS: Final = (
+    "In Lucille, open Computers and add this computer. Copy the code Lucille shows, then paste it "
+    "below.",
+    "To paste, press Command-V, or Control-click the box and choose Paste.",
+    "Paste only a code you copied from Lucille's page yourself. Never paste one someone sent you.",
+)
+CODE_HINT: Final = "That doesn't look like a code from Lucille. Copy it again from Lucille's page."
+CONNECT_BUTTON: Final = "Connect"
+BAD_CODE: Final = "That isn't a code from Lucille. Copy it again from Lucille's page."
+# A code-shaped text the ui check leaves on the pasteboard when the code window opens, which the
+# app must not read; and the text it pastes, which passes the app's own check on a code (the
+# prefix, then 100 to 8192 characters of base64url) and which the host refuses as no code.
+PASTEBOARD_SENTINEL: Final = "swbp1_" + "S" * 120
+PASTED_TEXT: Final = "swbp1_" + "A" * 120
+# The compare page, and the note after They Match.
+COMPARE_TITLE: Final = "Compare the numbers"
+COMPARE_QUESTION: Final = "Does Lucille's page show this number?"
+THEY_MATCH: Final = "They Match"
+CONFIRMED_TITLE: Final = "Confirmed on this Mac"
+# Quit while ``run`` runs: the question, its button, the finishing panel and its button, and the
+# panel's words once Stop now is chosen.
+QUIT_ITEM: Final = f"Quit {APP_NAME}"
+QUIT_QUESTION: Final = f"Quit {APP_NAME}?"
+QUIT_TEXT: Final = f"Your Mac will stop answering Lucille until you open {APP_NAME} again."
+QUIT_BUTTON: Final = "Quit"
+FINISHING: Final = "Finishing the current task…"
+STOP_NOW: Final = f"Stop now ({APP_NAME} will be paused when you next open it)"
+STOPPING_NOW: Final = "Stopping…"
+# The note at launch while the host is paused, and its button that resumes.
+PAUSED_TITLE: Final = f"{APP_NAME} is paused"
+RESUME_BUTTON: Final = "Resume"
+# Disconnect: the question, its button, and the note once Lucille was told.
+DISCONNECT_TITLE: Final = "Disconnect this Mac from Lucille?"
+DISCONNECT_BUTTON: Final = "Disconnect"
+DISCONNECTED_TOLD: Final = "Disconnected. Lucille was told."
+# The line the app writes on standard error when ``run`` exits after a drain its standard input's
+# end began (``RunSupervisor.describe``), and the start of the one for a ``run`` a signal ended.
+DRAINED_LINE: Final = "run exited 0 (drained, stdin_end)"
+SIGNALED_LINE: Final = "run ended by signal"
 
 
 def _system_events(body: str, timeout: float = 30) -> tuple[bool, str]:
@@ -951,8 +1065,8 @@ def _drive_menu(checker: Checker, screens: Path, flag: Path) -> bool:
 
 
 def _op_state(python: Path, op: str) -> str:
-    """The state ``ops list`` gives one operation, for the real HOME."""
-    for line in _host(python, Path.home(), ["ops", "list"]).stdout.splitlines():
+    """The state ``ops list`` gives one operation, for the real HOME, on the app's profile."""
+    for line in _app_host(python, ["ops", "list"]).stdout.splitlines():
         name, _, state = line.partition("  ")
         if name == op:
             return state
@@ -960,8 +1074,8 @@ def _op_state(python: Path, op: str) -> str:
 
 
 def _roots(python: Path) -> dict[str, str]:
-    """``roots list`` for the real HOME, as {alias: path}."""
-    listed = _host(python, Path.home(), ["roots", "list"]).stdout.splitlines()
+    """``roots list`` for the real HOME, on the app's profile, as {alias: path}."""
+    listed = _app_host(python, ["roots", "list"]).stdout.splitlines()
     return dict(line.split("  ", 1) for line in listed if "  " in line)
 
 
@@ -1000,7 +1114,7 @@ def _drive_abilities(checker: Checker, python: Path, screens: Path) -> None:
         )
     finally:
         if _op_state(python, op) == "enabled":
-            _host(python, Path.home(), ["ops", "disable", op])
+            _app_host(python, ["ops", "disable", op])
 
 
 def _choose_folder(folder: Path, screens: Path, shot: str) -> tuple[bool, str]:
@@ -1058,6 +1172,156 @@ def _acknowledge(checker: Checker, words: str, shot: Path) -> None:
         f"{texts}",
     )
     _system_events('click button "OK" of window 1')
+
+
+def _quoted(text: str) -> str:
+    """``text`` as an AppleScript string. The app's words hold no quote and no backslash."""
+    if '"' in text or "\\" in text:
+        raise ValueError(f"{text!r} cannot be quoted for AppleScript here")
+    return f'"{text}"'
+
+
+def _target(kind: str, name: str | None = None) -> str:
+    """AppleScript that sets ``theTarget`` to the first UI element of the class ``kind``
+    (``button``, ``text field``), with the name ``name`` if one is given, in any window of the app
+    and at any depth, or stops with an error. The app's own windows may hold their contents in
+    groups, where ``of window 1`` does not reach."""
+    named = "" if name is None else f" and name of theElement is {_quoted(name)}"
+    said = kind if name is None else f"{kind} named {name}"
+    return (
+        "set theTarget to missing value\n"
+        "repeat with theWindow in windows\n"
+        "try\n"
+        "repeat with theElement in (entire contents of theWindow)\n"
+        "try\n"
+        f"if class of theElement is {kind}{named} then\n"
+        "set theTarget to contents of theElement\n"
+        "exit repeat\n"
+        "end if\n"
+        "end try\n"
+        "end repeat\n"
+        "end try\n"
+        "if theTarget is not missing value then exit repeat\n"
+        "end repeat\n"
+        f"if theTarget is missing value then error {_quoted(f'no {said} on the screen')}\n"
+    )
+
+
+def _every(kind: str, what: str) -> list[str]:
+    """``what`` of every UI element of the class ``kind`` in every window of the app, at any depth,
+    one per line (``value`` of every ``static text``, say); empty when System Events cannot say."""
+    worked, said = _system_events(
+        "set found to {}\n"
+        "repeat with theWindow in windows\n"
+        "try\n"
+        "repeat with theElement in (entire contents of theWindow)\n"
+        "try\n"
+        f"if class of theElement is {kind} then "
+        f"set end of found to (({what} of theElement) as text)\n"
+        "end try\n"
+        "end repeat\n"
+        "end try\n"
+        "end repeat\n"
+        f"{LINES}return found as text"
+    )
+    if not worked:
+        print(f"note: reading every {kind}: {said}")
+        return []
+    return said.splitlines()
+
+
+def _texts() -> list[str]:
+    """Every text the app's windows show, its notes included."""
+    return _every("static text", "value")
+
+
+def _says(words: str) -> bool:
+    return any(words in text for text in _texts())
+
+
+def _press(name: str) -> tuple[bool, str]:
+    """Click the button named ``name``, in whichever window of the app holds it."""
+    return _system_events(_target("button", name) + 'click theTarget\nreturn "pressed"')
+
+
+def _enabled(name: str) -> str:
+    """Whether the button named ``name`` is on: ``true``, ``false``, or ``absent``."""
+    worked, said = _system_events(
+        _target("button", name) + "return ((enabled of theTarget) as text)"
+    )
+    return said if worked else "absent"
+
+
+def _field() -> tuple[bool, str]:
+    """What the first text field in the app's windows holds."""
+    return _system_events(_target("text field") + "return ((value of theTarget) as text)")
+
+
+def _window_names() -> list[str]:
+    worked, said = _system_events(f"{LINES}return (name of every window) as text")
+    return said.splitlines() if worked else []
+
+
+def _choose(start: str) -> tuple[bool, str]:
+    """Open the menu and choose the item whose name starts with ``start``, which spares the
+    script the ellipsis some items end with."""
+    return _system_events(
+        f"click {STATUS_ITEM}\ndelay 1\n"
+        f"click (first menu item of {MENU} whose name starts with {_quoted(start)})",
+        timeout=60,
+    )
+
+
+def _menu_until(test: Callable[[list[str]], bool], seconds: float) -> tuple[bool, list[str]]:
+    """Open the menu, read it and close it again, until ``test`` holds of what it shows, for at
+    most ``seconds``. The menu shows what the app knew when it opened, and opening it starts a
+    refresh, so one read can be a refresh behind."""
+    deadline = time.monotonic() + seconds
+    while True:
+        worked, shown = _open_menu_and_read()
+        _system_events("key code 53")
+        if worked and test(shown):
+            return True, shown
+        if time.monotonic() >= deadline:
+            return False, shown
+        time.sleep(3)
+
+
+def _menu_shot(path: Path) -> None:
+    """A screenshot with the menu open."""
+    _system_events(f"click {STATUS_ITEM}\ndelay 1")
+    _screenshot(path)
+    _system_events("key code 53")
+
+
+def _set_pasteboard(text: str) -> None:
+    """Put ``text`` on the general pasteboard, as a user copying it would; empty clears it."""
+    done = subprocess.run(
+        ["pbcopy"], input=text, capture_output=True, text=True, timeout=30, check=False
+    )
+    if done.returncode != 0:
+        print(f"note: pbcopy: {_shown(done)}")
+
+
+def _profile_folder() -> Path:
+    """Where the host keeps the app's profile, for the real HOME (src/lucille_host/paths.py)."""
+    return Path.home() / "Library" / "Application Support" / "lucille-host" / APP_PROFILE
+
+
+def _app_host(python: Path, args: list[str]) -> subprocess.CompletedProcess[str]:
+    """The host's command line for the real HOME, on the app's own profile."""
+    return _host(python, Path.home(), ["--profile", APP_PROFILE, *args])
+
+
+def _pair_state(python: Path) -> str | None:
+    """The ``pair`` state ``status --json`` gives on the app's profile, for the real HOME."""
+    done = _app_host(python, ["--json", "status"])
+    try:
+        found = json.loads(done.stdout.splitlines()[-1])
+        return str(found["pair"]["state"])
+    except (IndexError, KeyError, TypeError, ValueError):
+        print(f"note: status --json: {_shown(done)}")
+        return None
 
 
 def _drive_folders(checker: Checker, python: Path, screens: Path) -> None:
@@ -1175,7 +1439,7 @@ def _drive_folders(checker: Checker, python: Path, screens: Path) -> None:
     finally:
         for alias, path in _roots(python).items():
             if alias in added or path in (str(folder), str(home)):
-                _host(python, home, ["roots", "remove", alias])
+                _app_host(python, ["roots", "remove", alias])
         shutil.rmtree(folder.parent, ignore_errors=True)
 
 
@@ -1263,7 +1527,7 @@ def _drive_whole_disk(checker: Checker, python: Path, screens: Path) -> None:
             _system_events('click button "Cancel" of window 1\ndelay 1')
         for alias, path in _roots(python).items():
             if path in refused:
-                _host(python, Path.home(), ["roots", "remove", alias])
+                _app_host(python, ["roots", "remove", alias])
         # The link alone, never what it leads to.
         if link.is_symlink():
             link.unlink()
@@ -1273,25 +1537,123 @@ def _drive_whole_disk(checker: Checker, python: Path, screens: Path) -> None:
             pass
 
 
+def _drive_code_window(checker: Checker, python: Path, screens: Path, logs: Sequence[Path]) -> None:
+    """With a code-shaped text on the pasteboard, choose Connect to Lucille…: the code window opens
+    with its field empty, and the field stays empty once it has the focus, so the app read nothing
+    from the pasteboard. A typed word gets the hint, and Connect stays off. Command-V, typed
+    through System Events, pastes exactly the text copied, which the app's own check passes;
+    Connect hands it to the host on standard input, which refuses it as no code, and the app says
+    so. Nothing is paired, and neither text reaches the app's standard output or error. Cancel
+    closes the window, and the pasteboard is cleared."""
+    pair = _pair_state(python)
+    if not checker.expect(pair is not None, "status --json reads the app's profile"):
+        return
+    if pair != "none":
+        print(f"note: the app's profile holds a pair ({pair}), so the code window was not tried")
+        return
+    _set_pasteboard(PASTEBOARD_SENTINEL)
+    try:
+        worked, said = _choose(CONNECT_ITEM.removesuffix("…"))
+        opened = worked and _wait_until(lambda: CODE_TITLE in _window_names(), 15)
+        _screenshot(screens / "17-code-window.png")
+        if not checker.expect(
+            opened, f"choosing {CONNECT_ITEM!r} opens the window {CODE_TITLE!r}", said
+        ):
+            return
+        texts = _texts()
+        checker.expect(
+            all(any(words in text for text in texts) for words in CODE_WORDS),
+            "it says where the code comes from, how to paste it, and never to paste one someone "
+            "sent",
+            f"{texts}",
+        )
+        checker.expect(
+            _field() == (True, ""),
+            "the code field opens empty: the app read nothing from the pasteboard",
+            f"{_field()}",
+        )
+        worked, said = _system_events(
+            "set frontmost to true\n" + _target("text field") + "set focused of theTarget to true"
+        )
+        time.sleep(1)
+        checker.expect(
+            worked and _field() == (True, ""),
+            "it is still empty once it has the focus",
+            f"{said} {_field()}",
+        )
+        checker.expect(
+            _enabled(CONNECT_BUTTON) == "false",
+            f"{CONNECT_BUTTON} is off while the field is empty",
+            _enabled(CONNECT_BUTTON),
+        )
+        _system_events('set frontmost to true\nkeystroke "hello"')
+        hinted = _wait_until(lambda: _says(CODE_HINT), 10)
+        _screenshot(screens / "18-code-hint.png")
+        checker.expect(
+            hinted and _enabled(CONNECT_BUTTON) == "false",
+            f"a typed word that is no code gets the hint {CODE_HINT!r}, and {CONNECT_BUTTON} "
+            "stays off",
+            f"{_texts()}",
+        )
+        # Take the word out with Backspace, then paste with Command-V, which the window forwards
+        # to the field: the user's own paste, through the field.
+        _system_events("set frontmost to true\nrepeat 20 times\nkey code 51\nend repeat")
+        _set_pasteboard(PASTED_TEXT)
+        _system_events('set frontmost to true\nkeystroke "v" using command down')
+        pasted = _wait_until(lambda: _field() == (True, PASTED_TEXT), 10)
+        _screenshot(screens / "19-code-pasted.png")
+        checker.expect(
+            pasted, "Command-V pastes into the field exactly the text copied", f"{_field()}"
+        )
+        checker.expect(
+            _enabled(CONNECT_BUTTON) == "true",
+            f"{CONNECT_BUTTON} is on once the field holds something shaped like a code",
+            _enabled(CONNECT_BUTTON),
+        )
+        worked, said = _press(CONNECT_BUTTON)
+        refused = worked and _wait_until(lambda: _says(BAD_CODE), 60)
+        _screenshot(screens / "20-code-refused.png")
+        checker.expect(
+            refused,
+            f"{CONNECT_BUTTON} hands it to the host, which refuses it as no code; the app says "
+            f"{BAD_CODE!r}",
+            f"{said} {_texts()}",
+        )
+        _press("OK")
+        checker.expect(_pair_state(python) == "none", "the app's profile still holds no pair")
+        logged = "".join(log.read_text(encoding="utf-8", errors="replace") for log in logs)
+        checker.expect(
+            PASTED_TEXT not in logged and PASTEBOARD_SENTINEL not in logged,
+            "neither text reaches the app's standard output or standard error",
+        )
+    finally:
+        _set_pasteboard("")
+        if CODE_TITLE in _window_names():
+            worked, said = _press("Cancel")
+            checker.expect(
+                worked and _wait_until(lambda: CODE_TITLE not in _window_names(), 10),
+                "Cancel closes the code window",
+                said,
+            )
+
+
 def check_ui(app: Path, checker: Checker, work: Path, require_driven: bool = False) -> None:
     """Open the app and drive it the way a user would, through System Events: read the note that
     says what it is for and where its menu is, when it opens and when it is opened again; read the
     menu; choose Pause Lucille and Resume Lucille, and watch the host's pause flag; switch an
     ability on and off; add a folder through the Open panel and the name dialog, and remove it from
     the Folders submenu; add the home folder, which the app asks about first; choose the Data
-    volume, and ``/`` through a link to it, which the app refuses. Each step is checked against
-    the host's own state. It uses the real HOME, and leaves the host as it found it. Where macOS
+    volume, and ``/`` through a link to it, which the app refuses; open the code window and paste
+    into it (:func:`_drive_code_window`). Each step is checked against the host's own state, on the
+    app's own profile. It uses the real HOME, and leaves the host as it found it. Where macOS
     does not let System Events drive other apps (no accessibility permission), it says so and
     drives nothing; with ``require_driven`` that is a failure. Screenshots go to
     ``<out>/check/screens``."""
     name = build_app.load_pins().app_name
     screens = work / "screens"
     screens.mkdir(parents=True, exist_ok=True)
-    flag = Path.home() / "Library" / "Application Support" / "lucille-host" / "default"
-    flag = flag / "state" / "paused"
-    if _running(name):
-        subprocess.run(["pkill", "-x", name], check=False)
-        _wait_until(lambda: not _running(name), 10)
+    flag = _profile_folder() / "state" / "paused"
+    _stop_earlier_copies(checker, name)
     out_log = work / "app-stdout.txt"
     err_log = work / "app-stderr.txt"
     for log in (out_log, err_log):
@@ -1316,6 +1678,7 @@ def check_ui(app: Path, checker: Checker, work: Path, require_driven: bool = Fal
             _drive_abilities(checker, python_in(app), screens)
             _drive_folders(checker, python_in(app), screens)
             _drive_whole_disk(checker, python_in(app), screens)
+            _drive_code_window(checker, python_in(app), screens, (out_log, err_log))
         elif require_driven:
             checker.expect(False, "System Events drove the menu, as --require-driven asks")
     finally:
@@ -1324,6 +1687,833 @@ def check_ui(app: Path, checker: Checker, work: Path, require_driven: bool = Fal
         for log in (out_log, err_log):
             text = log.read_text(encoding="utf-8", errors="replace")
             print(f"the app's {log.stem.removeprefix('app-')}: {text[-5000:]!r}")
+
+
+# The pairing check's work room, the folder alias it adds, the file it asks the fingerprint of,
+# and how long the requests run during which it quits: the first long enough for the finishing
+# panel to be read before ``run`` drains, the second long enough that only Stop now ends it.
+PAIRING_ROOM: Final = "work-1"
+PAIRING_ALIAS: Final = "pairing-check"
+PAIRING_FILE: Final = b"the file the pairing check asks the fingerprint of\n"
+QUIT_DURING: Final = 20
+STOP_DURING: Final = 120
+# A SAS as the app shows it (spec/CLI.md section 6, ``pair``).
+SAS: Final = re.compile(r"\b[0-9]{4}-[0-9]{4}\b")
+
+
+class _Stop(Exception):
+    """A step that every later one needs did not hold (and was counted): the check tidies up."""
+
+
+@dataclasses.dataclass(frozen=True)
+class _Harness:
+    """What the pairing check takes from the test harness and from Switchboard, which
+    :func:`check_pairing` imports only when it runs."""
+
+    child: Any  # tests._process.Child
+    child_env: Callable[[Path], dict[str, str]]
+    until: Callable[..., Any]
+    body: Callable[..., dict[str, Any]]
+    fake_lucille: Any  # tests._lucille.FakeLucille
+    loopback_hub: Any  # tests._process.LoopbackHub
+    client: Any  # switchboard.client.Client
+    hub_program: Path
+    listening: re.Pattern[str]
+
+
+def _value_within(get: Callable[[], Any], seconds: float) -> Any:
+    """What ``get()`` returns once it is truthy, asked every second for at most ``seconds``; its
+    last answer if it never is."""
+    deadline = time.monotonic() + seconds
+    while True:
+        found = get()
+        if found or time.monotonic() >= deadline:
+            return found
+        time.sleep(1)
+
+
+def _alive(pid: int | None) -> bool:
+    if pid is None:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def _ps(pid: int, field: str) -> str:
+    done = subprocess.run(
+        ["ps", "-ww", "-o", f"{field}=", "-p", str(pid)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return done.stdout.strip()
+
+
+def _parent(pid: int) -> int | None:
+    found = _ps(pid, "ppid")
+    return int(found) if found.isdigit() else None
+
+
+def _sleeping(run: int) -> bool:
+    """Whether ``run`` has started the process of a ``host.sleep`` request."""
+    done = subprocess.run(
+        ["pgrep", "-P", str(run), "-f", "^/bin/sleep "], capture_output=True, text=True, check=False
+    )
+    return bool(done.stdout.split())
+
+
+def _profile_processes() -> list[int]:
+    """The host's processes on the app's profile, whoever started them."""
+    done = subprocess.run(
+        ["pgrep", "-f", f"lucille_host --profile {APP_PROFILE} "],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return [int(pid) for pid in done.stdout.split()]
+
+
+def _close_pairing_window() -> tuple[bool, str]:
+    """Click the close button of the app's pairing window: the window titled as the code window
+    or the compare page, or the one that holds They Match."""
+    titles = "{" + ", ".join(_quoted(title) for title in (CODE_TITLE, COMPARE_TITLE)) + "}"
+    return _system_events(
+        "repeat with theWindow in windows\n"
+        f"set held to (name of theWindow is in {titles})\n"
+        "try\n"
+        "repeat with theElement in (entire contents of theWindow)\n"
+        "try\n"
+        f"if class of theElement is button and name of theElement is {_quoted(THEY_MATCH)} then "
+        "set held to true\n"
+        "end try\n"
+        "end repeat\n"
+        "end try\n"
+        "if held then\n"
+        'click (first button of theWindow whose subrole is "AXCloseButton")\n'
+        'return "closed"\n'
+        "end if\n"
+        "end repeat\n"
+        'error "no pairing window is open"'
+    )
+
+
+def _pairing_window_open() -> bool:
+    return bool({CODE_TITLE, COMPARE_TITLE} & set(_window_names())) or (
+        _enabled(THEY_MATCH) != "absent"
+    )
+
+
+class _PairingCheck:
+    """One run of the pairing check: a hub of its own, a fake Lucille, the harness's commands on
+    the app's profile, and the app, driven one step after another (:meth:`go`)."""
+
+    def __init__(
+        self,
+        app: Path,
+        checker: Checker,
+        work: Path,
+        tmp: Path,
+        harness: _Harness,
+        require_driven: bool,
+    ) -> None:
+        self.app = app
+        self.python = python_in(app)
+        self.checker = checker
+        self.work = work
+        self.screens = work / "screens"
+        self.tmp = tmp
+        self.h = harness
+        self.require_driven = require_driven
+        self.children: list[Any] = []
+        # The app's standard error, a file for each time the check opens it.
+        self.logs: list[Path] = []
+        # The harness's commands run for the real HOME, where the app keeps its profile.
+        self.host_env = harness.child_env(Path.home())
+        self.profile = _profile_folder()
+        self.set_aside: Path | None = None
+        # Whether the profile folder is the check's own, once anything there before was set aside:
+        # only then may the check stop the profile's processes and remove the folder.
+        self.owns_profile = False
+        self.folder = Path.home() / "lucille-host-pairing-check"
+        self.lucille: Any = None
+        self.url = ""
+
+    # --- small things ---------------------------------------------------------------------
+
+    def need(self, ok: bool, what: str, detail: str = "") -> None:
+        """Count ``what``; if it does not hold, stop: the steps after it need it."""
+        if not self.checker.expect(ok, what, detail):
+            raise _Stop(what)
+
+    def start(self, argv: list[str], *, env: dict[str, str], piped: bool) -> Any:
+        child = self.h.child(argv, env=env, cwd=self.tmp, piped=piped)
+        self.children.append(child)
+        return child
+
+    def host_argv(self, *args: str) -> list[str]:
+        """The host on the app's profile, through the app's own interpreter: isolated, and writing
+        no bytecode into the bundle, whose signature the check verifies at its end."""
+        return [str(self.python), "-I", "-B", "-m", "lucille_host", "--profile", APP_PROFILE, *args]
+
+    def host(self, *args: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            self.host_argv(*args),
+            input="",
+            capture_output=True,
+            text=True,
+            env=self.host_env,
+            cwd=self.tmp,
+            timeout=180,
+            check=False,
+        )
+
+    def status(self) -> dict[str, Any]:
+        done = self.host("--json", "status")
+        try:
+            found = json.loads(done.stdout.splitlines()[-1])
+        except (IndexError, ValueError):
+            print(f"note: status --json: {_shown(done)}")
+            return {}
+        return found if isinstance(found, dict) else {}
+
+    def pair_state(self) -> Any:
+        return self.status().get("pair", {}).get("state")
+
+    def run_pid(self) -> int | None:
+        run = self.status().get("run", {})
+        pid = run.get("pid")
+        return pid if run.get("state") == "running" and isinstance(pid, int) else None
+
+    def reading(self) -> bool:
+        rooms = self.status().get("work_rooms", [])
+        return any(room.get("state") == "reading" for room in rooms)
+
+    def lifeline_ends(self, cause: str | None = None) -> int:
+        """How many times the host's log says that ``run``'s lifeline ended: for ``cause``
+        (``stdin_end``, ``stdout_gone``) if one is given. The log records the first cause only."""
+        done = self.host("--json", "log", "--limit", "1000")
+        ends = 0
+        for line in done.stdout.splitlines():
+            try:
+                record = json.loads(json.loads(line)["text"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            if (
+                isinstance(record, dict)
+                and record.get("kind") == "lifeline"
+                and (cause is None or record.get("event") == cause)
+            ):
+                ends += 1
+        return ends
+
+    def app_pid(self) -> int | None:
+        pids = _running(APP_NAME)
+        return int(pids[0]) if len(pids) == 1 else None
+
+    def stderr_now(self) -> str:
+        """What the app has written on standard error since the check last opened it."""
+        if not self.logs:
+            return ""
+        return self.logs[-1].read_text(encoding="utf-8", errors="replace")
+
+    def answer(self, job_id: str, seconds: float) -> dict[str, Any]:
+        """The body of the host's reply to the request ``job_id``, once Lucille can read it."""
+        reply = _value_within(lambda: self.lucille.reply(PAIRING_ROOM, job_id), seconds)
+        found = reply.get("body") if isinstance(reply, dict) else None
+        return found if isinstance(found, dict) else {}
+
+    def launch(self, label: str) -> None:
+        """Open the app as Finder does, its standard output and error into files of their own,
+        and choose OK on the note it shows first."""
+        out = self.work / f"pairing-{label}-stdout.txt"
+        err = self.work / f"pairing-{label}-stderr.txt"
+        for log in (out, err):
+            log.write_text("", encoding="utf-8")
+        self.logs.append(err)
+        done = subprocess.run(
+            ["open", "--stdout", str(out), "--stderr", str(err), str(self.app)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.need(
+            done.returncode == 0 and _wait_until(lambda: self.app_pid() is not None, 15),
+            f"open starts the app ({label})",
+            _shown(done),
+        )
+        time.sleep(3)
+        if not _can_drive():
+            if self.require_driven:
+                self.checker.expect(False, "System Events drove the app, as --require-driven asks")
+            raise _Stop("System Events cannot drive the app here")
+        _welcome(self.checker, self.screens / f"p-{label}-welcome.png", f"when it opens ({label})")
+
+    def ask_to_quit(self, shot: str) -> None:
+        worked, said = _choose(QUIT_ITEM)
+        asked = worked and _wait_until(lambda: _says(QUIT_QUESTION), 15)
+        _screenshot(self.screens / shot)
+        self.need(asked, f"the app's own Quit asks first: {QUIT_QUESTION!r}", f"{said} {_texts()}")
+        self.checker.expect(_says(QUIT_TEXT), f"it says {QUIT_TEXT!r}", f"{_texts()}")
+
+    # --- the steps ------------------------------------------------------------------------
+
+    def set_up(self) -> None:
+        """No copy of the app runs, nor any host process of its profile; the profile, if there
+        is one, is set aside; then the hub and Lucille."""
+        _stop_earlier_copies(self.checker, APP_NAME)
+        self.need(
+            _wait_until(lambda: not _profile_processes(), 90),
+            "no host process of the app's profile runs",
+            f"{_profile_processes()}",
+        )
+        _set_pasteboard("")
+        if self.profile.exists():
+            aside = self.profile.with_name(f"{APP_PROFILE}.set-aside-{os.getpid()}")
+            self.profile.rename(aside)
+            self.set_aside = aside
+            print(f"note: the app's profile is set aside at {aside} until the end")
+        self.owns_profile = True
+        # Lucille's client, in this process, reads no Switchboard variable and finds no signer.
+        for name in [name for name in os.environ if name.startswith("SWITCHBOARD_")]:
+            del os.environ[name]
+        runtime = self.tmp / "lucille-runtime"
+        runtime.mkdir(mode=0o700)
+        os.environ["XDG_RUNTIME_DIR"] = str(runtime)
+        hub_home = self.tmp / "hub-home"
+        hub_home.mkdir(mode=0o700)
+        hub = self.start(
+            [
+                str(self.h.hub_program),
+                "serve",
+                "--host",
+                "127.0.0.1",
+                "--port",
+                "0",
+                "--db",
+                str(self.tmp / "hub.db"),
+                "--log-level",
+                "info",
+            ],
+            env=self.h.child_env(hub_home),
+            piped=False,
+        )
+
+        def listening() -> str | None:
+            assert hub.proc.poll() is None, hub.describe()
+            found = self.h.listening.search(hub.stderr)
+            return found.group(1) if found else None
+
+        self.url = self.h.until(listening, "the hub listening", self.children)
+        print(f"the hub listens at {self.url}")
+        self.lucille = self.h.fake_lucille(
+            self.h.loopback_hub(self.url), self.tmp / "lucille", connect=self.h.client
+        )
+
+    def pair_through_the_harness(self) -> None:
+        """Pair the app's profile as a test harness does (spec/CLI.md section 7): ``pair
+        --code-stdin`` with ``--hub`` and ``--store-file``, the code on standard input, Lucille
+        collecting the answer. It ends once it has shown the SAS, so the SAS is pending, and the
+        app must show it again before They Match counts."""
+        code = self.lucille.start()
+        pair = self.start(
+            self.host_argv("pair", "--code-stdin", "--json", "--hub", self.url, "--store-file"),
+            env=self.host_env,
+            piped=True,
+        )
+        pair.write(code.encode() + b"\n")
+
+        def collected() -> bool:
+            assert pair.proc.poll() in (None, 0), pair.describe()
+            return self.lucille.collect().state == "paired"
+
+        self.h.until(collected, "Lucille collecting this Mac's answer", self.children)
+        self.need(
+            pair.wait() == 0, "the harness's pair ends once the SAS is shown", pair.describe()
+        )
+        said = pair.objects()
+        shown = said[-1] if said else {}
+        self.need(
+            shown.get("state") == "sas_pending" and shown.get("sas") == self.lucille.sas(),
+            "it showed the SAS Lucille's side shows",
+            pair.describe(),
+        )
+        self.need(self.pair_state() == "sas_pending", "status then says the SAS is pending")
+
+    def confirm_in_the_app(self) -> None:
+        """Open the pairing window from the menu: it shows Lucille's number, Return and Space
+        answer nothing, and They Match confirms."""
+        self.launch("pairing")
+        sas = self.lucille.sas()
+        # The app picks a pending pairing back up once its first note is closed, and may show the
+        # compare page on its own. Close it, as a user would, and open it again from the menu.
+        if _wait_until(_pairing_window_open, 15):
+            _wait_until(lambda: _enabled(THEY_MATCH) == "true", 20)
+            _screenshot(self.screens / "p01-compare-at-launch.png")
+            print("the app showed its pairing window on its own, once its first note was closed")
+            worked, said = _close_pairing_window()
+            self.need(
+                worked and _wait_until(lambda: not _pairing_window_open(), 10),
+                "its close button closes the pairing window",
+                said,
+            )
+        found, shown = _menu_until(lambda items: FINISH_ITEM in items, 60)
+        _menu_shot(self.screens / "p02-menu-finish.png")
+        self.need(
+            found,
+            f"with the SAS pending and no pairing window, the menu offers {FINISH_ITEM!r}",
+            f"{shown}",
+        )
+        self.checker.expect(CONNECTING in shown, f"and says {CONNECTING!r}", f"{shown}")
+        worked, said = _choose(FINISH_ITEM.removesuffix("…"))
+        self.need(worked, f"{FINISH_ITEM!r} can be chosen", said)
+
+        def numbers() -> list[str]:
+            return [number for text in _texts() for number in SAS.findall(text)]
+
+        drawn = _wait_until(lambda: bool(numbers()) and _enabled(THEY_MATCH) == "true", 30)
+        _screenshot(self.screens / "p03-compare.png")
+        shown_numbers = numbers()
+        self.need(
+            drawn and shown_numbers == [sas],
+            f"the pairing window shows Lucille's number, {sas}, once and no other, and They Match "
+            "is on",
+            f"{shown_numbers} {_texts()} {_enabled(THEY_MATCH)}",
+        )
+        self.checker.expect(_says(COMPARE_QUESTION), f"it asks {COMPARE_QUESTION!r}", f"{_texts()}")
+        # Neither button answers Return or Space: only a click does.
+        for key, code in (("Return", 36), ("Space", 49)):
+            _system_events(f"set frontmost to true\nkey code {code}")
+            time.sleep(4)
+            self.checker.expect(
+                self.pair_state() == "sas_pending",
+                f"{key} answers nothing: the SAS is still pending",
+            )
+        worked, said = _press(THEY_MATCH)
+        confirmed = worked and _wait_until(lambda: _says(CONFIRMED_TITLE), 60)
+        _screenshot(self.screens / "p04-confirmed.png")
+        self.need(
+            confirmed,
+            f"They Match confirms, and the app says {CONFIRMED_TITLE!r}",
+            f"{said} {_texts()}",
+        )
+        _press("OK")
+        self.need(self.pair_state() == "confirmed", "status then says the pair is confirmed")
+
+    def run_reads_the_room(self) -> None:
+        """The app starts ``run`` as its child, with the lifeline; a second ``run`` of the profile
+        is refused; ``run`` reads the room Lucille offers, and the menu says so."""
+        run = _value_within(self.run_pid, 60)
+        self.need(run is not None, "the app starts run once the pair is confirmed", f"{run}")
+        app = self.app_pid()
+        self.checker.expect(
+            _parent(run) == app, "run is the app's child", f"run {run}, parent {_parent(run)}"
+        )
+        command = _ps(run, "command")
+        self.checker.expect(
+            f"-m lucille_host --profile {APP_PROFILE} run --json-events --exit-on-stdin-eof"
+            in command,
+            "it runs on the app's profile, ended by the end of its standard input",
+            command,
+        )
+        descriptors = subprocess.run(
+            ["lsof", "-a", "-p", str(run), "-d", "0", "-F", "t"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.checker.expect(
+            "tPIPE" in descriptors.stdout.split(),
+            "its standard input is a pipe: the lifeline",
+            _shown(descriptors),
+        )
+        second = self.start(
+            self.host_argv("run", "--json-events", "--exit-on-stdin-eof"),
+            env=self.host_env,
+            piped=True,
+        )
+        refused = second.wait() == 21
+        self.checker.expect(
+            refused
+            and second.objects() == [{"v": 1, "type": "stopped", "reason": "already_running"}]
+            and _alive(run),
+            "a second run of the profile is refused (exit 21), and the app's run goes on",
+            second.describe(),
+        )
+        self.lucille.offer(PAIRING_ROOM)
+        self.need(_wait_until(self.reading, 90), "run reads the room Lucille offers")
+        found, shown = _menu_until(lambda items: CONNECTED in items, 60)
+        _menu_shot(self.screens / "p05-connected.png")
+        self.checker.expect(found, f"the menu then says {CONNECTED!r}", f"{shown}")
+        sockets = subprocess.run(
+            ["lsof", "-a", "-p", str(app), "-i"], capture_output=True, text=True, check=False
+        )
+        self.checker.expect(
+            app is not None and not sockets.stdout.strip(),
+            "the app itself holds no network connection",
+            sockets.stdout,
+        )
+
+    def fingerprint(self) -> None:
+        """A folder and files.sha256, added through the command line on the app's profile; one
+        request on that folder, answered."""
+        files = self.folder / "Files"
+        files.mkdir(parents=True, exist_ok=True)
+        (files / "a.txt").write_bytes(PAIRING_FILE)
+        for args in (
+            ("roots", "add", "--", PAIRING_ALIAS, str(files)),
+            ("ops", "enable", "files.sha256"),
+        ):
+            done = self.host(*args)
+            self.need(
+                done.returncode == 0,
+                f"{' '.join(args[:2])} on the app's profile, through the command line",
+                _shown(done),
+            )
+        sent = self.h.body(op="files.sha256", args={"root": PAIRING_ALIAS, "path": "a.txt"})
+        self.lucille.request(PAIRING_ROOM, sent)
+        answer = self.answer(sent["job_id"], 90)
+        digest = hashlib.sha256(PAIRING_FILE).hexdigest()
+        self.checker.expect(
+            answer.get("status") == "done" and digest in str(answer.get("stdout", "")),
+            "a files.sha256 request on that folder is answered with the file's fingerprint",
+            f"{answer}",
+        )
+
+    def welcome_again(self, shot: str) -> None:
+        """Open the running app again, as Finder does: it shows its note about the menu bar."""
+        done = subprocess.run(["open", str(self.app)], capture_output=True, text=True, check=False)
+        noted = done.returncode == 0 and _wait_until(lambda: _says(WELCOME_TITLE), 20)
+        _screenshot(self.screens / shot)
+        self.need(
+            noted,
+            f"opened again while it runs, the app says {WELCOME_TITLE!r}",
+            f"{_shown(done)} {_texts()}",
+        )
+
+    def backoff(self) -> None:
+        """``run`` killed with SIGKILL is a crash: the app starts it again after its back-off,
+        while a note is up too. A note's modal loop must hold back none of the app's timers, and
+        none of its children's events."""
+        run = self.run_pid()
+        self.need(run is not None, "run is running")
+        self.welcome_again("p05b-note-up.png")
+        os.kill(run, signal.SIGKILL)
+
+        def started_again() -> int | None:
+            pid = self.run_pid()
+            return pid if pid is not None and pid != run else None
+
+        again = _value_within(started_again, 60)
+        self.need(
+            again is not None,
+            "killed with SIGKILL, run is started again after the back-off",
+            f"{self.status().get('run')}",
+        )
+        self.checker.expect(
+            _says(WELCOME_TITLE), "it was started again while the note was still up", f"{_texts()}"
+        )
+        worked, said = _press("OK")
+        self.checker.expect(
+            worked and _wait_until(lambda: not _says(WELCOME_TITLE), 10), "OK closes the note", said
+        )
+        self.checker.expect(_parent(again) == self.app_pid(), "by the app, as its child")
+        self.checker.expect(
+            f"{SIGNALED_LINE} 9" in self.stderr_now(),
+            "the app says on standard error that a signal ended run",
+            self.stderr_now()[-2000:],
+        )
+        self.need(_wait_until(self.reading, 90), "the new run reads the room again")
+
+    def app_killed(self) -> None:
+        """The app killed with SIGKILL leaves ``run``'s standard input with no writer: ``run``
+        drains and exits (spec/CLI.md section 13.4)."""
+        app, run = self.app_pid(), self.run_pid()
+        self.need(app is not None and run is not None, "the app and its run are running")
+        ends = self.lifeline_ends()
+        os.kill(app, signal.SIGKILL)
+        self.need(
+            _wait_until(lambda: not _alive(run), 90),
+            "once the app is killed with SIGKILL, run exits",
+            f"{self.status().get('run')}",
+        )
+        state = self.status().get("run", {}).get("state")
+        self.checker.expect(
+            state == "stopped", "status then says run stopped, as after a drain", f"{state}"
+        )
+        self.checker.expect(
+            self.lifeline_ends() > ends,
+            "the host's log says run's lifeline ended (its standard input, or its standard output)",
+        )
+
+    def relaunch(self) -> None:
+        self.launch("relaunched")
+        run = _value_within(self.run_pid, 60)
+        self.need(
+            run is not None and _parent(run) == self.app_pid(),
+            "opened again, the app starts run, as its child",
+            f"{run}",
+        )
+        self.need(_wait_until(self.reading, 90), "run reads the room again")
+
+    def quit_and_drain(self) -> None:
+        """The app's own Quit, from its note about the menu bar, while a request runs: the
+        question, then the finishing panel; the app quits once ``run`` has finished the request and
+        drained. The note's Quit is chosen inside the note's own modal loop, and AppKit's wait to
+        quit is one too: the drain must go on inside it."""
+        done = self.host("ops", "enable", "host.sleep")
+        self.need(
+            done.returncode == 0,
+            "ops enable host.sleep on the app's profile, through the command line",
+            _shown(done),
+        )
+        app, run = self.app_pid(), self.run_pid()
+        self.need(app is not None and run is not None, "the app and its run are running")
+        ends = self.lifeline_ends("stdin_end")
+        sent = self.h.body(op="host.sleep", args={"n": QUIT_DURING})
+        self.lucille.request(PAIRING_ROOM, sent)
+        self.need(_wait_until(lambda: _sleeping(run), 60), "a host.sleep request starts")
+        self.welcome_again("p06-welcome-again.png")
+        worked, said = _press(QUIT_ITEM)
+        asked = worked and _wait_until(lambda: _says(QUIT_QUESTION), 15)
+        _screenshot(self.screens / "p06-quit-question.png")
+        self.need(
+            asked, f"the note's {QUIT_ITEM} asks first: {QUIT_QUESTION!r}", f"{said} {_texts()}"
+        )
+        self.checker.expect(_says(QUIT_TEXT), f"it says {QUIT_TEXT!r}", f"{_texts()}")
+        worked, said = _press(QUIT_BUTTON)
+        finishing = worked and _wait_until(lambda: _says(FINISHING), 15)
+        _screenshot(self.screens / "p07-finishing.png")
+        self.checker.expect(
+            finishing and _enabled(STOP_NOW) == "true",
+            f"while run finishes the request, the app says {FINISHING!r}, and offers {STOP_NOW!r}",
+            f"{said} {_texts()}",
+        )
+        self.need(
+            _wait_until(lambda: not _alive(app), QUIT_DURING + 120),
+            "the app quits once run has drained",
+        )
+        answer = self.answer(sent["job_id"], 60)
+        self.checker.expect(
+            answer.get("status") == "done",
+            "the request finished, and its reply was posted",
+            f"{answer}",
+        )
+        self.checker.expect(not _alive(run), "run has exited")
+        self.checker.expect(
+            DRAINED_LINE in self.stderr_now(),
+            f"the app says on standard error {DRAINED_LINE!r}",
+            self.stderr_now()[-2000:],
+        )
+        status = self.status()
+        self.checker.expect(
+            status.get("run", {}).get("state") == "stopped" and status.get("paused") is False,
+            "status says run stopped, and nothing paused the host",
+            f"{status.get('run')}, paused {status.get('paused')}",
+        )
+        self.checker.expect(
+            self.lifeline_ends("stdin_end") > ends,
+            "the host's log says run's standard input ended",
+        )
+
+    def stop_now(self) -> None:
+        """Quit while a request runs that would outlast the check, then Stop now: ``kill``
+        stops the request, Lucille is told, and the host is paused."""
+        self.launch("stop-now")
+        run = _value_within(self.run_pid, 60)
+        self.need(run is not None, "opened again, the app starts run")
+        self.need(_wait_until(self.reading, 90), "run reads the room again")
+        app = self.app_pid()
+        sent = self.h.body(op="host.sleep", args={"n": STOP_DURING})
+        self.lucille.request(PAIRING_ROOM, sent)
+        self.need(_wait_until(lambda: _sleeping(run), 60), "a host.sleep request starts")
+        self.ask_to_quit("p08-quit-question.png")
+        _press(QUIT_BUTTON)
+        offered = _wait_until(lambda: _enabled(STOP_NOW) == "true", 15)
+        _screenshot(self.screens / "p09-finishing.png")
+        self.need(offered, f"the finishing panel offers {STOP_NOW!r}", f"{_texts()}")
+        worked, said = _press(STOP_NOW)
+        self.need(worked, f"{STOP_NOW!r} can be chosen", said)
+        stopping = _wait_until(lambda: _says(STOPPING_NOW), 5)
+        _screenshot(self.screens / "p10-stopping.png")
+        print(f"the panel said {STOPPING_NOW!r} after Stop now: {stopping}")
+        self.need(_wait_until(lambda: not _alive(app), 120), "the app quits once run has stopped")
+        answer = self.answer(sent["job_id"], 60)
+        self.checker.expect(
+            (answer.get("status"), answer.get("code")) == ("failed", "killed_locally"),
+            "Stop now runs kill: Lucille is told the request failed, killed_locally",
+            f"{answer}",
+        )
+        status = self.status()
+        self.checker.expect(
+            status.get("paused") is True and status.get("run", {}).get("state") == "stopped",
+            "the host is then paused, and run stopped",
+            f"{status.get('run')}, paused {status.get('paused')}",
+        )
+
+    def paused_at_launch(self) -> None:
+        """Opened again, the app says the host is paused, and resumes it only when asked."""
+        self.launch("paused")
+        asked = _wait_until(lambda: _says(PAUSED_TITLE), 30)
+        _screenshot(self.screens / "p11-paused-at-launch.png")
+        self.need(
+            asked and _enabled(RESUME_BUTTON) == "true",
+            f"opened again, the app says {PAUSED_TITLE!r}, and offers {RESUME_BUTTON}",
+            f"{_texts()}",
+        )
+        time.sleep(10)
+        self.checker.expect(
+            self.status().get("paused") is True,
+            "ten seconds later the host is still paused: the app resumes only when asked",
+        )
+        worked, said = _press(RESUME_BUTTON)
+        self.need(
+            worked and _wait_until(lambda: self.status().get("paused") is False, 30),
+            f"{RESUME_BUTTON} resumes the host",
+            said,
+        )
+
+    def disconnect(self) -> None:
+        """Disconnect drains ``run``, then forgets the pair, and says whether Lucille was told."""
+        run = _value_within(self.run_pid, 60)
+        self.need(run is not None, "run is running")
+        found, shown = _menu_until(lambda items: DISCONNECT_ITEM in items, 60)
+        self.need(found, f"while connected, the menu offers {DISCONNECT_ITEM!r}", f"{shown}")
+        worked, said = _choose(DISCONNECT_ITEM.removesuffix("…"))
+        asked = worked and _wait_until(lambda: _says(DISCONNECT_TITLE), 15)
+        _screenshot(self.screens / "p12-disconnect-question.png")
+        self.need(asked, f"Disconnect asks first: {DISCONNECT_TITLE!r}", f"{said} {_texts()}")
+        worked, said = _press(DISCONNECT_BUTTON)
+        told = worked and _wait_until(lambda: _says(DISCONNECTED_TOLD), 120)
+        _screenshot(self.screens / "p13-disconnected.png")
+        self.checker.expect(told, f"then the app says {DISCONNECTED_TOLD!r}", f"{said} {_texts()}")
+        _press("OK")
+        self.checker.expect(not _alive(run), "run has exited")
+        self.checker.expect(
+            DRAINED_LINE in self.stderr_now(),
+            f"run was drained before the pair was forgotten: the app says {DRAINED_LINE!r}",
+            self.stderr_now()[-2000:],
+        )
+        self.checker.expect(self.pair_state() == "none", "the app's profile then holds no pair")
+        found, shown = _menu_until(
+            lambda items: NOT_CONNECTED in items and CONNECT_ITEM in items, 60
+        )
+        _menu_shot(self.screens / "p14-not-connected.png")
+        self.checker.expect(
+            found, f"the menu then says {NOT_CONNECTED!r}, and offers {CONNECT_ITEM!r}", f"{shown}"
+        )
+
+    def tidy(self) -> None:
+        """Stop the app, the host's processes and the hub; forget whatever pair is left; put the
+        profile back as it was; and check that nothing was written into the bundle."""
+        if _running(APP_NAME):
+            subprocess.run(["pkill", "-TERM", "-x", APP_NAME], check=False)
+            self.checker.expect(
+                _wait_until(lambda: not _running(APP_NAME), 15), "the app stops on SIGTERM"
+            )
+        if self.owns_profile and not _wait_until(lambda: not _profile_processes(), 90):
+            left = _profile_processes()
+            print(f"note: host processes of the app's profile still ran, and were killed: {left}")
+            for pid in left:
+                with contextlib.suppress(ProcessLookupError):
+                    os.kill(pid, signal.SIGKILL)
+        if self.owns_profile and self.url and self.profile.exists():
+            print(f"forget, at the end: {_shown(self.host('--json', 'forget'))}")
+        for child in reversed(self.children):
+            child.kill()
+        if self.owns_profile:
+            shutil.rmtree(self.profile, ignore_errors=True)
+        if self.set_aside is not None:
+            try:
+                self.set_aside.rename(self.profile)
+                print(f"the app's profile is back at {self.profile}")
+            except OSError as exc:
+                self.checker.expect(
+                    False, f"the app's profile is put back from {self.set_aside}", f"{exc}"
+                )
+        shutil.rmtree(self.folder, ignore_errors=True)
+        _set_pasteboard("")
+        done = subprocess.run(
+            ["codesign", "--verify", "--deep", "--strict", str(self.app)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.checker.expect(
+            done.returncode == 0,
+            "the app's signature still verifies: nothing was written into the bundle",
+            _shown(done),
+        )
+        for log in self.logs:
+            text = log.read_text(encoding="utf-8", errors="replace")
+            print(f"the app's standard error, {log.stem}: {text[-3000:]!r}")
+
+    def go(self) -> None:
+        steps: tuple[tuple[str, Callable[[], None]], ...] = (
+            ("a hub of its own, and a fake Lucille", self.set_up),
+            (
+                "pairing through the command line, the SAS left pending",
+                self.pair_through_the_harness,
+            ),
+            ("They Match, in the app", self.confirm_in_the_app),
+            ("run reads the room Lucille offers", self.run_reads_the_room),
+            ("files.sha256 on a folder", self.fingerprint),
+            ("run killed while a note is up, and started again", self.backoff),
+            ("the app killed", self.app_killed),
+            ("the app opened again", self.relaunch),
+            ("Quit from the note about the menu bar, while a request runs", self.quit_and_drain),
+            ("Quit, then Stop now", self.stop_now),
+            ("paused at launch", self.paused_at_launch),
+            ("Disconnect", self.disconnect),
+        )
+        try:
+            for label, step in steps:
+                print(f"--- {label}", flush=True)
+                step()
+        except _Stop as stop:
+            print(f"the check stopped at: {stop}")
+            _screenshot(self.screens / "p99-stopped.png")
+        except Exception:
+            self.checker.expect(False, "the pairing check ran to its end", traceback.format_exc())
+            _screenshot(self.screens / "p99-stopped.png")
+        finally:
+            self.tidy()
+
+
+def check_pairing(app: Path, checker: Checker, work: Path, require_driven: bool = False) -> None:
+    """Pair the app's profile through the command line with a hub of the check's own and a fake
+    Lucille, then drive the app: confirm, ``run`` and its supervision, Quit, Stop now and
+    Disconnect (:class:`_PairingCheck`). It uses the real HOME, where the app keeps its profile,
+    and puts that profile back as it found it. Screenshots go to ``<out>/check/screens``."""
+    # Imported here, not at the top: every other check runs where neither Switchboard nor the test
+    # harness is installed (``uv run --no-project``), and tests/test_macos_build.py imports this
+    # module wherever the suite runs.
+    from switchboard.client import Client
+
+    from tests._lucille import FakeLucille
+    from tests._process import LISTENING, SWITCHBOARD, Child, LoopbackHub, child_env, until
+    from tests._run import body
+
+    if not checker.expect(SWITCHBOARD.is_file(), f"Switchboard's hub is at {SWITCHBOARD}"):
+        return
+    harness = _Harness(
+        child=Child,
+        child_env=child_env,
+        until=until,
+        body=body,
+        fake_lucille=FakeLucille,
+        loopback_hub=LoopbackHub,
+        client=Client,
+        hub_program=SWITCHBOARD,
+        listening=LISTENING,
+    )
+    (work / "screens").mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="lucille-host-pairing-") as tmp:
+        _PairingCheck(app, checker, work, Path(tmp), harness, require_driven).go()
 
 
 def check_gatekeeper(app: Path, dmgs: Sequence[Path]) -> None:
@@ -1435,12 +2625,20 @@ def _probe_one(python: Path, home: Path, args: list[str], stdin: str | None) -> 
 
 
 def check_probe(app: Path) -> None:
-    """Print what the verbs the app is about to use do on this runner. Printed only, never a gate.
+    """Print what the verbs the app is about to use do on this runner. Printed only, never a gate:
+    whatever the probe meets, an exception included, it prints and returns.
 
     Each runs as the app will run it: profile mac-app, PATH=/var/empty, working directory /. Once
     under a fresh temporary HOME and once under the runner's own HOME, because whether macOS's
     Keychain is usable under each is what the app's tests must be written for.
     """
+    try:
+        _probe(app)
+    except Exception:
+        print(f"note: the probe stopped: {traceback.format_exc()}")
+
+
+def _probe(app: Path) -> None:
     python = python_in(app)
     for what in (["security", "list-keychains"], ["security", "default-keychain"]):
         done = subprocess.run(what, capture_output=True, text=True, check=False)
@@ -1463,6 +2661,7 @@ CHECKS: Final = (
     "gatekeeper",
     "dmg",
     "probe",
+    "pairing",
 )
 
 
@@ -1475,7 +2674,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument(
         "--require-driven",
         action="store_true",
-        help="ui: fail if System Events cannot drive the app's menu (CI passes this)",
+        help="ui and pairing: fail if System Events cannot drive the app (CI passes this)",
     )
     args = parser.parse_args(argv)
     if sys.platform != "darwin":
@@ -1506,6 +2705,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         check_gatekeeper(app, dmgs)
     elif args.check == "probe":
         check_probe(app)
+    elif args.check == "pairing":
+        check_pairing(app, checker, work, args.require_driven)
     else:
         check_dmg(dmgs, checker)
     if checker.failures:

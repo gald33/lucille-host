@@ -30,12 +30,14 @@ The workflow `macos-app` (`.github/workflows/macos-app.yml`) runs on pull reques
 `src/`, `pyproject.toml`, `uv.lock` or the workflow itself, on pushes to `main`, and by hand.
 - Job `app`, on GitHub-hosted `macos-15` (Apple silicon): it builds the Mac app, Capsule, and its disk
   image, signed ad hoc, then runs the checks [macos/README.md](macos/README.md#what-ci-checks) lists,
-  then the host's test suite on the app's trimmed Python runtime.
+  then the host's test suite on the app's trimmed Python runtime, then the end-to-end check of pairing
+  and supervision.
 - Its token can only read the repository, its checkout keeps no credentials, and it uses no secret. It
-  uploads the disk image only when every check passed. Its own copy skips the upload for a pull request
-  from a fork, but such a pull request runs the fork's copy of the workflow, which can upload anything:
-  an artifact on that run is the fork's build, whatever its name. The artifact's name says which event
-  and which commit built it, and the image's name ends `-adhoc-macOS-arm64.dmg`: it is not a release.
+  uploads the disk image only from a run started by hand (`workflow_dispatch`), only when every check
+  passed, and keeps it 3 days; any signed-in GitHub user can download it meanwhile. A pull request from a
+  fork runs the fork's copy of the workflow, which can upload anything: an artifact on that run is the
+  fork's build, whatever its name. The artifact's name says which event and which commit built it, and
+  the image's name ends `-adhoc-macOS-arm64.dmg`: it is not a release.
   Whether a fork's pull request runs workflows before a maintainer approves it is a repository setting
   ("Approval for running fork pull request workflows from contributors"), which no file here can show.
 
