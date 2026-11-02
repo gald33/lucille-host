@@ -544,12 +544,12 @@ login ─► Capsule (menu bar; an "Open at Login" item)
   the signed interpreter created would likely prompt when the `pipx` Python reads it (not yet tested on a
   Mac). The cost: a Mac with both is two computers to Lucille, each paired on its own. README says to use
   one. Coexistence is tested by hand (§19).
-- **Exit codes of `run`**, in `spec/CLI.md` §13.3: 0 stopped on purpose (`drained`, with the `cause`; the pair
-  `forgotten` here, or `ended` by Lucille); 20 not paired, or a gate that can never open (`no_gate`, or the SAS
-  not confirmed by its deadline while `run` waited, `expired`); 21 already running; 23 keyring unusable or
-  insecure; 24 refused environment (`SWITCHBOARD_*`, uid 0); 25 a downgrade (§16); 1 a failure the host met
-  (`stopped` `failed`, with a code). A `stopped` event with a reason comes before every exit `run` chooses.
-  22 is reserved.
+- **Exit codes of `run`**, in `spec/CLI.md` §13.3: 0 stopped on purpose (`drained`, with the `cause`) or the
+  pair gone (`forgotten` here, or `ended`, by Lucille or by this computer's side); 20 not paired, or a gate that
+  can never open (`no_gate`, or the SAS not confirmed by its deadline while `run` waited, `expired`); 21 already
+  running; 23 keyring unusable or insecure; 24 refused environment (`SWITCHBOARD_*`, uid 0); 25 a downgrade
+  (§16); 1 a failure the host met (`stopped` `failed`, with a code). A `stopped` event with a reason comes
+  before every exit `run` chooses. 22 is reserved.
 - **How the app reads an exit.** It reads standard output to its end, for up to about 2 s, then looks at
   how the process ended before it reads any number: 20 to 25 are also macOS signal numbers (`SIGCHLD`,
   `SIGTTIN`, `SIGTTOU`, `SIGIO`, `SIGXCPU`, `SIGXFSZ`), and `SIGXCPU` and `SIGXFSZ` end a process. A

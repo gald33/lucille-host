@@ -26,7 +26,7 @@ import time
 from collections.abc import Callable, Iterator
 from pathlib import Path
 from types import MappingProxyType
-from typing import Any
+from typing import Any, Final
 
 import pytest
 from keyring.backends.fail import Keyring as FailKeyring
@@ -46,12 +46,13 @@ from lucille_host import (
     policy,
     rooms,
     spec,
+    store,
 )
 from lucille_host import state as host_state
 from lucille_host.controls import Controls
 from lucille_host.ops import OPERATIONS
 from tests import _audit_hook
-from tests._host import HostEnv, lock_held
+from tests._host import HostEnv, lock_free, lock_held
 from tests._keyring import MemoryKeyring
 from tests._run import RunHost, body, counting, fast, nothing, until
 from tests._supervise import Lines, Piped, Supervised, folder, strings
@@ -1276,6 +1277,29 @@ def test_second_run_exits_21(
     assert first.wait() == 0
 
 
+def test_run_holds_its_lock_against_other_processes(
+    host: RunHost, supervise: Callable[..., Supervised]
+) -> None:
+    # tests/test_status.py (test_a_profile_runs_one_run_at_a_time) shows that a running runner
+    # holds the lock where another process sees it, and the test above that a second command is
+    # refused while the first serves. This one asks another process directly, through the
+    # command, which takes the lock itself before its other start checks and then serves under it:
+    # a lock that is only tested, never held, would keep out no other process.
+    lock = host.dirs.state / loop.RUN_LOCK
+    with loop.one_run(host.dirs.state):
+        assert not lock_free(lock), "another process could take the run lock"
+    assert lock_free(lock)
+    run = supervise(*EVENTS)
+    run.ready()
+    assert not lock_free(lock), "another process could take the lock of a `run` that runs"
+    run.offer("work-1")
+    assert host.reply("work-1", host.request("work-1"))["body"]["status"] == "done"
+    assert not lock_free(lock)
+    run.close_stdin()
+    assert run.wait() == 0
+    assert lock_free(lock)
+
+
 # --- exit codes -----------------------------------------------------------------------------------
 
 
@@ -1397,6 +1421,40 @@ def _raising(raised: BaseException) -> Callable[..., None]:
     return setup
 
 
+def _cannot_lock(env: HostEnv, h: Any, where: Path, patch: pytest.MonkeyPatch, stack: Any) -> None:
+    # A filesystem that cannot lock (ENOLCK: a network mount with no lock service, say).
+    real = os.lockf
+
+    def cannot(descriptor: int, command: int, length: int) -> None:
+        if command == os.F_TLOCK:
+            raise OSError(errno.ENOLCK, os.strerror(errno.ENOLCK))
+        real(descriptor, command, length)
+
+    patch.setattr("os.lockf", cannot)
+
+
+def _other_platform(
+    env: HostEnv, h: Any, where: Path, patch: pytest.MonkeyPatch, stack: Any
+) -> None:
+    patch.setattr("sys.platform", "freebsd14")
+
+
+def _runtime_linked(
+    env: HostEnv, h: Any, where: Path, patch: pytest.MonkeyPatch, stack: Any
+) -> None:
+    # The private runtime folder is a link to a private folder, not that folder.
+    elsewhere = paths.ensure_dir(env.dirs.state / "elsewhere")
+    env.dirs.runtime.symlink_to(elsewhere)
+
+
+def _cursors_damaged(
+    env: HostEnv, h: Any, where: Path, patch: pytest.MonkeyPatch, stack: Any
+) -> RunHost:
+    made = RunHost(h, env, where)
+    env.dirs.cursors_file.write_text("not json\n")
+    return made
+
+
 def _leaking(env: HostEnv, h: Any, where: Path, patch: pytest.MonkeyPatch, stack: Any) -> RunHost:
     made = RunHost(h, env, where)
 
@@ -1414,6 +1472,20 @@ def _forget_here(run: Supervised, made: RunHost | None, patch: pytest.MonkeyPatc
 
 def _lucille_forgets(run: Supervised, made: RunHost | None, patch: pytest.MonkeyPatch) -> None:
     assert made is not None
+    made.lucille.forget()
+
+
+def _room_kept(run: Supervised, made: RunHost | None, patch: pytest.MonkeyPatch) -> None:
+    # Lucille ends the pair while `run` holds a work room that cannot be left now: the pair is
+    # kept, so that the room's keys do not stay behind.
+    assert made is not None
+    made.lucille.offer("work-1")
+    until(lambda: made.record().held, what="the room taken")
+
+    def cannot(_link: Any, _name: str) -> Any:
+        raise _switchboard.RoomError("store", "the share store could not be written")
+
+    patch.setattr(_switchboard.Link, "leave_room", cannot)
     made.lucille.forget()
 
 
@@ -1456,7 +1528,15 @@ CASES = {
     "failed-bad_profile": _Case(
         "failed", _unpaired, before=("--profile", "../escape"), code="bad_profile"
     ),
+    "failed-lock_failed": _Case("failed", _cannot_lock, code="lock_failed"),
+    "failed-unsupported_platform": _Case("failed", _other_platform, code="unsupported_platform"),
+    "failed-runtime_folder": _Case("failed", _runtime_linked, code="runtime_folder"),
+    "failed-room_not_left": _Case("failed", _paired, _room_kept, code="room_not_left"),
+    "failed-state_invalid": _Case("failed", _cursors_damaged, code="state_invalid"),
 }
+# The `failed` codes no case makes. Each hub call of `run`'s found by reading link.py and loop.py
+# goes on after a hub error, so `hub_error` would stop `run` only for one that escapes them.
+NO_CASE: Final = frozenset({"hub_error"})
 
 
 def test_every_reason_has_a_case() -> None:
@@ -1464,6 +1544,8 @@ def test_every_reason_has_a_case() -> None:
     schema = spec.load_cli_schema("stopped")
     codes = schema["$defs"]["stopped.failed"]["properties"]["code"]["enum"]
     assert set(codes) == cli.RUN_FAILURES and len(codes) == len(cli.RUN_FAILURES)
+    made = {case.fields["code"] for case in CASES.values() if case.reason == "failed"}
+    assert made == cli.RUN_FAILURES - NO_CASE
 
 
 @pytest.mark.parametrize("case", CASES)
@@ -1501,7 +1583,14 @@ def test_run_exit_codes(
                 outcome = exc
             name = paired.name if paired is not None else "pair-a"
             objects = run.out.objects() if mode == "events" else []
-            seen[mode] = (outcome, run.err.text.replace(name, "<pair>"), objects)
+            said = run.err.text
+            # The home folder, as a message names it: the longer spelling first (on macOS the
+            # real path of a temporary folder starts with /private). It goes before the pair's
+            # name, which can be part of it (a pair named "lucille" under /tmp/lucille-...).
+            for home in sorted({os.path.realpath(env.home), str(env.home)}, key=len, reverse=True):
+                said = said.replace(home, "<home>")
+            said = said.replace(name, "<pair>")
+            seen[mode] = (outcome, said, objects)
     events, text = seen["events"], seen["text"]
     expected = cli.RUN_EXITS[made.reason]
     if made.reason == "failed" and made.fields.get("code") == "internal":
@@ -1514,6 +1603,89 @@ def test_run_exit_codes(
     assert last == _stopped(made.reason, **made.fields)
     assert _support.cli_objects(json.dumps(last, separators=(",", ":")) + "\n") == [last]
     assert not any(found["type"] == "stopped" for found in events[2][:-1])
+
+
+def _from_a_thread(cause: BaseException) -> loop.Failed:
+    """What main raises when one of `run`'s threads failed with ``cause``."""
+    try:
+        raise loop.Failed(f"run stopped: {cause!r}") from cause
+    except loop.Failed as exc:
+        return exc
+
+
+@pytest.mark.parametrize(
+    "raised",
+    [
+        ZeroDivisionError("a bug"),
+        policy.PolicyError("the policy is invalid"),
+        link.Stopped("refused", "that is not a pairing code", code="bad_code"),
+        loop.Failed("a code run does not give", code="held"),
+        _from_a_thread(ZeroDivisionError("a bug")),
+        _from_a_thread(_switchboard.PairFailed("aborted_here", "the library refused the pair")),
+        _from_a_thread(store.InsecureKeyring("the keyring keeps nothing")),
+        _from_a_thread(host_state.Refused("lucille-host does not run as root")),
+        _from_a_thread(policy.PolicyError("the policy is invalid")),
+    ],
+    ids=lambda raised: "-".join(
+        type(found).__name__ for found in (raised, raised.__cause__) if found is not None
+    ),
+)
+def test_every_internal_failure_shows_its_traceback(raised: Exception) -> None:
+    # spec/CLI.md sections 5 and 13.3: `failed` `internal` is an error `run` did not expect, and
+    # its traceback is on standard error. That holds for a failure with a code `run` does not
+    # give as much as for one with none: no line takes the traceback's place.
+    for ready in (False, True):
+        assert cli._run_failure(raised, ready) == ("failed", {"code": "internal"}, None)
+
+
+@pytest.mark.parametrize(
+    ("raised", "code"),
+    [
+        (_from_a_thread(PermissionError(errno.EACCES, "Permission denied")), "os_error"),
+        (_from_a_thread(host_state.StateError("a file of the host's is damaged")), "state_invalid"),
+        (_from_a_thread(_switchboard.HubError("the hub answered 500")), "hub_error"),
+        (link.Stopped("error", "a room was not left", code="room_not_left"), "room_not_left"),
+    ],
+)
+def test_a_failure_run_reports_keeps_its_line(raised: Exception, code: str) -> None:
+    reason, fields, line = cli._run_failure(raised, True)
+    assert (reason, fields) == ("failed", {"code": code})
+    assert line is not None and line.startswith(("lucille-host: ", "error: "))
+
+
+def test_a_thread_failure_with_a_code_run_does_not_give_is_raised(
+    host: RunHost, supervise: Callable[..., Supervised], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Through the command: a thread of `run` fails with something `run` has no code for. `stopped`
+    # says `failed` `internal`, and the failure is raised once it is written, so that Python shows
+    # its traceback; no line of `run`'s stands in for it.
+    def failing(_runner: loop.Runner) -> None:
+        raise _switchboard.PairFailed("aborted_here", "the library refused the pair")
+
+    monkeypatch.setattr(loop.Runner, "_beat_loop", failing)
+    run = supervise(*EVENTS)
+    with pytest.raises(loop.Failed) as failed:
+        run.wait(20)
+    assert isinstance(failed.value.__cause__, _switchboard.PairFailed)
+    assert run.out.objects()[-1] == _stopped("failed", code="internal")
+    assert "run stopped" not in run.err.text
+
+
+def test_a_pair_this_side_ended_is_ended_when_a_resolve_of_run_s_finds_it(
+    host: RunHost, supervise: Callable[..., Supervised]
+) -> None:
+    # spec/CLI.md section 13.3: the pair room says this computer's side ended the pair (a forget
+    # here that stopped part way), and this computer still holds its copy. `run`'s first resolve
+    # finds it: the library drops the pair and says `ended`, and so does `run`, exit 0.
+    kept = host.opened.pairs.get(host.name)
+    assert kept is not None
+    host.opened.forget(host.name)  # publishes this side's end in the pair room
+    host.opened.pairs.save(kept)  # this computer's copy, as if that forget never finished
+    run = supervise(*EVENTS)
+    assert run.wait(20) == 0
+    objects = run.out.objects()
+    assert objects[0]["type"] == "ready" and objects[-1] == _stopped("ended")
+    assert host.opened.names() == [] and host.gate() is None
 
 
 def test_run_exits_are_the_spec_s_table() -> None:
@@ -2551,6 +2723,45 @@ def test_a_blocked_stdout_holds_up_nothing(host: RunHost, monkeypatch: pytest.Mo
         release.set()
 
 
+def test_run_waits_a_bounded_time_for_its_last_events(
+    host_env: HostEnv, h: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # spec/CLI.md sections 13.1 and 13.2: at its end `run` waits up to 5 s for the events still
+    # queued, `stopped` last, to be written, and then exits with the code it chose, written or not.
+    assert cli.EVENTS_FLUSH == 5.0
+    monkeypatch.setattr("lucille_host.loop.__version__", "0.2.0")
+    argv = ("run", "--json-events")
+
+    class Slow(Lines):
+        def write(self, text: str) -> int:
+            time.sleep(0.3)
+            return super().write(text)
+
+    # A reader that reads, slowly: everything is written before `run` exits.
+    run = Supervised(monkeypatch, argv, client_class=h.client_class(), out=Slow())
+    assert run.wait(20) == 20
+    assert run.out.objects() == [_stopped("not_paired")]
+    # A reader that reads nothing: `run` waits its bound, then exits all the same.
+    release = threading.Event()
+
+    class Stuck(Lines):
+        def write(self, text: str) -> int:
+            release.wait(60)
+            return super().write(text)
+
+    monkeypatch.setattr("lucille_host.cli.EVENTS_FLUSH", 0.5)
+    try:
+        started = time.monotonic()
+        run = Supervised(monkeypatch, argv, client_class=h.client_class(), out=Stuck())
+        assert run.wait(20) == 20
+        assert time.monotonic() - started >= 0.5
+        assert run.out.objects() == []
+    finally:
+        release.set()
+    # It was waiting to be written, not dropped by `run`: a process would have exited by now.
+    until(lambda: run.out.objects() == [_stopped("not_paired")], what="the line written")
+
+
 def test_a_damaged_digest_key_stops_run(
     host: RunHost, supervise: Callable[..., Supervised]
 ) -> None:
@@ -2885,8 +3096,16 @@ def test_downgrade_refused(
         ("1.2", "0.0.1", 25, "0.0.1"),
         ("0.2.0", "0.2.0", 20, "0.2.0"),
         ("0.3.0", "0.2.0", 20, "0.3.0"),
+        # Each part is a number, not a string: 0.10.0 comes after 0.9.0, in every part.
+        ("0.10.0", "0.9.0", 20, "0.10.0"),
+        ("0.9.0", "0.10.0", 25, "0.10.0"),
+        ("0.2.10", "0.2.9", 20, "0.2.10"),
+        ("0.2.9", "0.2.10", 25, "0.2.10"),
+        ("10.0.0", "9.99.99", 20, "10.0.0"),
+        ("9.99.99", "10.0.0", 25, "10.0.0"),
         # A build with anything after the triple is never recorded: it is not a release.
         ("0.2.1.dev3", "0.2.0", 20, "0.2.0"),
+        ("0.10.0.dev1", "0.9.0", 20, "0.9.0"),
     ):
         _record(dirs, recorded)
         ran = unpaired("run", version=version)
@@ -2904,6 +3123,35 @@ def test_the_version_record_is_checked_before_the_store(
     refused = unpaired("run", "--json-events", version="0.1.0")
     assert refused.wait(20) == 25
     assert refused.out.objects() == [_stopped("downgrade", last_version="0.2.0")]
+
+
+def test_the_cursor_file_is_read_between_the_store_and_the_digest_key(
+    host_env: HostEnv, unpaired: Callable[..., Supervised], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # spec/CLI.md section 13.3: the store, then how far each room was read (state/cursors.json),
+    # then the digest key, then the pair. A damaged cursor file stops `run` before `ready`, even
+    # with no pair to serve, and a store that cannot be used is found first.
+    dirs = host_env.dirs
+    paths.ensure_dir(dirs.state)
+    dirs.cursors_file.write_text(json.dumps({"v": 1, "rooms": {"room": -1}}))
+    ran = unpaired("run", "--json-events")
+    assert ran.wait(20) == 1
+    assert ran.out.objects() == [_stopped("failed", code="state_invalid")]
+    assert ran.err.text == f"lucille-host: {dirs.cursors_file} is not a lucille-host cursor file\n"
+    (dirs.state / policy.KEY_FILE).write_bytes(b"abc")
+    ran = unpaired("run", "--json-events")
+    assert ran.wait(20) == 1
+    assert str(dirs.cursors_file) in ran.err.text
+    with monkeypatch.context() as patch:
+        patch.setattr("keyring.core._keyring_backend", FailKeyring())
+        ran = unpaired("run", "--json-events")
+        assert ran.wait(20) == 23
+    assert ran.out.objects() == [_stopped("insecure_keyring")]
+    dirs.cursors_file.unlink()
+    ran = unpaired("run", "--json-events")
+    assert ran.wait(20) == 1
+    assert ran.out.objects() == [_stopped("failed", code="state_invalid")]
+    assert str(dirs.cursors_file) not in ran.err.text
 
 
 @pytest.mark.parametrize(
