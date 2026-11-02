@@ -1,10 +1,13 @@
 import Foundation
 
-/// Runs the app's code that draws nothing (`Alias`, `HostCLI`, `HostText`) against a built app:
-/// the calls the menu makes, through the same code, with a temporary HOME. CI compiles it with
-/// those files (`macos/check_app.py swift`). Exit status 1 on any failure.
+/// Runs the app's code that draws nothing (`Alias`, `HostCLI`, `HostText`, `HostJSON`, `Pairing`,
+/// `Supervisor`, `ConnectionText`) without a screen: the host's golden fixtures through the JSON
+/// reader and the two state machines, fake children through the child runner, and, against a
+/// built app, the calls the menu makes, through the same code, with a temporary HOME. CI compiles
+/// it with those files (`macos/check_app.py swift`). Exit status 1 on any failure.
 ///
-///     selftest --vectors alias-vectors.json [--app NAME.app --home DIR --version V]
+///     selftest --vectors alias-vectors.json [--fixtures DIR] [--home DIR]
+///              [--app NAME.app --home DIR --version V]
 @main
 struct SelfTest {
     static func main() {
@@ -12,7 +15,7 @@ struct SelfTest {
         var args = CommandLine.arguments.dropFirst()
         while let key = args.popFirst() {
             guard key.hasPrefix("--"), let value = args.popFirst() else {
-                print("usage: selftest --vectors FILE [--app APP --home DIR --version V]")
+                print("usage: selftest --vectors FILE [--fixtures DIR] [--app APP --home DIR --version V]")
                 exit(2)
             }
             options[String(key.dropFirst(2))] = value
@@ -22,6 +25,17 @@ struct SelfTest {
             checkAliases(vectorsAt: vectors, report)
         }
         checkText(report)
+        checkCodeRules(report)
+        let fixtures = options["fixtures"].map { loadFixtures(at: $0, report) } ?? [:]
+        if options["app"] != nil {
+            report.expect(!fixtures.isEmpty, "the host's CLI fixtures are given with --fixtures")
+        }
+        checkJSON(fixtures, report)
+        checkPairing(fixtures, report)
+        checkSupervisor(fixtures, report)
+        if let home = options["home"] {
+            checkChild(home: home, report)
+        }
         if let app = options["app"], let home = options["home"], let version = options["version"] {
             checkCLI(app: URL(fileURLWithPath: app), home: home, version: version, report)
         }
@@ -280,8 +294,9 @@ struct SelfTest {
         let env = cli.environment()
         report.expect(Set(env.keys).isSubset(of: ["HOME", "PATH", "LANG", "USER", "LOGNAME", "TMPDIR"]),
                       "the environment is fixed", "\(env.keys.sorted())")
-        report.expect(cli.arguments(for: ["pause"]) == ["-I", "-B", "-m", "lucille_host", "pause"],
-                      "the interpreter runs isolated, without writing bytecode")
+        report.expect(cli.arguments(for: ["pause"]) == ["-I", "-B", "-m", "lucille_host", "--profile", "mac-app", "pause"],
+                      "the interpreter runs isolated, without writing bytecode, on the app's own profile")
+        report.expect(env["PATH"] == "/var/empty", "PATH names an empty folder", "\(env["PATH"] ?? "none")")
 
         let shown = cli.run(["--version"])
         report.expect(shown.succeeded && HostText.version(fromVersionOutput: shown.stdout) == version,
@@ -304,10 +319,16 @@ struct SelfTest {
             print("note: no ability is plainly off here, so the switch round trip was skipped")
         }
 
-        let paused = cli.run(["pause"])
-        report.expect(paused.succeeded && cli.isPaused, "pause shows as paused", "\(paused)")
-        let resumed = cli.run(["resume"])
-        report.expect(resumed.succeeded && !cli.isPaused, "resume shows as not paused", "\(resumed)")
+        // Whether the host is paused, from the controls object each writes, never from status,
+        // which opens the Keychain.
+        let paused = VerbOutcome(cli.run(["--json", "pause"]))
+        report.expect(paused.paused == true, "pause --json says the host is paused", "\(paused)")
+        let resumed = VerbOutcome(cli.run(["--json", "resume"]))
+        report.expect(resumed.paused == false, "resume --json says it is not", "\(resumed)")
+        let pausedText = cli.run(["pause"])
+        let resumedText = cli.run(["resume"])
+        report.expect(pausedText.succeeded && resumedText.succeeded, "pause and resume work as the menu runs them",
+                      "\(pausedText) \(resumedText)")
 
         let folder = URL(fileURLWithPath: home).appendingPathComponent("My Project Files")
         try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
@@ -378,6 +399,7 @@ struct SelfTest {
         let absent = HostCLI(python: URL(fileURLWithPath: "/nonexistent/python3"), home: home).run(["--version"])
         report.expect(absent.status == CLIResult.notStarted && !absent.stderr.isEmpty,
                       "a missing interpreter is reported, not a crash", "\(absent)")
+        checkPairingVerbs(python: cli.python, home: home, report)
         report.expect(HostCLI.stuckRuns == 0, "every run ended, so none is counted as stuck")
     }
 }
@@ -393,6 +415,1695 @@ final class Report {
         } else {
             failed += 1
             print("FAIL - \(what)" + (detail.isEmpty ? "" : ": \(detail)"))
+        }
+    }
+}
+
+// MARK: - Fixtures
+
+/// One golden fixture of the host's command line (spec/CLI.md §11).
+struct Fixture: Decodable {
+    let description: String
+    let argv: [String]
+    let exit: Int32
+    let stdout: [JSONValue]
+
+    /// Each object as the line the host writes.
+    var lines: [Data] {
+        stdout.compactMap { try? JSONEncoder().encode($0) }
+    }
+
+    /// Each object read back through the app's reader.
+    var objects: [HostObject] {
+        lines.compactMap { (line: Data) -> HostObject? in
+            if case .object(let object) = HostObject.parse(line: line) {
+                return object
+            }
+            return nil
+        }
+    }
+
+    var stopped: StopReason? {
+        for object in objects.reversed() {
+            if case .stopped(let reason) = object {
+                return reason
+            }
+        }
+        return nil
+    }
+}
+
+/// A seeded generator, so that every run of the self-test walks the same sequences.
+struct Seeded {
+    var state: UInt64
+
+    mutating func next(_ bound: Int) -> Int {
+        state = state &* 6_364_136_223_846_793_005 &+ 1_442_695_040_888_963_407
+        return Int((state >> 33) % UInt64(bound))
+    }
+
+    mutating func pick<T>(_ items: [T]) -> T {
+        items[next(items.count)]
+    }
+}
+
+/// What a fake child delivered.
+final class ChildWatch: @unchecked Sendable {
+    let queue = DispatchQueue(label: "selftest.child")
+    private let lock = NSLock()
+    private var gotObjects: [HostObject] = []
+    private var gotNotes: [String] = []
+    private var gotStderr: [String] = []
+    private var gotExit: ChildExit?
+    private let ended = DispatchSemaphore(value: 0)
+
+    func watch(_ child: HostChild) {
+        child.onObject = { object in
+            self.lock.lock()
+            self.gotObjects.append(object)
+            self.lock.unlock()
+        }
+        child.onUnusableLine = { note in
+            self.lock.lock()
+            self.gotNotes.append(note)
+            self.lock.unlock()
+        }
+        child.onStderrLine = { line in
+            self.lock.lock()
+            self.gotStderr.append(line)
+            self.lock.unlock()
+        }
+        child.onExit = { finished in
+            self.lock.lock()
+            self.gotExit = finished
+            self.lock.unlock()
+            self.ended.signal()
+        }
+    }
+
+    func waitForExit(seconds: Double) -> ChildExit? {
+        _ = ended.wait(timeout: .now() + seconds)
+        lock.lock()
+        defer { lock.unlock() }
+        return gotExit
+    }
+
+    var objects: [HostObject] {
+        lock.lock()
+        defer { lock.unlock() }
+        return gotObjects
+    }
+
+    var notes: [String] {
+        lock.lock()
+        defer { lock.unlock() }
+        return gotNotes
+    }
+
+    var stderr: [String] {
+        lock.lock()
+        defer { lock.unlock() }
+        return gotStderr
+    }
+
+    /// Wait until `condition` holds, for `seconds` at most.
+    func wait(seconds: Double, until condition: () -> Bool) -> Bool {
+        let end = Date().addingTimeInterval(seconds)
+        while Date() < end {
+            if condition() {
+                return true
+            }
+            Thread.sleep(forTimeInterval: 0.05)
+        }
+        return condition()
+    }
+}
+
+extension SelfTest {
+    /// 2026-11-01T12:00:00Z, the fixtures' sample time.
+    static let sampleTime = Date(timeIntervalSince1970: 1_793_534_400)
+    static let pairName = "pair-abcdef"
+
+    static func loadFixtures(at folder: String, _ report: Report) -> [String: Fixture] {
+        let names = (try? FileManager.default.contentsOfDirectory(atPath: folder)) ?? []
+        var found: [String: Fixture] = [:]
+        for name in names.sorted() where name.hasSuffix(".json") {
+            guard let data = FileManager.default.contents(atPath: folder + "/" + name),
+                  let fixture = try? JSONDecoder().decode(Fixture.self, from: data)
+            else {
+                report.expect(false, "read the fixture \(name)")
+                continue
+            }
+            found[String(name.dropLast(5))] = fixture
+        }
+        report.expect(found.count >= 50, "\(found.count) of the host's CLI fixtures read from \(folder)")
+        return found
+    }
+
+    static func status(
+        _ pair: StatusPair, run: StatusRun = .noRecord, paused: Bool = false
+    ) -> HostStatus {
+        HostStatus(
+            hostVersion: "0.1.0", paused: paused, policyOK: true, folders: [], enabledOps: ["host.describe"],
+            pair: pair, run: run, lastHubContact: nil, lastLeftBecause: nil, clock: .unknown
+        )
+    }
+
+    static func line(_ text: String) -> JSONLines.Item {
+        HostObject.parse(line: Data(text.utf8))
+    }
+
+    // MARK: - The code check and the words
+
+    static func checkCodeRules(_ report: Report) {
+        let body = String(repeating: "A", count: 100)
+        report.expect(Pairing.looksLikeCode("swbp1_" + body), "a code with 100 characters after its prefix looks like one")
+        report.expect(!Pairing.looksLikeCode("swbp1_" + String(body.dropLast())), "99 do not")
+        let longest = "swbp1_" + String(repeating: "a-_9", count: 2046) + "ab"
+        report.expect(Pairing.looksLikeCode(longest), "8186 do: the whole code is then 8192 characters")
+        report.expect(Data((longest + "\n").utf8).count == HostCLI.maxInputBytes,
+                      "the longest code that looks like one, with its newline, is the most the child's input may be")
+        report.expect(!Pairing.looksLikeCode("swbp1_" + String(repeating: "a", count: 8187)), "8187 do not")
+        report.expect(!Pairing.looksLikeCode("swb1_" + body) && !Pairing.looksLikeCode("swbsecret1_" + body),
+                      "an invite or a pair's secret is not a code")
+        report.expect(!Pairing.looksLikeCode("swbp1_" + body + "+") && !Pairing.looksLikeCode("swbp1_" + body + "="),
+                      "a character base64url does not use is refused")
+        report.expect(Pairing.cleaned("  swbp1_AB\nCD \r\n") == "swbp1_ABCD", "spaces and line breaks are taken out")
+        report.expect(Pairing.hint(for: "") == nil && Pairing.hint(for: " swbp1_" + body + "\n") == nil
+                          && Pairing.hint(for: "hello") == ConnectionText.codeHint,
+                      "the hint shows only for text that is not a code")
+
+        let refusals = ConnectionText.refusals
+        report.expect(refusals.values.allSatisfy { !$0.isEmpty }, "every refusal has words")
+        let expiredBefore = ConnectionText.refusal(code: "expired", message: nil, afterSAS: false)
+        let expiredAfter = ConnectionText.refusal(code: "expired", message: nil, afterSAS: true)
+        let leaked = ConnectionText.refusal(code: "leaked", message: nil, afterSAS: true)
+        report.expect(expiredBefore != expiredAfter && expiredBefore != leaked && expiredAfter != leaked
+                          && expiredAfter == ConnectionText.expiredAfterSAS,
+                      "the code expiring, the time to compare running out, and a leaked code read apart")
+        report.expect(ConnectionText.refusal(code: "brand_new", message: "the host's words", afterSAS: false) == "the host's words",
+                      "a code this release does not know shows the host's own sentence")
+        for code in ConnectionText.appBugCodes {
+            report.expect(ConnectionText.refusal(code: code, message: "x", afterSAS: false) == ConnectionText.appBug,
+                          "\(code) reads as the app's own mistake")
+        }
+        report.expect(ConnectionText.appBugCodes.isDisjoint(with: Set(refusals.keys))
+                          && Pairing.redrawCodes.isDisjoint(with: Set(refusals.keys)),
+                      "no code has two sentences")
+        let note = ConnectionText.note(.refused(code: "bad_code", message: "this is not a pairing code", afterSAS: false))
+        report.expect(note.title == ConnectionText.couldNotConnect && note.text == refusals["bad_code"]
+                          && note.detail == "this is not a pairing code",
+                      "a refusal note has the app's sentence, and the host's words as details", "\(note)")
+        let differed = ConnectionText.note(.rejected(lucilleTold: true, afterDiffer: true))
+        let stopped = ConnectionText.note(.rejected(lucilleTold: true, afterDiffer: false))
+        report.expect(differed.text.contains("intercepted") && !stopped.text.contains("intercepted")
+                          && differed.title == ConnectionText.nothingConnectedTitle,
+                      "They Differ says why numbers can differ; Stop Connecting does not")
+        report.expect(ConnectionText.note(.rejected(lucilleTold: false, afterDiffer: true)).text.contains("remove this computer"),
+                      "when Lucille was not told, the note says to remove the computer there")
+        report.expect(ConnectionText.statusLine(.connected, paused: true) == "Connected to Lucille · Paused"
+                          && ConnectionText.statusLine(.notConnected(nil), paused: false) == "Not connected to Lucille",
+                      "the status line, and its paused suffix")
+        report.expect(ConnectionText.clock(skew: 600).contains("10 minutes behind")
+                          && ConnectionText.clock(skew: -360).contains("6 minutes ahead")
+                          && ConnectionText.clock(skew: nil).contains("more than 5 minutes off"),
+                      "the clock's problem says which way, and how far, when the host knows")
+        report.expect(ConnectionText.stopNow.hasPrefix("Stop now (") && ConnectionText.stopNow.hasSuffix(" will be paused when you next open it)"),
+                      "the Stop now button says what it does", ConnectionText.stopNow)
+        report.expect(ConnectionText.disconnected(.refused(HostError(code: "none", message: "m", kind: nil))).text
+                          == ConnectionText.wasNotConnected
+                          && ConnectionText.disconnected(.done([.forget(.forgotten(name: pairName, lucilleTold: false))])).text
+                          == ConnectionText.disconnectedNotTold,
+                      "Disconnect takes no pair as done, and says when Lucille was not told")
+    }
+
+    // MARK: - checkJSON
+
+    static func checkJSON(_ fixtures: [String: Fixture], _ report: Report) {
+        for (name, fixture) in fixtures.sorted(by: { $0.key < $1.key }) {
+            var wrong: [String] = []
+            for line in fixture.lines {
+                let item = HostObject.parse(line: line)
+                guard case .object(let object) = item else {
+                    wrong.append("\(item)")
+                    continue
+                }
+                if case .unknown(let type) = object, HostObject.knownTypes.contains(type) {
+                    wrong.append("\(type) read as unknown")
+                }
+            }
+            report.expect(wrong.isEmpty && fixture.lines.count == fixture.stdout.count,
+                          "\(name): every object reads, and every type the app knows decodes", "\(wrong)")
+        }
+        if !fixtures.isEmpty {
+            checkFixtureObjects(fixtures, report)
+        }
+
+        // Framing (spec/CLI.md §4.1 and §13.2).
+        let ready = #"{"v":1,"type":"ready","host_version":"1.0.0","pair":"p"}"#
+        func padded(_ total: Int) -> String {
+            let head = #"{"v":1,"type":"pad","x":""#
+            let tail = #""}"#
+            return head + String(repeating: "a", count: total - head.utf8.count - tail.utf8.count) + tail
+        }
+        var lines = JSONLines()
+        let atBound = lines.feed(Data((padded(JSONLines.maxLineBytes - 1) + "\n").utf8))
+        report.expect(atBound == [.object(.unknown(type: "pad"))], "a line of 16384 bytes, its newline included, is read")
+        let overBound = lines.feed(Data((padded(JSONLines.maxLineBytes) + "\n" + ready + "\n").utf8))
+        report.expect(overBound.count == 2 && overBound.last == .object(.ready(pair: "p", hostVersion: "1.0.0")),
+                      "one byte more is dropped, and the next line is read", "\(overBound)")
+        if case .unusable? = overBound.first {
+        } else {
+            report.expect(false, "a line over the bound is a note", "\(overBound)")
+        }
+        let longStatus = #"{"v":1,"type":"status","host_version":"1","policy":{"state":"ok","file":null,"enabled":[],"disabled":[],"folders":["#
+            + Array(repeating: #""folder-with-a-long-alias-name-xx""#, count: 600).joined(separator: ",")
+            + #"]},"paused":false,"store":"keyring","hub":"h","loopback_hub":null,"pair":{"state":"none"},"work_rooms":[],"last_left_because":null,"offers_waiting":0,"run":{"state":"none"},"last_hub_contact":null,"clock":{"state":"unknown"}}"#
+        let wide = HostJSON.objects(inOutput: longStatus + "\n")
+        var wideFolders = 0
+        if case .status(let found)? = wide.first {
+            wideFolders = found.folders.count
+        }
+        report.expect(longStatus.utf8.count > JSONLines.maxLineBytes && wideFolders == 600,
+                      "a short verb's output is read whole: run's line bound does not apply to it")
+        let long = lines.feed(Data((String(repeating: "x", count: 20000) + "\n").utf8))
+        report.expect(long.count == 1 && long.first != nil && !isObject(long[0]), "a 20000-byte line is dropped")
+        report.expect(lines.feed(Data("not json\n\n[1,2]\n".utf8)).allSatisfy { !isObject($0) },
+                      "a line that is not one JSON object is dropped")
+        report.expect(lines.feed(Data((ready + "\r\n").utf8)).allSatisfy { !isObject($0) },
+                      "a line that ends with a carriage return is dropped, though JSON would allow it")
+        var bytewise: [JSONLines.Item] = []
+        for byte in Data((ready + "\n").utf8) {
+            bytewise += lines.feed(Data([byte]))
+        }
+        report.expect(bytewise == [.object(.ready(pair: "p", hostVersion: "1.0.0"))], "a line that arrives a byte at a time is read whole")
+        report.expect(lines.feed(Data(ready.utf8)).isEmpty, "a line with no newline yet waits")
+        let fragment = lines.finish()
+        report.expect(fragment.count == 1 && !isObject(fragment[0]) && lines.finish().isEmpty,
+                      "a last fragment with no newline is dropped, with one note")
+        report.expect(line(#"{"v":2,"type":"ready"}"#) == .object(.otherVersion(2)), "an object of another version is told apart")
+        report.expect(!isObject(line(#"{"v":1}"#)) && !isObject(line(#"{"type":"ready"}"#))
+                          && !isObject(line(#"{"v":true,"type":"ready"}"#)),
+                      "an object with no version or no type is dropped")
+        report.expect(!isObject(line(#"{"v":1,"type":"controls","paused":1}"#)),
+                      "a boolean field holding a number is not read as one")
+        for sas in ["1234-567", "12345678", "abcd-efgh", "1234-56789", "1234 5678"] {
+            let text = #"{"v":1,"type":"pair","state":"sas_pending","name":"p","sas":""# + sas + #"","deadline":"2026-11-01T12:00:00Z"}"#
+            report.expect(!isObject(line(text)), "a SAS of another shape (\(sas)) is never read")
+        }
+        report.expect(line(#"{"v":1,"type":"version","host_version":"1","contract":"1.0"}"#) == .object(.unknown(type: "version")),
+                      "a type the app does not use is ignored")
+
+        // Values a reader treats specially (spec/CLI.md §12).
+        let frozen = line(#"{"v":1,"type":"state","pair":"p","confirmed":true,"paused":false,"policy":"frozen","last_hub_contact":null,"clock":{"state":"unknown"},"rooms":[],"offers_waiting":0,"last_left_because":null}"#)
+        if case .object(.state(let state)) = frozen {
+            report.expect(state.policy == .invalid, "a policy state this release does not know is invalid")
+        } else {
+            report.expect(false, "a state with a new policy value reads", "\(frozen)")
+        }
+        let moon = line(#"{"v":1,"type":"stopped","reason":"drained","cause":"moon"}"#)
+        report.expect(moon == .object(.stopped(.drained(cause: .other("moon")))), "a drain cause this release does not know is kept as other")
+        report.expect(line(#"{"v":1,"type":"stopped","reason":"new_reason"}"#) == .object(.stopped(.other("new_reason"))),
+                      "a stopped reason this release does not know is kept as other")
+        report.expect(line(#"{"v":1,"type":"pair","state":"new_state","name":"p"}"#) == .object(.pair(.other("new_state"))),
+                      "a pair state this release does not know is never shown")
+        report.expect(line(#"{"v":1,"type":"error","code":"new_code","message":"the host's words"}"#)
+                          == .object(.error(HostError(code: "new_code", message: "the host's words", kind: nil))),
+                      "an error code this release does not know reads")
+
+        // Short verbs: how they ended comes first (spec/CLI.md §4.3).
+        func result(_ status: Int32, _ stdout: String, signal: Bool = false) -> CLIResult {
+            CLIResult(status: status, stdout: stdout, stderr: "", timedOut: false, cancelled: false,
+                      terminationReason: signal ? .uncaughtSignal : .exit)
+        }
+        let held = #"{"v":1,"type":"error","code":"held","message":"m"}"# + "\n"
+        report.expect(VerbOutcome(result(1, held)) == .refused(HostError(code: "held", message: "m", kind: nil)),
+                      "exit 1 with an error object last is a refusal")
+        report.expect(VerbOutcome(result(1, "")) == .signaled && VerbOutcome(result(2, ready + "\n")) == .signaled,
+                      "exit 1 or 2 with no error object last was a signal")
+        report.expect(VerbOutcome(result(1, held, signal: true)) == .signaled, "a signal is never read as an exit code")
+        report.expect(VerbOutcome(result(0, #"{"v":1,"type":"controls","paused":true}"# + "\n")).paused == true,
+                      "a controls object says whether the host is paused")
+        report.expect(VerbOutcome(result(7, "")) == .otherExit(7), "another exit status is kept")
+        report.expect(VerbOutcome(CLIResult(status: CLIResult.notStarted, stdout: "", stderr: "", timedOut: false)) == .notStarted
+                          && VerbOutcome(CLIResult(status: 15, stdout: "", stderr: "", timedOut: true)) == .timedOut
+                          && VerbOutcome(CLIResult(status: 15, stdout: "", stderr: "", timedOut: false, cancelled: true)) == .cancelled,
+                      "a run that did not start, timed out or was cancelled says so")
+        let signaled = result(24, "", signal: true)
+        report.expect(signaled.signal == 24 && !signaled.succeeded && result(0, "").signal == nil,
+                      "a result says which signal ended it")
+    }
+
+    static func isObject(_ item: JSONLines.Item) -> Bool {
+        if case .object = item {
+            return true
+        }
+        return false
+    }
+
+    static func checkFixtureObjects(_ fixtures: [String: Fixture], _ report: Report) {
+        let deadline = sampleTime
+        let pairing = fixtures["pair-code-stdin"]?.objects ?? []
+        report.expect(pairing == [
+            .pairCode(name: pairName), .policyReset,
+            .pair(.accepted(name: pairName, clockSkewed: false)),
+            .pair(.waiting(name: pairName)),
+            .pair(.sasPending(name: pairName, sas: "1234-5678", deadline: deadline)),
+        ], "pair --code-stdin reads as its code, the policy set aside, accepted, waiting, then the SAS", "\(pairing)")
+        let leaked = fixtures["pair-code-stdin-leaked"]?.objects.last
+        if case .error(let error)? = leaked {
+            report.expect(error.code == "leaked", "a leaked code ends with its error")
+        } else {
+            report.expect(false, "pair-code-stdin-leaked ends with an error", "\(String(describing: leaked))")
+        }
+        report.expect(fixtures["pair-status-sas-pending"]?.objects
+                          == [.pair(.sasPending(name: pairName, sas: "1234-5678", deadline: deadline))]
+                          && fixtures["pair-status-waiting"]?.objects == [.pair(.waiting(name: pairName))]
+                          && fixtures["pair-status-none"]?.objects == [.pair(.noPair)]
+                          && fixtures["pair-confirm"]?.objects == [.pair(.confirmed(name: pairName))]
+                          && fixtures["pair-reject"]?.objects == [.pair(.rejected(name: pairName, lucilleTold: true))],
+                      "pair status, confirm and reject read")
+        if case .status(let found)? = fixtures["status-paired"]?.objects.first {
+            report.expect(found.pair == .confirmed(name: pairName) && found.run == .stopped && !found.paused
+                              && found.policyOK && found.folders == ["docs"] && found.enabledOps == ["host.describe"]
+                              && found.clock == .ok(skew: 1.5) && found.lastHubContact == deadline
+                              && found.lastLeftBecause == nil,
+                          "status, paired, reads its pair, run, policy and clock", "\(found)")
+        } else {
+            report.expect(false, "status-paired reads")
+        }
+        if case .status(let found)? = fixtures["status-unpaired"]?.objects.first {
+            report.expect(found.pair == .noPair && found.run == .noRecord && found.clock == .unknown && found.lastHubContact == nil,
+                          "status, unpaired, reads", "\(found)")
+        } else {
+            report.expect(false, "status-unpaired reads")
+        }
+        if case .status(let found)? = fixtures["status-unreadable"]?.objects.first {
+            report.expect(found.pair == .unreadable(code: "insecure_keyring") && found.paused,
+                          "status with an unreadable store says which, and the rest", "\(found)")
+        } else {
+            report.expect(false, "status-unreadable reads")
+        }
+        report.expect(fixtures["forget"]?.objects == [.forget(.forgotten(name: pairName, lucilleTold: true))]
+                          && fixtures["pause"]?.objects == [.controls(paused: true)]
+                          && fixtures["resume"]?.objects == [.controls(paused: false)]
+                          && fixtures["kill"]?.objects == [.controls(paused: true)],
+                      "forget, pause, resume and kill read")
+        let requests = fixtures["run-events-requests"]?.objects ?? []
+        var hasRoom = false
+        if requests.count > 1, case .state(let state) = requests[1] {
+            hasRoom = state.confirmed && state.policy == .ok && state.rooms == [RunRoom(name: "room-1", state: .reading)]
+        }
+        report.expect(requests.first == .ready(pair: pairName, hostVersion: "0.1.0.dev0") && hasRoom
+                          && requests.contains(.hostTooOld(jobId: "00000000-0000-4000-8000-000000000004",
+                                                           minVersion: "999.0.0", hostVersion: "0.1.0.dev0"))
+                          && requests.last == .stopped(.drained(cause: .stdinEnd))
+                          && requests.filter({ (object: HostObject) -> Bool in
+                              if case .request = object {
+                                  return true
+                              }
+                              return false
+                          }).count == 13,
+                      "run's events read: ready, state, requests, host_too_old, stopped", "\(requests.count) objects")
+    }
+
+    // MARK: - checkPairing
+
+    static func checkPairing(_ fixtures: [String: Fixture], _ report: Report) {
+        let deadline = sampleTime
+        let code = "swbp1_" + String(repeating: "Q", count: 160)
+        let pairObjects: [HostObject] = fixtures["pair-code-stdin"]?.objects ?? [
+            .pairCode(name: pairName), .policyReset,
+            .pair(.accepted(name: pairName, clockSkewed: false)),
+            .pair(.waiting(name: pairName)),
+            .pair(.sasPending(name: pairName, sas: "1234-5678", deadline: deadline)),
+        ]
+        let pending = status(.sasPending(name: pairName, deadline: deadline))
+
+        // The whole gate, as the fixture runs it.
+        var flow = PairingFlow()
+        func send(_ input: PairingFlow.Input) -> [PairingFlow.Effect] {
+            flow.handle(input, epoch: flow.epoch)
+        }
+        _ = send(.startConnecting)
+        report.expect(flow.screen == .enterCode, "Connect to Lucille… opens the code window")
+        report.expect(send(.submit("hello")).isEmpty && flow.screen == .enterCode && !flow.pairChildAlive,
+                      "text that is not a code starts nothing")
+        let started = send(.submit("  " + code + "\n"))
+        report.expect(started == [.clearCodeField, .startPair(code: code)] && flow.pairChildAlive,
+                      "a code starts pair --code-stdin with the code, and the field is cleared", "\(started)")
+        var shown: [PairingFlow.Effect] = []
+        for object in pairObjects {
+            shown += send(.childObject(object))
+        }
+        let expected = PairingFlow.Comparison(name: pairName, sas: "1234-5678", deadline: deadline, canMatch: true, drawnAt: nil)
+        report.expect(flow.screen == .compare(expected) && shown == [.cancelPoll, .deadlineAt(deadline.addingTimeInterval(Pairing.deadlineGrace))],
+                      "sas_pending shows the number, and sets a timer a little past its deadline", "\(flow.screen) \(shown)")
+        report.expect(send(.childExited(.exited(0))).isEmpty && !flow.pairChildAlive, "pair exits 0 once the SAS is shown")
+        report.expect(send(.theyMatch(at: 100)).isEmpty && flow.screen == .compare(expected),
+                      "They Match before the number is drawn does nothing")
+        report.expect(send(.sasDrawn("0000-0000", at: 100)).isEmpty && flow.screen == .compare(expected),
+                      "another number drawn does not count")
+        _ = send(.sasDrawn("1234-5678", at: 100))
+        report.expect(send(.theyMatch(at: 100.1)).isEmpty, "a click from before the number was drawn does not count")
+        let matched = send(.theyMatch(at: 101))
+        report.expect(matched == [.cancelDeadline, .run(.status(.beforeConfirm))] && flow.screen == .busy(.checking),
+                      "They Match first reads status, which never carries the SAS", "\(matched)")
+        let bound = send(.verbResult(.status(.beforeConfirm), .done([.status(pending)])))
+        report.expect(bound == [.run(.pairConfirm)] && flow.screen == .busy(.confirming),
+                      "the same pair, with the same deadline, still pending: pair confirm", "\(bound)")
+        let confirmed = send(.verbResult(.pairConfirm, .done([.pair(.confirmed(name: pairName))])))
+        report.expect(confirmed == [.say(.confirmed), .startRunCheck] && flow.screen == .closed,
+                      "confirmed: the note, and a status read that may start run", "\(confirmed)")
+
+        // A second sas_pending must be drawn again; a status that disagrees redraws.
+        func comparing() -> PairingFlow {
+            var fresh = PairingFlow()
+            _ = fresh.handle(.startConnecting, epoch: fresh.epoch)
+            _ = fresh.handle(.submit(code), epoch: fresh.epoch)
+            _ = fresh.handle(.childObject(.pair(.sasPending(name: pairName, sas: "1234-5678", deadline: deadline))), epoch: fresh.epoch)
+            _ = fresh.handle(.childExited(.exited(0)), epoch: fresh.epoch)
+            _ = fresh.handle(.sasDrawn("1234-5678", at: 10), epoch: fresh.epoch)
+            return fresh
+        }
+        flow = comparing()
+        _ = send(.childObject(.pair(.sasPending(name: pairName, sas: "8765-4321", deadline: deadline))))
+        if case .compare(let now) = flow.screen {
+            report.expect(now.sas == "8765-4321" && !now.drawn, "a new sas_pending must be drawn again", "\(now)")
+        } else {
+            report.expect(false, "a new sas_pending shows", "\(flow.screen)")
+        }
+        report.expect(send(.theyMatch(at: 50)).isEmpty, "and They Match waits for it")
+        for other in [status(.sasPending(name: pairName, deadline: deadline.addingTimeInterval(60))),
+                      status(.sasPending(name: "pair-other", deadline: deadline)),
+                      status(.sasReady(name: pairName))] {
+            flow = comparing()
+            _ = send(.theyMatch(at: 20))
+            let redraw = send(.verbResult(.status(.beforeConfirm), .done([.status(other)])))
+            report.expect(redraw == [.run(.pairStatus)] && flow.screen == .waiting(clockSkewed: false),
+                          "a status that names another pair, deadline or an unshown SAS confirms nothing, and redraws", "\(other.pair) \(redraw)")
+        }
+        flow = comparing()
+        _ = send(.theyMatch(at: 20))
+        report.expect(send(.verbResult(.status(.beforeConfirm), .timedOut)) == [.run(.pairStatus)],
+                      "a status that did not answer confirms nothing")
+        flow = comparing()
+        _ = send(.theyMatch(at: 20))
+        report.expect(send(.verbResult(.status(.beforeConfirm), .done([.status(status(.confirmed(name: pairName)))])))
+                          == [.startRunCheck] && flow.screen == .closed,
+                      "the pair shown, confirmed meanwhile: the run check, and no confirm")
+        flow = comparing()
+        _ = send(.theyMatch(at: 20))
+        report.expect(send(.verbResult(.status(.beforeConfirm), .done([.status(status(.confirmed(name: "pair-other")))])))
+                          == [.say(.confirmedAnother), .refreshStatus] && flow.screen == .closed,
+                      "another pair confirmed meanwhile: said, and nothing started")
+        flow = comparing()
+        _ = send(.theyMatch(at: 20))
+        _ = send(.verbResult(.status(.beforeConfirm), .done([.status(pending)])))
+        report.expect(send(.verbResult(.pairConfirm, .done([.pair(.confirmed(name: "pair-other"))])))
+                          == [.say(.confirmedAnother), .refreshStatus],
+                      "a confirm that names another pair says so, and starts nothing")
+        flow = comparing()
+        _ = send(.theyMatch(at: 20))
+        _ = send(.verbResult(.status(.beforeConfirm), .done([.status(pending)])))
+        report.expect(send(.verbResult(.pairConfirm, .refused(HostError(code: "sas_ready", message: "m", kind: nil))))
+                          == [.run(.pairStatus)],
+                      "sas_ready from pair confirm: ask pair status, and draw it")
+        let answers: [(VerbOutcome, [PairingFlow.Effect])] = [
+            (.done([.status(status(.confirmed(name: pairName)))]), [.say(.confirmed), .startRunCheck]),
+            (.done([.status(pending)]), [.say(.notConfirmed), .refreshStatus]),
+            (.timedOut, [.say(.confirmUnknown), .refreshStatus]),
+        ]
+        for (answer, says) in answers {
+            flow = comparing()
+            _ = send(.theyMatch(at: 20))
+            _ = send(.verbResult(.status(.beforeConfirm), .done([.status(pending)])))
+            let unanswered = send(.verbResult(.pairConfirm, .cancelled))
+            let after = send(.verbResult(.status(.afterConfirm), answer))
+            report.expect(unanswered == [.run(.status(.afterConfirm))] && after == says,
+                          "a confirm with no answer asks status, and says plainly what it found", "\(after)")
+        }
+
+        // Each status read is answered once: one asked before a confirm, arriving after the confirm
+        // ended with no answer, confirms nothing again.
+        flow = comparing()
+        _ = send(.theyMatch(at: 20))
+        _ = send(.verbResult(.status(.beforeConfirm), .done([.status(pending)])))
+        _ = send(.verbResult(.pairConfirm, .cancelled))
+        report.expect(send(.verbResult(.status(.beforeConfirm), .done([.status(pending)]))).isEmpty && flow.screen == .busy(.checking),
+                      "a second answer to the read before a confirm runs no second confirm")
+        report.expect(send(.verbResult(.status(.afterConfirm), .done([.status(pending)]))) == [.say(.notConfirmed), .refreshStatus],
+                      "and the read after it is still answered")
+
+        // They Differ: reject, a late answer from before is dropped, and They Match stays off.
+        flow = comparing()
+        let before = flow.epoch
+        let differ = send(.theyDiffer)
+        report.expect(differ == [.cancelRunRetries, .cancelPoll, .cancelDeadline, .run(.pairReject)] && flow.epoch == before + 1,
+                      "They Differ runs pair reject in a new epoch", "\(differ)")
+        report.expect(flow.handle(.verbResult(.pairStatus, .done([.pair(.sasPending(name: pairName, sas: "1234-5678", deadline: deadline))])),
+                                  epoch: before).isEmpty && flow.screen == .busy(.rejecting),
+                      "an answer from before They Differ is dropped")
+        report.expect(send(.verbResult(.pairReject, .done([.pair(.rejected(name: pairName, lucilleTold: true))])))
+                          == [.say(.rejected(lucilleTold: true, afterDiffer: true)), .refreshStatus],
+                      "rejected: Nothing was connected, and whether Lucille was told")
+        flow = comparing()
+        _ = send(.theyDiffer)
+        let failed = send(.verbResult(.pairReject, .refused(HostError(code: "room_not_left", message: "m", kind: nil))))
+        report.expect(failed == [.say(.rejectFailed(HostError(code: "room_not_left", message: "m", kind: nil))), .refreshStatus],
+                      "a reject that failed says so", "\(failed)")
+        _ = send(.resume(.sasPending(name: pairName, deadline: deadline)))
+        _ = send(.verbResult(.pairStatus, .done([.pair(.sasPending(name: pairName, sas: "1234-5678", deadline: deadline))])))
+        _ = send(.sasDrawn("1234-5678", at: 30))
+        if case .compare(let latched) = flow.screen {
+            report.expect(!latched.canMatch && send(.theyMatch(at: 40)).isEmpty,
+                          "after They Differ, They Match is never on again for that pair", "\(latched)")
+        } else {
+            report.expect(false, "the differed pair shows again, to stop it", "\(flow.screen)")
+        }
+
+        // A relaunch resumes from status (spec/CLI.md §7).
+        let relaunches: [(StatusPair, [PairingFlow.Effect], PairingFlow.Screen)] = [
+            (.noPair, [], .closed),
+            (.waiting(name: pairName), [.cancelRunRetries, .cancelPoll, .cancelDeadline, .run(.pairStatus)], .waiting(clockSkewed: false)),
+            (.sasReady(name: pairName), [.cancelRunRetries, .cancelPoll, .cancelDeadline, .run(.pairStatus)], .waiting(clockSkewed: false)),
+            (.sasPending(name: pairName, deadline: deadline), [.cancelRunRetries, .cancelPoll, .cancelDeadline, .run(.pairStatus)], .waiting(clockSkewed: false)),
+            (.expired(name: pairName, deadline: deadline), [.say(.refused(code: "expired", message: nil, afterSAS: true)), .refreshStatus], .closed),
+            (.refused(name: pairName), [.say(.refused(code: "no_gate", message: nil, afterSAS: false))], .closed),
+            (.confirmed(name: pairName), [], .closed),
+            (.severalPairs, [], .closed),
+            (.unreadable(code: "store_error"), [], .closed),
+        ]
+        for (pair, effects, screen) in relaunches {
+            flow = PairingFlow()
+            let got = send(.resume(pair))
+            report.expect(got == effects && flow.screen == screen, "a relaunch with \(pair) resumes as it should", "\(got) \(flow.screen)")
+        }
+        flow = PairingFlow()
+        _ = send(.resume(.waiting(name: pairName)))
+        _ = send(.resume(.waiting(name: pairName)))
+        let staleAnswer = flow.handle(
+            .verbResult(.pairStatus, .done([.pair(.sasPending(name: pairName, sas: "1234-5678", deadline: deadline))])),
+            epoch: flow.epoch - 1
+        )
+        report.expect(staleAnswer.isEmpty && flow.screen == .waiting(clockSkewed: false),
+                      "a pair status answer from an earlier attempt changes nothing, even on the same page",
+                      "\(staleAnswer) \(flow.screen)")
+        flow = PairingFlow()
+        _ = send(.resume(.waiting(name: pairName)))
+        let polled = send(.verbResult(.pairStatus, .done([.pair(.waiting(name: pairName))])))
+        report.expect(polled == [.pollAfter(5)] && send(.pollDue) == [.run(.pairStatus)],
+                      "while waiting, pair status asks again 5 s after each answer")
+        report.expect(send(.windowClosed) == [.cancelPoll, .cancelDeadline] && flow.screen == .closed,
+                      "closing the window stops asking")
+        report.expect(send(.pollDue).isEmpty && send(.verbResult(.pairStatus, .done([.pair(.waiting(name: pairName))]))).isEmpty,
+                      "and nothing asks pair status while it is closed")
+        let late = send(.verbResult(.pairStatus, .done([.pair(.sasPending(name: pairName, sas: "1234-5678", deadline: deadline))])))
+        if case .compare = flow.screen {
+            report.expect(late.contains(.deadlineAt(deadline.addingTimeInterval(Pairing.deadlineGrace))),
+                          "a SAS that arrives after the window closed brings it back, to show it")
+        } else {
+            report.expect(false, "a SAS that arrives after the window closed is shown", "\(flow.screen)")
+        }
+
+        // The pairing child: closing the window or its time limit interrupts it, which keeps the pair.
+        flow = PairingFlow()
+        _ = send(.startConnecting)
+        _ = send(.submit(code))
+        report.expect(send(.windowClosed) == [.cancelPoll, .cancelDeadline, .interruptPair], "closing the window interrupts pair")
+        _ = send(.childObject(.error(HostError(code: "interrupted", message: "m", kind: nil))))
+        report.expect(send(.childExited(.exited(1))) == [.refreshStatus] && flow.screen == .closed,
+                      "interrupted: the pair is kept, and the menu offers Finish Connecting…")
+        flow = PairingFlow()
+        _ = send(.startConnecting)
+        _ = send(.submit(code))
+        report.expect(send(.childTimeLimit) == [.interruptPair], "the child's time limit interrupts it")
+        _ = send(.childObject(.error(HostError(code: "interrupted", message: "m", kind: nil))))
+        report.expect(send(.childExited(.exited(1))) == [.run(.pairStatus)], "and pair status goes on while the window is open")
+        flow = PairingFlow()
+        _ = send(.startConnecting)
+        _ = send(.submit(code))
+        let stop = send(.stopConnecting)
+        report.expect(stop == [.cancelRunRetries, .cancelPoll, .cancelDeadline, .interruptPair],
+                      "Stop Connecting interrupts a waiting pair first", "\(stop)")
+        report.expect(flow.handle(.childExited(.exited(1)), epoch: flow.epoch - 1) == [.run(.pairReject)],
+                      "then rejects once it has ended")
+        report.expect(send(.verbResult(.pairReject, .done([.pair(.rejected(name: pairName, lucilleTold: false))])))
+                          == [.say(.rejected(lucilleTold: false, afterDiffer: false)), .refreshStatus],
+                      "and says Lucille was not told")
+        flow = PairingFlow()
+        _ = send(.startConnecting)
+        _ = send(.submit(code))
+        report.expect(send(.childNotStarted) == [.say(.notStarted), .refreshStatus], "a child that cannot start says so")
+        flow = PairingFlow()
+        _ = send(.startConnecting)
+        _ = send(.submit(code))
+        report.expect(send(.childExited(.signaled(15))) == [.run(.status(.afterChild))],
+                      "a child that ends with no answer: status says where the pair is")
+        report.expect(send(.verbResult(.status(.afterChild), .done([.status(status(.waiting(name: pairName)))]))) == [.run(.pairStatus)],
+                      "and the window goes on from there")
+        for (confirmedName, says) in [(pairName, [PairingFlow.Effect.startRunCheck]),
+                                      ("pair-other", [.say(.confirmedAnother), .refreshStatus])] {
+            flow = PairingFlow()
+            _ = send(.startConnecting)
+            _ = send(.submit(code))
+            _ = send(.childObject(.pairCode(name: pairName)))
+            _ = send(.childExited(.signaled(15)))
+            let found = send(.verbResult(.status(.afterChild), .done([.status(status(.confirmed(name: confirmedName)))])))
+            report.expect(found == says && flow.screen == .closed,
+                          "a child that ended with \(confirmedName) confirmed: \(says)", "\(found)")
+        }
+
+        // Every refusal pair --code-stdin can give, and which ones bring the code window back.
+        var codes = Array(ConnectionText.refusals.keys) + Array(ConnectionText.appBugCodes)
+        codes.append("brand_new")
+        for refusal in codes.sorted() where refusal != "interrupted" {
+            flow = PairingFlow()
+            _ = send(.startConnecting)
+            _ = send(.submit(code))
+            _ = send(.childObject(.error(HostError(code: refusal, message: "the host's words", kind: nil))))
+            let said = send(.childExited(.exited(1)))
+            let again = Pairing.newCodeCodes.contains(refusal)
+            report.expect(said.contains(.say(.refused(code: refusal, message: "the host's words", afterSAS: false)))
+                              && flow.screen == (again ? PairingFlow.Screen.enterCode : .closed),
+                          "\(refusal) is said, and \(again ? "the code window stays" : "the window closes")", "\(said)")
+        }
+        let leakedObjects = fixtures["pair-code-stdin-leaked"]?.objects ?? []
+        if !leakedObjects.isEmpty {
+            flow = PairingFlow()
+            _ = send(.startConnecting)
+            _ = send(.submit(code))
+            for object in leakedObjects {
+                _ = send(.childObject(object))
+            }
+            let said = send(.childExited(.exited(1)))
+            var leakedSaid = false
+            for effect in said {
+                if case .say(.refused(let found, _, false)) = effect, found == "leaked" {
+                    leakedSaid = true
+                }
+            }
+            report.expect(leakedSaid, "the leaked fixture is said as leaked", "\(said)")
+        }
+
+        // The deadline: pair status a little past it says expired, after a SAS was shown.
+        flow = comparing()
+        report.expect(send(.deadlinePassed(at: deadline.addingTimeInterval(3))) == [.run(.pairStatus)], "the deadline asks pair status")
+        let expiredSaid = send(.verbResult(.pairStatus, .refused(HostError(code: "expired", message: "m", kind: nil))))
+        report.expect(expiredSaid.contains(.say(.refused(code: "expired", message: "m", afterSAS: true))) && flow.screen == .closed,
+                      "expired after a SAS was shown is the time to compare running out")
+        flow = comparing()
+        _ = send(.deadlinePassed(at: deadline.addingTimeInterval(3)))
+        let still = send(.verbResult(.pairStatus, .done([.pair(.sasPending(name: pairName, sas: "1234-5678", deadline: deadline))])))
+        report.expect(still.contains(.deadlineAt(deadline.addingTimeInterval(3 + Pairing.recheckDelay))),
+                      "a SAS still pending past its deadline is asked about again later, not at once", "\(still)")
+
+        checkPairingWalk(report)
+    }
+
+    /// Thousands of inputs, in a seeded order, partly following the gate and partly not, with
+    /// some answers from an older epoch: the rules hold at every step.
+    static func checkPairingWalk(_ report: Report) {
+        let deadline = sampleTime
+        let code = "swbp1_" + String(repeating: "Z", count: 120)
+        let names = [pairName, "pair-other"]
+        let sases = ["1234-5678", "8765-4321"]
+        let deadlines = [deadline, deadline.addingTimeInterval(60)]
+        var random = Seeded(state: 20_261_102)
+        var flow = PairingFlow()
+        var matched: PairingFlow.Comparison?
+        var lastShown: PairingFlow.Comparison?
+        var clock: TimeInterval = 0
+        var violations: [String] = []
+        var confirms = 0
+
+        func randomPair() -> PairState {
+            switch random.next(5) {
+            case 0:
+                return .waiting(name: random.pick(names))
+            case 1:
+                return .confirmed(name: random.pick(names))
+            case 2:
+                return .noPair
+            default:
+                return .sasPending(name: random.pick(names), sas: random.pick(sases), deadline: random.pick(deadlines))
+            }
+        }
+        func randomStatusPair() -> StatusPair {
+            switch random.next(6) {
+            case 0:
+                return .waiting(name: random.pick(names))
+            case 1:
+                return .confirmed(name: random.pick(names))
+            case 2:
+                return .expired(name: random.pick(names), deadline: random.pick(deadlines))
+            case 3:
+                return .noPair
+            default:
+                return .sasPending(name: random.pick(names), deadline: random.pick(deadlines))
+            }
+        }
+        func randomOutcome() -> VerbOutcome {
+            switch random.next(6) {
+            case 0:
+                return .done([.pair(randomPair())])
+            case 1:
+                return .done([.status(status(randomStatusPair()))])
+            case 2:
+                return .refused(HostError(code: random.pick(["waiting", "sas_ready", "expired", "held", "none", "room_not_left"]),
+                                          message: "m", kind: nil))
+            case 3:
+                return .timedOut
+            case 4:
+                return .signaled
+            default:
+                return .done([.pair(.rejected(name: random.pick(names), lucilleTold: random.next(2) == 0))])
+            }
+        }
+        func guided() -> PairingFlow.Input {
+            switch flow.screen {
+            case .closed:
+                return .startConnecting
+            case .enterCode:
+                return .submit(code)
+            case .waiting:
+                if flow.pairChildAlive {
+                    return .childObject(.pair(.sasPending(name: random.pick(names), sas: random.pick(sases), deadline: random.pick(deadlines))))
+                }
+                return .verbResult(.pairStatus, .done([.pair(randomPair())]))
+            case .compare(let shown):
+                if let drawnAt = shown.drawnAt {
+                    return .theyMatch(at: drawnAt + 1)
+                }
+                return .sasDrawn(shown.sas, at: clock)
+            case .busy(.checking):
+                if let shown = lastShown, random.next(3) > 0 {
+                    return .verbResult(random.pick([.status(.beforeConfirm), .status(.afterConfirm)]),
+                                       .done([.status(status(.sasPending(name: shown.name, deadline: shown.deadline)))]))
+                }
+                return .verbResult(.status(.beforeConfirm), randomOutcome())
+            case .busy(.confirming):
+                return .verbResult(.pairConfirm, .done([.pair(.confirmed(name: random.pick(names)))]))
+            case .busy(.rejecting):
+                return .verbResult(.pairReject, randomOutcome())
+            }
+        }
+        func noise() -> PairingFlow.Input {
+            switch random.next(15) {
+            case 0:
+                return .startConnecting
+            case 1:
+                return .resume(randomStatusPair())
+            case 2:
+                return .submit(random.next(2) == 0 ? code : "not a code")
+            case 3:
+                return .childObject(.pair(randomPair()))
+            case 4:
+                return .childObject(.error(HostError(code: random.pick(["interrupted", "hub_error", "leaked", "held"]), message: "m", kind: nil)))
+            case 5:
+                return .childExited(random.pick([.exited(0), .exited(1), .signaled(15)]))
+            case 6:
+                return .verbResult(random.pick([.pairStatus, .pairConfirm, .pairReject, .status(.beforeConfirm),
+                                                .status(.afterConfirm), .status(.afterChild)]), randomOutcome())
+            case 7:
+                return .sasDrawn(random.pick(sases), at: clock)
+            case 8:
+                return .theyMatch(at: clock + Double(random.next(3)))
+            case 9:
+                return .theyDiffer
+            case 10:
+                return .pollDue
+            case 11:
+                return .deadlinePassed(at: random.pick(deadlines).addingTimeInterval(3))
+            case 12:
+                return .windowClosed
+            case 13:
+                return .stopConnecting
+            default:
+                return .childTimeLimit
+            }
+        }
+
+        for step in 0..<40_000 {
+            clock += 0.2
+            if step % 400 == 0 {
+                // A relaunch: They Differ latches only four pairs and deadlines here, and a walk
+                // that has latched them all can never reach pair confirm again.
+                flow = PairingFlow()
+                matched = nil
+                lastShown = nil
+            }
+            let input = random.next(10) < 6 ? guided() : noise()
+            let stale = random.next(10) == 0
+            let epoch = stale ? flow.epoch - 1 : flow.epoch
+            let screenBefore = flow.screen
+            if case .compare(let shown) = screenBefore {
+                lastShown = shown
+            }
+            let effects = flow.handle(input, epoch: epoch)
+            if effects.contains(.run(.pairStatus)) {
+                switch flow.screen {
+                case .waiting, .compare:
+                    break
+                default:
+                    violations.append("\(step): pair status with the window showing \(flow.screen)")
+                }
+            }
+            if case .theyMatch = input, effects.contains(.run(.status(.beforeConfirm))), case .compare(let shown) = screenBefore {
+                matched = shown
+            }
+            if effects.contains(.run(.pairConfirm)) {
+                confirms += 1
+                var bound = false
+                if case .verbResult(.status(.beforeConfirm), let outcome) = input, !stale,
+                   let found = outcome.status, case .sasPending(let name, let due) = found.pair,
+                   let shown = matched, shown.name == name, shown.deadline == due, shown.drawn, shown.canMatch {
+                    bound = true
+                }
+                if !bound {
+                    violations.append("\(step): pair confirm after \(input)")
+                }
+                matched = nil
+            }
+            for effect in effects {
+                if case .startPair = effect {
+                    if case .submit = input {
+                    } else {
+                        violations.append("\(step): pair started by \(input)")
+                    }
+                }
+            }
+        }
+        report.expect(violations.isEmpty, "over 40000 seeded steps, pair confirm follows only a drawn, matched, still-pending SAS, and pair status only an open window",
+                      violations.prefix(5).joined(separator: "; "))
+        report.expect(confirms >= 200, "the walk reached pair confirm often (\(confirms) times)")
+    }
+
+    // MARK: - checkSupervisor
+
+    static func checkSupervisor(_ fixtures: [String: Fixture], _ report: Report) {
+        report.expect((1...12).map { RunSupervisor.backoff(attempt: $0) } == [2, 4, 8, 16, 32, 64, 128, 256, 300, 300, 300, 300],
+                      "the back-off is 2, 4, 8 … 256, then 300 s")
+
+        let wall0 = Date(timeIntervalSince1970: 1_800_000_000)
+        var sup = RunSupervisor()
+        var clock: TimeInterval = 1000
+        func send(_ input: RunSupervisor.Input, at time: TimeInterval? = nil) -> [RunSupervisor.Effect] {
+            if let time {
+                clock = time
+            }
+            return sup.handle(input, epoch: sup.epoch, now: clock, wall: wall0.addingTimeInterval(clock))
+        }
+        let confirmed = status(.confirmed(name: pairName))
+        let running = status(.confirmed(name: pairName), run: .running(pid: 42))
+        let stoppedRun = status(.confirmed(name: pairName), run: .stopped)
+        func fresh() {
+            sup = RunSupervisor()
+            clock = 1000
+        }
+        func spawned() {
+            fresh()
+            _ = send(.start)
+            _ = send(.statusRead(confirmed))
+        }
+        func finish(_ end: ChildEnd, _ stopped: StopReason?) -> [RunSupervisor.Effect] {
+            if let stopped {
+                _ = send(.object(.stopped(stopped)))
+            }
+            return send(.exited(ChildExit(end: end, stdoutComplete: true)))
+        }
+
+        fresh()
+        report.expect(send(.start) == [.readStatus] && send(.statusRead(confirmed)) == [.spawnRun, .terminationGuard(true)],
+                      "run starts only from a status read that says the pair is confirmed")
+        fresh()
+        _ = send(.start)
+        report.expect(send(.statusRead(status(.sasPending(name: pairName, deadline: sampleTime)))).isEmpty && sup.phase == .idle,
+                      "a pair not confirmed yet starts nothing")
+        fresh()
+        _ = send(.start)
+        report.expect(send(.statusRead(status(.noPair))).isEmpty && sup.phase == .halted(.notConnected(.notPaired)),
+                      "no pair: not connected")
+        fresh()
+        _ = send(.start)
+        _ = send(.statusRead(status(.unreadable(code: "store_error"))))
+        report.expect(sup.phase == .halted(.needsAttention(.storeError)) && Attention.storeError.offersTryAgain,
+                      "a store status cannot read needs attention, with Try Again")
+        fresh()
+        _ = send(.start)
+        _ = send(.statusFailed(.refused(HostError(code: "state_invalid", message: "m", kind: nil))))
+        report.expect(sup.phase == .halted(.needsAttention(.statusFailed(code: "state_invalid")))
+                          && send(.tryAgain) == [.readStatus] && send(.statusRead(confirmed)) == [.spawnRun, .terminationGuard(true)],
+                      "a status that failed starts nothing until Try Again")
+
+        // Crashes: the back-off, and five in ten minutes stop the restarts.
+        spawned()
+        var times: [TimeInterval] = []
+        for _ in 0..<4 {
+            _ = finish(.signaled(9), nil)
+            guard case .backoff(let until) = sup.phase else {
+                report.expect(false, "a crash backs off", "\(sup.phase)")
+                break
+            }
+            times.append(until - clock)
+            report.expect(send(.tick, at: until - 0.5).isEmpty, "nothing before the back-off ends")
+            report.expect(send(.tick, at: until) == [.readStatus], "then status is read")
+            _ = send(.statusRead(confirmed))
+        }
+        report.expect(times == [2, 4, 8, 16], "crashes 1 to 4 back off 2, 4, 8 and 16 s", "\(times)")
+        _ = finish(.signaled(9), nil)
+        report.expect(sup.phase == .halted(.needsAttention(.keepsStopping)), "the fifth crash in ten minutes stops the restarts", "\(sup.phase)")
+        report.expect(send(.tryAgain) == [.readStatus] && sup.crashes.isEmpty && sup.attempt == 0,
+                      "Try Again clears the count, and reads status")
+        spawned()
+        for _ in 0..<5 {
+            _ = finish(.exited(1), .failed(code: "internal"))
+            guard case .backoff = sup.phase else {
+                break
+            }
+            _ = send(.tick, at: clock + 200)
+            _ = send(.statusRead(confirmed))
+        }
+        report.expect(sup.runAlive, "five crashes spread over more than ten minutes do not stop it", "\(sup.phase)")
+        spawned()
+        _ = send(.object(.ready(pair: pairName, hostVersion: "1")))
+        _ = finish(.exited(1), .failed(code: "store_error"))
+        report.expect(sup.crashes.count == 1 && sup.phase == .backoff(until: clock + 2),
+                      "a failed store_error after ready counts as a crash", "\(sup.phase)")
+        _ = send(.tick, at: clock + 2)
+        _ = send(.statusRead(confirmed))
+        _ = finish(.signaled(9), nil)
+        report.expect(sup.phase == .backoff(until: clock + 4), "the next crash backs off longer", "\(sup.phase)")
+        _ = send(.tick, at: clock + 4)
+        _ = send(.statusRead(confirmed))
+        _ = send(.object(.ready(pair: pairName, hostVersion: "1")))
+        _ = send(.tick, at: clock + 601)
+        _ = finish(.signaled(9), nil)
+        report.expect(sup.phase == .backoff(until: clock + 2), "ten minutes ready start the back-off from 2 s again", "\(sup.phase)")
+
+        // Exits (spec/CLI.md §13.3): every run-events fixture, by its exit code and reason.
+        let table: [String: RunSupervisor.Outcome] = [
+            "run-events-already-running": .otherRun,
+            "run-events-downgrade": .needsAttention(.downgrade(lastVersion: "999.0.0")),
+            "run-events-drained": .crash,
+            "run-events-ended": .notConnected(.ended),
+            "run-events-expired": .notConnected(.expired),
+            "run-events-failed": .crash,
+            "run-events-insecure-keyring": .needsAttention(.insecureKeyring),
+            "run-events-leaked": .notConnected(.leaked),
+            "run-events-no-gate": .notConnected(.noGate),
+            "run-events-not-paired": .notConnected(.notPaired),
+            "run-events-pair-unusable": .needsAttention(.pairUnusable),
+            "run-events-requests": .crash,
+            "run-events-several-pairs": .needsAttention(.severalPairs),
+            "run-events-startup-refused": .needsAttention(.startupRefused),
+            "run-events-store-error": .needsAttention(.storeError),
+            "run-json": .needsAttention(.appBug),
+        ]
+        for (name, fixture) in fixtures.sorted(by: { $0.key < $1.key }) where name.hasPrefix("run-events-") || name == "run-json" {
+            let got = RunSupervisor.classify(exit: .exited(fixture.exit), stopped: fixture.stopped, asked: false)
+            report.expect(table[name] != nil && got == table[name], "\(name) (exit \(fixture.exit)) maps to its outcome", "\(got)")
+        }
+        if !fixtures.isEmpty {
+            report.expect(Set(table.keys).isSubset(of: Set(fixtures.keys)), "every outcome in the table has its fixture")
+        }
+        let drained = StopReason.drained(cause: .stdinEnd)
+        report.expect(RunSupervisor.classify(exit: .exited(0), stopped: drained, asked: true) == .drainedAsAsked
+                          && RunSupervisor.classify(exit: .exited(0), stopped: drained, asked: false) == .crash,
+                      "a drain the app asked for is done; one it did not ask for is a crash")
+        report.expect(RunSupervisor.classify(exit: .exited(0), stopped: .drained(cause: .other("moon")), asked: true) == .crash,
+                      "a drain cause this release does not know is a drain it did not ask for")
+        report.expect(RunSupervisor.classify(exit: .exited(24), stopped: .startupRefused, asked: false) == .needsAttention(.startupRefused)
+                          && RunSupervisor.classify(exit: .signaled(24), stopped: .startupRefused, asked: false) == .crash
+                          && RunSupervisor.classify(exit: .signaled(20), stopped: .notPaired, asked: false) == .crash,
+                      "a signal is a crash, whatever its number and whatever run said")
+        report.expect(RunSupervisor.classify(exit: .exited(20), stopped: drained, asked: false) == .crash
+                          && RunSupervisor.classify(exit: .exited(0), stopped: .notPaired, asked: false) == .crash,
+                      "an exit code that disagrees with the reason is a crash")
+        report.expect(RunSupervisor.classify(exit: .exited(0), stopped: nil, asked: false) == .askStatus
+                          && RunSupervisor.classify(exit: .exited(20), stopped: nil, asked: false) == .askStatus,
+                      "no stopped after 0 or 20: status first")
+        report.expect(RunSupervisor.classify(exit: .exited(20), stopped: .other("new_reason"), asked: false) == .notConnected(.other)
+                          && RunSupervisor.classify(exit: .exited(23), stopped: .other("new_reason"), asked: false) == .needsAttention(.storeError)
+                          && RunSupervisor.classify(exit: .exited(7), stopped: nil, asked: false) == .crash
+                          && RunSupervisor.classify(exit: .exited(2), stopped: nil, asked: false) == .needsAttention(.appBug),
+                      "a reason this release does not know goes by the exit code; an exit code it does not know is a crash")
+        report.expect(RunSupervisor.describe(.exited(0), stopped: drained) == "run exited 0 (drained, stdin_end)"
+                          && RunSupervisor.describe(.signaled(9), stopped: nil) == "run ended by signal 9 (no stopped object)",
+                      "each exit has one diagnostic line")
+
+        spawned()
+        report.expect(finish(.exited(0), nil).contains(.readStatus) && sup.phase == .awaitingStatus(.afterExit),
+                      "an exit 0 with no stopped reads status")
+        _ = send(.statusRead(confirmed))
+        report.expect(sup.phase == .backoff(until: clock + 2), "and, still confirmed, it was a crash")
+        spawned()
+        _ = finish(.exited(20), nil)
+        _ = send(.statusRead(status(.noPair)))
+        report.expect(sup.phase == .halted(.notConnected(.notPaired)), "an exit 20 with no stopped and no pair: not connected")
+
+        // Exit 21: wait while a run from before finishes, then start; past 330 s, another copy.
+        spawned()
+        report.expect(finish(.exited(21), .alreadyRunning).contains(.readStatus), "exit 21 reads status")
+        _ = send(.statusRead(running))
+        if case .otherRun(_, let retryAt) = sup.phase {
+            report.expect(sup.health(now: clock, wall: wall0, status: running) == .finishingEarlier,
+                          "the menu says a task from before is finishing")
+            report.expect(send(.tick, at: retryAt) == [.readStatus], "status is read again after the back-off")
+            report.expect(send(.statusRead(stoppedRun)) == [.spawnRun, .terminationGuard(true)], "once it stopped, run starts at once")
+        } else {
+            report.expect(false, "a run still running is waited for", "\(sup.phase)")
+        }
+        spawned()
+        _ = finish(.exited(21), .alreadyRunning)
+        _ = send(.statusRead(running), at: clock + 331)
+        report.expect(sup.phase == .halted(.needsAttention(.anotherCopy)), "past 330 s, another copy is running", "\(sup.phase)")
+
+        // An object of another version: close the lifeline, then needs attention.
+        spawned()
+        report.expect(send(.object(.otherVersion(2))) == [.closeLifeline] && send(.object(.otherVersion(2))).isEmpty,
+                      "an object of another version closes the lifeline, once")
+        _ = finish(.exited(0), drained)
+        report.expect(sup.phase == .halted(.needsAttention(.contract)), "and the exit then needs attention")
+
+        // The quit ladder: panel at 0.5 s, kill at 330 s, SIGKILL 40 s later; logout kills at 20 s.
+        spawned()
+        let quitAt = clock
+        report.expect(send(.quit(.quit)) == [.closeLifeline] && sup.nextWake == quitAt + 0.5, "Quit closes the lifeline")
+        report.expect(send(.tick, at: quitAt + 0.5) == [.showFinishing(logout: false)] && sup.nextWake == quitAt + 330,
+                      "the finishing panel shows after half a second")
+        report.expect(send(.tick, at: quitAt + 329).isEmpty, "nothing more before 330 s")
+        report.expect(send(.tick, at: quitAt + 330) == [.runKill, .finishingStopping] && sup.nextWake == quitAt + 370,
+                      "at 330 s, kill, which pauses")
+        report.expect(send(.tick, at: quitAt + 370) == [.sigkillRun] && sup.nextWake == nil, "40 s later, SIGKILL")
+        let quitExit = send(.exited(ChildExit(end: .signaled(9), stdoutComplete: true)))
+        report.expect(quitExit == [.terminationGuard(false), .log("run ended by signal 9 (no stopped object)"), .hideFinishing, .replyTerminate]
+                          && sup.phase == .halted(.quitDone),
+                      "then the app may quit", "\(quitExit)")
+        spawned()
+        let logoutAt = clock
+        _ = send(.quit(.logout))
+        _ = send(.tick, at: logoutAt + 0.5)
+        report.expect(send(.tick, at: logoutAt + 20) == [.runKill, .finishingStopping], "a logout kills at 20 s")
+        spawned()
+        _ = send(.quit(.quit))
+        _ = send(.tick, at: clock + 0.5)
+        report.expect(send(.stopNow, at: clock + 5) == [.runKill, .finishingStopping] && sup.nextWake == clock + 40,
+                      "Stop now kills at once, and SIGKILL follows 40 s later")
+        spawned()
+        _ = send(.quit(.quit))
+        _ = send(.tick, at: clock + 0.5)
+        _ = send(.object(.stopped(drained)), at: clock + 3)
+        report.expect(sup.nextWake == clock + 10 && send(.tick, at: clock + 10).contains(.sigkillRun),
+                      "a run that said stopped and has not exited 10 s later gets SIGKILL")
+        spawned()
+        _ = send(.quit(.quit))
+        report.expect(send(.quit(.logout)).isEmpty && send(.tick, at: clock + 20).contains(.runKill),
+                      "a logout during a quit takes the logout's bound")
+        spawned()
+        let drainExit = finish(.exited(0), drained)
+        report.expect(drainExit.contains(.readStatus) == false && sup.phase == .backoff(until: clock + 2),
+                      "a drain the app did not ask for is a crash")
+        fresh()
+        report.expect(send(.quit(.quit)) == [.replyTerminate], "a quit with no run lets the app quit at once")
+        spawned()
+        _ = send(.object(.stopped(.notPaired)))
+        report.expect(send(.tick, at: clock + 10) == [.sigkillRun], "a run that said stopped and did not exit is killed")
+        _ = send(.exited(ChildExit(end: .signaled(9), stdoutComplete: true)))
+        report.expect(sup.phase == .halted(.notConnected(.notPaired)), "and its exit goes by what it said")
+
+        // Disconnect drains first, then forgets; a pairing or a Disconnect drops pending restarts.
+        spawned()
+        report.expect(send(.disconnect) == [.closeLifeline], "Disconnect drains run first")
+        report.expect(finish(.exited(0), drained).contains(.runForget) && sup.phase == .idle, "then runs forget")
+        fresh()
+        report.expect(send(.disconnect) == [.runForget], "with no run, it forgets at once")
+        for cancel in [RunSupervisor.Input.pairingStarted, .disconnect] {
+            spawned()
+            _ = finish(.signaled(9), nil)
+            guard case .backoff(let until) = sup.phase else {
+                report.expect(false, "a crash backs off")
+                continue
+            }
+            let oldEpoch = sup.epoch
+            _ = send(cancel)
+            report.expect(send(.tick, at: until + 1).isEmpty
+                              && sup.handle(.statusRead(confirmed), epoch: oldEpoch, now: clock, wall: wall0).isEmpty,
+                          "\(cancel) drops the pending restart, and a status read from before it", "\(sup.phase)")
+        }
+
+        // A status read from an earlier epoch is dropped while a fresh one is awaited, where only
+        // the epoch tells them apart.
+        fresh()
+        _ = send(.start)
+        let firstEpoch = sup.epoch
+        _ = send(.pairingStarted)
+        _ = send(.start)
+        let lateRead = sup.handle(.statusRead(confirmed), epoch: firstEpoch, now: clock, wall: wall0.addingTimeInterval(clock))
+        let lateFail = sup.handle(.statusFailed(.timedOut), epoch: firstEpoch, now: clock, wall: wall0.addingTimeInterval(clock))
+        report.expect(lateRead.isEmpty && lateFail.isEmpty && sup.phase == .awaitingStatus(.start),
+                      "a status read, or one that failed, from an earlier epoch changes nothing", "\(sup.phase)")
+        report.expect(send(.statusRead(confirmed)) == [.spawnRun, .terminationGuard(true)], "and the read asked for now starts run")
+
+        // A quit while a Disconnect drains: the Disconnect is finished, forget first, then the reply.
+        for kind in [RunSupervisor.DrainKind.quit, .logout] {
+            spawned()
+            _ = send(.disconnect)
+            report.expect(send(.quit(kind)).isEmpty, "a \(kind) while Disconnect drains starts nothing more")
+            let after = finish(.exited(0), drained)
+            let forgets = after.firstIndex(of: .runForget)
+            let replies = after.firstIndex(of: .replyTerminate)
+            report.expect(forgets != nil && replies != nil && (forgets ?? 0) < (replies ?? 0) && sup.phase == .halted(.quitDone),
+                          "a \(kind) during a Disconnect still forgets, before the app replies", "\(after)")
+        }
+        spawned()
+        _ = send(.disconnect)
+        _ = send(.quit(.logout))
+        report.expect(send(.tick, at: clock + 20).contains(.runKill), "a logout during a Disconnect takes the logout's bound")
+
+        // A halt that needs the user stays until Try Again: neither a start nor a pairing lifts it.
+        spawned()
+        while sup.phase != .halted(.needsAttention(.keepsStopping)) && sup.crashes.count < 6 {
+            _ = finish(.signaled(9), nil)
+            if case .backoff(let until) = sup.phase {
+                _ = send(.tick, at: until)
+                _ = send(.statusRead(confirmed))
+            }
+        }
+        let keepsStopping = RunSupervisor.Phase.halted(.needsAttention(.keepsStopping))
+        report.expect(sup.phase == keepsStopping && send(.start).isEmpty && sup.phase == keepsStopping
+                          && send(.pairingStarted).isEmpty && sup.phase == keepsStopping,
+                      "five crashes stay halted through a start and a pairing", "\(sup.phase)")
+
+        // The back-off starts from 2 s again after ten minutes of run being ready, not of it running.
+        spawned()
+        let crashBase = clock
+        _ = finish(.signaled(9), nil)
+        _ = send(.tick, at: crashBase + 2)
+        _ = send(.statusRead(confirmed))
+        _ = send(.object(.ready(pair: pairName, hostVersion: "1")), at: crashBase + 102)
+        _ = send(.exited(ChildExit(end: .signaled(9), stdoutComplete: true)), at: crashBase + 652)
+        report.expect(sup.phase == .backoff(until: crashBase + 656),
+                      "a run started 650 s before its crash, but ready for 550 s, keeps its back-off", "\(sup.phase)")
+
+        // host_too_old: once, for the highest version asked.
+        spawned()
+        let told = [("2.0.0", true), ("1.5.0", false), ("2.0.0", false), ("10.0.0", true)].allSatisfy { least, tells in
+            send(.object(.hostTooOld(jobId: "j", minVersion: least, hostVersion: "1.0.0"))).isEmpty != tells
+        }
+        report.expect(told, "Lucille asking for a newer release is said once for the highest version")
+
+        checkHealth(report)
+        checkSupervisorWalk(report)
+    }
+
+    static func checkHealth(_ report: Report) {
+        let wall0 = Date(timeIntervalSince1970: 1_800_000_000)
+        var sup = RunSupervisor()
+        var clock: TimeInterval = 1000
+        // How far the wall clock is ahead of `clock`, as after a sleep.
+        var jump: TimeInterval = 0
+        func send(_ input: RunSupervisor.Input, at time: TimeInterval? = nil) {
+            if let time {
+                clock = time
+            }
+            _ = sup.handle(input, epoch: sup.epoch, now: clock, wall: wall0.addingTimeInterval(clock + jump))
+        }
+        func makeState(
+            confirmed: Bool = true, policy: RunState.Policy = .ok, clock skew: ClockState = .ok(skew: 0),
+            contact: Date? = nil, rooms: [RunRoom] = [RunRoom(name: "room-1", state: .reading)], left: String? = nil,
+            paused: Bool = false
+        ) -> RunState {
+            RunState(pair: pairName, confirmed: confirmed, paused: paused, policy: policy, lastHubContact: contact,
+                     clock: skew, rooms: rooms, offersWaiting: 0, lastLeftBecause: left)
+        }
+        func currentHealth() -> Health {
+            sup.health(now: clock, wall: wall0.addingTimeInterval(clock + jump), status: nil)
+        }
+        func ready() {
+            sup = RunSupervisor()
+            clock = 1000
+            jump = 0
+            send(.start)
+            send(.statusRead(status(.confirmed(name: pairName))))
+            report.expect(currentHealth() == .connecting, "a run not ready yet is connecting")
+            send(.object(.ready(pair: pairName, hostVersion: "1")))
+        }
+        func contact() -> Date {
+            wall0.addingTimeInterval(clock + jump)
+        }
+        ready()
+        send(.object(.state(makeState(contact: contact()))))
+        report.expect(currentHealth() == .connected, "a room reading: connected")
+        send(.object(.state(makeState(contact: contact(), rooms: []))))
+        report.expect(currentHealth() == .connectedWaiting, "no room yet: connected, waiting for Lucille")
+        send(.object(.state(makeState(confirmed: false, contact: contact(), rooms: []))))
+        report.expect(currentHealth() == .connecting, "the gate not open: connecting")
+        send(.object(.state(makeState(contact: contact(), rooms: [], left: "check_3"))))
+        report.expect(currentHealth() == .needsAttention(.leftConnection(because: "check_3")), "a room left on its own needs attention")
+        send(.object(.state(makeState(contact: contact(), rooms: [RunRoom(name: "room-1", state: .readStuck)]))))
+        report.expect(currentHealth() == .needsAttention(.readStuck), "a room that cannot be read needs attention")
+        send(.object(.state(makeState(contact: wall0.addingTimeInterval(clock - 121)))))
+        report.expect(currentHealth() == .needsAttention(.hubUnreachable(since: wall0.addingTimeInterval(clock - 121))),
+                      "no hub contact for over 120 s: out of reach, since then")
+        send(.object(.state(makeState(clock: .skewed(skew: 600), contact: wall0.addingTimeInterval(clock - 121)))))
+        report.expect(currentHealth() == .needsAttention(.clock(skew: 600)), "a skewed clock comes before the hub")
+        send(.object(.state(makeState(policy: .checking, clock: .skewed(skew: 600), contact: contact()))), at: clock + 1)
+        report.expect(currentHealth() == .needsAttention(.clock(skew: 600)), "checking for under 30 s is no problem")
+        send(.tick, at: clock + 31)
+        report.expect(currentHealth() == .needsAttention(.policyStuck), "checking for over 30 s comes before the clock")
+        send(.object(.state(makeState(policy: .invalid, clock: .skewed(skew: 600)))))
+        report.expect(currentHealth() == .needsAttention(.policyInvalid), "an invalid policy comes before the clock")
+        send(.tick, at: clock + 120)
+        report.expect(currentHealth() == .needsAttention(.notResponding), "no state for 120 s: not responding, before the rest")
+        ready()
+        let contacted = contact()
+        send(.object(.state(makeState(contact: contacted))))
+        jump = 3600
+        send(.tick, at: clock + 10)
+        report.expect(currentHealth() == .connected && sup.graceUntil == clock + RunSupervisor.wakeGrace,
+                      "after a wake, a hub contact an hour old by the wall clock is not yet a problem")
+        send(.object(.state(makeState(contact: contacted))), at: clock + RunSupervisor.wakeGrace + 1)
+        report.expect(currentHealth() == .needsAttention(.hubUnreachable(since: contacted)),
+                      "once the grace has passed, it is", "\(currentHealth())")
+        ready()
+        send(.object(.state(makeState(contact: contact(), paused: true))))
+        report.expect(sup.paused(status: status(.confirmed(name: pairName), paused: false)), "while run runs, its state says whether paused")
+        report.expect(RunSupervisor().paused(status: status(.noPair, paused: true)), "otherwise status does")
+        report.expect(RunSupervisor.health(of: nil) == .notConnected(nil)
+                          && RunSupervisor.health(of: status(.noPair)) == .notConnected(nil)
+                          && RunSupervisor.health(of: status(.waiting(name: pairName))) == .connecting
+                          && RunSupervisor.health(of: status(.expired(name: pairName, deadline: sampleTime))) == .notConnected(.expired)
+                          && RunSupervisor.health(of: status(.severalPairs)) == .needsAttention(.halted(.severalPairs))
+                          && RunSupervisor.health(of: status(.unreadable(code: "insecure_keyring"))) == .needsAttention(.halted(.insecureKeyring)),
+                      "with no run, the status line comes from status")
+        for problem in [Problem.notResponding, .policyInvalid, .policyStuck, .clock(skew: nil), .hubUnreachable(since: nil),
+                        .hubUnreachable(since: sampleTime), .readStuck, .leftConnection(because: "check_4"),
+                        .leftConnection(because: "left_before"), .leftConnection(because: "something_new"),
+                        .halted(.keepsStopping), .halted(.anotherCopy), .halted(.downgrade(lastVersion: "9.9.9")),
+                        .halted(.statusFailed(code: nil)), .halted(.statusFailed(code: "state_invalid"))] {
+            report.expect(!ConnectionText.problem(problem).isEmpty
+                              && ConnectionText.reason(.needsAttention(problem)) == ConnectionText.problem(problem),
+                          "\(problem) has words under Needs attention")
+        }
+        for why in [NotConnected.noGate, .leaked, .expired, .ended, .forgotten] {
+            report.expect(ConnectionText.notConnectedReason(why) != nil, "not connected because \(why) has words")
+        }
+    }
+
+    /// Thousands of inputs in a seeded order: run starts only from a confirmed status read it
+    /// asked for, and resume runs only when the user asks.
+    static func checkSupervisorWalk(_ report: Report) {
+        var random = Seeded(state: 9_202_611)
+        var sup = RunSupervisor()
+        var clock: TimeInterval = 1000
+        var violations: [String] = []
+        var spawns = 0
+        let wall0 = Date(timeIntervalSince1970: 1_800_000_000)
+        let pairs: [StatusPair] = [.confirmed(name: pairName), .noPair, .waiting(name: pairName),
+                                   .unreadable(code: "store_error"), .severalPairs]
+        let runs: [StatusRun] = [.running(pid: 1), .stopped, .notSeen(pid: 1), .noRecord]
+        let reasons: [StopReason?] = [nil, .drained(cause: .stdinEnd), .notPaired, .alreadyRunning, .failed(code: "x"),
+                                      .storeError, .forgotten, .other("new")]
+        for step in 0..<40_000 {
+            clock += Double(random.next(40))
+            let input: RunSupervisor.Input
+            switch random.next(13) {
+            case 0:
+                input = .start
+            case 1, 2:
+                input = .statusRead(status(random.pick(pairs), run: random.pick(runs)))
+            case 3:
+                input = .statusFailed(.timedOut)
+            case 4:
+                input = .object(random.pick([.ready(pair: pairName, hostVersion: "1"), .otherVersion(2),
+                                             .state(RunState(pair: pairName, confirmed: true, paused: false, policy: .ok,
+                                                             lastHubContact: nil, clock: .unknown, rooms: [], offersWaiting: 0,
+                                                             lastLeftBecause: nil))]))
+            case 5:
+                if let reason = random.pick(reasons) {
+                    input = .object(.stopped(reason))
+                } else {
+                    input = .tick
+                }
+            case 6:
+                input = .exited(ChildExit(end: random.pick([.exited(0), .exited(1), .exited(20), .exited(21), .signaled(9)]),
+                                          stdoutComplete: true))
+            case 7:
+                input = .tick
+            case 8:
+                input = .quit(random.pick([.quit, .logout]))
+            case 9:
+                input = random.pick([.stopNow, .disconnect, .spawnFailed])
+            case 10:
+                input = .pairingStarted
+            case 11:
+                input = .tryAgain
+            default:
+                input = random.next(4) == 0 ? .userResume : .tick
+            }
+            let stale = random.next(8) == 0
+            let epoch = stale ? sup.epoch - 1 : sup.epoch
+            let phaseBefore = sup.phase
+            let effects = sup.handle(input, epoch: epoch, now: clock, wall: wall0.addingTimeInterval(clock))
+            if effects.contains(.spawnRun) {
+                spawns += 1
+                var fromConfirmed = false
+                if case .statusRead(let found) = input, !stale, case .confirmed = found.pair, case .awaitingStatus = phaseBefore {
+                    fromConfirmed = true
+                }
+                if !fromConfirmed {
+                    violations.append("\(step): run started by \(input) in \(phaseBefore)")
+                }
+            }
+            let resumes = effects.contains(.runResume)
+            var asked = false
+            if case .userResume = input {
+                asked = true
+            }
+            if resumes != asked {
+                violations.append("\(step): resume \(resumes) on \(input)")
+            }
+            if case .pairingStarted = input {
+                switch sup.phase {
+                case .backoff, .otherRun, .awaitingStatus:
+                    violations.append("\(step): a pairing left a restart pending")
+                default:
+                    break
+                }
+            }
+            // The quit after a halt starts over, so the walk keeps going.
+            if case .halted(.quitDone) = sup.phase, random.next(4) == 0 {
+                sup = RunSupervisor()
+            }
+        }
+        report.expect(violations.isEmpty, "over 40000 seeded steps, run starts only from a confirmed status read, and resumes only when asked",
+                      violations.prefix(5).joined(separator: "; "))
+        report.expect(spawns > 0, "the walk started run (\(spawns) times)")
+    }
+
+    // MARK: - checkChild
+
+    /// The child runner against fake children: a shell script in place of the interpreter, which
+    /// prints chosen lines and ends as told. HostCLI starts any executable, with the app's fixed
+    /// arguments first, which the script skips.
+    static func checkChild(home: String, _ report: Report) {
+        let script = home + "/fake-host"
+        let text = """
+            #!/bin/sh
+            # A stand-in for the interpreter: -I -B -m lucille_host --profile NAME come first.
+            shift 6
+            printf '%s\\n' "$@" > "$HOME/argv"
+            case "$1" in
+            replay)
+                /bin/cat "$2"
+                exit "$3"
+                ;;
+            stderr)
+                /bin/cat "$2" >&2
+                exit "$3"
+                ;;
+            signal)
+                /bin/cat "$2"
+                kill -s "$3" $$
+                /bin/sleep 5
+                exit 99
+                ;;
+            lifeline)
+                /bin/cat "$2"
+                /bin/cat > /dev/null
+                /bin/cat "$3"
+                exit 0
+                ;;
+            stdin)
+                /usr/bin/head -n 1 > "$HOME/stdin"
+                /bin/cat "$2"
+                exit "$3"
+                ;;
+            trap)
+                trap '/bin/cat "$3"; exit 1' INT
+                /bin/cat "$2"
+                while :; do /bin/sleep 1; done
+                ;;
+            sleep)
+                exec /bin/sleep "$2"
+                ;;
+            esac
+            exit 98
+
+            """
+        guard FileManager.default.createFile(atPath: script, contents: Data(text.utf8),
+                                             attributes: [.posixPermissions: 0o755])
+        else {
+            report.expect(false, "write the fake child at \(script)")
+            return
+        }
+        func file(_ name: String, _ content: String) -> String {
+            let path = home + "/" + name
+            _ = FileManager.default.createFile(atPath: path, contents: Data(content.utf8))
+            return path
+        }
+        let fake = HostCLI(python: URL(fileURLWithPath: script), home: home)
+        let readyLine = #"{"v":1,"type":"ready","host_version":"1.0.0","pair":"pair-abcdef"}"#
+        let stateLine = #"{"v":1,"type":"state","pair":"pair-abcdef","confirmed":true,"paused":false,"policy":"ok","last_hub_contact":null,"clock":{"state":"unknown"},"rooms":[],"offers_waiting":0,"last_left_because":null}"#
+        let stoppedLine = #"{"v":1,"type":"stopped","reason":"drained","cause":"stdin_end"}"#
+        let heldLine = #"{"v":1,"type":"error","code":"held","message":"this computer already holds a pair"}"#
+        let pairCodeLine = #"{"v":1,"type":"pair_code","name":"pair-abcdef","hub":"h","note":""}"#
+        let interruptedLine = #"{"v":1,"type":"error","code":"interrupted","message":"m"}"#
+
+        func start(_ verb: [String], _ input: HostChild.Input = .lifeline) -> (HostChild, ChildWatch)? {
+            let watch = ChildWatch()
+            let child = HostChild(cli: fake, verb: verb, input: input, deliverOn: watch.queue)
+            watch.watch(child)
+            do {
+                try child.start()
+            } catch {
+                report.expect(false, "start the fake child \(verb)", "\(error)")
+                return nil
+            }
+            return (child, watch)
+        }
+
+        // Replay: the objects in order, then the exit, read before the number.
+        let replay = file("replay.jsonl", [readyLine, stateLine, stoppedLine].joined(separator: "\n") + "\n")
+        if let (_, watch) = start(["replay", replay, "0"]) {
+            let ended = watch.waitForExit(seconds: 10)
+            report.expect(ended == ChildExit(end: .exited(0), stdoutComplete: true)
+                              && watch.objects == [.ready(pair: pairName, hostVersion: "1.0.0"),
+                                                   HostObject.state(RunState(pair: pairName, confirmed: true, paused: false, policy: .ok,
+                                                                             lastHubContact: nil, clock: .unknown, rooms: [],
+                                                                             offersWaiting: 0, lastLeftBecause: nil)),
+                                                   .stopped(.drained(cause: .stdinEnd))],
+                          "a child's objects arrive in order, then its exit", "\(String(describing: ended)) \(watch.objects)")
+        }
+        let already = file("already.jsonl", #"{"v":1,"type":"stopped","reason":"already_running"}"# + "\n")
+        if let (_, watch) = start(["replay", already, "21"]) {
+            report.expect(watch.waitForExit(seconds: 10)?.end == .exited(21), "exit 21 is an exit")
+        }
+
+        // A signal is read before the number: SIGXCPU is 24, as is the exit code of startup_refused.
+        let readyFile = file("ready.jsonl", readyLine + "\n")
+        if let (_, watch) = start(["signal", readyFile, "XCPU"]) {
+            let ended = watch.waitForExit(seconds: 10)
+            report.expect(ended?.end == .signaled(24), "a child ended by SIGXCPU reads as signal 24, not exit 24", "\(String(describing: ended))")
+            if let ended {
+                report.expect(RunSupervisor.classify(exit: ended.end, stopped: .startupRefused, asked: false) == .crash,
+                              "and is a crash")
+            }
+        }
+        let short = fake.run(["signal", readyFile, "XCPU"])
+        report.expect(short.terminationReason == .uncaughtSignal && short.signal == 24 && !short.succeeded
+                          && VerbOutcome(short) == .signaled,
+                      "a short run ended by a signal says so", "\(short)")
+
+        // The lifeline: closing it drains the child while another child, started after it, lives.
+        let stoppedFile = file("stopped.jsonl", stoppedLine + "\n")
+        if let (child, watch) = start(["lifeline", readyFile, stoppedFile]) {
+            report.expect(watch.wait(seconds: 10) { watch.objects.contains(.ready(pair: pairName, hostVersion: "1.0.0")) },
+                          "the fake run is ready")
+            let token = CancelToken()
+            let sleeperDone = DispatchSemaphore(value: 0)
+            DispatchQueue.global().async {
+                _ = fake.run(["sleep", "30"], cancel: token, timeout: 60)
+                sleeperDone.signal()
+            }
+            Thread.sleep(forTimeInterval: 1)
+            report.expect(child.isRunning && child.pid > 0, "the fake run runs")
+            child.closeLifeline()
+            let ended = watch.waitForExit(seconds: 5)
+            report.expect(ended?.end == .exited(0) && watch.objects.last == .stopped(.drained(cause: .stdinEnd)),
+                          "closing the lifeline ends the fake run within 5 s, so no other child holds its write end",
+                          "\(String(describing: ended))")
+            report.expect(sleeperDone.wait(timeout: .now()) == .timedOut, "while the child started after it still runs")
+            token.cancel()
+            report.expect(sleeperDone.wait(timeout: .now() + 20) == .success, "and that child is stopped")
+            report.expect(!child.isRunning, "an ended child is not running")
+            child.interrupt()
+            child.killNow()
+        }
+
+        // The code goes on standard input, never in argv.
+        let code = "swbp1_" + String(repeating: "Kq9_-", count: 60)
+        let heldFile = file("held.jsonl", heldLine + "\n")
+        if let (_, watch) = start(["stdin", heldFile, "1"], .code(code)) {
+            let ended = watch.waitForExit(seconds: 10)
+            let read = FileManager.default.contents(atPath: home + "/stdin").map { String(decoding: $0, as: UTF8.self) }
+            let argv = FileManager.default.contents(atPath: home + "/argv").map { String(decoding: $0, as: UTF8.self) } ?? ""
+            report.expect(read == code + "\n" && !argv.contains(code) && argv.hasPrefix("stdin\n"),
+                          "the code reaches standard input, and is not in argv", "\(String(describing: read)) \(argv)")
+            report.expect(ended?.end == .exited(1) && watch.objects == [.error(HostError(code: "held", message: "this computer already holds a pair", kind: nil))],
+                          "and the refusal is read")
+        }
+        // A child that exits without reading the code cannot break the app (no SIGPIPE).
+        if let (_, watch) = start(["replay", heldFile, "1"], .code(code)) {
+            report.expect(watch.waitForExit(seconds: 10)?.end == .exited(1) && watch.objects.count == 1,
+                          "a child that exits before reading the code is read like any other")
+        }
+        let tooLong = HostChild(cli: fake, verb: ["replay", heldFile, "1"], input: .code(String(repeating: "A", count: 9000)),
+                                deliverOn: DispatchQueue(label: "selftest.unused"))
+        do {
+            try tooLong.start()
+            report.expect(false, "a code longer than the pipe takes is refused")
+        } catch {
+            report.expect((error as? HostChild.StartError) == .inputTooLong && !tooLong.isRunning,
+                          "a code longer than the pipe takes is refused, and nothing starts")
+        }
+        report.expect(fake.run(["replay", heldFile, "1"], input: Data(count: 9000)).status == CLIResult.notStarted,
+                      "so is a short run's input")
+
+        // SIGINT reaches a waiting child, which says interrupted.
+        let pairCodeFile = file("pair-code.jsonl", pairCodeLine + "\n")
+        let interruptedFile = file("interrupted.jsonl", interruptedLine + "\n")
+        if let (child, watch) = start(["trap", pairCodeFile, interruptedFile], .code(code)) {
+            report.expect(watch.wait(seconds: 10) { !watch.objects.isEmpty }, "the waiting child wrote its code's name")
+            child.interrupt()
+            let ended = watch.waitForExit(seconds: 10)
+            report.expect(ended?.end == .exited(1)
+                              && watch.objects.last == .error(HostError(code: "interrupted", message: "m", kind: nil)),
+                          "interrupt() sends SIGINT, which a waiting pair answers with interrupted", "\(String(describing: ended))")
+        }
+
+        // Lines that cannot be used are dropped, with a note each.
+        let hygiene = file(
+            "hygiene.jsonl",
+            String(repeating: "x", count: 20000) + "\nnot json\n" + stateLine + "\n" + readyLine + "\r\n" + #"{"v":1,"type":"ready""#
+        )
+        if let (_, watch) = start(["replay", hygiene, "0"]) {
+            _ = watch.waitForExit(seconds: 10)
+            report.expect(watch.objects.count == 1 && watch.notes.count == 4,
+                          "an over-long line, a line that is not JSON, one ending in CR and a last fragment are dropped, each with a note",
+                          "\(watch.objects.count) objects, notes \(watch.notes)")
+        }
+
+        // Standard error is kept, its last 40 lines.
+        let errLines = (1...50).map { "line \($0)" }.joined(separator: "\n") + "\n"
+        let errFile = file("stderr.txt", errLines)
+        if let (child, watch) = start(["stderr", errFile, "1"]) {
+            _ = watch.waitForExit(seconds: 10)
+            report.expect(child.stderrTail.count == 40 && child.stderrTail.last == "line 50" && watch.stderr.count == 50,
+                          "each line of standard error is delivered, and the last 40 kept", "\(child.stderrTail.count)")
+        }
+
+        // A burst: 5000 objects, then the lifeline closes, and nothing waits on anything.
+        let burst = file("burst.jsonl", String(repeating: stateLine + "\n", count: 5000))
+        if let (child, watch) = start(["lifeline", burst, stoppedFile]) {
+            report.expect(watch.wait(seconds: 30) { watch.objects.count >= 5000 }, "5000 objects arrive", "\(watch.objects.count)")
+            child.closeLifeline()
+            let ended = watch.waitForExit(seconds: 10)
+            report.expect(ended?.end == .exited(0) && watch.objects.count == 5001, "and the child then drains and exits",
+                          "\(String(describing: ended)) \(watch.objects.count)")
+        }
+    }
+
+    // MARK: - The real command line: pairing verbs and run
+
+    /// The pairing verbs and `run` against the real host, unpaired, on a throwaway profile. What
+    /// `status`, `pair status` and `run` say depends on whether macOS's Keychain can be used under
+    /// this HOME, so each takes either answer the host can give, and says which it saw. `pair`
+    /// passes `--store-file`, so it reaches the code without the Keychain.
+    static func checkPairingVerbs(python: URL, home: String, _ report: Report) {
+        let cli = HostCLI(python: python, home: home, profile: "selftest-pair", timeout: 60)
+        report.expect(cli.arguments(for: ["status"]) == ["-I", "-B", "-m", "lucille_host", "--profile", "selftest-pair", "status"],
+                      "the profile is HostCLI's to choose, for tests")
+        let storeCodes: Set<String> = ["insecure_keyring", "store_error"]
+        let state = VerbOutcome(cli.run(["--json", "status"]))
+        if let found = state.status {
+            var known = false
+            switch found.pair {
+            case .noPair:
+                known = true
+            case .unreadable(let code):
+                known = storeCodes.contains(code)
+            default:
+                known = false
+            }
+            report.expect(known && !found.paused, "status --json reads, with no pair or a store it cannot use", "\(found.pair)")
+            print("note: status says the pair is \(found.pair) under this HOME")
+        } else {
+            report.expect(false, "status --json reads", "\(state)")
+        }
+        let pairState = VerbOutcome(cli.run(["--json", "pair", "status"]))
+        switch pairState {
+        case .done(let objects):
+            report.expect(objects == [.pair(.noPair)], "pair status says there is no pair", "\(objects)")
+        case .refused(let error):
+            report.expect(storeCodes.contains(error.code), "pair status refuses only for the store", "\(error)")
+        default:
+            report.expect(false, "pair status answers", "\(pairState)")
+        }
+
+        let queue = DispatchQueue(label: "selftest.pair")
+        for (given, expected) in [("swbp1_" + String(repeating: "A", count: 120), "bad_code"), ("", "no_code")] {
+            let watch = ChildWatch()
+            let child = HostChild(cli: cli, verb: ["pair", "--code-stdin", "--store-file", "--json"], input: .code(given), deliverOn: queue)
+            watch.watch(child)
+            do {
+                try child.start()
+            } catch {
+                report.expect(false, "start pair --code-stdin", "\(error)")
+                continue
+            }
+            let ended = watch.waitForExit(seconds: 60)
+            report.expect(ended?.end == .exited(1) && watch.objects.last.map(isError(expected)) == true,
+                          "the host reads what was written on standard input: \(expected)",
+                          "\(String(describing: ended)) \(watch.objects)")
+        }
+
+        let watch = ChildWatch()
+        let run = HostChild(cli: cli, verb: ["run", "--json-events", "--exit-on-stdin-eof"], input: .lifeline, deliverOn: queue)
+        watch.watch(run)
+        do {
+            try run.start()
+            var ended = watch.waitForExit(seconds: 60)
+            if ended == nil {
+                run.closeLifeline()
+                ended = watch.waitForExit(seconds: 30)
+            }
+            run.closeLifeline()
+            var stopped: StopReason?
+            for object in watch.objects {
+                if case .stopped(let reason) = object {
+                    stopped = reason
+                }
+            }
+            let outcome = ended.map { RunSupervisor.classify(exit: $0.end, stopped: stopped, asked: false) }
+            let expected: [RunSupervisor.Outcome] = [.notConnected(.notPaired), .needsAttention(.insecureKeyring),
+                                                     .needsAttention(.storeError)]
+            report.expect(outcome.map { expected.contains($0) } == true,
+                          "run with the lifeline, unpaired, stops at once and is not restarted",
+                          "\(String(describing: ended)) \(String(describing: stopped)) \(String(describing: outcome))")
+            print("note: run said \(String(describing: stopped)) under this HOME")
+        } catch {
+            report.expect(false, "start run", "\(error)")
+        }
+    }
+
+    static func isError(_ code: String) -> (HostObject) -> Bool {
+        { object in
+            if case .error(let error) = object {
+                return error.code == code
+            }
+            return false
         }
     }
 }

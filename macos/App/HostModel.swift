@@ -1,11 +1,16 @@
 import AppKit
 import Foundation
 
-/// What the menu shows, and what its items do. Every change goes through the host's command line
-/// (`HostCLI`); the app writes none of the host's files.
+/// What the menu shows of the host's own set-up, and what its items do. Every change goes through
+/// the host's command line (`HostCLI`); the app writes none of the host's files. Connecting, the
+/// status line and `run` are `Connection`'s, which also says whether the host is paused.
 @MainActor
 final class HostModel: ObservableObject {
+    static let shared = HostModel()
+
     @Published private(set) var version: String?
+    /// Whether the host is paused, as `Connection` last learned it: from `status`, from `run`'s
+    /// `state`, or from what `pause`, `resume` and `kill` reported.
     @Published private(set) var paused = false
     @Published private(set) var abilities: [Ability] = []
     @Published private(set) var folders: [Folder] = []
@@ -22,7 +27,7 @@ final class HostModel: ObservableObject {
     /// progress window's Cancel button stops the run sooner.
     private let addTimeout: TimeInterval = 600
 
-    init() {
+    private init() {
         cli = HostCLI(python: HostCLI.python(inApp: Bundle.main.bundleURL), home: HostCLI.userHome())
         // Read the state again each time a menu opens, so a change made in Terminal shows too.
         menuObserver = NotificationCenter.default.addObserver(
@@ -35,11 +40,6 @@ final class HostModel: ObservableObject {
 
     var title: String {
         version.map { "\(HostText.appName) \($0)" } ?? HostText.appName
-    }
-
-    /// The app cannot pair yet, so the line always says this Mac is not connected, first.
-    var statusLine: String {
-        paused ? "Not connected to Lucille \u{00B7} Paused" : "Not connected to Lucille"
     }
 
     /// The abilities the menu lists.
@@ -56,12 +56,31 @@ final class HostModel: ObservableObject {
         Task { await reload() }
     }
 
+    /// Pause or resume, and show what the host then says (`controls`).
     func setPaused(_ pause: Bool) {
         perform(
-            [pause ? "pause" : "resume"],
+            ["--json", pause ? "pause" : "resume"],
             waiting: pause ? "Pausing Lucille\u{2026}" : "Resuming Lucille\u{2026}",
             failing: pause ? "pause" : "resume"
-        )
+        ) { result in
+            if let paused = VerbOutcome(result).paused {
+                Connection.shared.controlsChanged(paused: paused)
+            }
+        }
+    }
+
+    /// What `Connection` learned of the pause flag.
+    func applyPaused(_ value: Bool) {
+        guard paused != value else {
+            return
+        }
+        paused = value
+        labelStatusItem()
+        // SwiftUI may put a new icon in the menu bar after `paused` changes; name that one too.
+        Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(500))
+            self.labelStatusItem()
+        }
     }
 
     func setAbility(_ ability: Ability, on: Bool) {
@@ -86,18 +105,26 @@ final class HostModel: ObservableObject {
         guard let problem else {
             return
         }
-        let alert = NSAlert()
-        alert.alertStyle = .warning
-        alert.messageText = problem.message
-        alert.informativeText = problem.detail.map { "Details: \($0)" } ?? ""
-        alert.addButton(withTitle: "OK")
-        NSApp.activate()
-        alert.runModal()
+        Alerts.shared.show {
+            let alert = NSAlert()
+            alert.alertStyle = .warning
+            alert.messageText = problem.message
+            alert.informativeText = problem.detail.map { "Details: \($0)" } ?? ""
+            alert.addButton(withTitle: "OK")
+            return alert
+        }
     }
 
     /// Choose a folder in the standard Open panel, name it, and add it. The whole disk is refused
-    /// outright; the home folder, or a folder that holds it, is confirmed first.
+    /// outright; the home folder, or a folder that holds it, is confirmed first. The panel and the
+    /// questions are modal, so they start in a `RunLoopTurn` of their own.
     func addFolder() {
+        RunLoopTurn.perform { [weak self] in
+            self?.chooseAndAdd()
+        }
+    }
+
+    private func chooseAndAdd() {
         var chosen = chooseFolder()
         while let url = chosen {
             let path = url.path
@@ -145,35 +172,29 @@ final class HostModel: ObservableObject {
         return panel.url
     }
 
+    /// Read the version, the abilities and the folders again. Whether the host is paused is
+    /// `Connection`'s, from `status`, which opens the Keychain and is not read on every menu.
     private func reload() async {
-        let cli = self.cli
-        let results = await Task.detached(priority: .userInitiated) {
-            [cli.run(["--version"]), cli.run(["ops", "list"]), cli.run(["roots", "list"])]
-        }.value
-        let versionRun = results[0]
-        let opsRun = results[1]
-        let rootsRun = results[2]
+        let versionRun = await run(["--version"])
+        let opsRun = await run(["ops", "list"])
+        let rootsRun = await run(["roots", "list"])
+        let results = [versionRun, opsRun, rootsRun]
         version = versionRun.succeeded ? HostText.version(fromVersionOutput: versionRun.stdout) : nil
         abilitiesRead = opsRun.succeeded
         foldersRead = rootsRun.succeeded
         abilities = opsRun.succeeded ? HostText.abilities(fromList: opsRun.stdout) : []
         folders = rootsRun.succeeded ? HostText.folders(fromList: rootsRun.stdout) : []
         problem = results.first(where: { !$0.succeeded }).map { HostText.explain($0) }
-        paused = cli.isPaused
         stuck = HostCLI.stuckRuns > 0
         labelStatusItem()
-        // SwiftUI may put a new icon in the menu bar after `paused` changes; name that one too.
-        Task { @MainActor in
-            try? await Task.sleep(for: .milliseconds(500))
-            self.labelStatusItem()
-        }
     }
 
     /// The menu bar icon. Its accessibility description is the menu bar item's title, which
-    /// VoiceOver reads: the app's name, and whether Lucille is paused.
-    static func icon(paused: Bool) -> NSImage {
+    /// VoiceOver reads: the app's name, and whether Lucille is paused. While something needs the
+    /// user, it is a warning sign, so the user sees it without opening the menu.
+    static func icon(paused: Bool, attention: Bool = false) -> NSImage {
         let name = HostText.statusItemName(paused: paused)
-        let symbol = paused ? "pause.circle" : "desktopcomputer"
+        let symbol = attention ? "exclamationmark.triangle" : (paused ? "pause.circle" : "desktopcomputer")
         let image = NSImage(systemSymbolName: symbol, accessibilityDescription: name) ?? NSImage()
         image.isTemplate = true
         return image
@@ -197,21 +218,25 @@ final class HostModel: ObservableObject {
         }
     }
 
+    /// Run a verb on a thread of its own (`VerbQueue`), never on Swift's shared threads.
     private func run(
         _ verb: [String], cancel: CancelToken? = nil, timeout: TimeInterval? = nil
     ) async -> CLIResult {
-        let cli = self.cli
-        return await Task.detached(priority: .userInitiated) {
-            cli.run(verb, cancel: cancel, timeout: timeout)
-        }.value
+        await VerbQueue.run(cli, verb, on: VerbQueue.other, cancel: cancel, timeout: timeout)
     }
 
     /// Run a verb that changes something, with a window that has a Cancel button if it takes more
-    /// than a moment. A run the user cancels is not a failure, unless one the app gave up on
-    /// still holds things up.
-    private func perform(_ verb: [String], waiting message: String, failing action: String) {
+    /// than a moment, then hand its result to `then`. A run the user cancels is not a failure,
+    /// unless one the app gave up on still holds things up.
+    private func perform(
+        _ verb: [String],
+        waiting message: String,
+        failing action: String,
+        then: @escaping (CLIResult) -> Void = { _ in }
+    ) {
         Task {
             let result = await runWithProgress(verb, message: message)
+            then(result)
             let stuck = HostCLI.stuckRuns > 0
             if !result.succeeded && (!result.cancelled || stuck || result.status == CLIResult.notFinished) {
                 showFailure(HostText.explain(result, earlierRunStuck: stuck), action: action)
@@ -233,12 +258,12 @@ final class HostModel: ObservableObject {
             // still refused outright.
             if HostText.isWholeDisk(path: path) {
                 await reload()
-                if refuseWholeDisk() {
+                if await RunLoopTurn.ask({ self.refuseWholeDisk() }) {
                     addFolder()
                 }
                 return
             }
-            guard confirmBroadFolder(.holdsHome) else {
+            guard await RunLoopTurn.ask({ self.confirmBroadFolder(.holdsHome) }) else {
                 await reload()
                 addFolder()
                 return
@@ -262,7 +287,8 @@ final class HostModel: ObservableObject {
             return
         }
         if result.succeeded {
-            showNote(title: "Folder added", text: HostText.folderAdded(alias: alias))
+            let connected = Connection.shared.holdsPair
+            showNote(title: "Folder added", text: HostText.folderAdded(alias: alias, connected: connected))
             return
         }
         let explanation = HostText.explain(
@@ -349,23 +375,26 @@ final class HostModel: ObservableObject {
         return alert.runModal() == .alertFirstButtonReturn
     }
 
+    /// A note, through `Alerts`, which shows it once no other note is up.
     private func showNote(title: String, text: String) {
-        let alert = NSAlert()
-        alert.messageText = title
-        alert.informativeText = text
-        alert.addButton(withTitle: "OK")
-        NSApp.activate()
-        alert.runModal()
+        Alerts.shared.show {
+            let alert = NSAlert()
+            alert.messageText = title
+            alert.informativeText = text
+            alert.addButton(withTitle: "OK")
+            return alert
+        }
     }
 
     private func showFailure(_ explanation: Explanation, action: String) {
-        let alert = NSAlert()
-        alert.alertStyle = .warning
-        alert.messageText = "\(HostText.appName) could not \(action)."
-        alert.informativeText = explanation.message
-            + (explanation.detail.map { "\n\nDetails: \($0)" } ?? "")
-        alert.addButton(withTitle: "OK")
-        NSApp.activate()
-        alert.runModal()
+        Alerts.shared.show {
+            let alert = NSAlert()
+            alert.alertStyle = .warning
+            alert.messageText = "\(HostText.appName) could not \(action)."
+            alert.informativeText = explanation.message
+                + (explanation.detail.map { "\n\nDetails: \($0)" } ?? "")
+            alert.addButton(withTitle: "OK")
+            return alert
+        }
     }
 }

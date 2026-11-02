@@ -26,7 +26,9 @@ jobs:
   app:
     name: build and check the app (macos-15, arm64)
     runs-on: macos-15
-    timeout-minutes: 45
+    # Each step that could hang has a limit of its own, well inside this one, so a hang fails that
+    # step and the screenshots are still uploaded at the end.
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -49,11 +51,16 @@ jobs:
       - name: "Check: the embedded interpreter runs the host"
         if: ${{ !cancelled() }}
         run: uv run --no-project python macos/check_app.py host
+      - name: "Probe: the host's status, pair and run verbs as the app will run them (printed only)"
+        if: ${{ !cancelled() }}
+        run: uv run --no-project python macos/check_app.py probe
       - name: "Check: the app's Swift code against the real command line"
         if: ${{ !cancelled() }}
+        timeout-minutes: 12
         run: uv run --no-project python macos/check_app.py swift
       - name: "Check: a copy in another folder still works"
         if: ${{ !cancelled() }}
+        timeout-minutes: 14
         run: uv run --no-project python macos/check_app.py relocate
       - name: "Check: libraries, paths, minimum macOS, and what the app imports"
         if: ${{ !cancelled() }}
@@ -66,6 +73,7 @@ jobs:
         run: uv run --no-project python macos/check_app.py launch
       - name: "Check: the menu, driven as a user would"
         if: ${{ !cancelled() }}
+        timeout-minutes: 15
         run: uv run --no-project python macos/check_app.py ui --require-driven
       - name: "Gatekeeper's verdict (printed only; ad hoc builds are refused)"
         if: ${{ !cancelled() }}
@@ -75,6 +83,7 @@ jobs:
         run: uv run --no-project python macos/check_app.py dmg
       - name: "Check: the host's test suite passes on the pruned runtime"
         if: ${{ !cancelled() }}
+        timeout-minutes: 20
         run: |
           copy="$RUNNER_TEMP/pruned/Capsule.app"
           mkdir -p "$RUNNER_TEMP/pruned"
@@ -86,19 +95,32 @@ jobs:
           uv run --no-sync python -c "import sys; print(sys.version); print(sys.base_prefix)"
           uv run --no-sync python -c "import sys; assert 'Capsule.app' in sys.base_prefix"
           uv run --no-sync pytest -q
-      # Only from a build whose every check passed. This copy of the workflow also skips it for a
-      # pull request from a fork, but such a pull request runs the fork's own copy of this file,
-      # which can upload anything: an artifact on that run is the fork's build, whatever its name.
-      # The artifact's name says which event and which commit built it, and the file name ends
+      # Pairs the app's own profile with a local hub and a fake Lucille, then drives the app through
+      # the pairing window, `run`'s supervision, Quit and Disconnect. It needs Switchboard's hub and
+      # the test harness, so it runs in the environment the step above made from the app's own
+      # interpreter. Its own time limit keeps a hang from using up the job's, which would cancel the
+      # screenshot upload below.
+      - name: "Check: pairing and run, end to end, with a local hub and a fake Lucille"
+        if: ${{ !cancelled() }}
+        timeout-minutes: 20
+        env:
+          UV_PROJECT_ENVIRONMENT: ${{ runner.temp }}/pruned-venv
+        run: uv run --no-sync python macos/check_app.py pairing --require-driven
+      # Only from a run started by hand (workflow_dispatch), and only when every check passed: a push
+      # or a pull request uploads no disk image. An artifact of a manual run of this public
+      # repository can still be downloaded by any signed-in GitHub user while it is kept, so it is
+      # kept for 3 days. A pull request from a fork runs the fork's own copy of this file, which can
+      # upload anything: an artifact on that run is the fork's build, whatever its name. The
+      # artifact's name says which event and which commit built it, and the file name ends
       # "-adhoc-macOS-arm64.dmg", so it cannot be taken for a release asset.
       - name: Upload the disk image (ad hoc signed, not a release)
-        if: ${{ success() && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+        if: ${{ success() && github.event_name == 'workflow_dispatch' }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: capsule-adhoc-macos-arm64-dmg-${{ github.event_name }}-${{ github.event.pull_request.head.sha || github.sha }}
           path: build/macos/*-adhoc-macOS-arm64.dmg
           if-no-files-found: error
-          retention-days: 7
+          retention-days: 3
       - name: Upload the screenshots
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
