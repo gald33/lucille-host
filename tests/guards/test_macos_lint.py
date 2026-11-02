@@ -516,6 +516,60 @@ def test_the_tests_strings_are_not_held_to_the_claims() -> None:
     assert swift_rules('let banned = "private"', "macos/Tests/CapsuleKitTests/Words.swift") == set()
 
 
+# The stand-in the self-test writes and starts through HostCLI in place of the interpreter: a
+# script whose first line is the one shell a test may name (decisions/0002 §20).
+STAND_IN = (
+    "func checkChild(home: String) {\n"
+    '    let text = """\n'
+    "        #!/bin/sh\n"
+    "        shift 8\n"
+    '        /bin/cat "$2"\n'
+    '        exit "$3"\n'
+    "\n"
+    '        """\n'
+    '    write(text, to: home + "/fake-host")\n'
+    "}\n"
+)
+
+
+def test_a_test_may_write_a_stand_in_script_for_the_interpreter() -> None:
+    assert macos_lint.TEST_SHEBANG == "#!/bin/sh"
+    assert swift_rules(STAND_IN, TEST) == set()
+    assert swift_rules(STAND_IN, "macos/Tests/CapsuleKitTests/Child.swift") == set()
+    scan = macos_lint.swift_scan(STAND_IN)
+    spans, lines = macos_lint.allowed_test_shebangs(STAND_IN, scan)
+    assert [STAND_IN[start:end] for start, end in spans] == ["#!/bin/sh"]
+    assert lines == {2}
+
+
+@pytest.mark.parametrize(
+    ("rel", "text", "line"),
+    [
+        # The app never names a shell, there or anywhere.
+        (APP, STAND_IN, 3),
+        (PROCESS, HOST_CLI + STAND_IN, 3 + HOST_CLI.count("\n")),
+        # Another shell, or the shebang with arguments, in a test.
+        (TEST, STAND_IN.replace("#!/bin/sh", "#!/bin/bash"), 3),
+        (TEST, STAND_IN.replace("#!/bin/sh", "#!/bin/zsh"), 3),
+        (TEST, STAND_IN.replace("#!/bin/sh", "#!/bin/sh -e"), 3),
+        # The shebang anywhere but alone on the literal's first line.
+        (TEST, STAND_IN.replace("#!/bin/sh\n        shift 8", "shift 8\n        #!/bin/sh"), 4),
+        (TEST, STAND_IN.replace("        #!/bin/sh\n", "        # #!/bin/sh\n"), 3),
+        (TEST, 'let text = "#!/bin/sh\\nexit 0\\n"\n', 1),
+        (TEST, '// starts #!/bin/sh\nlet text = """\n    exit 0\n    """\n', 1),
+        # The shell named again inside the script, or beside it.
+        (TEST, STAND_IN.replace("shift 8", "exec /bin/sh -c x"), 4),
+        (TEST, STAND_IN.replace("shift 8", "/bin/sh"), 4),
+        (TEST, STAND_IN + 'let shell = "/bin/sh"\n', STAND_IN.count("\n") + 1),
+    ],
+)
+def test_a_shell_outside_the_stand_in_shebang_is_reported(rel: str, text: str, line: int) -> None:
+    found = macos_lint.check_swift(text, rel, phrases())
+    shells = [v for v in found if v.rule == "swift-denylist" and "names a shell" in v.message]
+    assert shells, text
+    assert line in {v.line for v in shells}, (line, shells)
+
+
 def test_the_build_and_its_docstrings_are_clean() -> None:
     assert python_rules(BUILD_APP, BUILD) == set()
     # Comments are not string constants.

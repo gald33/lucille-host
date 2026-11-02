@@ -364,9 +364,13 @@ def test_ci_macos_jobs() -> None:
         "dmg",
         "startup",
         "suite",
+        "probe",
+        "pairing",
     }
     # The smoke jobs run the same bytes: they build nothing and repeat no check that depends only
-    # on the bytes (M10, M11, the libraries, the suite).
+    # on the bytes (M10, M11, the libraries, the suite), and they do not run the pairing check,
+    # which needs the suite's copy of the runtime for its harness. The probe prints what the
+    # verbs do on each macOS, and gates nothing.
     assert smoke_checks == [
         "handoff-check",
         "unpack-dmg",
@@ -375,6 +379,7 @@ def test_ci_macos_jobs() -> None:
         "signature",
         "wrapper",
         "host",
+        "probe",
         "environment",
         "readonly",
         "swift",
@@ -438,6 +443,62 @@ def test_ci_macos_jobs() -> None:
                 'else set -- --build-number "$RUN_NUMBER"; fi'
             ) in run
     assert not (build_app.REPO_ROOT / ".github" / "workflows" / "macos-app.yml").exists()
+
+
+def test_the_pairing_check_runs_with_the_suites_copy_of_the_runtime() -> None:
+    doc = _ci()
+    steps = _steps(doc, "macos-app")
+    runs = [str(step.get("run", "")) for step in steps]
+    pairing = [index for index, run in enumerate(runs) if "check_app.py pairing" in run]
+    assert len(pairing) == 1
+    step = steps[pairing[0]]
+    # It needs Switchboard's hub and the test harness, which the suite step installed into its
+    # copy of the runtime (and nothing else on the runner holds), so this script runs with that
+    # copy's interpreter, with the flags the suite runs pytest with; the step refuses to go on
+    # unless exactly one such interpreter is there.
+    suite = [index for index, run in enumerate(runs) if "check_app.py suite" in run]
+    assert len(suite) == 1 and suite[0] < pairing[0]
+    assert '--copy-to "$RUNNER_TEMP/suite"' in runs[suite[0]]
+    assert step["run"].splitlines() == [
+        f'set -- "$RUNNER_TEMP"/suite/*.app/{build_app.RUNTIME_IN_APP}',
+        'if [ "$#" -ne 1 ] || [ ! -x "$1" ]; then echo "the suite step made no copy of the '
+        'runtime: $*"; exit 1; fi',
+        '"$1" -I -B tools/macos/check_app.py pairing --require-driven',
+    ]
+    assert step["if"] == "${{ !cancelled() && steps.build.outcome == 'success' }}"
+    assert "env" not in step
+    # After the ui check, before the last signature check, which then sees whether the pairing
+    # check wrote into the bundle.
+    ui = runs.index("uv run --no-project python tools/macos/check_app.py ui --require-driven")
+    signatures = [index for index, run in enumerate(runs) if "check_app.py signature" in run]
+    assert ui < pairing[0] < signatures[-1]
+    # Its own time limit, well inside the job's: a hang must not use up the job and cancel the
+    # upload of the screenshots that show where it hung, which comes after it.
+    limit = step["timeout-minutes"]
+    job = doc["jobs"]["macos-app"]
+    assert isinstance(limit, int) and 0 < limit <= job["timeout-minutes"] // 2
+    uploads = [
+        index
+        for index, found in enumerate(steps)
+        if str(found.get("uses", "")).startswith("actions/upload-artifact@")
+    ]
+    assert uploads and min(uploads) > pairing[0]
+    # Every step that drives the app or runs a long check has a limit of its own too, in both
+    # jobs, inside the job's.
+    for job_id, names in (
+        ("macos-app", ("swift", "relocate", "ui", "suite", "pairing")),
+        ("macos-smoke", ("swift", "ui")),
+    ):
+        job = doc["jobs"][job_id]
+        for name in names:
+            (found,) = [
+                found
+                for found in _steps(doc, job_id)
+                if re.search(rf"check_app\.py {name}\b", str(found.get("run", "")))
+            ]
+            limit = found.get("timeout-minutes")
+            assert isinstance(limit, int) and 0 < limit < job["timeout-minutes"], (job_id, name)
+    assert not any("check_app.py pairing" in run for run in _runs(doc, "macos-smoke"))
 
 
 def test_ci_steps_take_github_values_only_through_the_environment() -> None:

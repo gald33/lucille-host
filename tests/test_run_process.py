@@ -14,146 +14,30 @@ needed: ``pair --code-stdin --json``, ``pair confirm --json``, then ``run --json
 It is skipped when the suite runs as root, where the host refuses to start, and on no other
 condition: CI runs the suite as an ordinary user.
 
-Every wait has a bound, and every child is killed at the end, whatever happened.
+Every wait has a bound, and every child is killed at the end, whatever happened. The children,
+the hub's configuration and the waits come from tests/_process.py, which the Mac app's
+end-to-end check (``tools/macos/check_app.py pairing``) uses too.
 """
 
 from __future__ import annotations
 
-import contextlib
-import json
 import os
-import re
-import subprocess
 import sys
-import threading
-import time
 from collections.abc import Callable
 from pathlib import Path
-from typing import IO, Any
+from typing import Any
 
 import pytest
 from switchboard.client import Client
-from switchboard.config import ClientConfig
 
 from tests._lucille import FakeLucille
+from tests._process import LISTENING, SWITCHBOARD, Child, LoopbackHub, child_env, until
 from tests._run import body
 from tests.spec._support import cli_objects
 
-# The hub the conformance extra installs, beside the interpreter running the suite.
-SWITCHBOARD = Path(sys.executable).parent / "switchboard"
-# What the hub says on standard error once it listens, with the port it picked.
-LISTENING = re.compile(r"Uvicorn running on (http://127\.0\.0\.1:[0-9]+) ")
-# The longest any one wait may take, in seconds.
-WAIT = 60.0
 # The longest line of an event, newline included (spec/CLI.md section 13.2).
 LINE_MOST = 16384
 WORK_ROOM = "work-1"
-
-
-class Child:
-    """A child process. Its standard output and standard error are each read, a line at a time,
-    on a thread that does nothing else, as spec/CLI.md section 13.1 asks of a shell; its standard
-    input is a pipe whose write end this test holds, or nothing."""
-
-    def __init__(self, argv: list[str], *, env: dict[str, str], cwd: Path, piped: bool) -> None:
-        self.argv = argv
-        self.proc = subprocess.Popen(
-            argv,
-            stdin=subprocess.PIPE if piped else subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            env=env,
-            cwd=cwd,
-        )
-        self.out: list[bytes] = []
-        self.err: list[bytes] = []
-        self._readers = [
-            threading.Thread(target=_read, args=(self.proc.stdout, self.out), daemon=True),
-            threading.Thread(target=_read, args=(self.proc.stderr, self.err), daemon=True),
-        ]
-        for reader in self._readers:
-            reader.start()
-
-    def write(self, data: bytes) -> None:
-        """Write ``data`` on standard input, then close it; a child that already exited is
-        not written to (spec/CLI.md section 7: a shell ignores a broken pipe)."""
-        stdin = self.proc.stdin
-        assert stdin is not None
-        with contextlib.suppress(BrokenPipeError):
-            stdin.write(data)
-        self.close_stdin()
-
-    def close_stdin(self) -> None:
-        """Close this test's write end of standard input, as a shell that quits closes it."""
-        stdin = self.proc.stdin
-        if stdin is not None and not stdin.closed:
-            with contextlib.suppress(BrokenPipeError):
-                stdin.close()
-
-    def wait(self, timeout: float = WAIT) -> int:
-        """Wait for the child to exit, then for both readers to reach the end; its exit code."""
-        try:
-            code = self.proc.wait(timeout)
-        except subprocess.TimeoutExpired:
-            raise AssertionError(f"it did not exit within {timeout} s\n{self.describe()}") from None
-        for reader in self._readers:
-            reader.join(timeout)
-        return code
-
-    def kill(self) -> None:
-        self.close_stdin()
-        if self.proc.poll() is None:
-            self.proc.kill()
-        with contextlib.suppress(subprocess.TimeoutExpired):
-            self.proc.wait(10)
-        for reader in self._readers:
-            reader.join(10)
-
-    @property
-    def text(self) -> str:
-        """Standard output so far, whole lines only."""
-        return "".join(line.decode() for line in list(self.out) if line.endswith(b"\n"))
-
-    @property
-    def stderr(self) -> str:
-        return b"".join(self.err).decode("utf-8", "replace")
-
-    def objects(self, kind: str | None = None, **match: Any) -> list[dict[str, Any]]:
-        """The objects written so far, of type ``kind`` if given, with the fields ``match``."""
-        return [
-            found
-            for found in (json.loads(line) for line in self.text.splitlines())
-            if (kind is None or found["type"] == kind)
-            and all(found.get(key) == value for key, value in match.items())
-        ]
-
-    def describe(self) -> str:
-        """What a failing assertion shows of this child."""
-        return (
-            f"--- {' '.join(self.argv[1:])}: exit {self.proc.poll()}\n"
-            f"stdout:\n{b''.join(self.out[-20:]).decode('utf-8', 'replace')}"
-            f"stderr:\n{b''.join(self.err[-40:]).decode('utf-8', 'replace')}"
-        )
-
-
-def _read(stream: IO[bytes], into: list[bytes]) -> None:
-    for line in iter(stream.readline, b""):
-        into.append(line)
-    stream.close()
-
-
-def _until(condition: Callable[[], Any], what: str, children: list[Child]) -> Any:
-    """Wait until ``condition()`` is true, for at most :data:`WAIT` seconds; returns what it
-    returned. A wait that runs out shows what every child wrote."""
-    deadline = time.monotonic() + WAIT
-    while True:
-        found = condition()
-        if found:
-            return found
-        if time.monotonic() >= deadline:
-            shown = "\n".join(child.describe() for child in children)
-            raise AssertionError(f"{what} never held within {WAIT} s\n{shown}")
-        time.sleep(0.05)
 
 
 def _while_up(child: Child, condition: Callable[[], Any]) -> Callable[[], Any]:
@@ -164,47 +48,6 @@ def _while_up(child: Child, condition: Callable[[], Any]) -> Callable[[], Any]:
         return condition()
 
     return check
-
-
-class LoopbackHub:
-    """What :class:`tests._lucille.FakeLucille` asks of a hub, for the one this test started: a
-    configuration naming it, the library's own client, and the wall clock. Lucille's client keeps
-    nothing on disk (no peer log, no stash)."""
-
-    def __init__(self, url: str) -> None:
-        self.url = url
-
-    @property
-    def now(self) -> float:
-        return time.time()
-
-    def client_class(self) -> type[Client]:
-        return Client
-
-    def client_config(self, *, workspace: str, agent_id: str) -> ClientConfig:
-        return ClientConfig(
-            url=self.url,
-            url_source="explicit",
-            token=None,
-            workspace=workspace,
-            workspace_source="explicit",
-            agent_id=agent_id,
-            peer_log="",
-            stash_db="",
-        )
-
-
-def _child_env(home: Path) -> dict[str, str]:
-    """This process's environment, for a child, with ``home`` as its home: no ``SWITCHBOARD_*``
-    variable, which the host refuses (spec/CLI.md section 13.3, exit 24), and no ``XDG_*`` one,
-    so that the host keeps its files in that home and sets its own runtime folder."""
-    env = {
-        name: value
-        for name, value in os.environ.items()
-        if not name.startswith(("SWITCHBOARD_", "XDG_"))
-    }
-    env["HOME"] = str(home)
-    return env
 
 
 @pytest.mark.skipif(
@@ -221,7 +64,7 @@ def test_run_as_separate_processes(tmp_path: Path, monkeypatch: pytest.MonkeyPat
     monkeypatch.setenv("XDG_RUNTIME_DIR", str(lucille_runtime))
     home = tmp_path / "home"
     home.mkdir(mode=0o700)
-    env = _child_env(home)
+    env = child_env(home)
     host = [sys.executable, "-m", "lucille_host"]
     children: list[Child] = []
 
@@ -253,7 +96,7 @@ def test_run_as_separate_processes(tmp_path: Path, monkeypatch: pytest.MonkeyPat
             found = LISTENING.search(hub.stderr)
             return found.group(1) if found else None
 
-        url = _until(listening, "the hub listening", children)
+        url = until(listening, "the hub listening", children)
         lucille = FakeLucille(LoopbackHub(url), tmp_path / "lucille", connect=Client)
 
         # `pair --code-stdin --json`: the code on standard input, Lucille collecting the answer.
@@ -265,7 +108,7 @@ def test_run_as_separate_processes(tmp_path: Path, monkeypatch: pytest.MonkeyPat
             assert pair.proc.poll() in (None, 0), pair.describe()
             return lucille.collect().state == "paired"
 
-        _until(collected, "Lucille collecting the answer", children)
+        until(collected, "Lucille collecting the answer", children)
         assert pair.wait() == 0, pair.describe()
         said = cli_objects(pair.text)
         assert said[0] == {
@@ -300,7 +143,7 @@ def test_run_as_separate_processes(tmp_path: Path, monkeypatch: pytest.MonkeyPat
 
         # `run`, as a shell starts it.
         run = start([*host, "run", "--json-events", "--exit-on-stdin-eof"])
-        _until(_while_up(run, lambda: len(run.objects()) >= 2), "ready, then state", children)
+        until(_while_up(run, lambda: len(run.objects()) >= 2), "ready, then state", children)
         ready, first = run.objects()[:2]
         assert ready["type"] == "ready" and ready["pair"] == lucille.name
         assert first["type"] == "state" and first["pair"] == lucille.name
@@ -325,18 +168,18 @@ def test_run_as_separate_processes(tmp_path: Path, monkeypatch: pytest.MonkeyPat
                 if room["state"] == "reading"
             ]
 
-        _until(_while_up(run, reading), "a state with the room read", children)
+        until(_while_up(run, reading), "a state with the room read", children)
 
         # A request for an operation the fresh policy enables, answered.
         sent = body()
         job_id = sent["job_id"]
         lucille.request(WORK_ROOM, sent)
-        _until(
+        until(
             _while_up(run, lambda: run.objects("request", job_id=job_id, phase="finished")),
             "the request finished",
             children,
         )
-        reply = _until(
+        reply = until(
             _while_up(run, lambda: lucille.reply(WORK_ROOM, job_id)), "the reply read", children
         )
         answer = reply["body"]

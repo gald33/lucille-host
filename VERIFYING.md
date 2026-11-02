@@ -26,21 +26,25 @@ pull request, and when started by hand. It has no path filter.
 - Job `macos-app`, on GitHub-hosted `macos-15` (Apple silicon): it builds the Mac app, Capsule, and its
   disk image with the Xcode version `tools/macos/pins.toml` names, signed ad hoc, then runs the checks
   [macos/README.md](macos/README.md#what-ci-checks) lists, among them the host's whole test suite on a copy
-  of the app's own Python runtime. It also builds the unsigned app a second time, in another folder, and
-  writes to the job summary whether the two tarballs are the same. That is recorded, not a gate.
+  of the app's own Python runtime, and then, with that copy's interpreter, the end-to-end check of pairing
+  and supervision, against a hub of its own and a stand-in for Lucille. It also builds the unsigned app a
+  second time, in another folder, and writes to the job summary whether the two tarballs are the same.
+  That is recorded, not a gate.
 - Jobs `macos-smoke`, on `macos-26` and on `xcode-27` (GitHub's macOS 27 image): each takes the disk image
   `macos-app` built from the Actions cache, refuses it unless its sha256 is the one `macos-app` gave, and
-  runs the checks that need no build on it. They build nothing.
+  runs the checks that need no build on it. They build nothing, and do not run the pairing check, which
+  needs the suite's copy of the runtime.
 - The workflow's token can only read the repository (`permissions: contents: read`), and the checkout
   keeps no credentials (`persist-credentials: false`). The only secret it uses is the private-string
   list, in the `guards` job; no Mac job uses a secret, and none signs with a certificate.
 - Every run uploads the Mac jobs' logs and screenshots, kept 7 days. The ad-hoc disk image is uploaded
-  only by a run started by hand whose every check passed, kept 3 days. A pull request from a fork runs
-  the fork's copy of the workflow, which can upload anything: an artifact on that run is the fork's build,
-  whatever its name. The artifact's name says which event and which commit built it, and the image's name
-  ends `-adhoc-macOS-arm64.dmg`: it is not a release. Whether a fork's pull request runs workflows before
-  a maintainer approves it is a repository setting ("Approval for running fork pull request workflows from
-  contributors"), which no file here can show.
+  only by a run started by hand whose every check passed, kept 3 days; any signed-in GitHub user can
+  download it meanwhile. A pull request from a fork runs the fork's copy of the workflow, which can upload
+  anything: an artifact on that run is the fork's build, whatever its name. The artifact's name says which
+  event and which commit built it, and the image's name ends `-adhoc-macOS-arm64.dmg`: it is not a
+  release. Whether a fork's pull request runs workflows before a maintainer approves it is a repository
+  setting ("Approval for running fork pull request workflows from contributors"), which no file here can
+  show.
 
 **The five guards.** What the guards are for: they catch accidental and casual violations of the rules
 below, in the forms they list. They are not a sandbox, and they are not a defence against an author who
@@ -284,12 +288,17 @@ enforces.
      every `URL(string:` or `URL.init(string:`, and `UserDefaults` and `SWITCHBOARD_`. It reads the
      Swift three ways: the text with its comments, the code with its comments blanked (so
      `connect/**/(` is still a call), and each string literal decoded (so `https:\u{2F}/` is still a
-     URL);
+     URL). One exception, in tests only: in a Swift file under a `Tests` folder, `#!/bin/sh` alone on
+     the first line of a multi-line string literal, the script the self-test writes and starts through
+     the app's child runner as a stand-in for the interpreter (decisions/0002 §20). Any other shell,
+     and `/bin/sh` anywhere else, is still a failure there;
    - in Swift, on `Process` anywhere but `macos/App/HostCLI.swift`, and if that file does not write
      the bundled runtime's path, `Contents/Resources/runtime/bin/lucille-host-runtime`, and its
      arguments, `["-I", "-B", "-X", "utf8", "-m", "lucille_host"]`, outside its comments;
    - in Swift, on a read of the pasteboard or of what is dropped on the app (writing, for Copy
-     Diagnostics, is allowed), and on an `http://`, `https://`, `ws://`, `wss://` or `ftp://` URL;
+     Diagnostics, is allowed here; until Copy Diagnostics is built, `tests/test_macos_build.py` and
+     `check_app.py links` refuse `NSPasteboard` altogether), and on an `http://`, `https://`, `ws://`,
+     `wss://` or `ftp://` URL;
    - on a phrase [PRIVACY.md](PRIVACY.md) says this project must never claim, as a whole word in any
      case, in the string literals of the app's Swift (decoded; the self-test's are not read), in the
      strings of the functions that render `Info.plist`, in the pins the plist takes the app's name

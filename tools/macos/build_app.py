@@ -109,14 +109,19 @@ MANIFEST_PATH: Final = "Contents/Resources/MANIFEST.json"
 # PYTHON* variable and the user's site folder, -B writes no .pyc into the signed bundle, and
 # -X utf8 makes the text encoding UTF-8 whatever the locale.
 RUNTIME_FLAGS: Final = ("-I", "-B", "-X", "utf8")
+# The profile the app runs every verb on (0002 §9), apart from the ``default`` profile of a
+# command-line install. The Swift app names it too (``HostCLI.appProfile``).
+APP_PROFILE: Final = "mac-app"
 # The wrapper for Terminal users: it finds the bundle from its own real path, so a link to it from
-# a folder on PATH still runs this bundle's interpreter, never one next to the link.
+# a folder on PATH still runs this bundle's interpreter, never one next to the link. It runs the
+# host as the app does, with the app's flags and on the app's profile; a --profile given to it
+# comes later, so it replaces that one.
 WRAPPER_TEXT: Final = (
     "#!/bin/sh\n"
     'self=$(/bin/realpath -- "$0") || exit 1\n'
     'exec "${self%/*}/../runtime/bin/lucille-host-runtime" '
     + " ".join(RUNTIME_FLAGS)
-    + ' -m lucille_host "$@"\n'
+    + f' -m lucille_host --profile {APP_PROFILE} "$@"\n'
 )
 # The distributions of the runtime itself that the build uninstalls, by their RECORD, before any
 # wheel is installed: pip is the runtime's own installer and is in no locked wheel. It is the only

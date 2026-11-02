@@ -27,7 +27,12 @@ comments included; over the code with its comments blanked, so that a comment in
   ``URL.init(string:``, with no exception); a Mach or distributed-objects port (``NSMachPort``,
   ``NSSocketPort``, ``NSMessagePort``, ``CFMessagePort*``, ``NSConnection``), which is a listener
   too; ``UserDefaults``, because the app keeps no settings of its own; and ``SWITCHBOARD_``,
-  because the app passes the host no Switchboard setting.
+  because the app passes the host no Switchboard setting. One exception, for tests only: in a
+  Swift file under a ``Tests`` folder, :data:`TEST_SHEBANG` alone on the first line of a
+  multi-line string literal is not reported (:func:`allowed_test_shebangs`). The self-test
+  writes such a string to a file and starts it through the app's own child runner, as a
+  stand-in for the interpreter; nothing under ``Tests`` is in the app. Every other shell, and
+  ``/bin/sh`` anywhere else in that file or in that script, is still reported.
 - [process] ``Process`` only in :data:`PROCESS_FILE`, that exact path (``ProcessInfo`` is another
   name). That file must start the bundled runtime: outside its comments it holds the string
   literal :data:`RUNTIME_IN_APP` and the array literal of :data:`RUNTIME_ARGV`. A tree that has
@@ -147,6 +152,10 @@ MIN_PHRASES: Final = 15
 # Whole literals that may hold a phrase because they negate it, each with its reason in review.
 ALLOWED_SENTENCES: Final[frozenset[str]] = frozenset()
 RESOURCE_SUFFIXES: Final = (".plist", ".entitlements", ".strings", ".xcstrings")
+# The one shell a test may name, and where (decisions/0002 §20): alone on the first line of a
+# multi-line string literal in a Swift file under a Tests folder, the script the self-test writes
+# and starts through HostCLI as a stand-in for the interpreter.
+TEST_SHEBANG: Final = "#!/bin/sh"
 # What an interpolation, \(...), reads as inside a decoded literal.
 PLACEHOLDER: Final = "\ufffc"
 LINT_FILE: Final = "tools/guards/macos_lint.py"
@@ -556,6 +565,40 @@ def _is_test_swift(rel: str) -> bool:
     return "Tests" in rel.split("/")[:-1]
 
 
+def allowed_test_shebangs(text: str, scan: SwiftScan) -> tuple[list[tuple[int, int]], set[int]]:
+    """Where ``text`` holds :data:`TEST_SHEBANG` as a test may: alone on the first line of a
+    multi-line string literal, whose opening line ends with the three quotes that open it and
+    whose value starts with the shebang and a newline. Returns the shebang's spans in ``text``,
+    and the lines those literals start on in ``scan``. The caller allows them only in a file
+    under a ``Tests`` folder."""
+    starts = [0, *(match.end() for match in re.finditer("\n", text))]
+    spans: list[tuple[int, int]] = []
+    lines: set[int] = set()
+    for line, value in scan.literals:
+        if not value.startswith(TEST_SHEBANG + "\n") or line >= len(starts):
+            continue
+        end = text.find("\n", starts[line - 1])
+        opening = text[starts[line - 1] : len(text) if end < 0 else end]
+        if not opening.rstrip(" \t").endswith('"""'):
+            continue
+        end = text.find("\n", starts[line])
+        raw = text[starts[line] : len(text) if end < 0 else end]
+        if raw.strip(" \t") != TEST_SHEBANG:
+            continue
+        begin = starts[line] + raw.index(TEST_SHEBANG)
+        spans.append((begin, begin + len(TEST_SHEBANG)))
+        lines.add(line)
+    return spans, lines
+
+
+def _blanked(text: str, spans: Iterable[tuple[int, int]]) -> str:
+    """``text`` with each span's characters made spaces, so that every line keeps its number."""
+    chars = list(text)
+    for start, end in spans:
+        chars[start:end] = " " * (end - start)
+    return "".join(chars)
+
+
 def _swift_rule_findings(text: str, rel: str, first_line: int = 1) -> list[Violation]:
     """The regex rules of :data:`SWIFT_RULES`, and [process] outside :data:`PROCESS_FILE`."""
     found: list[Violation] = []
@@ -574,13 +617,20 @@ def check_swift(
     blanked, so that a comment inside a call (``connect/**/(``) does not hide it; and each
     string literal decoded, so that an escape (``https:\\u{2F}/``) does not hide a URL or a
     name."""
-    found = _swift_rule_findings(text, rel)
     try:
         scan = swift_scan(text)
     except SwiftSyntaxError as exc:
+        found = _swift_rule_findings(text, rel)
         return sorted({*found, Violation(rel, exc.line, "parse", f"cannot read: {exc.message}")})
-    found += _swift_rule_findings(scan.code, rel)
+    spans: list[tuple[int, int]] = []
+    shebangs: set[int] = set()
+    if _is_test_swift(rel):
+        spans, shebangs = allowed_test_shebangs(text, scan)
+    found = _swift_rule_findings(_blanked(text, spans), rel)
+    found += _swift_rule_findings(_blanked(scan.code, spans), rel)
     for line, value in scan.literals:
+        if line in shebangs and value.startswith(TEST_SHEBANG + "\n"):
+            value = " " * len(TEST_SHEBANG) + value[len(TEST_SHEBANG) :]
         found += _swift_rule_findings(value, rel, line)
     if rel == PROCESS_FILE:
         if RUNTIME_IN_APP not in {value for _, value in scan.literals}:

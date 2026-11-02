@@ -93,6 +93,8 @@ jobs:
   macos-app:
     name: build and check the app (macos-15, arm64)
     runs-on: macos-15
+    # Each step that could hang has a limit of its own, well inside this one, so a hang fails that
+    # step and the logs and screenshots are still uploaded at the end.
     timeout-minutes: 90
     outputs:
       built: ${{ steps.built.outputs.built }}
@@ -190,6 +192,9 @@ jobs:
       - name: "Check: the bundled host runs with the app's flags"
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         run: uv run --no-project python tools/macos/check_app.py host
+      - name: "Probe: the host's status, pair and run verbs as the app will run them (printed only)"
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: uv run --no-project python tools/macos/check_app.py probe
       - name: "Check: nothing in the environment changes what the runtime loads (M6)"
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         run: uv run --no-project python tools/macos/check_app.py environment
@@ -198,9 +203,11 @@ jobs:
         run: uv run --no-project python tools/macos/check_app.py readonly
       - name: "Check: the app's Swift code against the real command line"
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        timeout-minutes: 12
         run: uv run --no-project python tools/macos/check_app.py swift --selftest build/macos/handoff/selftest
       - name: "Check: a copy in another folder still works"
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        timeout-minutes: 14
         run: uv run --no-project python tools/macos/check_app.py relocate --selftest build/macos/handoff/selftest
       - name: Snapshot ~/Library (M12)
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
@@ -210,6 +217,7 @@ jobs:
         run: uv run --no-project python tools/macos/check_app.py launch
       - name: "Check: the menu, driven as a user would"
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        timeout-minutes: 15
         run: uv run --no-project python tools/macos/check_app.py ui --require-driven
       - name: "Check: ~/Library against the allowlist (M12)"
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
@@ -225,7 +233,20 @@ jobs:
         run: uv run --no-project python tools/macos/check_app.py startup --summary "$GITHUB_STEP_SUMMARY"
       - name: "Check: the host's whole test suite on a copy of the bundled runtime"
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        timeout-minutes: 20
         run: uv run --no-project python tools/macos/check_app.py suite --copy-to "$RUNNER_TEMP/suite"
+      # Pairs the app's own profile with a local hub and a fake Lucille, then drives the app through
+      # the pairing window, run's supervision, Quit and Disconnect. It needs Switchboard's hub and
+      # the test harness, so this script runs with the interpreter of the copy the suite step made,
+      # which holds both (the smoke jobs have no such copy, and do not run it). Its own limit keeps
+      # a hang from using up the job's, which would cancel the upload of the screenshots below.
+      - name: "Check: pairing and run, end to end, with a local hub and a fake Lucille"
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        timeout-minutes: 20
+        run: |
+          set -- "$RUNNER_TEMP"/suite/*.app/Contents/Resources/runtime/bin/lucille-host-runtime
+          if [ "$#" -ne 1 ] || [ ! -x "$1" ]; then echo "the suite step made no copy of the runtime: $*"; exit 1; fi
+          "$1" -I -B tools/macos/check_app.py pairing --require-driven
       - name: "Check: the signature, after every run (M8)"
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         run: uv run --no-project python tools/macos/check_app.py signature
@@ -333,6 +354,9 @@ jobs:
       - name: "Check: the bundled host runs with the app's flags"
         if: ${{ !cancelled() && steps.unpacked.outcome == 'success' }}
         run: uv run --no-project python tools/macos/check_app.py host
+      - name: "Probe: the host's status, pair and run verbs as the app will run them (printed only)"
+        if: ${{ !cancelled() && steps.unpacked.outcome == 'success' }}
+        run: uv run --no-project python tools/macos/check_app.py probe
       - name: "Check: nothing in the environment changes what the runtime loads (M6)"
         if: ${{ !cancelled() && steps.unpacked.outcome == 'success' }}
         run: uv run --no-project python tools/macos/check_app.py environment
@@ -341,6 +365,7 @@ jobs:
         run: uv run --no-project python tools/macos/check_app.py readonly
       - name: "Check: the app's Swift code against the real command line"
         if: ${{ !cancelled() && steps.unpacked.outcome == 'success' }}
+        timeout-minutes: 12
         run: uv run --no-project python tools/macos/check_app.py swift --selftest build/macos/handoff/selftest
       - name: Snapshot ~/Library (M12)
         if: ${{ !cancelled() && steps.unpacked.outcome == 'success' }}
@@ -352,6 +377,7 @@ jobs:
       # failure. Where it can, each driven step is checked as in macos-app, and one that fails fails.
       - name: "Check: the menu, driven as a user would where macOS allows it"
         if: ${{ !cancelled() && steps.unpacked.outcome == 'success' }}
+        timeout-minutes: 15
         run: uv run --no-project python tools/macos/check_app.py ui
       - name: "Check: ~/Library against the allowlist (M12)"
         if: ${{ !cancelled() && steps.unpacked.outcome == 'success' }}

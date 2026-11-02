@@ -2,17 +2,18 @@ import AppKit
 import SwiftUI
 
 /// The menu bar app that runs the host. It has no window and no Dock icon (LSUIElement);
-/// everything it does is in this menu.
+/// everything it does is in this menu, the pairing window and the notes it shows.
 @main
 struct MenuBarApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
-    @StateObject private var model = HostModel()
+    @StateObject private var model = HostModel.shared
+    @StateObject private var connection = Connection.shared
 
     var body: some Scene {
         MenuBarExtra {
-            HostMenu(model: model)
+            HostMenu(model: model, connection: connection)
         } label: {
-            Image(nsImage: HostModel.icon(paused: model.paused))
+            Image(nsImage: HostModel.icon(paused: model.paused, attention: connection.needsAttention))
                 .accessibilityLabel(HostText.statusItemName(paused: model.paused))
         }
     }
@@ -20,12 +21,16 @@ struct MenuBarApp: App {
 
 /// Says what the app is for and where the menu is when the app opens, and when it is opened again
 /// while it runs: it has no window and no Dock icon, so otherwise nothing would seem to happen.
-/// Quit is offered too, for when the menu bar has no room for the icon.
+/// Quit is offered too, for when the menu bar has no room for the icon. Once that note is first
+/// closed, `Connection` says whether the host is paused and picks up a pairing left unfinished, so
+/// nothing it shows at launch races the note.
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
-    private var showing = false
+    private var noteQueued = false
+    private var launchHandled = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        Connection.shared.launch()
         Task { @MainActor in
             try? await Task.sleep(for: .seconds(1))
             self.showWhereTheMenuIs()
@@ -37,30 +42,51 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return false
     }
 
+    /// While a child of the app lives, the app waits for it before it quits; its own Quit asks
+    /// first while `run` runs, and a quit by Apple event never asks (`Connection.shouldTerminate`).
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        Connection.shared.shouldTerminate()
+    }
+
     private func showWhereTheMenuIs() {
-        guard !showing else {
+        guard !noteQueued else {
             return
         }
-        showing = true
-        defer { showing = false }
-        let alert = NSAlert()
-        alert.messageText = HostText.welcomeTitle
-        alert.informativeText = HostText.welcomeText
-        alert.addButton(withTitle: "OK")
-        alert.addButton(withTitle: HostText.quitApp)
-        NSApp.activate()
-        if alert.runModal() == .alertSecondButtonReturn {
-            NSApplication.shared.terminate(nil)
-        }
+        noteQueued = true
+        Alerts.shared.show(key: "welcome", front: true, {
+            let alert = NSAlert()
+            alert.messageText = HostText.welcomeTitle
+            alert.informativeText = HostText.welcomeText
+            alert.addButton(withTitle: "OK")
+            alert.addButton(withTitle: HostText.quitApp)
+            return alert
+        }, done: { [weak self] response in
+            guard let self else {
+                return
+            }
+            self.noteQueued = false
+            if response == .alertSecondButtonReturn {
+                // The quit runs in a turn of its own, once this note's has ended.
+                Connection.shared.quitChosen()
+            }
+            if !self.launchHandled {
+                self.launchHandled = true
+                Connection.shared.afterWelcome()
+            }
+        })
     }
 }
 
 struct HostMenu: View {
     @ObservedObject var model: HostModel
+    @ObservedObject var connection: Connection
 
     var body: some View {
         Text(model.title)
-        Text(model.statusLine)
+        Text(connection.statusLine)
+        if let reason = connection.reason {
+            Button(reason) { connection.showAttention() }
+        }
         if model.paused {
             Text(HostText.pausedNote)
         }
@@ -100,7 +126,11 @@ struct HostMenu: View {
             }
             if model.describeIsOn {
                 Divider()
-                Text("Once connected, Lucille sees which abilities are on and your folders' names")
+                if connection.connected {
+                    Text(ConnectionText.describeConnected)
+                } else {
+                    Text("Once connected, Lucille sees which abilities are on and your folders' names")
+                }
             }
         }
         Divider()
@@ -119,10 +149,24 @@ struct HostMenu: View {
             }
         }
         Divider()
-        Button("Connect to Lucille (coming soon)") {}
-            .disabled(true)
+        if connection.items.connect {
+            Button(ConnectionText.connectItem) { connection.connectChosen() }
+                .disabled(!connection.items.enabled)
+        }
+        if connection.items.finish {
+            Button(ConnectionText.finishItem) { connection.finishChosen() }
+                .disabled(!connection.items.enabled)
+        }
+        if connection.items.stopConnecting {
+            Button(ConnectionText.stopConnectingItem) { connection.stopConnectingChosen() }
+                .disabled(!connection.items.enabled)
+        }
+        if connection.items.disconnect {
+            Button(ConnectionText.disconnectItem) { connection.disconnectChosen() }
+                .disabled(!connection.items.enabled)
+        }
         Divider()
-        Button(HostText.quitApp) { NSApplication.shared.terminate(nil) }
+        Button(HostText.quitApp) { connection.quitChosen() }
             .keyboardShortcut("q")
     }
 }

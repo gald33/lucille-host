@@ -21,6 +21,7 @@ import pytest
 
 import lucille_host
 from lucille_host import policy
+from lucille_host.cli import build_parser
 from lucille_host.ops import OPERATIONS
 from tools.guards import ast_lint, macos_lint
 from tools.macos import build_app, check_app, payload
@@ -296,7 +297,8 @@ def test_runtime_flags_match_the_app() -> None:
     # The lint holds the Swift process file to the runtime path and flags the build uses.
     assert macos_lint.RUNTIME_IN_APP == build_app.RUNTIME_IN_APP
     assert macos_lint.RUNTIME_ARGV == (*build_app.RUNTIME_FLAGS, "-m", "lucille_host")
-    assert f'{" ".join(macos_lint.RUNTIME_ARGV)} "$@"' in build_app.WRAPPER_TEXT
+    wrapper_argv = f'{" ".join(macos_lint.RUNTIME_ARGV)} --profile {build_app.APP_PROFILE} "$@"'
+    assert wrapper_argv in build_app.WRAPPER_TEXT
     # ... and reads the files the build reads.
     assert macos_lint.PLIST_SOURCE == "tools/macos/build_app.py"
     assert (build_app.REPO_ROOT / macos_lint.PLIST_SOURCE).resolve() == (
@@ -323,17 +325,22 @@ def test_the_app_and_its_self_test_run_the_bundled_runtime() -> None:
         f'        app.appendingPathComponent("{build_app.RUNTIME_IN_APP}")\n'
         "    }"
     ) in cli
+    # The runtime's arguments, then the app's own profile (0002 §9), then the verb.
     assert (
         "func arguments(for verb: [String]) -> [String] {\n"
-        f"        {_swift_array(macos_lint.RUNTIME_ARGV)} + verb\n"
+        f'        {_swift_array(macos_lint.RUNTIME_ARGV)} + ["--profile", profile] + verb\n'
         "    }"
     ) in cli
     assert "process.executableURL = python\n" in cli
     assert "process.arguments = arguments(for: verb)\n" in cli
     selftest = (build_app.MACOS_DIR / "Tests" / "SelfTest.swift").read_text(encoding="utf-8")
-    expected = _swift_array((*macos_lint.RUNTIME_ARGV, "pause"))
+    expected = _swift_array((*macos_lint.RUNTIME_ARGV, "--profile", "mac-app", "pause"))
     assert f'cli.arguments(for: ["pause"]) == {expected}' in selftest
     assert "HostCLI(python: HostCLI.python(inApp: app), home: home)" in selftest
+    # The self-test's stand-in for the interpreter skips exactly those arguments before the verb.
+    skipped = len(macos_lint.RUNTIME_ARGV) + 2
+    assert f"\n            shift {skipped}\n" in selftest
+    assert selftest.count("\n            shift ") == 1
     for source in (cli, selftest):
         assert "python/bin/python3" not in source
         assert '["-I", "-B", "-m"' not in source
@@ -530,6 +537,18 @@ def test_the_logic_sources_draw_nothing() -> None:
     for name in check_app.LOGIC_SOURCES:
         text = (build_app.SWIFT_DIR / name).read_text(encoding="utf-8")
         assert _swift_imports(text) <= _LOGIC_IMPORTS, name
+
+
+def test_the_self_test_compiles_every_file_that_draws_nothing() -> None:
+    # The self-test compiles LOGIC_SOURCES and nothing else of the app. Every file that imports
+    # no UI framework is in it, so its code runs on every build; no file that draws is.
+    drawless = {
+        path.name
+        for path in SWIFT_FILES
+        if _swift_imports(path.read_text(encoding="utf-8")) <= _LOGIC_IMPORTS
+    }
+    assert drawless == set(check_app.LOGIC_SOURCES)
+    assert len(check_app.LOGIC_SOURCES) == len(drawless)
 
 
 def test_the_app_imports_only_apples_ui_frameworks() -> None:
@@ -916,6 +935,7 @@ def test_forbidden_imports() -> None:
         "_OBJC_CLASS_$_NSWorkspace",
         "_$s10Foundation10URLSessionC6sharedACvgZ",
         "_$s10Foundation4DataV10contentsOf7optionsAcA3URLV_So20NSDataReadingOptionsVtKcfC",
+        "_OBJC_CLASS_$_NSPasteboard",
     ]
     assert check_app.forbidden_imports(allowed + refused) == refused
 
@@ -1382,10 +1402,19 @@ def test_wrapper_text() -> None:
     assert build_app.WRAPPER_TEXT == (
         "#!/bin/sh\n"
         'self=$(/bin/realpath -- "$0") || exit 1\n'
-        'exec "${self%/*}/../runtime/bin/lucille-host-runtime" -I -B -X utf8 -m lucille_host "$@"\n'
+        'exec "${self%/*}/../runtime/bin/lucille-host-runtime" -I -B -X utf8 -m lucille_host'
+        ' --profile mac-app "$@"\n'
     )
     assert len(build_app.WRAPPER_TEXT.splitlines()) == 3
     assert build_app.RUNTIME_FLAGS == ("-I", "-B", "-X", "utf8")
+    # The wrapper runs on the app's profile, the one the checks and the Swift app use (0002 §9),
+    # and the wrapper check on a Mac sees the host write that profile's pause flag through it.
+    assert build_app.APP_PROFILE == check_app.APP_PROFILE == "mac-app"
+    assert f'static let appProfile = "{build_app.APP_PROFILE}"' in _swift("HostCLI.swift")
+    check = _python_function(_CHECK_APP.read_text(encoding="utf-8"), "check_wrapper")
+    assert '_run_in([str(link), "pause"], home)' in check
+    assert '(hosts / APP_PROFILE / "state" / "paused").is_file()' in check
+    assert 'not (hosts / "default").exists()' in check
     # The wrapper finds the runtime from its own real path, not from dirname "$0".
     assert "dirname" not in build_app.WRAPPER_TEXT
     wrapper_dir = Path(build_app.WRAPPER_IN_APP).parent
@@ -1426,10 +1455,17 @@ def test_the_wrapper_runs_the_bundled_runtime_through_a_link(tmp_path: Path) -> 
         "utf8",
         "-m",
         "lucille_host",
+        "--profile",
+        "mac-app",
         "status",
         "--json",
         "two words",
     ]
+    # A --profile the user gives the wrapper comes after its own, and the host takes the last.
+    parser = build_parser()
+    assert parser.parse_args(["--profile", "mac-app", "status"]).profile == "mac-app"
+    given = parser.parse_args(["--profile", "mac-app", "--profile", "default", "status"])
+    assert given.profile == "default"
 
 
 def test_toolchain_problems() -> None:
@@ -1473,3 +1509,753 @@ def test_compare_reports_same_different_and_failed(
     assert "**DIFFERENT**" in report and f"- `{name}.app/Contents/Info.plist`" in report
     assert build_app.main(["compare", str(tmp_path / "a"), str(tmp_path / "missing")]) == 0
     assert "**FAILED**" in capsys.readouterr().out
+
+
+# The pairing screen and run supervision: the Foundation-only files they are built from, and the
+# rules those keep. The self-test (macos/Tests/SelfTest.swift) checks their behaviour on a Mac.
+SPEC_CLI = build_app.REPO_ROOT / "spec" / "CLI.md"
+NEW_LOGIC = ("HostJSON.swift", "Pairing.swift", "Supervisor.swift", "ConnectionText.swift")
+
+
+def _swift(name: str) -> str:
+    return (build_app.SWIFT_DIR / name).read_text(encoding="utf-8")
+
+
+def test_the_new_logic_files_are_compiled_by_the_self_test_and_draw_nothing() -> None:
+    # The self-test compiles LOGIC_SOURCES only, and test_the_logic_sources_draw_nothing holds
+    # each to Foundation, Darwin and Glibc; so these files can move into a package unchanged.
+    assert set(NEW_LOGIC) <= set(check_app.LOGIC_SOURCES)
+    for name in NEW_LOGIC:
+        assert _swift_imports(_swift(name)) == {"Foundation"}, name
+    # The self-test reads the host's golden fixtures, which check_app gives it.
+    assert len(list(check_app.CLI_FIXTURES.glob("*.json"))) >= 50
+    source = (build_app.TOOLS_DIR / "check_app.py").read_text(encoding="utf-8")
+    assert '"--fixtures",\n                str(CLI_FIXTURES),' in source
+
+
+def test_the_app_runs_every_verb_on_its_own_profile() -> None:
+    cli = _swift("HostCLI.swift")
+    assert 'static let appProfile = "mac-app"' in cli
+    assert (
+        "init(python: URL, home: String, profile: String = HostCLI.appProfile, "
+        "timeout: TimeInterval = 30)"
+    ) in cli
+    assert f'{_swift_array(macos_lint.RUNTIME_ARGV)} + ["--profile", profile] + verb' in cli
+    # The app itself never chooses another profile: only the self-test does. No file but
+    # HostCLI.swift names a profile argument at all, however the call around it is spelled.
+    for path in SWIFT_FILES:
+        text = path.read_text(encoding="utf-8")
+        assert not re.search(r"HostCLI\([^)]*\bprofile:", text), path.name
+        if path.name != "HostCLI.swift":
+            assert not re.search(r"\bprofile\s*:", text), path.name
+            assert '"--profile"' not in text, path.name
+
+
+def test_the_app_environment_has_an_empty_path() -> None:
+    cli = _swift("HostCLI.swift")
+    assert '"PATH": "/var/empty"' in cli
+    assert cli.count('"PATH"') == 1
+    for path in SWIFT_FILES:
+        assert "/usr/bin:/bin" not in path.read_text(encoding="utf-8"), path.name
+
+
+def _function_body(text: str, signature: str) -> str:
+    start = text.index(signature)
+    end = text.index("\n    }\n", start)
+    return text[start:end]
+
+
+def test_the_child_runner_guards_its_pipes() -> None:
+    cli = _swift("HostCLI.swift")
+    # One place starts every child, under one lock, and only it calls run().
+    assert cli.count("try process.run()") == 1
+    assert cli.count("HostCLI.spawnLock.lock()") == 1
+    spawn = _function_body(cli, "    func spawn(\n")
+    assert spawn.index("HostCLI.spawnLock.lock()") < spawn.index("let process = Process()")
+    assert "try process.run()" in spawn
+    # The ends the app keeps are close-on-exec, the lifeline's included, before anything starts.
+    assert "HostCLI.closeOnExec(inPipe.fileHandleForWriting.fileDescriptor)" in spawn
+    assert "_ = fcntl(fd, F_SETFD, flags | FD_CLOEXEC)" in cli
+    # A short input is written into the pipe before the child starts, non-blocking, and the app's
+    # end closed after: no write can meet a broken pipe or wait forever.
+    assert spawn.index("writeWithoutWaiting(data") < spawn.index("try process.run()")
+    assert spawn.index("try process.run()") < spawn.index("try? written?.close()")
+    assert "fcntl(fd, F_SETFL, flags | O_NONBLOCK)" in cli
+    assert "static let maxInputBytes = 8193" in cli
+    # The handlers and both readers exist before the child does.
+    for before in (
+        "process.terminationHandler = {",
+        "PipeDrain.start(outPipe",
+        "PipeDrain.start(errPipe",
+    ):
+        assert spawn.index(before) < spawn.index("try process.run()"), before
+    # read(2) and write(2), never the FileHandle calls that raise an exception Swift cannot catch,
+    # or that split lines on more than a newline.
+    assert "read(fd, raw.baseAddress, raw.count)" in cli
+    for banned in (
+        "availableData",
+        "readDataToEndOfFile",
+        "readabilityHandler",
+        ".write(",
+        "FileHandle.write",
+        ".bytes.lines",
+    ):
+        assert banned not in cli, banned
+    # No signal reaches a child that has ended, whose pid may be another process's now.
+    lines = cli.splitlines()
+    kills = [number for number, line in enumerate(lines) if re.search(r"\bkill\(", line)]
+    assert kills
+    for number in kills:
+        assert any("isRunning" in line for line in lines[max(0, number - 4) : number]), number
+    # The lifeline is closed, never written to.
+    assert "case lifeline" in cli and "func closeLifeline()" in cli
+
+
+def _matches(patterns: tuple[str, ...], text: str) -> list[str]:
+    """The patterns that match ``text``."""
+    return [pattern for pattern in patterns if re.search(pattern, text)]
+
+
+# Ways Swift code could read the pasteboard. The user pastes into a field, through the field; the
+# app never reads the pasteboard itself (macOS 15.4 and later may ask the user about that).
+_READS_THE_PASTEBOARD = (
+    r"NSPasteboard",
+    r"UIPasteboard",
+    r"generalPasteboard",
+    r"pasteboardItems",
+    r"\breadObjects\s*\(",
+    r"\bstring\s*\(\s*forType\s*:",
+    r"\bdata\s*\(\s*forType\s*:",
+    r"\bpropertyList\s*\(\s*forType\s*:",
+)
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "let pasteboard = NSPasteboard.general",
+        "let text = NSPasteboard.general.string(forType: .string)",
+        "pasteboard.readObjects(forClasses: [NSString.self], options: nil)",
+        "let text = pasteboard.string(forType: .string)",
+        "let raw = item.data(forType: .png)",
+        "let items = pasteboard.pasteboardItems",
+    ],
+)
+def test_the_pasteboard_scan_sees_each_way(line: str) -> None:
+    assert _matches(_READS_THE_PASTEBOARD, line), line
+
+
+def test_the_app_never_reads_the_pasteboard() -> None:
+    # Forwarding Command-V to the field is the user's own paste, and passes.
+    assert not _matches(
+        _READS_THE_PASTEBOARD, "NSApp.sendAction(#selector(NSText.paste(_:)), to: nil, from: self)"
+    )
+    for path in SWIFT_FILES:
+        assert not _matches(_READS_THE_PASTEBOARD, path.read_text(encoding="utf-8")), path.name
+    assert check_app.forbidden_imports(["_OBJC_CLASS_$_NSPasteboard"]) == [
+        "_OBJC_CLASS_$_NSPasteboard"
+    ]
+
+
+_NAMES_A_TEST_HUB_OR_FILE_STORE = (r"--hub\b", r"--store-file\b")
+
+
+@pytest.mark.parametrize(
+    "line", ['["pair", "--code-stdin", "--hub", hub, "--json"]', 'verb.append("--store-file")']
+)
+def test_the_test_hub_scan_sees_each_way(line: str) -> None:
+    assert _matches(_NAMES_A_TEST_HUB_OR_FILE_STORE, line), line
+
+
+def test_the_app_never_names_a_test_hub_or_a_file_store() -> None:
+    # The host takes a loopback hub only when a command's own --hub names it, and --store-file
+    # keeps the pair outside the Keychain: both are for tests, which the self-test may use, and the
+    # app never does (decisions/0001, spec/CLI.md section 7).
+    for path in SWIFT_FILES:
+        text = path.read_text(encoding="utf-8")
+        assert not _matches(_NAMES_A_TEST_HUB_OR_FILE_STORE, text), path.name
+
+
+def _swift_strings(text: str) -> list[str]:
+    """Every string literal in a Swift source: multi-line ones first, then raw and plain ones."""
+    found: list[str] = []
+    rest = text
+    for block in re.findall(r'"""\n(.*?)\n\s*"""', text, re.DOTALL):
+        found.append(block)
+    rest = re.sub(r'"""\n.*?\n\s*"""', "", rest, flags=re.DOTALL)
+    found += re.findall(r'#"(.*?)"#', rest)
+    rest = re.sub(r'#".*?"#', "", rest)
+    found += re.findall(r'"((?:[^"\\\n]|\\.)*)"', rest)
+    return found
+
+
+def test_the_swift_string_scan_sees_each_form() -> None:
+    text = 'let a = "one \\"two\\""\nlet b = #"three "four""#\nlet c = """\n    five\n    """\n'
+    assert _swift_strings(text) == ["    five", 'three "four"', 'one \\"two\\"']
+
+
+def test_every_word_the_app_says_makes_no_claim_privacy_forbids() -> None:
+    from tests.test_catalog import _must_never_claim
+
+    phrases = _must_never_claim()
+    for name in ("ConnectionText.swift", "HostText.swift"):
+        assert len(_swift_strings(_swift(name))) > 50, name
+    # Every file, not only the two that hold most of the words: the menu's own lines and the
+    # folder notes are written where they are shown.
+    for path in SWIFT_FILES:
+        name = path.name
+        for words in _swift_strings(path.read_text(encoding="utf-8")):
+            for phrase in phrases:
+                found = re.search(rf"(?<![\w-]){re.escape(phrase)}(?![\w-])", words, re.IGNORECASE)
+                assert found is None, (name, phrase, words)
+
+
+def _spec_verb_codes() -> dict[str, set[str]]:
+    """The error codes each verb the app runs can give: its row in spec/CLI.md section 7's table,
+    and the codes every verb can give, from the sentence before it."""
+    text = SPEC_CLI.read_text(encoding="utf-8")
+    section = text.split("## 7. Verbs", 1)[1].split("\n## ", 1)[0]
+    sentence = re.search(r"one of the codes every verb can give: (.*?)\.\n", section, re.DOTALL)
+    assert sentence is not None
+    every = set(re.findall(r"`([a-z_]+)`", sentence.group(1)))
+    assert every == {"usage", "internal", "bad_profile", "unsupported_platform", "os_error"}
+    rows: dict[str, set[str]] = {}
+    for line in section.splitlines():
+        if not line.startswith("| `"):
+            continue
+        cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
+        verb = re.match(r"`([^`]+)`", cells[0])
+        assert verb is not None, line
+        rows[verb.group(1)] = set(re.findall(r"`([a-z_]+)`", cells[-1])) | every
+    wanted = {
+        "status",
+        "forget",
+        "pair --code-stdin [--hub URL] [--store-file]",
+        "pair status",
+        "pair confirm",
+        "pair reject",
+        "run --json-events [--exit-on-stdin-eof] [--allow-downgrade]",
+    }
+    assert wanted <= set(rows), sorted(rows)
+    return {verb: rows[verb] for verb in wanted}
+
+
+def _spec_error_codes() -> set[str]:
+    text = SPEC_CLI.read_text(encoding="utf-8")
+    section = text.split("## 10. Error codes", 1)[1].split("\n## ", 1)[0]
+    return set(re.findall(r"^\| `([a-z_]+)` \|", section, re.MULTILINE))
+
+
+def test_every_error_code_the_app_meets_has_words() -> None:
+    words = _swift("ConnectionText.swift")
+    refusals = _swift_string_table(words, "refusals")
+    app_bugs = _swift_string_set(words, "appBugCodes")
+    redraw = _swift_string_set(_swift("Pairing.swift"), "redrawCodes")
+    assert redraw == {"waiting", "sas_ready"}
+    handled = set(refusals) | app_bugs | redraw
+    codes = _spec_verb_codes()
+    met = set().union(*codes.values())
+    assert met - handled == set(), sorted(met - handled)
+    # Each code has one meaning here, and none is a word the contract does not have.
+    assert not set(refusals) & app_bugs and not (set(refusals) | app_bugs) & redraw
+    assert handled <= _spec_error_codes(), sorted(handled - _spec_error_codes())
+    # The code window comes back only for refusals that have words.
+    again = _swift_string_set(_swift("Pairing.swift"), "newCodeCodes")
+    assert again <= set(refusals)
+    # A code expiring, the time to compare running out, and a leaked code read apart.
+    after = re.search(r'static let expiredAfterSAS = "([^"]+)"', words)
+    assert after is not None
+    assert len({refusals["expired"], after.group(1), refusals["leaked"]}) == 3
+    # held covers a pair still being set up, not only a connected one.
+    assert "or one being set up" in refusals["held"]
+    assert refusals["busy"] == "An earlier attempt is still finishing. Try again in a minute."
+
+
+def test_every_stopped_reason_is_read() -> None:
+    # Every reason run's stopped object can carry (spec/CLI.md section 6) is a case the app reads,
+    # and has the exit code the contract gives it.
+    text = SPEC_CLI.read_text(encoding="utf-8")
+    table = text.split("### `stopped`: why `run` ended", 1)[1].split("\n### ", 1)[0]
+    reasons: dict[str, int] = {}
+    for line in table.splitlines():
+        cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
+        if len(cells) == 3 and cells[2].isdigit():
+            for reason in re.findall(r"`([a-z_]+)`", cells[0]):
+                reasons[reason] = int(cells[2])
+    assert len(reasons) == 15, reasons
+    json = _swift("HostJSON.swift")
+    reader = _function_body(json, "    private static func readStopReason(")
+    exit_codes = _function_body(json, "    var exitCode: Int32? {")
+    for reason in reasons:
+        assert f'case "{reason}":' in reader, reason
+    by_code = re.findall(r"case (\.[^:]+):\n\s+return (\d+)", exit_codes)
+    assert {int(code) for _, code in by_code} == set(reasons.values())
+
+
+def test_the_app_stops_run_with_the_ladder_the_design_gives() -> None:
+    supervisor = _swift("Supervisor.swift")
+    for pin in (
+        "static let crashWindow: TimeInterval = 600",
+        "static let crashLimit = 5",
+        "static let quitBound: TimeInterval = 330",
+        "static let logoutBound: TimeInterval = 20",
+        "static let afterKill: TimeInterval = 40",
+        "static let afterStopped: TimeInterval = 10",
+        "static let stateSilence: TimeInterval = 120",
+        "static let hubStale: TimeInterval = 120",
+    ):
+        assert pin in supervisor, pin
+    # run is started in one place, which only a confirmed status read reaches. These count text,
+    # so a moved start gets past them: they are a quick check, and the self-test's walk of the
+    # supervisor is the guard.
+    assert supervisor.count("spawn(now: now)") == 2
+    reader = _function_body(supervisor, "    private mutating func statusRead(")
+    assert reader.count("return spawn(now: now)") == 2
+    assert reader.index("case .confirmed:") < reader.index("spawn(now: now)")
+    assert supervisor.count("[.spawnRun, .terminationGuard(true)]") == 1
+    # resume runs only when the user asks.
+    assert supervisor.count("[.runResume]") == 1
+    assert "case .userResume:\n            return [.runResume]" in supervisor
+
+
+def test_the_compare_page_keeps_its_safety_properties() -> None:
+    # Neither panel hides when the user looks at Lucille's page in another app.
+    for name in ("PairingPanel.swift", "ProgressPanel.swift"):
+        assert "panel.hidesOnDeactivate = false" in _swift(name), name
+    panel = _swift("PairingPanel.swift")
+    # The compare page gives neither button a key equivalent, and starts with nothing focused, so
+    # Return and Space answer nothing; Connect, on the code page, is the only default button.
+    compare = _swift_function(panel, "    private func comparePage(")
+    assert "keyEquivalent" not in compare
+    assert panel.count('keyEquivalent = "\\r"') == 1
+    assert 'connect.keyEquivalent = "\\r"' in panel
+    shown = _swift_function(panel, "    func showCompare(")
+    assert "panel.initialFirstResponder = nil" in shown
+    assert "_ = panel.makeFirstResponder(nil)" in shown
+    # No timer in the default mode, which stops while a note, a menu or the wait to quit runs.
+    for path in SWIFT_FILES:
+        text = path.read_text(encoding="utf-8")
+        assert not re.search(r"\bTimer\s*\(|scheduledTimer", text), path.name
+
+
+def test_every_close_of_the_pairing_window_reaches_the_flow() -> None:
+    # On macOS 15 the title bar's close button, pressed through accessibility, closed the window
+    # without going through GatePanel's performClose(_:), and the flow went on taking the compare
+    # page for open, so the menu never offered Finish Connecting… again. The panel is the window's
+    # delegate: before a user's close it tells the flow and answers no, the flow hiding the window
+    # once it agrees; a close that asked nobody still tells the flow.
+    panel = _swift("PairingPanel.swift")
+    assert "final class PairingPanel: NSObject, NSWindowDelegate {" in panel
+    assert "panel.delegate = self" in _swift_function(panel, "    override init() {")
+    should = _swift_function(panel, "    func windowShouldClose(_ sender: NSWindow) -> Bool {")
+    assert should.count("onClose?()") == 1
+    assert should.index("onClose?()") < should.index("return false")
+    assert "return true" not in should
+    closing = _swift_function(panel, "    func windowWillClose(_ notification: Notification) {")
+    assert closing.index("guard page != .none else {") < closing.index("onClose?()")
+    # performClose(_:) still asks the flow and never closes the window itself.
+    gate = _swift_function(panel, "    override func performClose(_ sender: Any?) {")
+    assert "onCloseAsked?()" in gate and "super" not in gate
+    # Nothing closes the panel but AppKit on the user's behalf: the flow's hide() orders it out.
+    assert "panel.close()" not in panel
+    assert "panel.orderOut(nil)" in _swift_function(panel, "    func hide() {")
+
+
+def test_modal_loops_never_start_inside_a_main_queue_callout() -> None:
+    # A modal loop started inside a main-queue callout (a dispatch source's handler, a main-queue
+    # block, a main-actor task) keeps the main queue from being served until it ends: no timer,
+    # no task and no child's event, the reply to quit included. So every note, question, Open panel
+    # and quit starts in a RunLoopTurn, and SIGTERM is not handled on the main queue at all. These
+    # read the source; the pairing check's steps with a note up are what show it on a Mac.
+    connection = _swift("Connection.swift")
+    model = _swift("HostModel.swift")
+    assert "RunLoop.main.perform(inModes: [.common]) {" in connection
+    assert "RunLoopTurn.perform {" in _swift_function(connection, "    private func pumpSoon(")
+    quit = _swift_function(connection, "    func quitChosen() {")
+    assert quit.index("RunLoopTurn.perform") < quit.index("terminate(nil)")
+    assert (
+        sum(path.read_text(encoding="utf-8").count("terminate(nil)") for path in SWIFT_FILES) == 1
+    )
+    for chosen in ("    func disconnectChosen() {", "    func stopConnectingChosen() {"):
+        assert "RunLoopTurn.perform" in _swift_function(connection, chosen), chosen
+    assert "RunLoopTurn.perform" in _swift_function(model, "    func addFolder() {")
+    adds = _swift_function(model, "    private func addRoot(")
+    assert "await RunLoopTurn.ask({ self.refuseWholeDisk() })" in adds
+    assert "await RunLoopTurn.ask({ self.confirmBroadFolder(.holdsHome) })" in adds
+    # The modal loops there are, each reached only from one of those turns (or from AppKit's own
+    # applicationShouldTerminate, for the quit question).
+    assert connection.count("runModal()") == 4
+    assert model.count("runModal()") == 4
+    for path in SWIFT_FILES:
+        if path.name not in ("Connection.swift", "HostModel.swift"):
+            assert "runModal()" not in path.read_text(encoding="utf-8"), path.name
+    reply = _swift_function(connection, "    private func replyIfDone() {")
+    assert "RunLoopTurn.perform" in reply and "DispatchQueue.main.async" not in reply
+    # SIGTERM: a source on a queue of its own, which stops the children and exits.
+    assert "makeSignalSource(signal: SIGTERM, queue: queue)" in connection
+    assert "makeSignalSource(signal: SIGTERM, queue: .main)" not in connection
+    assert 'private static let queue = DispatchQueue(label: "signals"' in connection
+
+
+# --- The macOS checks of pairing and run: check_app.py ui and pairing --------------------------
+
+
+def _python_function(source: str, name: str) -> str:
+    """The source of the function ``name`` in ``source``."""
+    import ast
+
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.FunctionDef) and node.name == name:
+            found = ast.get_source_segment(source, node)
+            assert found is not None, name
+            return found
+    raise AssertionError(f"no function {name}")
+
+
+_CHECK_APP = build_app.TOOLS_DIR / "check_app.py"
+
+
+def test_the_checks_use_the_apps_own_profile() -> None:
+    # The ui and pairing checks read and change the host's state on the profile the app runs
+    # every verb on, as the app does.
+    assert f'static let appProfile = "{check_app.APP_PROFILE}"' in _swift("HostCLI.swift")
+    assert check_app._profile_folder() == (
+        Path.home() / "Library" / "Application Support" / "lucille-host" / check_app.APP_PROFILE
+    )
+    source = _CHECK_APP.read_text(encoding="utf-8")
+    ui = _python_function(source, "check_ui")
+    assert 'flag = _profile_folder() / "state" / "paused"' in ui
+    # The code window comes last: after the whole disk, before the app is stopped.
+    assert ui.index("_drive_whole_disk(") < ui.index(
+        "_drive_code_window(checker, python_in(app), screens, (out_log, err_log))"
+    )
+    for name in (
+        "_op_state",
+        "_roots",
+        "_drive_abilities",
+        "_drive_folders",
+        "_drive_whole_disk",
+        "_drive_code_window",
+        "_pair_state",
+    ):
+        body = _python_function(source, name)
+        assert not re.search(r"(?<!\w)_host\(", body), name
+    assert '["--profile", APP_PROFILE, *args]' in _python_function(source, "_app_host")
+    # The pairing check and the probe run the host as the app does: the app's flags
+    # (build_app.RUNTIME_FLAGS, through host_argv), on the app's profile.
+    assert 'return host_argv(self.python, ["--profile", APP_PROFILE, *args])' in source
+    assert 'host_argv(python, ["--profile", APP_PROFILE, *args]),' in _python_function(
+        source, "_probe_one"
+    )
+    assert '"-I", "-B", "-m", "lucille_host"' not in source
+
+
+def test_the_pairing_checks_look_for_the_apps_own_words() -> None:
+    text = _swift("ConnectionText.swift")
+    words = {
+        "connectItem": check_app.CONNECT_ITEM,
+        "finishItem": check_app.FINISH_ITEM,
+        "disconnectItem": check_app.DISCONNECT_ITEM,
+        "notConnected": check_app.NOT_CONNECTED,
+        "connecting": check_app.CONNECTING,
+        "connected": check_app.CONNECTED,
+        "codeTitle": check_app.CODE_TITLE,
+        "codeSteps": check_app.CODE_WORDS[0],
+        "codePasteHow": check_app.CODE_WORDS[1],
+        "codeWarning": check_app.CODE_WORDS[2],
+        "codeHint": check_app.CODE_HINT,
+        "connectButton": check_app.CONNECT_BUTTON,
+        "compareTitle": check_app.COMPARE_TITLE,
+        "compareQuestion": check_app.COMPARE_QUESTION,
+        "theyMatch": check_app.THEY_MATCH,
+        "confirmedTitle": check_app.CONFIRMED_TITLE,
+        "quitQuestionTitle": check_app.QUIT_QUESTION,
+        "quitQuestionText": check_app.QUIT_TEXT,
+        "quitButton": check_app.QUIT_BUTTON,
+        "finishing": check_app.FINISHING,
+        "stopNow": check_app.STOP_NOW,
+        "stoppingNow": check_app.STOPPING_NOW,
+        "pausedTitle": check_app.PAUSED_TITLE,
+        "resumeButton": check_app.RESUME_BUTTON,
+        "disconnectQuestionTitle": check_app.DISCONNECT_TITLE,
+        "disconnectButton": check_app.DISCONNECT_BUTTON,
+        "disconnectedTold": check_app.DISCONNECTED_TOLD,
+    }
+    for name, said in words.items():
+        assert f'static let {name} = "{_named_in_swift(said)}"' in text, name
+    assert f'"bad_code": "{check_app.BAD_CODE}",' in text
+    assert check_app.CONNECT_ITEM in check_app.MENU_ITEMS
+    # The lines the app writes on standard error as run exits (RunSupervisor.describe), which the
+    # pairing check reads.
+    supervisor = _swift("Supervisor.swift")
+    assert 'how = "run exited \\(code)"' in supervisor
+    assert 'how = "run ended by signal \\(number)"' in supervisor
+    assert 'return how + " (" + (stopped?.words ?? "no stopped object") + ")"' in supervisor
+    assert 'return "drained, stdin_end"' in _swift("HostJSON.swift")
+    assert check_app.DRAINED_LINE == "run exited 0 (drained, stdin_end)"
+    assert check_app.SIGNALED_LINE == "run ended by signal"
+    # Every word the checks hand AppleScript can be quoted for it.
+    assert f'static let quitApp = "{_named_in_swift(check_app.QUIT_ITEM)}"' in _swift(
+        "HostText.swift"
+    )
+    for said in [*words.values(), "OK", "Cancel", check_app.QUIT_ITEM]:
+        assert check_app._quoted(said) == f'"{said}"'
+    # The text the ui check pastes passes the app's own check on a code, and so would the one it
+    # leaves on the pasteboard, which the app must never read by itself.
+    pairing = _swift("Pairing.swift")
+    assert 'static let codePrefix = "swbp1_"' in pairing
+    # The whole code is then at most 8192 characters, and with its newline fits the input a child
+    # gets.
+    assert "static let codeBodyLength = 100...8186" in pairing
+    assert "static let maxInputBytes = 8193" in _swift("HostCLI.swift")
+    for code in (check_app.PASTED_TEXT, check_app.PASTEBOARD_SENTINEL):
+        assert re.fullmatch(r"swbp1_[A-Za-z0-9_-]{100,8186}", code), code
+    assert check_app.PASTED_TEXT != check_app.PASTEBOARD_SENTINEL
+
+
+def test_the_applescript_the_checks_build_names_what_it_looks_for() -> None:
+    script = check_app._target("button", check_app.THEY_MATCH)
+    # Each window's own elements, as `button "OK" of window 1` finds a note's: a walk through
+    # `entire contents` found nothing in the code window on macOS 15.
+    assert (
+        'if exists (button "They Match" of theWindow) then '
+        'set theTarget to button "They Match" of theWindow\n'
+    ) in script
+    assert script.endswith('error "no button named They Match on the screen:" & held\nend if\n')
+    assert "role of every UI element of theWindow" in script
+    assert "if exists (text field 1 of theWindow) then" in check_app._target("text field")
+    assert "entire contents" not in _CHECK_APP.read_text(encoding="utf-8").replace(
+        "does not walk ``entire contents``", ""
+    )
+    for unquotable in ('say "this"', "back\\slash"):
+        with pytest.raises(ValueError):
+            check_app._quoted(unquotable)
+
+
+def test_reading_every_text_says_what_the_windows_hold_when_it_finds_none(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    scripts: list[str] = []
+    answers = iter([(True, ""), (True, " [Connect to Lucille: AXGroup, AXButton]")])
+
+    def fake(body: str, timeout: float = 30) -> tuple[bool, str]:
+        scripts.append(body)
+        return next(answers)
+
+    monkeypatch.setattr(check_app, "_system_events", fake)
+    assert check_app._texts() == []
+    # Each window's own elements, never a walk through `entire contents`.
+    assert "set found to found & (value of every static text of theWindow)" in scripts[0]
+    assert "entire contents" not in scripts[0]
+    # Nothing found: it asks what the windows hold, and says so.
+    assert scripts[1] == check_app.WINDOWS_HOLD + "return held"
+    assert "AXGroup" in capsys.readouterr().out
+
+
+def test_the_pairing_check_imports_the_harness_only_when_it_runs() -> None:
+    # Every other check runs where neither Switchboard nor the test harness is installed, and this
+    # suite imports check_app wherever it runs.
+    import ast
+    import subprocess
+
+    source = _CHECK_APP.read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    top: set[str] = set()
+    for node in tree.body:
+        if isinstance(node, ast.Import):
+            top |= {alias.name.split(".")[0] for alias in node.names}
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            top.add(node.module.split(".")[0])
+    assert not {"tests", "switchboard"} & top, top
+    functions = [node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)]
+    importing = {
+        node.name: {
+            inner.module
+            for inner in ast.walk(node)
+            if isinstance(inner, ast.ImportFrom) and inner.module
+        }
+        for node in functions
+        if any(isinstance(inner, ast.Import | ast.ImportFrom) for inner in ast.walk(node))
+    }
+    assert importing == {
+        "check_pairing": {"switchboard.client", "tests._lucille", "tests._process", "tests._run"}
+    }
+    done = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import sys\nimport tools.macos.check_app\n"
+            "loaded = {name.split('.')[0] for name in sys.modules}\n"
+            "print(sorted(loaded & {'switchboard', 'tests'}))",
+        ],
+        cwd=build_app.REPO_ROOT,
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+    )
+    assert (done.returncode, done.stdout) == (0, "[]\n"), done.stderr
+
+
+def test_the_probe_never_fails_the_job(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # The probe prints what the app's verbs do on the runner and gates nothing: whatever it meets,
+    # a program that cannot be started included, it says so and returns.
+    def refused(*args: object, **kwargs: object) -> None:
+        raise OSError("no such program")
+
+    monkeypatch.setattr("subprocess.run", refused)
+    check_app.check_probe(Path("/nonexistent/Capsule.app"))
+    assert "no such program" in capsys.readouterr().out
+
+
+def test_the_pairing_check_says_when_its_harness_is_missing(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Run with an interpreter that lacks Switchboard or the test harness, it fails and says which
+    # interpreter it needs, before it touches the app or the host. (None in sys.modules makes an
+    # import of that name fail.)
+    monkeypatch.setitem(sys.modules, "switchboard.client", None)
+    monkeypatch.setattr("subprocess.run", lambda *a, **k: pytest.fail("ran a program"))
+    checker = check_app.Checker()
+    check_app.check_pairing(tmp_path / "Capsule.app", checker, tmp_path / "check")
+    assert checker.failures == ["the pairing check finds Switchboard and the test harness"]
+    assert "suite --copy-to" in capsys.readouterr().out
+
+
+# --- The Open panel, on every macOS the jobs run: check_app.py ui -----------------------------
+# On macOS 26 and 27 (the smoke jobs, 2026-11-02) `button "Allow Capsule to Use This Folder" of
+# window 1` was not found, where macOS 15 finds it. The ui check now looks for the panel's buttons
+# in every window, sheet and group, and presses Return, the panel's default button, only when the
+# prompt is nowhere; what the app shows next is checked as before.
+
+_PLACES = ("theWindow", "theSheet", "theGroup", "theInner")
+
+
+def _looks_for(script: str, name: str) -> bool:
+    return all(
+        f'if exists (button "{name}" of {place}) then set theTarget to button "{name}" of '
+        f"{place}\n" in script
+        for place in _PLACES
+    )
+
+
+def test_choosing_in_the_open_panel_looks_in_every_window_sheet_and_group() -> None:
+    script = check_app.CHOOSE_IN_PANEL
+    assert _looks_for(script, check_app.OPEN_PROMPT)
+    for walk in (
+        "repeat with theWindow in windows\n",
+        "repeat with theSheet in sheets of theWindow\n",
+        "repeat with theInner in groups of theSheet\n",
+        "repeat with theGroup in groups of theWindow\n",
+        "repeat with theGroup in splitter groups of theWindow\n",
+        "repeat with theInner in groups of theGroup\n",
+    ):
+        assert walk in script, walk
+    # Never only window 1, and never a walk through `entire contents`.
+    assert "window 1" not in script and "entire contents" not in script
+    # Found: clicked, and nothing else is pressed.
+    clicked = script.index('click theTarget\ndelay 2\nreturn "clicked"\n')
+    assert script.count("click theTarget") == 1
+    assert script.index(f'button "{check_app.OPEN_PROMPT}"') < clicked
+
+
+def test_return_is_pressed_only_when_neither_the_prompt_nor_what_follows_is_found() -> None:
+    script = check_app.CHOOSE_IN_PANEL
+    clicked = script.index('return "clicked"')
+    # One of the app's own windows that follow the panel already up: nothing is pressed, and the
+    # caller checks that window.
+    for after in check_app.AFTER_THE_PANEL:
+        assert _looks_for(script, after), after
+        assert script.index(f'button "{after}"') > clicked
+    past = script.index('return "already past the Open panel: it shows "')
+    # Otherwise: what the windows hold, then Return, once, and it says so.
+    held = script.index(check_app.WINDOWS_HOLD)
+    pressed = script.index("set frontmost to true\nkey code 36\n")
+    assert clicked < past < held < pressed
+    assert script.count("key code") == 1
+    assert script.endswith(
+        f'return "pressed Return, the default button: no button named " & '
+        f'"{check_app.OPEN_PROMPT}" & ", and the app\'s windows held" & held'
+    )
+    # What follows the panel is the app's own: the name dialog's button, and the broad-folder and
+    # whole-disk notes' (App/HostModel.swift).
+    model = (build_app.SWIFT_DIR / "HostModel.swift").read_text(encoding="utf-8")
+    for after in check_app.AFTER_THE_PANEL:
+        assert f'alert.addButton(withTitle: "{after}")' in model, after
+    assert set(check_app.AFTER_THE_PANEL) >= {"Add Anyway", check_app.WHOLE_DISK_BUTTONS[0]}
+
+
+def test_what_the_windows_hold_names_their_buttons_and_sheets() -> None:
+    hold = check_app.WINDOWS_HOLD
+    assert "role of every UI element of theWindow" in hold
+    assert "name of every button of theWindow" in hold
+    assert "repeat with theSheet in sheets of theWindow\n" in hold
+    # Each part in a try of its own: a window that cannot say one thing still says the rest.
+    lines = hold.splitlines()
+    assert lines.count("try") == lines.count("end try") == 3
+
+
+@pytest.mark.parametrize(
+    ("answer", "worked", "note"),
+    [
+        ((True, "clicked"), True, False),
+        ((True, "already past the Open panel: it shows Add Folder"), True, True),
+        (
+            (True, "pressed Return, the default button: no button named x [Add a Folder: AXGroup]"),
+            True,
+            True,
+        ),
+        ((False, "execution error: no process"), False, False),
+    ],
+)
+def test_going_to_a_folder_chooses_through_the_panel_script(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    answer: tuple[bool, str],
+    worked: bool,
+    note: bool,
+) -> None:
+    scripts: list[str] = []
+    answers = iter([(True, ""), answer])
+
+    def fake(body: str, timeout: float = 30) -> tuple[bool, str]:
+        scripts.append(body)
+        return next(answers)
+
+    monkeypatch.setattr(check_app, "_system_events", fake)
+    monkeypatch.setattr(check_app, "_screenshot", lambda path: None)
+    folder = Path("/Users/runner/lucille-host-ui-check/My Project Files")
+    done = check_app._go_to_folder(folder, tmp_path, "5-open-panel.png")
+    # Go to Folder, typed; then the panel script, as it is.
+    assert f'keystroke "{folder}"\n' in scripts[0]
+    assert scripts[1] == check_app.CHOOSE_IN_PANEL
+    assert done[0] is worked
+    printed = capsys.readouterr().out
+    assert (f"note: choosing {folder} in the Open panel: {answer[1]}" in printed) is note
+    if not worked:
+        assert done[1] == f"choosing the folder: {answer[1]}"
+
+
+def test_the_panel_checks_read_every_window_sheet_and_group() -> None:
+    source = _CHECK_APP.read_text(encoding="utf-8")
+    # The checks that the Open panel came back, or did not, read its buttons wherever they sit.
+    for name in ("_drive_folders", "_drive_whole_disk"):
+        body = _python_function(source, name)
+        assert "OPEN_PROMPT in buttons" in body, name
+        reads = re.findall(r"(\w+), buttons = (_\w+)\(([^)]*)\)\n", body)
+        # Every read of buttons after which the Open panel's prompt is looked for.
+        for found, function, _ in reads:
+            after = body.split(f"{found}, buttons = {function}(", 1)[1].split("checker.expect", 2)
+            if "OPEN_PROMPT" in after[1]:
+                assert function == "_panel_buttons", (name, found, function)
+    folders = _python_function(source, "_drive_folders")
+    disk = _python_function(source, "_drive_whole_disk")
+    assert folders.count("worked, buttons = _panel_buttons()") == 1
+    assert disk.count("worked, buttons = _panel_buttons()") == 1
+    assert disk.count("still, buttons = _panel_buttons()") == 1
+    # No check looks for the prompt in window 1 alone any more.
+    assert 'button "{OPEN_PROMPT}" of window 1' not in source
+    assert "_in_each_place(" in _python_function(source, "_panel_buttons")

@@ -30,13 +30,14 @@ Python, and without Homebrew. Mac first; nothing here may block a Windows or Lin
 - **"Proposed, pending the maintainer's decision"** marks a part of this design that is not decided. Nothing
   builds on it until it is decided. Two parts carry it: the typed gate (§11.2) and the Connect flow (§11.4).
   Until they are decided, 0001's pairing gate stands: the host shows the SAS, and the user types `y` if it
-  matches Lucille's page.
+  matches Lucille's page. The app built today pairs on that gate: it shows the SAS, and the user clicks
+  **They Match** ("What is built today").
 
 ## What is built today
 
 The first build's Swift sources are in [`macos/`](../macos/README.md), whose README is the reference for
 it, and its build and check scripts are in `tools/macos/`. It is not a release, and it is for people
-developing the app.
+developing the app. Its builds stay ad hoc signed, for the repository owner's own Mac (§3.2).
 - **`Capsule.app`**, a menu bar app for Apple silicon Macs with macOS 15 or later, with no main window and no
   Dock icon; and **`Capsule-<version>-<commit>-adhoc-macOS-arm64.dmg`**, a disk image that holds it and a link
   to Applications.
@@ -48,39 +49,70 @@ developing the app.
   `.pyc`. Beside the runtime are the wrapper `Resources/bin/lucille-host` for Terminal users, the licence
   texts in `Resources/licenses/`, and `Resources/MANIFEST.json` (§6).
 - **The app drives the host only through its command line**, as
-  `lucille-host-runtime -I -B -X utf8 -m lucille_host <verb>`, with an argv and a fixed environment. It reads
-  the host's text output and its pause flag, writes none of the host's files, and opens no network
-  connection.
-- **The menu** shows the version and "Not connected to Lucille", and offers Pause and Resume, the abilities
-  (the operations, switched with `ops enable` and `ops disable`), Add a Folder…, the folders with Remove, and
-  Quit Capsule. "Connect to Lucille (coming soon)" is disabled: the host's command line can pair (`lucille-host pair`), but the app has no screen for it yet.
+  `lucille-host-runtime -I -B -X utf8 -m lucille_host --profile mac-app <verb>`, with an argv and a fixed
+  environment (`PATH=/var/empty`). It runs every verb on its own profile, `mac-app` (§9); builds before it
+  used `default`, and nothing moves from one to the other. It reads JSON (§8) from `status`, the pairing
+  verbs, `forget`, `kill`, `pause`, `resume` and `run`'s events, and the text of `--version`, `ops list` and
+  `roots list`. It reads and writes none of the host's files, and opens no network connection.
+- **Pairing by paste, on 0001's gate** (§11.3). The maintainer decided on 2026-11-02 to build it now on
+  [0001](0001-host-design.md)'s gate, not the typed one. The user pastes the code; the app passes it to
+  `pair --code-stdin --json` on standard input, shows the SAS from `sas_pending`, and the user clicks
+  **They Match** (`pair confirm --json`) only if Lucille's page shows the same number, or **They Differ**
+  (`pair reject --json`). The typed gate (§11.2) and the Connect flow (§11.4) stay proposed, and are not
+  built.
+- **Supervision of `run`** (§9): `run --json-events --exit-on-stdin-eof` as the app's child, with the
+  lifeline; the exit table; restarts with back-off, and the stop after five crashes in ten minutes; Quit and
+  logout with the drain ladder and **Stop now**; paused at the next launch after a `kill`, and never resumed
+  by the app on its own; **Disconnect from Lucille…**, which drains `run` before `forget --json`.
+- **The menu** shows the version and a status line read from `status --json` and `run`'s events, with a line
+  for what needs attention, and offers Pause and Resume, the abilities (the operations, switched with
+  `ops enable` and `ops disable`), Add a Folder…, the folders with Remove, the pairing items (Connect to
+  Lucille…, Finish Connecting…, Stop Connecting…, Disconnect from Lucille…), and Quit Capsule.
 - **It is signed ad hoc**, with the hardened runtime and no entitlements, each Mach-O file with its own
   identifier and the interpreter with `com.lucille-ai.capsule.runtime` (§7). It is not notarized, so macOS
   refuses to open it normally.
 - **`ci.yml`** builds it on every pull request and every push to `main`. Its `macos-app` job builds on
   GitHub's `macos-15` runner, runs each check in `tools/macos/check_app.py` and the host's whole test suite
-  on a copy of the bundled runtime; its `macos-smoke` jobs run the same disk image on macOS 26 and 27
-  (§18, §19). Logs and UI snapshots are uploaded on every run. The disk image is uploaded only by a manual
-  run, and kept 3 days.
+  on a copy of the bundled runtime, then, with that copy's interpreter, an end-to-end check of pairing and
+  supervision with a local hub and a stand-in for Lucille; its `macos-smoke` jobs run the same disk image
+  on macOS 26 and 27, without the end-to-end check (§18, §19). Logs and UI snapshots are uploaded on every
+  run. The disk image is uploaded only by a manual run whose every check passed, and kept 3 days.
 
-Not built yet: pairing, running in the background and opening at login, the app's use of the JSON
-contract (§8; the host's command line has it, [spec/CLI.md](../spec/CLI.md), with `run`'s events and
-`policy reset`, except the verbs §8 lists for §11.4, §15 and section 17), the Welcome
-and main windows, updates, **Remove Capsule…** (section 17), Developer ID signing and notarization, ripgrep
-(`Helpers/rg`; the pins hold an empty ripgrep commit until then, and `Resources/licenses/` has no ripgrep
-licence), and the release jobs. The first build also departs from this record in these ways, among others;
-`macos/README.md`, under "Choices made for the first build", says why for most of them:
-- the command line runs with `PATH=/usr/bin:/bin` and the working folder `/`, not `PATH=/var/empty` and the
-  host's own state folder (§9);
+Not built yet: the typed gate and the Connect flow (§11.2, §11.4; proposed), opening at login, Activity,
+the restore list after a new pairing (§11.6, `policy previous`), Stop What's Running, Reset Settings
+(`policy reset`, §10), Download and Prepare to Update (§16), the app's use of the JSON contract for `ops`
+and `roots` (§8), the Welcome and main windows, updates, **Remove Capsule…** (section 17), Copy
+Diagnostics (§15), Developer ID signing and notarization, ripgrep (`Helpers/rg`; the pins hold an empty
+ripgrep commit until then, and `Resources/licenses/` has no ripgrep licence), and the release jobs. The
+first build also departs from this record in these ways, among others; `macos/README.md`, under "Choices
+made for the first build", says why for most of them:
+- the command line runs with `PATH=/var/empty`, but with `/` as its working directory, not the host's own
+  state folder (§9);
 - the app opens from any folder, where the planned app runs only from `/Applications/Capsule.app` (§13);
-- the app uses the host's `default` profile, the one a `pipx` install uses, not its own `mac-app` profile
-  (§9);
 - the words for each ability and the suggested folder names are in the Swift app, not in the core (§8, §12,
   §13);
 - the `Info.plist`'s six folder usage keys hold the sentences on what Capsule is for, not the sentence §12
   plans (§12; whether macOS shows either is not yet tested on a Mac);
 - the app refuses outright, besides `/` and the Data volume, the two folders between them, `/System` and
-  `/System/Volumes`, which hold the Data volume (§12). Here the first build allows less than this record.
+  `/System/Volumes`, which hold the Data volume (§12). Here the first build allows less than this record;
+- the computer's gate is 0001's click, not the typed number of §11.2, which is proposed (above). The buttons
+  count only once the number is drawn in a window not wholly hidden, and **They Match** runs `pair confirm`
+  only after a `status` read shows the same pair and deadline still pending. `pair confirm` names no pair,
+  so a command run on profile `mac-app` from Terminal between that read and the confirm is not excluded;
+  the app's own store verbs run one at a time. After **They Differ**, They Match stays off for that pair
+  only while the app stays open: it keeps no memory of its own. A click gate does not protect the
+  computer's side against an attacker who can rewrite Lucille's page, which §11.2 is for: one more reason
+  the paste form stays on the owner's Mac (§11.1);
+- a profile that holds more than one pair (`several_pairs`) gets no Disconnect: `forget` refuses it too.
+  The app says it cannot end them, and `macos/README.md` gives the repair by hand (§9);
+- the app reads `pair status --json` only while its pairing window is open (§11.3);
+- the Quit question is asked only for the app's own Quit, and only while `run` lives and no Disconnect is
+  under way; a quit by Apple event, a logout included, never asks. A quit during a Disconnect finishes it:
+  `forget` runs once `run` has drained, before the app replies (§9);
+- when no `state` arrives for 120 s, the app only says so; it neither restarts `run` nor closes the
+  lifeline (§9);
+- the clock's fix is said in words, not offered as an **Open Date & Time Settings** button (§3.3), because
+  the Mac lint and the build's checks keep `NSWorkspace` out of the app (§20).
 
 Where this record says what the app does, it describes the planned app.
 
@@ -329,9 +361,10 @@ ripgrep.
   every check in `tools/macos/check_app.py` run it with these flags.
 - **The wrapper**, `Resources/bin/lucille-host`, is three lines of `sh`. It finds its own real path with
   `/bin/realpath`, so a link to it from a folder on `PATH` still runs this bundle's interpreter and never one
-  beside the link, and runs the interpreter with the same flags. A Linux test pins its text. On macOS,
-  `check_app.py wrapper` runs it through a link, on a writable copy of the app, and checks that it writes no
-  bytecode.
+  beside the link, and runs the interpreter with the same flags and on the app's profile,
+  `--profile mac-app` (§9); a `--profile` given to it comes later and replaces that one. A Linux test pins
+  its text. On macOS, `check_app.py wrapper` runs it through a link, on a writable copy of the app, and
+  checks that it pauses the app's profile, not `default`, and writes no bytecode.
 - **No `.pyc` anywhere in the app.** A precompiled file is in no wheel's `RECORD`, and an
   `unchecked-hash` one is loaded without being checked against its source, so the bytes the interpreter
   ran would be the bytes nothing verified. Without them every module is compiled in memory at each start.
@@ -530,10 +563,11 @@ login ─► Capsule (menu bar; an "Open at Login" item)
   operation, replies, and exits. No host runs unseen. That holds only while no other process holds the
   pipe's write end: the app gives it to no other child, and that Foundation's `Pipe` and `Process` keep it
   out of the children the app starts later (some of which never end, such as a verb stuck on a stalled
-  drive) is not yet tested on a Mac. A check in `check_app.py` is to start `run`, start a long verb as
-  another child, drop the app's write end, and see `run` write `stopped` `drained` while the other child
-  lives; if it fails, the app sets `FD_CLOEXEC` on the write end itself, right after making the pipe. The
-  hardware tests check that a force-quit leaves no host process.
+  drive) is not yet tested on a Mac. The app sets `FD_CLOEXEC` on the ends it keeps itself, under one lock
+  held around every child it starts, so the question does not depend on Foundation. The Swift self-test
+  checks the effect on CI's Mac for one order: it starts a stand-in `run`, then a long verb as another
+  child, drops the app's write end, and sees the stand-in end while the other child lives. The hardware
+  tests check that a force-quit leaves no host process.
 - **One host per profile.** `run` holds `state/.run.lock` (`os.lockf`). A relaunched app, or a `run` from
   Terminal, finds it held: `run` exits 21 (`already_running`) and changes nothing.
 - **The app's own profile.** The app runs every verb with `--profile mac-app`, and so does the Terminal
@@ -555,7 +589,8 @@ login ─► Capsule (menu bar; an "Open at Login" item)
   `SIGTTIN`, `SIGTTOU`, `SIGIO`, `SIGXCPU`, `SIGXFSZ`), and `SIGXCPU` and `SIGXFSZ` end a process. A
   signal (`terminationReason` `.uncaughtSignal`) is a crash, except the one the app sent at its own last
   step below. An exit's number is checked against the `stopped` reason it read, and the reason decides
-  within a number. When `stopped` is missing after 0 or 20, the app asks `status --json` where the pair is.
+  within a number; a number that disagrees with the reason is a crash. When `stopped` is missing after 0
+  or 20, the app asks `status --json` where the pair is.
   - 0 `drained` the app asked for (Quit, Prepare to Update): done. 0 `drained` it did not ask for (a
     `SIGTERM` from elsewhere, a `stdin_end` or `stdout_gone` it did not cause), one within a few seconds of
     `ready` above all: a crash. 0 `forgotten` or `ended`: Not connected, and the login item is unregistered.
@@ -568,9 +603,10 @@ login ─► Capsule (menu bar; an "Open at Login" item)
     Capsule's host is running, and how to stop it.
   - 23: two reasons, in different words. `insecure_keyring` is permanent: Needs attention, "The Keychain
     cannot keep Capsule's pairing safely". `store_error` can pass (a locked Keychain, a Deny at a prompt):
-    "Capsule cannot open its Keychain item", with Try Again. A `failed` `store_error` after `ready` is the
-    same, not a crash; so is `status --json`'s `pair` `unreadable` with those codes, before the app first
-    starts `run`.
+    "Capsule cannot open its Keychain item", with Try Again. So is `status --json`'s `pair` `unreadable`
+    with those codes, before the app first starts `run`. A `failed` `store_error` after `ready` restarts
+    `run`, but counts toward the five crashes below, so that a store that fails after every start cannot
+    restart it forever.
   - 24: Needs attention (the app builds the environment, so this is a bug). 25: §16.
   - 2 (usage) can only be the app's own mistake against the host it ships: it is not retried; Needs
     attention, with standard error.
@@ -579,13 +615,22 @@ login ─► Capsule (menu bar; an "Open at Login" item)
   stops and shows "Capsule keeps stopping", with the last lines of standard error behind a disclosure. An
   unrequested `drained` counts as a crash, so that something that keeps draining `run` (a standard input that
   is not a live pipe, say) cannot loop it.
-- **Quit.** The menu asks first: "Your Mac will stop answering Lucille until you open Capsule again." Quit
-  from the menu, from the welcome alert, from an AppleScript or from Activity Monitor, and a logout, all reach
-  the app delegate's `applicationShouldTerminate`, which returns `.terminateLater`, drains, and then calls
-  `reply(toApplicationShouldTerminate:)`. While a `run` child lives, the app turns off sudden and automatic
-  termination (`ProcessInfo.disableSuddenTermination()` and `disableAutomaticTermination(_:)`), and turns
-  them on again once it has exited, so that a logout cannot end the app without its drain (not yet tested on
-  a Mac). The drain is a ladder; the app reads both pipes until `run` exits, at every step:
+- **Quit.** The app's own Quit (the menu, the welcome alert) asks first while `run` lives: "Your Mac will
+  stop answering Lucille until you open Capsule again." A quit by Apple event (an AppleScript, Activity
+  Monitor, a logout) never asks; the app tells a logout, restart or shutdown from a plain quit by the
+  event's `kAEQuitReason` (not yet tested on a Mac). Each reaches the app delegate's
+  `applicationShouldTerminate`, which returns `.terminateLater`, drains, and then calls
+  `reply(toApplicationShouldTerminate:)`. While any child lives, `pair` included, the app turns off sudden
+  and automatic termination (`ProcessInfo.disableSuddenTermination()` and `disableAutomaticTermination(_:)`),
+  and turns them on again once none does, so that a logout cannot end the app without its drain (not yet
+  tested on a Mac). A `pair` child gets SIGINT, which keeps the pair, then SIGTERM and SIGKILL, before the
+  app replies. Every timer runs on the main queue, which the run loop serves in every mode, a menu's
+  included. Every modal loop (a note, a question, the Open panel, and AppKit's wait to quit) starts in a
+  turn of the main run loop of its own, never inside a main-queue callout: the main queue is serial, and a
+  modal loop started inside one of its callouts would keep it from being served until the loop ended, so
+  no timer, no event of `run` and no reply to the quit could arrive. Started apart, they all go on while a
+  note is up and while the app waits to quit. The silence and crash windows count the time the Mac is
+  awake. The drain is a ladder; the app reads both pipes until `run` exits, at every step:
   1. It closes the pipe and shows "Finishing the current task…" with **Stop now**. `run` finishes its
      operation and its reply: up to the operation's time limit, at most 300 s, then 30 s.
   2. **Stop now**, or the bound passing, runs `kill`, which kills the operation's process group and sets the
@@ -603,8 +648,12 @@ login ─► Capsule (menu bar; an "Open at Login" item)
   "Known gaps").
 - **After a kill at Quit or log out**, the host is paused at the next launch, which the user did not choose
   after a log out. The app does not resume it on its own: a pause nobody asked for fails safe. The next
-  launch says "Capsule is paused. This happens when a task is stopped at Quit or log out." with
-  **Resume**.
+  launch says "Capsule is paused": "Lucille's requests are turned away until you resume. You paused
+  Capsule, or a task was stopped when Capsule quit or you logged out.", with **Resume**. It names both
+  causes, because the pause flag holds only a time (`controls.py`), and the app keeps no memory of its own.
+- **SIGTERM to the app** asks nothing and runs no `kill`: the app closes the lifeline, stops a `pair`
+  child as at a quit, and exits within a few seconds. `run` then drains on its own. The app handles it on a
+  dispatch queue of its own, never the main queue, which a note or the wait to quit may hold.
 - **The child's environment** is built, never copied: `HOME`, `USER`, `LOGNAME`, `TMPDIR` from the session,
   `LANG=en_US.UTF-8`, `PATH=/var/empty`, and the working directory inside the host's own state folder. agent-
   switchboard 2.6.0 runs `git` through `PATH` and treats a failure as "no value" (sb `client.py:117-131`); on a
@@ -706,6 +755,13 @@ answer that has not reached the hub), writes one event per state change, and exi
 maps to one sentence ("This code isn't from Lucille. Nothing was
 connected."). The two terminal messages of 0001 stay distinct: "This code may have been used by someone else.
 Remove this computer in Lucille and start again" and "The code expired. Click Add computer again."
+
+**Built, on 0001's gate.** The maintainer decided on 2026-11-02 to build the paste form now, with 0001's gate
+in place of §11.2's typed number ("What is built today"). After `sas_pending`, the app shows the number and
+asks whether Lucille's page shows the same; **They Match** runs `pair confirm --json`, and **They Differ**
+runs `pair reject --json`. The app reads `pair status --json` only while its pairing window is open: every
+5 s while the pair is `waiting`, and at the deadline. `macos/README.md`, "Connecting to Lucille", says
+what each screen does.
 
 ### 11.4 The final form: Connect from the computer
 
@@ -1022,10 +1078,16 @@ job is now in `ci.yml`, so there is one macOS build pipeline. It runs on every p
 to `main`, with no path filter; a new push to a pull request cancels that pull request's older run.
 - **`macos-app`**, on `macos-15`, selects the pinned Xcode, builds the host's wheel and the app, signs the
   app ad hoc and builds the disk image. It runs every check of §19 on them, and the host's whole test suite
-  on a copy of the bundled runtime. Then it builds the unsigned app a second time, in another folder, and
-  compares the two (below).
+  on a copy of the bundled runtime. Then, with that copy's interpreter, which holds Switchboard's hub and the
+  test harness, it runs the end-to-end check of pairing and supervision (`check_app.py pairing`) against a
+  hub of its own on a loopback port and a stand-in for Lucille. Then it builds the unsigned app a second
+  time, in another folder, and compares the two (below). Each step that drives the app or runs long (the
+  self-test, the copy in another folder, the menu, the suite, pairing) has a time limit of its own, well
+  inside the job's, so a hang fails that step and the logs and snapshots are still uploaded.
 - **`macos-smoke`**, on `macos-26` and on `xcode-27`, runs the same disk image, and the Swift self-test that
-  `macos-app` compiled, through the checks that need no build (§19). It builds nothing.
+  `macos-app` compiled, through the checks that need no build (§19). It builds nothing. It does not run the
+  pairing check: it has no copy of the runtime with the test harness, and making one would mean installing
+  the suite's dependencies there too. The probe of the host's verbs, printed only, runs in both jobs.
 - Neither job holds a secret, has an `environment`, signs with anything but `-` (ad hoc), or notarizes. The
   only secret `ci.yml` names is the private-string list, in its `guards` job.
 
@@ -1140,7 +1202,8 @@ check from `tools/macos/check_app.py`:
   the build, not only by the linker, with its own identifier; the signature, again after every other check;
 - M10 on the signed bundle (§6), and M11: the version rule and `MANIFEST.json`;
 - the libraries each Mach-O file loads, and what the app's executable imports;
-- the wrapper and the app's flags, on a writable copy, write no bytecode;
+- the wrapper runs on the app's profile, and it and the app's flags, on a writable copy, write no
+  bytecode;
 - the bundle made read-only (`chmod -R a-w`) for the runs, then `codesign --verify --strict` again (M8);
 - M6: nothing in the environment changes what the runtime loads, each vector with a control that shows it
   would have loaded without `-I`;
@@ -1151,11 +1214,18 @@ check from `tools/macos/check_app.py`:
 - the start-up time with no `.pyc` (§6), and the unsigned app built twice and compared (§18), both recorded
   in the job summary, not gates;
 - the host's whole test suite against a copy of the bundled runtime, with the test dependencies installed
-  into the copy only.
+  into the copy only;
+- end to end, with that copy's interpreter, a hub of the check's own on 127.0.0.1 and a stand-in for
+  Lucille: the app's profile paired through the command line with the SAS left pending, then, driven
+  through System Events, They Match on 0001's gate, `run` as the app's child reading an offered room,
+  `files.sha256` answered, `run` restarted after SIGKILL, `run` drained when the app is killed, Quit with
+  its drain, Stop now (`kill`, then paused at the next launch) and Disconnect (`forget` after the drain);
+- a probe of the verbs the app uses, run as the app runs them, printed only.
 
 And by its `macos-smoke` jobs on `macos-26` and `xcode-27`, on the same disk image: the disk image, the
 bundle and signature checks, the wrapper, the read-only runs, M6, the Swift self-test that `macos-app`
-compiled, the launch, the menu, and the `~/Library` diff. There, a machine where System Events cannot
+compiled, the probe, the launch, the menu, and the `~/Library` diff; not the end-to-end check, which
+needs the suite's copy of the runtime (§18). There, a machine where System Events cannot
 drive the menu is recorded, not failed; `macos-app` fails it. Where it can, every driven step is checked
 as in `macos-app`, and one that fails fails the job. They skip the build and these checks, which
 `macos-app` ran on the same bytes: M10, M11, the libraries, the copy in another folder, the start-up time
@@ -1164,8 +1234,9 @@ and the test suite. So on those jobs M6's `.pth` half reads the installed `RECOR
 
 Planned:
 - the conformance suite against the bundled host (a `--host-command` option names it);
-- end to end through the bundle: a local hub on 127.0.0.1, a fake Lucille, pair, typed number, an offered room,
-  `files.sha256` on a temporary folder, reply, `kill`, `pause`, `forget`;
+- end to end through the bundle with the typed number (§11.2), once it is decided, and with the app's own
+  `pair --code-stdin` reaching the SAS (the built check pairs through the command line, with `--hub` and
+  `--store-file`, which the app never passes);
 - the Keychain for real, through a temporary default keychain;
 - `lsof` sampling: no listener anywhere, no connection from the app, only the hub from the host;
 - crafted scheme URLs (option-shaped codes, a 1 MiB string, paths shaped like folder or operation commands): the
@@ -1212,12 +1283,28 @@ in 10 minutes or less.
     other ways to start a process or use the network that the first build's tests listed, nor `LSOpen*` or
     any `NSUser*Task`; no `URL(string:` or `URL.init(string:` at all; no `UserDefaults`, since the app
     keeps no settings of its own, and no `SWITCHBOARD_`;
+  - one exception to the shell names, for tests only, added with the pairing screen: in a Swift file under
+    a `Tests` folder, `#!/bin/sh` alone on the first line of a multi-line string literal is not reported.
+    The self-test checks the app's child runner (`HostChild`, in `HostCLI.swift`) against children that
+    end as told: a signal, a partial line, a lifeline that closes, a code on standard input. It writes such
+    a child as a short `sh` script in its temporary HOME and gives that file to `HostCLI` in place of the
+    interpreter, so the script is started by the app's own `Process`, the one the `[process]` rule allows,
+    and the self-test starts nothing itself. A Swift stand-in would need a second compiled program, or a
+    `Process` in the self-test, which the rule forbids; a Python one would need an interpreter, while the
+    self-test checks the child runner with `--home` alone, no app given, and a shebang cannot name the
+    bundled runtime at a path with a space, which `relocate` uses. Nothing under `Tests` is in the app:
+    the self-test is compiled to a file of its own and handed to the smoke jobs beside the disk image, and
+    `check_app.py bundle` holds the bundle to its five Mach-O files.
+    The exception is that one line: `/bin/bash`, `/bin/zsh`, `#!/bin/sh -e`, a shebang on any other line or
+    in a one-line string, a comment, and `/bin/sh` anywhere else in the file or the script are all still
+    reported (`tests/guards/test_macos_lint.py` plants each);
   - `Process` only in `macos/App/HostCLI.swift`, which must write the bundled runtime's path,
     `Contents/Resources/runtime/bin/lucille-host-runtime`, and its arguments,
     `["-I", "-B", "-X", "utf8", "-m", "lucille_host"]`, outside its comments. The lint sees that they are
     written there, not that the `Process` gets them; a build test pins the lines where it does;
   - no read of a pasteboard, or of what is dropped on the app (the user pastes into a field, §11.3; writing,
-    for Copy Diagnostics, is allowed);
+    for Copy Diagnostics, is allowed by this rule). Until Copy Diagnostics is built, a build test and
+    `check_app.py links` refuse `NSPasteboard` altogether; the change that adds it lifts both;
   - no `http://`, `https://`, `ws://`, `wss://` or `ftp://` in Swift. `x-apple.systempreferences:` is not
     allowed yet either: it would come through `URL(string:`, and the change that adds Open Privacy Settings
     records that exception here;
@@ -1324,7 +1411,7 @@ These join 0001's "Host invariants and their tests".
 | M9 | Nothing runs as root, at install or at run time | no `.pkg`, no daemon (`macos_lint`); uid 0 refused (0001) |
 | M10 | The wheel inside is PyPI's; every file under `site-packages` is a file of a wheel's `RECORD`, except the named installer-written files, and no `.pyc` is there | the build guard, byte for byte before signing (`payload.record_problems`, also run on Linux); `check_app.py record` on the signed bundle, which holds each wheel `MANIFEST.json` names to `uv.lock` and the host wheel to the sha256 the wheel step output, and where each Mach-O file is compared with its wheel's after both signatures are removed, and that comparison is reported, not failed (§6); post-release checks; `verify_app.py` |
 | M11 | A build from a tag has one version number; any other build records its real version in `MANIFEST.json` | the build's version rule (`bundle_versions`, tested on Linux); `check_app.py version` on the built app |
-| M12 | The app writes nothing outside the host's own folders except what macOS writes for any app | the `~/Library` diff (`check_app.py library-diff`): a changed path that names the bundle identifier, the app's name or `lucille` must match `tools/macos/library-allowlist.txt`; every other change is printed, not gated; the host's own state folder must be among the changes. What it cannot see is below the table |
+| M12 | The app writes nothing outside the host's own folders except what macOS writes for any app | the `~/Library` diff (`check_app.py library-diff`): a changed path that names the bundle identifier, the app's name or `lucille` must match `tools/macos/library-allowlist.txt`; every other change is printed, not gated; the state folder of the app's profile (`mac-app`) must be among the changes. What it cannot see is below the table |
 | M13 | Pairing and the read loop start no process | the audit-hook test, on Linux and macOS |
 | M14 | No host outlives its app unseen | close the pipe: `run` drains and exits 0 |
 | M15 | One host per profile | a second `run` exits 21 |
@@ -1340,10 +1427,10 @@ allow. The allowlist starts with the host's own folder (`Application Support/luc
 does not catch a write to a path whose name says nothing of the app, which it only prints; nor anything
 under `~/Library/Developer` or `~/Library/Android`, which it skips because the runner images keep their
 own tools there; nor a folder macOS does not let it read, which it lists; nor anything outside `~/Library`;
-nor what the app writes in a run that does not take the paths CI drives. The host's own state folder must
-appear among the changes, so a walk that saw nothing, of the wrong folder say, fails rather than passes. On
-the smoke jobs, where the menu may not be driven, the check makes those writes itself first (`pause`, then
-`resume`).
+nor what the app writes in a run that does not take the paths CI drives. The state folder of the app's
+profile (`mac-app`) must appear among the changes, so a walk that saw nothing, of the wrong folder say,
+fails rather than passes. On the smoke jobs, where the menu may not be driven, the check makes those writes
+itself first (`pause`, then `resume`).
 
 ## 23. Threats the Mac app adds or bounds
 
