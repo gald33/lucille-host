@@ -18,6 +18,7 @@ The bundle as built:
   byte for byte a file of its wheel's ``RECORD`` (``payload.record_problems``, the build's own
   check), apart from the Mach-O files, which codesign rewrites in place: those are compared after
   ``codesign --remove-signature`` on both copies, and that comparison is reported, not failed.
+  A copy codesign could not strip is named, not compared.
 - ``version`` (M11, with ``--tag`` or ``--build-number``): Info.plist's two version strings are
   the version rule's, and MANIFEST.json, the bundled host's ``--version`` and the pins agree.
 - ``links``: every library a Mach-O file in the bundle loads is macOS's own, or resolves, the
@@ -1547,7 +1548,9 @@ def _stripped_comparison(
     site: Path, macho: Sequence[str], wheels: Sequence[Path]
 ) -> list[tuple[str, str]]:
     """Each Mach-O file in ``site`` against the same file in its wheel, after ``codesign
-    --remove-signature`` on a copy of each: SAME or DIFFERENT."""
+    --remove-signature`` on a copy of each: SAME, or DIFFERENT with both sizes. Where codesign
+    fails on either copy, the verdict says which, with its exit status and the first line it
+    wrote, and nothing is compared: a copy that kept its signature would read as DIFFERENT."""
     holders: dict[str, Path] = {}
     for wheel in wheels:
         with zipfile.ZipFile(wheel) as archive:
@@ -1564,14 +1567,28 @@ def _stripped_comparison(
             shutil.copyfile(site / rel, ours)
             with zipfile.ZipFile(wheel) as archive:
                 theirs.write_bytes(archive.read(rel))
-            for copy in (ours, theirs):
-                subprocess.run(
-                    ["codesign", "--remove-signature", str(copy)], capture_output=True, check=False
-                )
-            results.append(
-                (rel, "SAME" if ours.read_bytes() == theirs.read_bytes() else "DIFFERENT")
-            )
+            results.append((rel, _strip_and_compare(ours, theirs)))
     return results
+
+
+def _strip_and_compare(ours: Path, theirs: Path) -> str:
+    for whose, copy in (("bundle", ours), ("wheel", theirs)):
+        done = subprocess.run(
+            ["codesign", "--remove-signature", str(copy)], capture_output=True, check=False
+        )
+        if done.returncode != 0:
+            said = (done.stderr or done.stdout).decode(errors="replace").strip().splitlines()
+            return (
+                f"not compared: `codesign --remove-signature` failed on the {whose}'s copy "
+                f"(exit {done.returncode}: {said[0] if said else 'it said nothing'})"
+            )
+    a, b = ours.read_bytes(), theirs.read_bytes()
+    if a == b:
+        return "SAME"
+    return (
+        f"DIFFERENT (without signatures, the bundle's copy is {len(a)} bytes "
+        f"and the wheel's {len(b)})"
+    )
 
 
 def _summarize(summary: Path | None, text: str) -> None:
@@ -1630,8 +1647,9 @@ def check_record(
     lines = [
         "### M10 after signing: each Mach-O file in site-packages against its wheel's",
         "",
-        "Compared after `codesign --remove-signature` on a copy of each. Reported, not a gate: "
-        "the build compared every file byte for byte before signing.",
+        "Compared after `codesign --remove-signature` on a copy of each; a copy it could not "
+        "strip is named, not compared. Reported, not a gate: the build compared every file byte "
+        "for byte before signing.",
         "",
         "| file | without signatures |",
         "|---|---|",

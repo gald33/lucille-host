@@ -382,9 +382,11 @@ ripgrep.
   | `checked-hash`, standard library | 386 | 330 | 398 | 334 |
   | `checked-hash`, everything | 161 | 136 | 226 | 176 |
 
-  So shipping no `.pyc` costs about half a second on each start of the host, which the app pays on every
-  verb it runs. If that is too slow, the fallback is `checked-hash` files that `verify_app.py` recompiles
-  with the bundled interpreter and compares. **Not decided yet**: the maintainer judges what is too slow.
+  So on that runner, shipping no `.pyc` cost about half a second on each start of the host against
+  `checked-hash` files for everything, and about 0.3 s against them for the standard library only. The app
+  pays it on every verb it runs. If that is too slow, the fallback is `checked-hash` files that
+  `verify_app.py` recompiles with the bundled interpreter and compares. **Not decided yet**: the maintainer
+  judges what is too slow.
 - **It is renamed** so that Activity Monitor and any macOS prompt name it, not `python3.13`, and it has its own
   signing identifier (`com.lucille-ai.capsule.runtime`, from the pins; §7).
 - **`MANIFEST.json`**, as built, holds: the app's name, identifiers, deployment target and two version
@@ -405,10 +407,11 @@ ripgrep.
   it names must be one `uv.lock` pins, by name, version, file, URL and sha256, and the host wheel's sha256
   must be the one the wheel step output. Then it checks every other file byte for byte, and compares each
   Mach-O file with its wheel's after `codesign --remove-signature` on both copies; that comparison is reported
-  in the job summary, and does not fail the check. Seen in CI (run 41407347108): both files are still
-  DIFFERENT after the signatures are removed from both copies. So that comparison does not show the signed
-  files hold their wheels' code; the byte-for-byte check before signing is what shows M10. Why they still
-  differ has not been looked into.
+  in the job summary, and does not fail the check. A copy codesign cannot strip is named, with what codesign
+  said, and not compared. Seen in CI (run 41407347108): both files read DIFFERENT. That run's check did not
+  yet look at whether codesign succeeded, so it does not show the signatures were removed. Either way, a
+  DIFFERENT here cannot show the signed files hold their wheels' code; the byte-for-byte check before signing
+  is what shows M10. Why they differ has not been looked into.
 - **Mach-O files under `Contents/Resources`.** Apple's placement table ("Placing Content in a Bundle") puts
   libraries in `Contents/Frameworks` and a helper tool in `Contents/MacOS` or `Contents/Helpers`, and warns
   that incorrectly placed code "might cause problems during notarization". The interpreter is a helper tool,
@@ -1125,10 +1128,12 @@ the app's files and folders in sorted order, each with the commit's time, owner 
 and mode 0755 or 0644, in a gzip file with no name or time in its header. `macos-app` compares its two
 builds' tarballs by the sha256 of the gzip file and of the tar inside it, and writes SAME, DIFFERENT or
 FAILED to the job summary. That is recorded, not a gate, until `macos-payload-repro` below exists. Seen in
-CI (`macos-15`, run 41407347108, 2026-11-02): SAME. Both builds' gzip files had sha256
-`67729981ad8b616c6335b3bbf1bc6ae4b20157797b0cba3b355d4b4c698b456e`, and the tar inside each
-`cdb1d07d7edc1c499bdafea0f3e5f0f5f5c94c081f8c5cfc9339a48938acb924`. That is two builds in one job, on one
-machine; whether another machine gives the same bytes is what `macos-payload-repro` will show.
+CI (`macos-15`, run 41407347108, 2026-11-02): both builds printed the gzip file's sha256
+`67729981ad8b616c6335b3bbf1bc6ae4b20157797b0cba3b355d4b4c698b456e` and the tar's
+`cdb1d07d7edc1c499bdafea0f3e5f0f5f5c94c081f8c5cfc9339a48938acb924`, which `compare` writes as SAME. (Its
+verdict goes to the job summary, which the API does not return; the two digests are in the job's log.) That
+is two builds in one job, on one machine; whether another machine gives the same bytes is what
+`macos-payload-repro` will show.
 
 **The Mac jobs in `release.yml`.**
 1. `macos-payload` (macOS 15, no secrets): downloads the exact wheel PyPI published and checks its sha256;

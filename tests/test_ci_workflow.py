@@ -15,6 +15,7 @@ import copy
 import hashlib
 import io
 import json
+import os
 import re
 import shlex
 import shutil
@@ -952,6 +953,70 @@ def test_split_record_problems_on_a_signed_mach_o(tmp_path: Path) -> None:
     found = payload.record_problems(site, [wheel])
     failing, _ = check_app.split_record_problems(found, ["demo/_x.so", "demo/_y.so"])
     assert any("demo/_y.so" in p for p in failing)
+
+
+# A stand-in for codesign: --remove-signature cuts a file at its first b"SIG", or fails on a file
+# whose name ends with FAKE_CODESIGN_REFUSES.
+FAKE_CODESIGN = """\
+import os, sys
+assert sys.argv[1:2] == ["--remove-signature"] and len(sys.argv) == 3, sys.argv
+path = sys.argv[2]
+refuses = os.environ.get("FAKE_CODESIGN_REFUSES")
+if refuses and path.endswith(refuses):
+    sys.stderr.write(path + ": invalid or unsupported format for signature\\nsecond line\\n")
+    sys.exit(3)
+with open(path, "rb") as handle:
+    data = handle.read()
+with open(path, "wb") as handle:
+    handle.write(data.split(b"SIG", 1)[0])
+"""
+
+
+def _fake_codesign(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    fake = bin_dir / "codesign"
+    fake.write_text(f"#!{sys.executable}\n{FAKE_CODESIGN}", encoding="utf-8")
+    fake.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
+
+
+def _stripped(tmp_path: Path, ours: bytes, theirs: bytes) -> list[tuple[str, str]]:
+    wheel = _wheel(tmp_path / "wheels", "demo", "1.0", {"demo/_x.so": theirs})
+    site = tmp_path / "site"
+    (site / "demo").mkdir(parents=True)
+    (site / "demo" / "_x.so").write_bytes(ours)
+    return check_app._stripped_comparison(site, ["demo/_x.so", "demo/_none.so"], [wheel])
+
+
+def test_stripped_comparison_same_and_different(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _fake_codesign(tmp_path, monkeypatch)
+    same = _stripped(tmp_path / "same", b"codeSIG ours", b"codeSIG theirs")
+    assert same == [("demo/_x.so", "SAME"), ("demo/_none.so", "in no wheel")]
+    different = _stripped(tmp_path / "different", b"code+SIG ours", b"codeSIG theirs")
+    assert different[0] == (
+        "demo/_x.so",
+        "DIFFERENT (without signatures, the bundle's copy is 5 bytes and the wheel's 4)",
+    )
+
+
+@pytest.mark.parametrize("refused", ["bundle", "wheel"])
+def test_stripped_comparison_names_a_copy_codesign_could_not_strip(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, refused: str
+) -> None:
+    # A removal that failed used to read as DIFFERENT, so DIFFERENT could not show that the
+    # signatures had been removed at all.
+    _fake_codesign(tmp_path, monkeypatch)
+    monkeypatch.setenv("FAKE_CODESIGN_REFUSES", f"-{refused}")
+    rel, verdict = _stripped(tmp_path, b"codeSIG ours", b"codeSIG theirs")[0]
+    assert rel == "demo/_x.so"
+    assert verdict.startswith(
+        f"not compared: `codesign --remove-signature` failed on the {refused}'s copy (exit 3: "
+    )
+    assert verdict.endswith(": invalid or unsupported format for signature)")
+    assert "second line" not in verdict and "SAME" not in verdict and "DIFFERENT" not in verdict
 
 
 def _manifest(wheels: list[tuple[str, str, Path]], host: Path) -> dict[str, Any]:
