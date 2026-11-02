@@ -125,6 +125,11 @@ NOT_HOSTED = [
     job("ubuntu-mybox"),
     job("windows-selfhost-box"),
     job("macos-99"),
+    # A retired image, and an image GitHub has not announced.
+    job("macos-14"),
+    job("macos-14-large"),
+    job("macos-14-xlarge"),
+    job("xcode-28"),
     job("[ubuntu-latest, ubuntu-gpu]"),
     job("[ubuntu-latest, macos-latest]"),
     # A custom label added only through the matrix's include list.
@@ -266,7 +271,9 @@ def test_script_exit_codes(tmp_path: Path) -> None:
     assert ".github/workflows/release.yaml:4: [self-hosted]" in result.stdout
 
 
-def test_the_hosted_labels_are_pinned() -> None:
+def test_hosted_labels() -> None:
+    # macos-26 is the macOS 26 image; xcode-27 is the macOS 27 image, which GitHub keys by its
+    # Xcode version. The macos-14 images are retired, so their labels are refused.
     assert workflow_lint.HOSTED_LABELS == {
         "ubuntu-latest",
         "ubuntu-24.04",
@@ -274,15 +281,14 @@ def test_the_hosted_labels_are_pinned() -> None:
         "ubuntu-24.04-arm",
         "ubuntu-22.04-arm",
         "macos-latest",
+        "macos-26",
         "macos-15",
-        "macos-14",
+        "xcode-27",
         "macos-15-intel",
         "macos-latest-large",
         "macos-15-large",
-        "macos-14-large",
         "macos-latest-xlarge",
         "macos-15-xlarge",
-        "macos-14-xlarge",
         "windows-latest",
         "windows-2025",
         "windows-2022",

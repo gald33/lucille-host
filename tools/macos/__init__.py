@@ -1,1 +1,1 @@
-"""The macOS app: its build script, its checks and its Swift sources."""
+"""The Mac app's build and check scripts, and their pins. Not shipped in the wheel."""

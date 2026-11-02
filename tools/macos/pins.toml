@@ -1,12 +1,15 @@
-# What the Mac app is built from, besides this repository and uv.lock.
+# What the Mac app is built from, besides this repository and uv.lock: the one pins file.
 #
-# build_app.py reads this file. It downloads the Python runtime from `url` and refuses to build
-# unless the download's sha256 is `sha256`. To move to a new runtime, change all four values in
-# one reviewed commit: the asset name, its version, its URL and its sha256 from the release's
-# SHA256SUMS file.
+# tools/macos/build_app.py reads it, and refuses a file that is not exactly these tables and keys
+# (tests/test_macos_build.py checks that). The host wheel's build backend is pinned separately, by
+# hash, in build-constraints.txt beside this file, because uv reads that file as a requirements
+# file (`uv build --build-constraints ... --require-hashes`).
 
 [python]
-# python-build-standalone, Apple silicon, the "install_only_stripped" flavour.
+# python-build-standalone, Apple silicon, the "install_only_stripped" flavour. build_app.py
+# downloads it from `url` and refuses to build unless its sha256 is `sha256`. To move to a new
+# runtime, change all four values in one reviewed commit, with the sha256 from the release's
+# SHA256SUMS file, and check prune.txt against the new archive's listing.
 version = "3.13.18"
 asset = "cpython-3.13.18+20261026-aarch64-apple-darwin-install_only_stripped.tar.gz"
 url = "https://github.com/astral-sh/python-build-standalone/releases/download/20261026/cpython-3.13.18%2B20261026-aarch64-apple-darwin-install_only_stripped.tar.gz"
@@ -16,12 +19,30 @@ sha256 = "8392b6ea51d94391befb2c31ebe75463f045d0b69dfcf5e1bb3234e1f5fa3405"
 # The app's name, as macOS and its user see it: letters and digits, with single spaces between
 # words. build_app.py writes it into Info.plist, the app reads it from there, and the checks read
 # it from here, so no code changes with it. A new name does also change the app's paths and
-# artifact names in .github/workflows/macos-app.yml and the values tests/test_macos_build.py pins,
-# and those tests fail until all of them agree with this file. It is a working name until the
-# first signed build. The host program inside keeps its own name, lucille-host.
+# artifact names in the workflows and the values tests/test_macos_build.py pins, and those tests
+# fail until all of them agree with this file. It is a working name until the first signed build.
+# The host program inside keeps its own name, lucille-host.
 name = "Capsule"
-# The app's permanent identifier. Changing it after a signed release makes macOS ask the user
-# again for every folder and Keychain item.
+# The app's permanent identifier, and the interpreter's (the bundle identifier followed by
+# ".runtime"; the build refuses any other). Changing either after a signed release makes macOS
+# ask the user again for every folder and Keychain item.
 bundle_id = "com.lucille-ai.capsule"
-minimum_macos = "15.0"
+runtime_id = "com.lucille-ai.capsule.runtime"
+# LSMinimumSystemVersion and swiftc's -target: macOS 15 or later (decisions/0002 §5).
+deployment_target = "15.0"
 category = "public.app-category.utilities"
+
+[xcode]
+# The Xcode the build runs, from /Applications/Xcode_<version>.app on GitHub's macOS images.
+# `build_app.py toolchain` refuses unless `xcodebuild -version` reports this version.
+version = "16.4"
+
+[ripgrep]
+# The ripgrep source commit the app will bundle as Contents/Helpers/rg (decisions/0002 §13).
+# Empty until the release that bundles it.
+commit = ""
+
+[signing]
+# Whether ad hoc builds are signed with the hardened runtime (decisions/0002 §7). Developer ID
+# builds always are.
+adhoc_hardened_runtime = true

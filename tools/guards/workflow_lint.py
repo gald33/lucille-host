@@ -52,7 +52,10 @@ from tools.guards._common import Violation, repo_files, run_guard  # noqa: E402
 WORKFLOW_DIR = ".github/workflows/"
 ACTION_FILES = ("action.yml", "action.yaml")
 # The GitHub-hosted runner image labels this lint accepts. A label is either GitHub-hosted or
-# custom; only an exact list keeps a custom label that looks hosted out.
+# custom; only an exact list keeps a custom label that looks hosted out. A retired image's labels
+# are removed (macos-14 retired on 2026-11-02). GitHub now names a new macOS image by its Xcode
+# version: xcode-27 is the macOS 27 image (GitHub changelog, 2026-10-15), so the next macOS will
+# most likely come as an xcode-* label, added here when GitHub announces it.
 HOSTED_LABELS = frozenset(
     {
         "ubuntu-latest",
@@ -61,15 +64,14 @@ HOSTED_LABELS = frozenset(
         "ubuntu-24.04-arm",
         "ubuntu-22.04-arm",
         "macos-latest",
+        "macos-26",
         "macos-15",
-        "macos-14",
+        "xcode-27",
         "macos-15-intel",
         "macos-latest-large",
         "macos-15-large",
-        "macos-14-large",
         "macos-latest-xlarge",
         "macos-15-xlarge",
-        "macos-14-xlarge",
         "windows-latest",
         "windows-2025",
         "windows-2022",

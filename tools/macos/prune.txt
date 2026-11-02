@@ -1,0 +1,57 @@
+# What the build removes from the pinned Python runtime: one literal path per line, relative to
+# the archive's top folder `python/`. Reviewed like code. build_app.py refuses a path that the
+# pinned runtime does not hold, a pattern, a path with . or .., a *.dist-info folder or anything
+# in one, and anything in site-packages but README.txt. The runtime's own pip is not listed: the
+# build uninstalls it whole, by its RECORD, before pruning (that removes bin/pip, bin/pip3 and
+# bin/pip3.13 too). Whatever this list misses is not deleted: the build refuses a runtime that is
+# not then exactly bin/lucille-host-runtime and lib/python3.13/, with an empty site-packages.
+#
+# CI runs the host's whole test suite on a copy of the pruned runtime, so a wrong cut fails a
+# pull request.
+
+# Programs the app never runs. The interpreter, bin/python3.13, is kept and renamed
+# lucille-host-runtime; bin/python and bin/python3 are links to it.
+bin/idle3
+bin/idle3.13
+bin/pydoc3
+bin/pydoc3.13
+bin/python
+bin/python3
+bin/python3-config
+bin/python3.13-config
+
+# Headers and manual pages, for building and reading about Python, not running it.
+include
+share
+
+# The interpreter links Python statically, so the shared library goes. Tcl/Tk and its packages
+# serve tkinter only, and pkg-config files serve builds.
+lib/itcl4.3.8
+lib/libpython3.13.dylib
+lib/libtcl9.0.dylib
+lib/libtcl9tk9.0.dylib
+lib/pkgconfig
+lib/tcl9
+lib/tcl9.0
+lib/thread3.0.6
+lib/tk9.0
+
+# Standard library parts the host never imports: the build configuration, the pip bootstrapper,
+# IDLE, tkinter and turtle graphics (tests/test_macos_build.py checks that none is a module the
+# host's runtime may import).
+lib/python3.13/config-3.13-darwin
+lib/python3.13/ensurepip
+lib/python3.13/idlelib
+lib/python3.13/tkinter
+lib/python3.13/turtle.py
+lib/python3.13/turtledemo
+lib/python3.13/lib-dynload/_tkinter.cpython-313-darwin.so
+
+# Three timestamp .pyc files the archive ships for the encodings package. Their recorded source
+# times do not match the sources', so the interpreter ignores them; removing them leaves no .pyc
+# and no __pycache__ anywhere in the app.
+lib/python3.13/encodings/__pycache__
+
+# site-packages' note that third-party packages go there. The build empties site-packages before
+# installing the wheels.
+lib/python3.13/site-packages/README.txt

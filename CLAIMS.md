@@ -26,7 +26,8 @@ that supervises it with `--exit-on-stdin-eof`. Some tests named below do not exi
 - Some sentences have a host part and a Lucille part. Each part is mapped on its own.
 
 The existing guard tests prove that each guard catches a planted violation in the forms it lists. The
-tests of the workflow, AST and Switchboard-surface lints also show that this repository is clean today.
+tests of the workflow, AST, Switchboard-surface and Mac lints also show that this repository is clean
+today.
 The private-string test does not: it checks the repository against a synthetic list, and only the CI
 step "Private-string check", run with the repository secret, shows that no private string is committed.
 None of these tests proves the behaviour of code that does not exist yet. The guards catch accidental
@@ -533,6 +534,7 @@ These existing tests back the design rather than one sentence of the claim.
 |---|---|
 | `tests/guards/test_private_strings.py` | The CI step "Private-string check", run with the repository secret, is what checks that no string private to Lucille is committed here; this test shows that the check finds a planted string, never prints it, and fails closed without the list. Its own check of this repository uses a synthetic list, so it passes whatever is committed. |
 | `tests/guards/test_switchboard_lint.py` | Part of invariant "The host never invites anyone into its pair's rooms, and offers no room of its own": the source names no invite and no `register`, and, outside the conformance package and the tests, no `share_new` and no Switchboard function outside the listed surface (so no `pairing.start`, `heal` or `export`). It does not cover a method called on a client object, other than `register`, invites and private members, or a value a wrapper function returns; review, and `tests/test_read_loop.py` (`test_host_never_invites`, `test_sharing_calls_limited`), cover that. |
+| `tests/guards/test_macos_lint.py` | The Mac app's part of decisions/0002 §20 and of its invariants M1, M2 and M9, in the forms the lint lists: its Swift names no network, listener, XPC, shell or other way to start a process, starts `Process` only in `macos/App/HostCLI.swift`, which writes the bundled runtime's path and arguments, reads no pasteboard and holds no `http(s)` URL; the app's strings, the `Info.plist` template and the pins it reads use no phrase [PRIVACY.md](PRIVACY.md) says this project must never claim; and nothing declares a URL scheme, a daemon or an installer package. It reads the source, not the built app. |
 | `tests/guards/test_workflow_lint.py` | Invariant "Every release comes from a hosted runner and environment `pypi`" (the hosted-runner half; that a release publishes from environment `pypi` is checked by the provenance step in [VERIFYING.md](VERIFYING.md), not by this test). |
 | `tests/test_import_graph.py` | The runtime imports no hub server. (That the base install has none is `pyproject.toml`'s dependency list: the server comes only with the `[conformance]` extra.) The README's "opens no listening port" also needs `tests/test_read_loop.py` (`test_no_listening_socket`). |
 | `tests/test_cli.py` | `lucille-host` and `lucille-host --version` print the version, and the version has one source; every verb the parser takes has a handler of its own, and a verb without one is refused. |

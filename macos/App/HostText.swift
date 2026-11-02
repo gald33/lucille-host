@@ -109,11 +109,11 @@ enum HostText {
     /// and is described in the menu instead, and `host.sleep`, which is for testing.
     static let unlistedAbilities: Set<String> = ["host.describe", "host.sleep"]
 
-    /// The app's name, from its Info.plist, where build_app.py puts the name macos/runtime.toml
+    /// The app's name, from its Info.plist, where build_app.py puts the name tools/macos/pins.toml
     /// holds, so that a new name needs no change here. Code run outside the app, such as the
     /// self-test, finds no name there and uses "the app". That fallback is deliberately not the
     /// app's name: if the app ever stopped reading its Info.plist, the `ui` check, which looks for
-    /// the name from runtime.toml, would fail instead of passing on the fallback.
+    /// the name from pins.toml, would fail instead of passing on the fallback.
     static let appName = Bundle.main.object(forInfoDictionaryKey: "CFBundleDisplayName") as? String ?? "the app"
 
     /// What the app is for, for someone who does not know it. The second sentence is there

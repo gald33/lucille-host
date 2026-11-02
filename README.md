@@ -110,7 +110,8 @@ This repository proves only the host's side. The full design is
 | `src/lucille_host/spec/` | The JSON Schemas and golden fixtures of the protocol and of the command line's `--json` contract, which ship in the wheel. |
 | `tools/spec/` | Writes the protocol fixtures for each place in each schema pattern; a test checks that the committed fixtures are what it writes. |
 | `tools/guards/` | Checks CI runs on every change. They catch accidental and casual violations; they are not a sandbox or a defence against a determined author, and maintainer review of every pull request is the backstop. [VERIFYING.md](VERIFYING.md) describes each one and what it cannot see. |
-| [macos/](macos/README.md) | A first build of Capsule, the Mac app, which lets Lucille use only the folders you choose: a menu bar app that drives the host's command line, and the scripts that build and check it. Not a release. |
+| [macos/](macos/README.md) | A first build of Capsule, the Mac app, which lets Lucille use only the folders you choose: a menu bar app, in Swift, that drives the host's command line. Not a release. |
+| `tools/macos/` | The scripts that build Capsule and check the built app, the files that pin what it is built from, and the reviewed list of what the build removes from its Python runtime. [macos/README.md](macos/README.md) says how to build it. |
 | [PRIVACY.md](PRIVACY.md) | The claim, and what this project must never claim. |
 | [CLAIMS.md](CLAIMS.md) | Each sentence of the claim, mapped to its code and test. |
 | [THREAT_MODEL.md](THREAT_MODEL.md) | What the host defends against, and what is left. |
@@ -136,6 +137,7 @@ as well. Each exits 0 when clean, 1 on a violation and 2 on a usage error:
 uv run python tools/guards/workflow_lint.py .
 uv run python tools/guards/ast_lint.py .
 uv run python tools/guards/switchboard_lint.py .
+uv run python tools/guards/macos_lint.py .
 uv run python tools/guards/private_strings.py .
 ```
 

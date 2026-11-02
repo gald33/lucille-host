@@ -2,7 +2,7 @@ import Foundation
 
 /// Runs the app's code that draws nothing (`Alias`, `HostCLI`, `HostText`) against a built app:
 /// the calls the menu makes, through the same code, with a temporary HOME. CI compiles it with
-/// those files (`macos/check_app.py swift`). Exit status 1 on any failure.
+/// those files (`tools/macos/check_app.py swift`). Exit status 1 on any failure.
 ///
 ///     selftest --vectors alias-vectors.json [--app NAME.app --home DIR --version V]
 @main
@@ -280,8 +280,8 @@ struct SelfTest {
         let env = cli.environment()
         report.expect(Set(env.keys).isSubset(of: ["HOME", "PATH", "LANG", "USER", "LOGNAME", "TMPDIR"]),
                       "the environment is fixed", "\(env.keys.sorted())")
-        report.expect(cli.arguments(for: ["pause"]) == ["-I", "-B", "-m", "lucille_host", "pause"],
-                      "the interpreter runs isolated, without writing bytecode")
+        report.expect(cli.arguments(for: ["pause"]) == ["-I", "-B", "-X", "utf8", "-m", "lucille_host", "pause"],
+                      "the interpreter runs isolated, in UTF-8 mode, without writing bytecode")
 
         let shown = cli.run(["--version"])
         report.expect(shown.succeeded && HostText.version(fromVersionOutput: shown.stdout) == version,

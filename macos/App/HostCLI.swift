@@ -43,10 +43,13 @@ final class CancelToken: @unchecked Sendable {
 }
 
 /// Runs the host's command line. It is the only program the app starts: the Python interpreter
-/// inside the app, with `-I` (isolated: no PYTHON* variables, no user site-packages, no current
-/// folder on the import path) and `-B` (no .pyc writes inside the signed app), running the
-/// `lucille_host` package. Arguments go as an argv array, never through a shell. The environment
-/// is fixed, not inherited. Every run has a time limit, and the user can cancel one.
+/// inside the app (`lucille-host-runtime`, the bundled runtime's renamed interpreter), with `-I`
+/// (isolated: no PYTHON* variables, no user site-packages, no current folder on the import path),
+/// `-B` (no .pyc writes inside the signed app; the app ships none) and `-X utf8` (UTF-8 text
+/// whatever the locale), running the `lucille_host` package. These are the flags the build's
+/// wrapper and checks use (decisions/0002 §6). Arguments go as an argv array, never through a
+/// shell. The environment is fixed, not inherited. Every run has a time limit, and the user can
+/// cancel one.
 struct HostCLI: Sendable {
     let python: URL
     let home: String
@@ -60,7 +63,7 @@ struct HostCLI: Sendable {
 
     /// The interpreter inside an app bundle.
     static func python(inApp app: URL) -> URL {
-        app.appendingPathComponent("Contents/Resources/python/bin/python3")
+        app.appendingPathComponent("Contents/Resources/runtime/bin/lucille-host-runtime")
     }
 
     /// The home folder the host uses: HOME when it is an absolute path, as the host reads it.
@@ -72,7 +75,7 @@ struct HostCLI: Sendable {
     }
 
     func arguments(for verb: [String]) -> [String] {
-        ["-I", "-B", "-m", "lucille_host"] + verb
+        ["-I", "-B", "-X", "utf8", "-m", "lucille_host"] + verb
     }
 
     /// The whole environment a run gets. Nothing else from the app's own environment passes.
