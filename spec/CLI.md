@@ -374,8 +374,9 @@ its own: the answer was kept, and is sent again while `pair` waits, but the cloc
 
 `run` passed its start checks (section 13.3) and serves the pair. It is written once, first, before `run`
 first calls the hub, and a `state` follows it, unless `run` stops at once: a state file of the profile that
-cannot be read (`rooms.json`, say) makes `stopped` `failed` follow `ready` directly. After it, `run` ends
-only with a `stopped` reason of exit 0, 1 or 20.
+cannot be read (`rooms.json`, say) makes `stopped` `failed` follow `ready` directly, but for those the start
+checks read, which stop `run` before `ready`. After it, `run` ends only with a `stopped` reason of exit 0, 1
+or 20.
 
 ### `state`: what a running `run` sees now
 
@@ -699,9 +700,12 @@ Each fixture is one command line and what it writes:
   exit code and standard error are the same.
 - `ops-list-sends-file-content` is written with a catalog entry stubbed to send file contents, so that a
   shell's decoder sees `sends_file_content` true. No operation in this release does.
-- Every `stopped` reason has a fixture of `run`, except `forgotten`: only another command forgetting the pair
-  while `run` runs gives it, at a moment one command line does not fix, and a pair forgotten before `run`
-  starts leaves none to serve. The tests make it another way.
+- Every `stopped` reason has a fixture of `run`, except `forgotten`. It comes only while `run` serves the
+  pair, when another command forgets it, or when a touch of `run`'s, coming after a resolve, finds that this
+  computer's side ended the pair (section 13.3): at a moment one command line does not fix. A pair forgotten
+  before `run` starts leaves none to serve, and one this computer's side ended before `run` starts is found
+  by the first resolve of `run`'s that reads the pair room, which says the pair ended (if the hub turns
+  `run`'s first resolve away, a touch can find it first, as above). The tests make it another way.
 - `run-events-leaked` is written with the pairing library's answer at `run`'s first hub call stubbed to say
   the handshake was interfered with (`aborted`), which a set-up cannot do on the hub.
 - A fixture of `run` has `--json-events` in its `argv`, and its last object is `stopped`, whose reason gives
@@ -763,13 +767,18 @@ lucille-host --profile <name> run --json-events --exit-on-stdin-eof
   nothing waits for it, a drain and a `SIGTERM` included. A shell that stops reading altogether lets 1000
   objects wait, and then counts as a standard output nobody reads (section 13.4). Standard error is written
   as it comes: a shell reads it continuously.
+- Only at its very end does `run` wait for the shell: once it has queued `stopped`, it waits up to 5 s for
+  the objects still queued, `stopped` last, to be written, and then exits with the code it chose, whatever
+  is still unwritten. A shell that reads its standard output continuously, as above, gets them all.
 
 ### 13.2 The events
 
 - One object per line, as section 4.1 says, each at most 16384 bytes.
 - `ready` is first, or absent: a refusal at start writes `stopped` alone. `stopped` is last, or absent: a
-  signal `run` does not handle, a kill, or a standard output that broke writes nothing more. Nothing follows
-  `stopped`.
+  signal `run` does not handle, a kill, or a standard output that broke writes nothing more, and objects not
+  yet written to standard output within 5 s of `run`'s end are lost: a shell that stopped reading, so that
+  the pipe is full, does not get them (13.1). One written in time stays in the pipe for the shell to read,
+  after the process has exited too. Nothing follows `stopped`.
 - Between them, `state`, `request` and `host_too_old` come in any order. A request's own objects are in
   order: `received`, `decided`, then `host_too_old` for that refusal, `started` for an operation that starts
   a process, and `finished`. The first `state` comes before any `request`. A `request` with no `finished`
@@ -794,8 +803,8 @@ lucille-host --profile <name> run --json-events --exit-on-stdin-eof
 | Exit | `stopped` `reason` | Meaning |
 |---|---|---|
 | 0 | `drained` | Stopped on purpose, by what `cause` says: the first `SIGTERM`, `SIGHUP` or Ctrl-C, or with `--exit-on-stdin-eof` the end of standard input or a standard output nobody reads (13.4). The running operation finished and its reply was posted, or the reply was given 30 s. |
-| 0 | `forgotten` | Another command on this computer forgot the pair (`forget`) while `run` ran. |
-| 0 | `ended` | Lucille ended the pair. This computer's half is forgotten too. |
+| 0 | `forgotten` | The pair was forgotten on this computer while `run` served it: by another command (`forget`, `pair reject`, a `pair` answered `n` at its prompt, or a `pair`, `pair status` or `pair confirm` that found the pair over or its SAS past its deadline), or by the pairing library within a touch of `run`'s that found, in the pair room, that this computer's side ended the pair (a `forget` here that stopped part way, or another copy of this computer's half). |
+| 0 | `ended` | A resolve of `run`'s found the pair ended: by Lucille, or, in the pair room, by this computer's side (as for `forgotten`). This computer's half is forgotten too. |
 | 20 | `not_paired` | This computer holds no pair. |
 | 20 | `no_gate` | The pair has no local gate record, so it can never be confirmed here: `pair reject`, then pair again. |
 | 20 | `several_pairs` | The profile holds more than one pair, and the host keeps one. |
@@ -805,15 +814,16 @@ lucille-host --profile <name> run --json-events --exit-on-stdin-eof
 | 23 | `insecure_keyring`, `store_error` | The store that keeps the pair is unsafe, or cannot be used. |
 | 24 | `startup_refused` | The host does not start here: it runs as root, or a `SWITCHBOARD_*` variable is set. |
 | 25 | `downgrade` | This release is older than one that started `run` on this profile before (13.6). |
-| 1 | `failed` | Anything else `run` met and stopped for; `code` says what, and standard error says why. An unexpected error (`internal`) also writes its traceback. |
+| 1 | `failed` | Anything else `run` met and stopped for; `code` says what, and standard error says why. An unexpected error (`internal`, which is also any failure `run` has no other code for) writes its traceback in place of that line. |
 | 2 | | Usage: the command line could not be parsed. With `--json` or `--json-events`, one `error` object with `code` `usage`. |
 
 - `run`'s start checks come in this order, each before the next can write or read anything: the profile and
-  its host configuration (1); the environment (24); the run lock (21); the version record (25); the store
-  (23); the policy digest key, which a damaged file makes `failed` `state_invalid` rather than an invalid
-  policy (1); the pair, its record in the store and its gate record, read on this computer (20, or 23 for a
-  record the store cannot read); then `ready`, and the first hub call. So root writes nothing, a second
-  `run` changes nothing, and an older release reads no secret.
+  its host configuration (1); the environment (24); the run lock (21); the version record (25); the private
+  runtime folder (1) and the store (23); how far each work room was read (`state/cursors.json`), which a
+  damaged file makes `failed` `state_invalid` (1); the policy digest key, which a damaged file makes
+  `failed` `state_invalid` rather than an invalid policy (1); the pair, its record in the store and its gate
+  record, read on this computer (20, or 23 for a record the store cannot read); then `ready`, and the first
+  hub call. So root writes nothing, a second `run` changes nothing, and an older release reads no secret.
 - A pair whose SAS is not confirmed yet is not refused at start: `run` serves it, and waits for `pair
   confirm` (section 13.1). Of the gate, only a pair with no gate record, which can never be confirmed here,
   gives 20 at start (`no_gate`). While `run` waits, `expired` comes once the SAS deadline passes, and

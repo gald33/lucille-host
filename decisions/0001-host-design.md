@@ -1018,12 +1018,14 @@ no command has shown; `sas_pending`, one shown and not yet confirmed.
 The spec and the sections above leave these to the host. Each was made with the code on 2026-11-01, and
 each could be made another way in a later pull request that updates this list.
 
-- **One writer thread for the events.** Each object is serialized by the thread that has it, and queued;
-  one thread writes each line whole and flushes it. So a shell that reads slowly holds up no thread of
-  `run`: not the worker between its last check and an operation's start, and not main, which drains and
-  takes the signals. `ready` and `state` come from main, a request's objects from the worker, each right
-  after the audit line it mirrors, and `stopped` from the command once `run` has ended. Nothing is written
-  after `stopped`.
+- **One writer thread for the events.** Each object is serialized by the thread that has it, and queued; one
+  thread writes each line whole and flushes it. So a shell that reads slowly holds up no thread of `run`:
+  not the worker between its last check and an operation's start, and not main, which drains and takes the
+  signals. `ready` and `state` come from main, a request's objects from the worker, each right after the
+  audit line it mirrors, and `stopped` from the command once `run` has ended. Nothing is written after
+  `stopped`. Only then does the command wait for the shell, up to 5 s (`EVENTS_FLUSH`) for what is still
+  queued, `stopped` last, to be written, and it then exits with the code it chose, whatever is still
+  unwritten: a shell that stopped reading cannot keep `run` from ending.
 - **Standard output is taken for the events.** They go to a private duplicate of its descriptor, made
   blocking, while the descriptor itself and `sys.stdout` point at standard error, so a line a library
   prints never reaches the shell's stdout pipe, nor does `run`'s own text, which `--json-events` replaces.
@@ -1038,15 +1040,17 @@ each could be made another way in a later pull request that updates this list.
   process; it then reads again each tick, and a terminal brought back to the foreground ends it with
   Ctrl-D as before.
 - **The start checks** run in this order, each before the next can write or read anything: the environment
-  (24), the run lock (21), the version record (25), the store (23), the digest key (1), the pair, its
-  record in the store and its gate record (20, or 23 for a record the store cannot read). So root writes
-  nothing, a second `run` changes nothing, and an older release reads no secret. Reading the pair's record
-  here, as `status` does with no hub call, makes a damaged file store a refusal at start, not a `failed`
-  after `ready` at every start. The first SIGTERM, SIGHUP or Ctrl-C during the checks drains, as the
-  lifeline's end does: the command installs handlers once the profile's name is checked, writing nothing for
-  them, and keeps them until it has written `stopped`. Until `ready` they only drain, a second Ctrl-C too,
-  through the runner's own checks of the digest key and the pair, since nothing runs that a kill could stop
-  and nothing may be written yet: a kill would leave the profile paused for the next `run`.
+  (24), the run lock (21), the version record (25), the private runtime folder (1) and the store (23), how
+  far each room was read (`state/cursors.json`, 1, which the runner reads as it is made), the digest key
+  (1), the pair, its record in the store and its gate record (20, or 23 for a record the store cannot read).
+  So root writes nothing, a second `run` changes nothing, and an older release reads no secret. Reading the
+  pair's record here, as `status` does with no hub call, makes a damaged file store a refusal at start, not
+  a `failed` after `ready` at every start. The first SIGTERM, SIGHUP or Ctrl-C during the checks drains, as
+  the lifeline's end does: the command installs handlers once the profile's name is checked, writing nothing
+  for them, and keeps them until it has written `stopped`. Until `ready` they only drain, a second Ctrl-C
+  too, through the runner's own checks of the cursor file, the digest key and the pair, since nothing runs
+  that a kill could stop and nothing may be written yet: a kill would leave the profile paused for the next
+  `run`.
 - **A pair whose SAS is not confirmed yet does not stop `run` at start,** rather than exiting 20 as a
   computer that holds no pair does. `run` writes `ready` and `state` (`confirmed` false), takes no room and
   runs nothing, and serves once `pair confirm` opens the gate. At start, 20 comes only for a pair with no
