@@ -1300,6 +1300,29 @@ def test_the_compare_page_keeps_its_safety_properties() -> None:
         assert not re.search(r"\bTimer\s*\(|scheduledTimer", text), path.name
 
 
+def test_every_close_of_the_pairing_window_reaches_the_flow() -> None:
+    # On macOS 15 the title bar's close button, pressed through accessibility, closed the window
+    # without going through GatePanel's performClose(_:), and the flow went on taking the compare
+    # page for open, so the menu never offered Finish Connecting… again. The panel is the window's
+    # delegate: before a user's close it tells the flow and answers no, the flow hiding the window
+    # once it agrees; a close that asked nobody still tells the flow.
+    panel = _swift("PairingPanel.swift")
+    assert "final class PairingPanel: NSObject, NSWindowDelegate {" in panel
+    assert "panel.delegate = self" in _swift_function(panel, "    override init() {")
+    should = _swift_function(panel, "    func windowShouldClose(_ sender: NSWindow) -> Bool {")
+    assert should.count("onClose?()") == 1
+    assert should.index("onClose?()") < should.index("return false")
+    assert "return true" not in should
+    closing = _swift_function(panel, "    func windowWillClose(_ notification: Notification) {")
+    assert closing.index("guard page != .none else {") < closing.index("onClose?()")
+    # performClose(_:) still asks the flow and never closes the window itself.
+    gate = _swift_function(panel, "    override func performClose(_ sender: Any?) {")
+    assert "onCloseAsked?()" in gate and "super" not in gate
+    # Nothing closes the panel but AppKit on the user's behalf: the flow's hide() orders it out.
+    assert "panel.close()" not in panel
+    assert "panel.orderOut(nil)" in _swift_function(panel, "    func hide() {")
+
+
 def test_modal_loops_never_start_inside_a_main_queue_callout() -> None:
     # A modal loop started inside a main-queue callout (a dispatch source's handler, a main-queue
     # block, a main-actor task) keeps the main queue from being served until it ends: no timer,
@@ -1449,13 +1472,41 @@ def test_the_pairing_checks_look_for_the_apps_own_words() -> None:
 
 def test_the_applescript_the_checks_build_names_what_it_looks_for() -> None:
     script = check_app._target("button", check_app.THEY_MATCH)
-    assert "repeat with theElement in (entire contents of theWindow)" in script
-    assert 'if class of theElement is button and name of theElement is "They Match" then' in script
-    assert script.endswith('error "no button named They Match on the screen"\n')
-    assert "name of theElement" not in check_app._target("text field")
+    # Each window's own elements, as `button "OK" of window 1` finds a note's: a walk through
+    # `entire contents` found nothing in the code window on macOS 15.
+    assert (
+        'if exists (button "They Match" of theWindow) then '
+        'set theTarget to button "They Match" of theWindow\n'
+    ) in script
+    assert script.endswith('error "no button named They Match on the screen:" & held\nend if\n')
+    assert "role of every UI element of theWindow" in script
+    assert "if exists (text field 1 of theWindow) then" in check_app._target("text field")
+    assert "entire contents" not in _CHECK_APP.read_text(encoding="utf-8").replace(
+        "does not walk ``entire contents``", ""
+    )
     for unquotable in ('say "this"', "back\\slash"):
         with pytest.raises(ValueError):
             check_app._quoted(unquotable)
+
+
+def test_reading_every_text_says_what_the_windows_hold_when_it_finds_none(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    scripts: list[str] = []
+    answers = iter([(True, ""), (True, " [Connect to Lucille: AXGroup, AXButton]")])
+
+    def fake(body: str, timeout: float = 30) -> tuple[bool, str]:
+        scripts.append(body)
+        return next(answers)
+
+    monkeypatch.setattr(check_app, "_system_events", fake)
+    assert check_app._texts() == []
+    # Each window's own elements, never a walk through `entire contents`.
+    assert "set found to found & (value of every static text of theWindow)" in scripts[0]
+    assert "entire contents" not in scripts[0]
+    # Nothing found: it asks what the windows hold, and says so.
+    assert scripts[1] == check_app.WINDOWS_HOLD + "return held"
+    assert "AXGroup" in capsys.readouterr().out
 
 
 def test_the_pairing_check_imports_the_harness_only_when_it_runs() -> None:

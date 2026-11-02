@@ -1181,52 +1181,70 @@ def _quoted(text: str) -> str:
     return f'"{text}"'
 
 
+# AppleScript that sets ``held`` to each window's name and the roles of the UI elements it holds,
+# for an error that says what was on the screen instead.
+WINDOWS_HOLD: Final = (
+    'set AppleScript\'s text item delimiters to ", "\n'
+    'set held to ""\n'
+    "repeat with theWindow in windows\n"
+    "try\n"
+    'set held to held & " [" & (name of theWindow as text) & ": " '
+    '& ((role of every UI element of theWindow) as text) & "]"\n'
+    "end try\n"
+    "end repeat\n"
+)
+
+
 def _target(kind: str, name: str | None = None) -> str:
     """AppleScript that sets ``theTarget`` to the first UI element of the class ``kind``
-    (``button``, ``text field``), with the name ``name`` if one is given, in any window of the app
-    and at any depth, or stops with an error. The app's own windows may hold their contents in
-    groups, where ``of window 1`` does not reach."""
-    named = "" if name is None else f" and name of theElement is {_quoted(name)}"
+    (``button``, ``text field``), with the name ``name`` if one is given, in the first of the app's
+    windows, in the order System Events gives them, that holds one; or stops with an error that
+    names each window and the roles of what it holds. It looks among each window's own UI
+    elements, as ``button "OK" of window 1`` does: the app's windows hold their views straight in
+    the window, in no group (App/PairingPanel.swift, App/ProgressPanel.swift), as a note does. It
+    does not walk ``entire contents``, which found nothing in the code window on macOS 15 while
+    ``of window`` lookups found a note's words."""
+    one = f"{kind} 1 of theWindow" if name is None else f"{kind} {_quoted(name)} of theWindow"
     said = kind if name is None else f"{kind} named {name}"
     return (
         "set theTarget to missing value\n"
         "repeat with theWindow in windows\n"
         "try\n"
-        "repeat with theElement in (entire contents of theWindow)\n"
-        "try\n"
-        f"if class of theElement is {kind}{named} then\n"
-        "set theTarget to contents of theElement\n"
-        "exit repeat\n"
-        "end if\n"
-        "end try\n"
-        "end repeat\n"
+        f"if exists ({one}) then set theTarget to {one}\n"
         "end try\n"
         "if theTarget is not missing value then exit repeat\n"
         "end repeat\n"
-        f"if theTarget is missing value then error {_quoted(f'no {said} on the screen')}\n"
+        "if theTarget is missing value then\n"
+        + WINDOWS_HOLD
+        + f"error {_quoted(f'no {said} on the screen:')} & held\n"
+        "end if\n"
     )
 
 
 def _every(kind: str, what: str) -> list[str]:
-    """``what`` of every UI element of the class ``kind`` in every window of the app, at any depth,
-    one per line (``value`` of every ``static text``, say); empty when System Events cannot say."""
+    """``what`` of every UI element of the class ``kind`` that a window of the app holds, one per
+    line (``value`` of every ``static text``, say), looked for as :func:`_target` looks; empty when
+    System Events cannot say, which it then prints."""
     worked, said = _system_events(
         "set found to {}\n"
+        "set theProblems to {}\n"
         "repeat with theWindow in windows\n"
         "try\n"
-        "repeat with theElement in (entire contents of theWindow)\n"
-        "try\n"
-        f"if class of theElement is {kind} then "
-        f"set end of found to (({what} of theElement) as text)\n"
+        f"set found to found & ({what} of every {kind} of theWindow)\n"
+        "on error theError\n"
+        "set end of theProblems to theError\n"
         "end try\n"
         "end repeat\n"
-        "end try\n"
-        "end repeat\n"
-        f"{LINES}return found as text"
+        f"{LINES}"
+        "if found is {} and theProblems is not {} then error (theProblems as text)\n"
+        "return found as text"
     )
     if not worked:
         print(f"note: reading every {kind}: {said}")
         return []
+    if not said.strip():
+        _, held = _system_events(WINDOWS_HOLD + "return held")
+        print(f"note: no {kind} in the app's windows, which hold:{held}")
     return said.splitlines()
 
 
@@ -1786,12 +1804,7 @@ def _close_pairing_window() -> tuple[bool, str]:
         "repeat with theWindow in windows\n"
         f"set held to (name of theWindow is in {titles})\n"
         "try\n"
-        "repeat with theElement in (entire contents of theWindow)\n"
-        "try\n"
-        f"if class of theElement is button and name of theElement is {_quoted(THEY_MATCH)} then "
-        "set held to true\n"
-        "end try\n"
-        "end repeat\n"
+        f"if exists (button {_quoted(THEY_MATCH)} of theWindow) then set held to true\n"
         "end try\n"
         "if held then\n"
         'click (first button of theWindow whose subrole is "AXCloseButton")\n'

@@ -15,11 +15,14 @@ import AppKit
 /// - A click on They Match carries its event's time, so the flow can refuse a click made before
 ///   the number was drawn.
 /// - Its views sit straight in the window, in no group, as in a note.
+/// - It is the window's delegate, so every close AppKit tells the delegate about reaches the flow;
+///   where AppKit asks first, the flow decides.
 @MainActor
-final class PairingPanel: NSObject {
+final class PairingPanel: NSObject, NSWindowDelegate {
     /// What the user did. The app's glue turns each into an input of `PairingFlow`.
     var onSubmit: ((String) -> Void)?
-    /// The window's close button, or Cancel on the code page.
+    /// The window's close button, or Cancel on the code page; or the window closing on a route
+    /// that asked nobody first.
     var onClose: (() -> Void)?
     /// Cancel on the waiting page: the app asks whether to stop connecting.
     var onStopAsked: (() -> Void)?
@@ -71,6 +74,7 @@ final class PairingPanel: NSObject {
         panel.onCloseAsked = { [weak self] in
             self?.onClose?()
         }
+        panel.delegate = self
         occlusionObserver = NotificationCenter.default.addObserver(
             forName: NSWindow.didChangeOcclusionStateNotification, object: panel, queue: .main
         ) { [weak self] _ in
@@ -443,12 +447,34 @@ final class PairingPanel: NSObject {
     @objc private func differPressed(_ sender: Any?) {
         onDiffer?()
     }
+
+    // MARK: Closing the window
+
+    /// The title bar's close button. In the pairing check on macOS 15, pressed through
+    /// accessibility, it closed the window without going through `GatePanel.performClose(_:)`.
+    /// AppKit asks here before a user closes the window: the flow decides, and `hide()` orders the
+    /// window out once it agrees.
+    func windowShouldClose(_ sender: NSWindow) -> Bool {
+        onClose?()
+        return false
+    }
+
+    /// A close that asked neither `GatePanel.performClose(_:)` nor `windowShouldClose(_:)`: tell
+    /// the flow, so it never takes a closed window for an open one. While a verb runs the flow
+    /// keeps its page, and the window comes back the next time the flow shows a page.
+    func windowWillClose(_ notification: Notification) {
+        guard page != .none else {
+            return
+        }
+        onClose?()
+    }
 }
 
-/// The pairing window. Its close button asks the app, which closes it once the flow agrees, and it
-/// sends Command-V, C, X, A and Z, and Shift-Command-Z, to the field being edited, as an Edit menu
-/// would: the app has no Edit menu of its own. That paste is the user's, through the field; the
-/// app's code never reads the pasteboard.
+/// The pairing window. A close asks the app, which hides the window once the flow agrees:
+/// `performClose(_:)` here, and the title bar's close button, as AppKit documents it, through
+/// `PairingPanel.windowShouldClose(_:)` (expected, not yet seen on a Mac). It sends Command-V, C, X, A and Z, and Shift-Command-Z,
+/// to the field being edited, as an Edit menu would: the app has no Edit menu of its own. That
+/// paste is the user's, through the field; the app's code never reads the pasteboard.
 final class GatePanel: NSPanel {
     var onCloseAsked: (() -> Void)?
 
