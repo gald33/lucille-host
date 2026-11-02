@@ -29,7 +29,8 @@ comments included; over the code with its comments blanked, so that a comment in
   too; ``UserDefaults``, because the app keeps no settings of its own; and ``SWITCHBOARD_``,
   because the app passes the host no Switchboard setting. One exception, for tests only: in a
   Swift file under a ``Tests`` folder, :data:`TEST_SHEBANG` alone on the first line of a
-  multi-line string literal is not reported (:func:`allowed_test_shebangs`). The self-test
+  multi-line string literal, the only literal on the line it opens, is not reported
+  (:func:`allowed_test_shebangs`). The self-test
   writes such a string to a file and starts it through the app's own child runner, as a
   stand-in for the interpreter; nothing under ``Tests`` is in the app. Every other shell, and
   ``/bin/sh`` anywhere else in that file or in that script, is still reported.
@@ -567,18 +568,26 @@ def _is_test_swift(rel: str) -> bool:
 
 def allowed_test_shebangs(text: str, scan: SwiftScan) -> tuple[list[tuple[int, int]], set[int]]:
     """Where ``text`` holds :data:`TEST_SHEBANG` as a test may: alone on the first line of a
-    multi-line string literal, whose opening line ends with the three quotes that open it and
-    whose value starts with the shebang and a newline. Returns the shebang's spans in ``text``,
-    and the lines those literals start on in ``scan``. The caller allows them only in a file
-    under a ``Tests`` folder."""
+    multi-line string literal, whose value starts with the shebang and a newline, and which is
+    the only literal that starts on its opening line, a line whose code (outside any comment)
+    ends with the three quotes that open it. Returns the shebang's spans in ``text``, and the
+    lines those literals start on in ``scan``; each such line holds that one literal, so the
+    caller can tell it by its line. The caller allows them only in a file under a ``Tests``
+    folder."""
     starts = [0, *(match.end() for match in re.finditer("\n", text))]
+    opened_on: dict[int, int] = {}
+    for line, _ in scan.literals:
+        opened_on[line] = opened_on.get(line, 0) + 1
     spans: list[tuple[int, int]] = []
     lines: set[int] = set()
     for line, value in scan.literals:
         if not value.startswith(TEST_SHEBANG + "\n") or line >= len(starts):
             continue
-        end = text.find("\n", starts[line - 1])
-        opening = text[starts[line - 1] : len(text) if end < 0 else end]
+        if opened_on[line] != 1:
+            continue
+        # Comments are blanked in scan.code, character for character, so its lines are text's.
+        end = scan.code.find("\n", starts[line - 1])
+        opening = scan.code[starts[line - 1] : len(scan.code) if end < 0 else end]
         if not opening.rstrip(" \t").endswith('"""'):
             continue
         end = text.find("\n", starts[line])

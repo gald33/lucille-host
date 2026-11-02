@@ -1164,6 +1164,17 @@ def test_stripped_comparison_names_a_copy_codesign_could_not_strip(
     assert "second line" not in verdict and "SAME" not in verdict and "DIFFERENT" not in verdict
 
 
+def test_stripped_comparison_strips_even_copies_that_are_already_equal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Equal bytes before stripping would read SAME either way; what codesign said must not be
+    # skipped for them.
+    _fake_codesign(tmp_path, monkeypatch)
+    monkeypatch.setenv("FAKE_CODESIGN_REFUSES", "-bundle")
+    _, verdict = _stripped(tmp_path, b"codeSIG", b"codeSIG")[0]
+    assert verdict.startswith("not compared: `codesign --remove-signature` failed on the bundle's")
+
+
 def _manifest(wheels: list[tuple[str, str, Path]], host: Path) -> dict[str, Any]:
     return {
         "host": {

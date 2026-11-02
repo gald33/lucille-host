@@ -1302,21 +1302,22 @@ in 10 minutes or less.
     other ways to start a process or use the network that the first build's tests listed, nor `LSOpen*` or
     any `NSUser*Task`; no `URL(string:` or `URL.init(string:` at all; no `UserDefaults`, since the app
     keeps no settings of its own, and no `SWITCHBOARD_`;
-  - one exception to the shell names, for tests only, added with the pairing screen: in a Swift file under
-    a `Tests` folder, `#!/bin/sh` alone on the first line of a multi-line string literal is not reported.
-    The self-test checks the app's child runner (`HostChild`, in `HostCLI.swift`) against children that
-    end as told: a signal, a partial line, a lifeline that closes, a code on standard input. It writes such
-    a child as a short `sh` script in its temporary HOME and gives that file to `HostCLI` in place of the
-    interpreter, so the script is started by the app's own `Process`, the one the `[process]` rule allows,
-    and the self-test starts nothing itself. A Swift stand-in would need a second compiled program, or a
-    `Process` in the self-test, which the rule forbids; a Python one would need an interpreter, while the
-    self-test checks the child runner with `--home` alone, no app given, and a shebang cannot name the
-    bundled runtime at a path with a space, which `relocate` uses. Nothing under `Tests` is in the app:
-    the self-test is compiled to a file of its own and handed to the smoke jobs beside the disk image, and
-    `check_app.py bundle` holds the bundle to its five Mach-O files.
-    The exception is that one line: `/bin/bash`, `/bin/zsh`, `#!/bin/sh -e`, a shebang on any other line or
-    in a one-line string, a comment, and `/bin/sh` anywhere else in the file or the script are all still
-    reported (`tests/guards/test_macos_lint.py` plants each);
+  - one exception to the shell names, for tests only, added with the pairing screen: in a Swift file under a
+    `Tests` folder, `#!/bin/sh` alone on the first line of a multi-line string literal is not reported, where
+    that literal is the only one that starts on its opening line, and that line's code, outside any comment,
+    ends with the quotes that open it. The self-test checks the app's child runner (`HostChild`, in
+    `HostCLI.swift`) against children that end as told: a signal, a partial line, a lifeline that closes, a
+    code on standard input. It writes such a child as a short `sh` script in its temporary HOME and gives that
+    file to `HostCLI` in place of the interpreter, so the script is started by the app's own `Process`, the
+    one the `[process]` rule allows, and the self-test starts nothing itself. A Swift stand-in would need a
+    second compiled program, or a `Process` in the self-test, which the rule forbids; a Python one would need
+    an interpreter, while the self-test checks the child runner with `--home` alone, no app given, and a
+    shebang cannot name the bundled runtime at a path with a space, which `relocate` uses. Nothing under
+    `Tests` is in the app: the self-test is compiled to a file of its own and handed to the smoke jobs beside
+    the disk image, and `check_app.py bundle` holds the bundle to its five Mach-O files.
+    The exception is that one line: `/bin/bash`, `/bin/zsh`, `#!/bin/sh -e`, a shebang on any other line or in
+    a one-line string, a comment, `/bin/sh` anywhere else in the file or the script, and a string that starts
+    on the stand-in's opening line are all still reported (`tests/guards/test_macos_lint.py` plants each);
   - `Process` only in `macos/App/HostCLI.swift`, which must write the bundled runtime's path,
     `Contents/Resources/runtime/bin/lucille-host-runtime`, and its arguments,
     `["-I", "-B", "-X", "utf8", "-m", "lucille_host"]`, outside its comments. The lint sees that they are

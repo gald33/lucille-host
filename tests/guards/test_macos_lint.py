@@ -585,6 +585,11 @@ def test_a_shell_outside_the_stand_in_shebang_is_reported(rel: str, text: str, l
         ('let text = """\n    #!/bin/sh\\nexit 0\n    """\n', 2),
         # The shebang with no script after it.
         ('let text = """\n    #!/bin/sh\n    """\n', 2),
+        # A one-line literal on the line a stand-in opens on: the allowance is the stand-in's
+        # alone, so the line holds no other literal.
+        ('let a = "#!/bin/s\\u{68}\\nx"; let b = """\n#!/bin/sh\nexit 0\n"""\n', 1),
+        # The quotes that end the line are in a comment, so they open no stand-in.
+        ('let a = "#!/bin/s\\u{68}\\nx" /* """\n#!/bin/sh\n*/\n', 1),
     ],
 )
 def test_a_shebang_the_allowance_does_not_cover_is_reported(text: str, line: int) -> None:
