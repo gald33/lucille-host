@@ -448,6 +448,19 @@ def test_ci_macos_jobs() -> None:
     assert not (build_app.REPO_ROOT / ".github" / "workflows" / "macos-app.yml").exists()
 
 
+def test_only_the_xcode_27_leg_may_fail_without_failing_the_run() -> None:
+    # The maintainer's decision of 2026-11-02 (decisions/0002 §18): the xcode-27 leg still runs and
+    # shows its result, but a failure there does not fail the run. Every other job gates.
+    doc = _ci()
+    smoke = doc["jobs"]["macos-smoke"]
+    assert smoke["continue-on-error"] == "${{ matrix.runner == 'xcode-27' }}"
+    runners = smoke["strategy"]["matrix"]["runner"]
+    assert "xcode-27" in runners and len(runners) > 1
+    for job_id, job in doc["jobs"].items():
+        if job_id != "macos-smoke":
+            assert "continue-on-error" not in job, job_id
+
+
 def test_the_pairing_check_runs_with_the_suites_copy_of_the_runtime() -> None:
     doc = _ci()
     steps = _steps(doc, "macos-app")

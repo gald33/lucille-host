@@ -298,11 +298,14 @@ jobs:
   # The same bytes on macOS 26 and on macOS 27 (the xcode-27 image): the disk image and the
   # self-test macos-app built, restored from the cache and refused unless their sha256 is the one
   # macos-app gave. Nothing is built here. Runs whenever macos-app got as far as handing them on.
+  # The xcode-27 leg runs and shows its result, but a failure there does not fail the run: the
+  # maintainer's decision of 2026-11-02 (decisions/0002 §18). macos-26 gates like every other job.
   macos-smoke:
     name: smoke (${{ matrix.runner }})
     needs: macos-app
     if: ${{ !cancelled() && needs.macos-app.outputs.built == 'true' }}
     runs-on: ${{ matrix.runner }}
+    continue-on-error: ${{ matrix.runner == 'xcode-27' }}
     timeout-minutes: 40
     strategy:
       fail-fast: false

@@ -502,7 +502,8 @@ runs each check in [`check_app.py`](../tools/macos/check_app.py). Its jobs `maco
 on `xcode-27` (macOS 27), take the disk image and the compiled Swift self-test that `macos-app` built,
 refuse them unless their sha256 is the one `macos-app` gave, and run the checks marked "both" on them; they
 build nothing. The workflow's token can only read the repository, and the Mac jobs use no secret. A check
-that finds a problem fails its job.
+that finds a problem fails its job. On `xcode-27` alone, a failed job does not fail the workflow run
+(`continue-on-error`, the maintainer's decision of 2026-11-02, decisions/0002 §18).
 
 | Check | Where | What it shows |
 |---|---|---|

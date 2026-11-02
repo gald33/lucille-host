@@ -1103,6 +1103,10 @@ to `main`, with no path filter; a new push to a pull request cancels that pull r
   `macos-app` compiled, through the checks that need no build (§19). It builds nothing. It does not run the
   pairing check: it has no copy of the runtime with the test harness, and making one would mean installing
   the suite's dependencies there too. The probe of the host's verbs, printed only, runs in both jobs.
+  **The `xcode-27` leg does not gate** (the maintainer's decision, 2026-11-02): the job is
+  `continue-on-error` on that leg alone, so it still runs and shows its result, but its failure does not fail
+  the workflow run (GitHub's documentation of `jobs.<job_id>.continue-on-error`; not tested here).
+  `macos-26` and every other job still gate.
 - Neither job holds a secret, has an `environment`, signs with anything but `-` (ad hoc), or notarizes. The
   only secret `ci.yml` names is the private-string list, in its `guards` job.
 
@@ -1115,7 +1119,8 @@ pages or its API, and only a workflow run of this repository can restore it (a r
 documentation of the cache; not tested here). The residual: a pull request's run, a fork's included, can
 restore entries that runs on `main` saved, while they are kept, and could upload what it restored as an
 artifact of its own run. That run could equally build the same app from the same source, so the cache
-exposes nothing a fork could not make itself.
+exposes nothing a fork could not make itself. **The maintainer accepted this reading, with its residual, on
+2026-11-02:** an Actions cache entry is not an upload.
 
 **Uploads.** Every run uploads its logs and UI snapshots (the PNG, text and JSON files `check_app.py` writes
 in `build/macos/check/`), kept 7 days; never the `~/Library` snapshots, and never the self-test program.
