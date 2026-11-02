@@ -19,6 +19,7 @@ import os
 import re
 import shlex
 import shutil
+import subprocess
 import sys
 import zipfile
 from collections.abc import Callable, Iterator
@@ -28,6 +29,7 @@ from typing import Any
 import pytest
 import yaml
 
+from lucille_host import paths
 from tools.macos import build_app, check_app, payload
 
 CI = build_app.REPO_ROOT / ".github" / "workflows" / "ci.yml"
@@ -485,7 +487,8 @@ def test_the_pairing_check_runs_with_the_suites_copy_of_the_runtime() -> None:
     ]
     assert uploads and min(uploads) > pairing[0]
     # Every step that drives the app or runs a long check has a limit of its own too, in both
-    # jobs, inside the job's.
+    # jobs, at most half the job's as this one's is: a hang in any of them must leave the job the
+    # time to upload what shows it.
     for job_id, names in (
         ("macos-app", ("swift", "relocate", "ui", "suite", "pairing")),
         ("macos-smoke", ("swift", "ui")),
@@ -498,8 +501,76 @@ def test_the_pairing_check_runs_with_the_suites_copy_of_the_runtime() -> None:
                 if re.search(rf"check_app\.py {name}\b", str(found.get("run", "")))
             ]
             limit = found.get("timeout-minutes")
-            assert isinstance(limit, int) and 0 < limit < job["timeout-minutes"], (job_id, name)
+            assert isinstance(limit, int), (job_id, name)
+            assert 0 < limit <= job["timeout-minutes"] // 2, (job_id, name)
     assert not any("check_app.py pairing" in run for run in _runs(doc, "macos-smoke"))
+
+
+def test_the_pairing_step_finds_the_interpreter_the_suite_check_installs_into(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # The pairing step's glob holds only if check_suite puts its copy at <--copy-to>/<the app>;
+    # a mismatch would show only on the Mac, as "made no copy". Here check_suite runs with its
+    # programs stubbed up to its first install, then the step's own lines look for the
+    # interpreter it installed into.
+    doc = _ci()
+    runs = _runs(doc, "macos-app")
+    (suite,) = [shlex.split(run) for run in runs if "check_app.py suite" in run]
+    (pairing,) = [run for run in runs if "check_app.py pairing" in run]
+    runner_temp = tmp_path / "runner"
+    copy_to = Path(suite[suite.index("--copy-to") + 1].replace("$RUNNER_TEMP", str(runner_temp)))
+    app = check_app.app_path(tmp_path / "build")
+    runtime = check_app.python_in(app)
+    runtime.parent.mkdir(parents=True)
+    runtime.write_text("#!/bin/sh\n", encoding="ascii")
+    runtime.chmod(0o755)
+    installed_into: list[str] = []
+
+    def run(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        if argv[0] == "ditto":
+            shutil.copytree(argv[1], argv[2], symlinks=True)
+        elif argv[:3] == ["uv", "pip", "install"]:
+            installed_into.append(argv[argv.index("--python") + 1])
+            return subprocess.CompletedProcess(argv, 1, "", "")
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    with monkeypatch.context() as patched:
+        patched.setattr(check_app, "_manifest", lambda app: {})
+        patched.setattr(check_app, "find_reference_wheels", lambda manifest, folders: ({}, []))
+        patched.setattr("subprocess.run", run)
+        check_app.check_suite(app, tmp_path / "build", copy_to, check_app.Checker())
+    (python,) = installed_into
+
+    def step() -> subprocess.CompletedProcess[str]:
+        lines = [line for line in pairing.splitlines() if "check_app.py pairing" not in line]
+        return subprocess.run(
+            ["sh", "-c", "\n".join([*lines, 'printf "%s\\n" "$1"'])],
+            env={"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "RUNNER_TEMP": str(runner_temp)},
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+
+    done = step()
+    assert (done.returncode, done.stdout) == (0, f"{python}\n"), done.stderr
+    # Two copies, and the step refuses rather than pick one.
+    shutil.copytree(copy_to / app.name, copy_to / "Other.app", symlinks=True)
+    assert step().returncode == 1
+
+
+def test_the_probe_runs_after_the_host_check_on_the_read_only_bundle() -> None:
+    # In both jobs the probe prints what the verbs do on the bundle as the app ships it, read-only,
+    # once the host check has run, and runs as every check but pairing does, without the project.
+    doc = _ci()
+    for job in ("macos-app", "macos-smoke"):
+        runs = [run.strip() for run in _runs(doc, job)]
+        probe = [index for index, run in enumerate(runs) if "check_app.py probe" in run]
+        assert len(probe) == 1, job
+        assert runs[probe[0]] == "uv run --no-project python tools/macos/check_app.py probe", job
+        made_readonly = runs.index("chmod -R a-w build/macos/*.app")
+        host = next(i for i, run in enumerate(runs) if re.search(r"check_app\.py host\b", run))
+        assert made_readonly < host < probe[0], job
 
 
 def test_ci_steps_take_github_values_only_through_the_environment() -> None:
@@ -801,6 +872,80 @@ def test_library_problems() -> None:
         app_name=PINS.app_name,
     )
     assert not sibling.control_seen
+
+
+def _mac_state(home: Path) -> Path:
+    """The state folder of the app's profile, where the host keeps it on macOS."""
+    return paths.dirs(check_app.APP_PROFILE, family="macos", environ={"HOME": str(home)}).state
+
+
+def test_the_library_control_is_the_state_folder_of_the_apps_profile(tmp_path: Path) -> None:
+    assert tmp_path / "Library" / check_app.LIBRARY_CONTROL == _mac_state(tmp_path)
+
+
+# A stand-in for the app's runtime, for the two controls: the last --profile given, or default,
+# and the pause flag in that profile's state folder, which both verbs make, as the host does.
+_CONTROLS_RUNTIME = """\
+#!/bin/sh
+profile=default
+while [ "$#" -gt 1 ]; do
+    [ "$1" = --profile ] && profile=$2
+    shift
+done
+state="$HOME/Library/Application Support/lucille-host/$profile/state"
+mkdir -p "$state" || exit 1
+case $1 in
+    pause) : > "$state/paused" ;;
+    resume) rm -f "$state/paused" ;;
+    *) exit 2 ;;
+esac
+"""
+
+
+def _controls_app(home: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    monkeypatch.setenv("HOME", str(home))
+    app = home / "Capsule.app"
+    runtime = check_app.python_in(app)
+    runtime.parent.mkdir(parents=True)
+    runtime.write_text(_CONTROLS_RUNTIME, encoding="ascii")
+    runtime.chmod(0o755)
+    return app
+
+
+@pytest.mark.parametrize("paused", [False, True])
+def test_the_control_run_changes_the_apps_profile_and_leaves_it_as_it_was(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, paused: bool
+) -> None:
+    app = _controls_app(tmp_path, monkeypatch)
+    flag = _mac_state(tmp_path) / "paused"
+    if paused:
+        flag.parent.mkdir(parents=True)
+        flag.touch()
+    checker = check_app.Checker()
+    check_app._control_writes(app, checker)
+    assert checker.failures == []
+    assert flag.is_file() == paused
+    # Both verbs ran on the app's profile: no other profile appeared.
+    hosts = tmp_path / "Library" / "Application Support" / "lucille-host"
+    assert [folder.name for folder in hosts.iterdir()] == [check_app.APP_PROFILE]
+
+
+def test_the_library_diff_sees_its_own_control_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    app = _controls_app(tmp_path, monkeypatch)
+    library = tmp_path / "Library"
+    library.mkdir()
+    before = tmp_path / "before.json"
+    before.write_text(json.dumps(check_app.library_snapshot(library)), encoding="utf-8")
+    checker = check_app.Checker()
+    check_app.check_library_diff(app, before, True, checker)
+    assert checker.failures == []
+    # From here on nothing writes, so a diff without the control run has no control.
+    before.write_text(json.dumps(check_app.library_snapshot(library)), encoding="utf-8")
+    quiet = check_app.Checker()
+    check_app.check_library_diff(app, before, False, quiet)
+    assert len(quiet.failures) == 1
 
 
 def test_library_snapshot(tmp_path: Path) -> None:

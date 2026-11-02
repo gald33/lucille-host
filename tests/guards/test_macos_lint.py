@@ -570,6 +570,62 @@ def test_a_shell_outside_the_stand_in_shebang_is_reported(rel: str, text: str, l
     assert line in {v.line for v in shells}, (line, shells)
 
 
+# The cases above spell the shell plainly, so the rules over the whole text report it whatever the
+# allowance decides. Here the only text that names it is a literal spelled with an escape (\u{68}
+# is "h"), or the one line the allowance would blank, so only the allowance's own checks keep
+# these reported.
+@pytest.mark.parametrize(
+    ("text", "line"),
+    [
+        # A one-line literal is no stand-in, however it spells the shebang.
+        ('let text = "#!/bin/s\\u{68}\\nexit 0\\n"\n', 1),
+        # The shebang alone on its line, after a literal that line does not open with """.
+        ('let text = "#!/bin/s\\u{68}\\nx" /*\n#!/bin/sh\n*/\n', 2),
+        # The shebang on the literal's first line, with more script after it through an escape.
+        ('let text = """\n    #!/bin/sh\\nexit 0\n    """\n', 2),
+        # The shebang with no script after it.
+        ('let text = """\n    #!/bin/sh\n    """\n', 2),
+    ],
+)
+def test_a_shebang_the_allowance_does_not_cover_is_reported(text: str, line: int) -> None:
+    found = macos_lint.check_swift(text, TEST, phrases())
+    assert line in {v.line for v in found if "names a shell" in v.message}, found
+
+
+def test_a_shell_escaped_inside_the_stand_in_is_reported() -> None:
+    # Only the decoded script names the shell again; the allowance blanks its shebang alone.
+    text = STAND_IN.replace("shift 8", "exec /bin/s\\u{68} -c x")
+    found = macos_lint.check_swift(text, TEST, phrases())
+    assert any("names a shell" in v.message for v in found), found
+
+
+def test_every_stand_in_in_a_test_file_is_allowed() -> None:
+    text = STAND_IN + STAND_IN.replace("checkChild", "checkOther")
+    assert swift_rules(text, TEST) == set()
+    spans, lines = macos_lint.allowed_test_shebangs(text, macos_lint.swift_scan(text))
+    assert [text[start:end] for start, end in spans] == ["#!/bin/sh", "#!/bin/sh"]
+    assert lines == {2, 12}
+
+
+def test_a_stand_in_may_have_spaces_after_its_opening_quotes() -> None:
+    # The lexer reads spaces and a tab after the opening """ as the same literal.
+    text = STAND_IN.replace('let text = """\n', 'let text = """ \t\n')
+    assert macos_lint.swift_scan(text).literals == macos_lint.swift_scan(STAND_IN).literals
+    assert swift_rules(text, TEST) == set()
+
+
+def test_a_stand_in_the_lexer_cannot_read_is_reported() -> None:
+    # With no literals read there is no allowance: the shebang is a shell like any other.
+    found = macos_lint.check_swift(STAND_IN + 'let s = "open\n', TEST, phrases())
+    assert "parse" in {v.rule for v in found}
+    assert 3 in {v.line for v in found if "names a shell" in v.message}, found
+
+
+def test_swift_the_lexer_cannot_read_is_still_checked_by_the_rules() -> None:
+    found = macos_lint.check_swift('let s = URLSession.shared\nlet t = "open\n', APP, phrases())
+    assert {(1, "swift-denylist"), (2, "parse")} <= {(v.line, v.rule) for v in found}
+
+
 def test_the_build_and_its_docstrings_are_clean() -> None:
     assert python_rules(BUILD_APP, BUILD) == set()
     # Comments are not string constants.

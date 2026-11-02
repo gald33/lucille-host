@@ -14,6 +14,7 @@ import plistlib
 import re
 import subprocess
 import sys
+import types
 from collections.abc import Callable
 from pathlib import Path
 
@@ -1422,6 +1423,102 @@ def test_wrapper_text() -> None:
     assert target == build_app.RUNTIME_IN_APP
 
 
+# A stand-in for the bundled runtime, for the runs check_wrapper makes. It keeps the host's layout
+# on macOS (src/lucille_host/paths.py): the last --profile given, or default, whose state folder
+# status makes (link.Session does) and pause writes its flag in; and, unless given -B, it writes
+# bytecode beside itself.
+_WRAPPER_CHECK_RUNTIME = """\
+#!/bin/sh
+here=${0%/*}
+profile=default
+verb=
+bytecode=yes
+while [ "$#" -gt 0 ]; do
+    case $1 in
+        -B) bytecode=no ;;
+        -I) ;;
+        -X | -m) shift ;;
+        --profile) profile=$2; shift ;;
+        *) [ -n "$verb" ] || verb=$1 ;;
+    esac
+    shift
+done
+if [ "$bytecode" = yes ]; then
+    mkdir -p "$here/__pycache__" || exit 1
+fi
+state="$HOME/Library/Application Support/lucille-host/$profile/state"
+case $verb in
+    --version) echo "lucille-host @VERSION@" ;;
+    status) mkdir -p "$state" ;;
+    ops) ;;
+    pause) @PAUSE@ ;;
+    *) exit 2 ;;
+esac
+"""
+_PAUSE = 'mkdir -p "$state" && : > "$state/paused"'
+
+
+def _wrapper_check(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    wrapper: str = build_app.WRAPPER_TEXT,
+    pause: str = _PAUSE,
+) -> list[str]:
+    """Run check_wrapper on an app holding ``wrapper`` and the stand-in runtime, with ``cp`` for
+    ``ditto``, and return what failed."""
+    tools = tmp_path / "tools"
+    tools.mkdir()
+    (tools / "ditto").write_text('#!/bin/sh\nexec cp -pR -- "$1" "$2"\n', encoding="ascii")
+    (tools / "ditto").chmod(0o755)
+    monkeypatch.setenv("PATH", f"{tools}{os.pathsep}{os.environ['PATH']}")
+    app = tmp_path / "Capsule.app"
+    build_app.write_wrapper(app).write_text(wrapper, encoding="ascii")
+    runtime = app / build_app.RUNTIME_IN_APP
+    runtime.parent.mkdir(parents=True)
+    script = _WRAPPER_CHECK_RUNTIME.replace("@VERSION@", build_app.host_version())
+    runtime.write_text(script.replace("@PAUSE@", pause), encoding="ascii")
+    runtime.chmod(0o755)
+    checker = check_app.Checker()
+    check_app.check_wrapper(app, checker)
+    return checker.failures
+
+
+def test_the_wrapper_check_passes_a_wrapper_on_the_apps_profile(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    assert _wrapper_check(tmp_path, monkeypatch) == []
+
+
+@pytest.mark.parametrize(
+    ("wrapper", "pause"),
+    [
+        # The wrapper before the app had a profile of its own: the host runs on default.
+        (build_app.WRAPPER_TEXT.replace(f" --profile {build_app.APP_PROFILE}", ""), _PAUSE),
+        # The flag lands in the app's profile, but the pause fails.
+        (build_app.WRAPPER_TEXT, _PAUSE + " && exit 1"),
+        # The flag lands in the app's profile, and a default profile appears beside it.
+        (build_app.WRAPPER_TEXT, 'mkdir -p "${state%/*/*}/default" && ' + _PAUSE),
+    ],
+    ids=["on-default", "pause-fails", "default-appears"],
+)
+def test_the_wrapper_check_fails_a_pause_that_is_not_on_the_apps_profile_alone(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, wrapper: str, pause: str
+) -> None:
+    failures = _wrapper_check(tmp_path, monkeypatch, wrapper, pause)
+    assert len(failures) == 1
+    assert check_app.APP_PROFILE in failures[0]
+
+
+def test_the_self_test_runs_the_pairing_verbs_on_a_profile_of_its_own() -> None:
+    # The self-test runs the real host's pairing verbs on a throwaway profile, never the app's,
+    # and checks that HostCLI passes it after the runtime's arguments. It compiles only on a Mac.
+    selftest = (build_app.MACOS_DIR / "Tests" / "SelfTest.swift").read_text(encoding="utf-8")
+    check = _swift_function(selftest, "static func checkPairingVerbs(")
+    assert 'HostCLI(python: python, home: home, profile: "selftest-pair", timeout: 60)' in check
+    expected = _swift_array((*macos_lint.RUNTIME_ARGV, "--profile", "selftest-pair", "status"))
+    assert f'cli.arguments(for: ["status"]) == {expected},' in check
+
+
 def test_the_wrapper_runs_the_bundled_runtime_through_a_link(tmp_path: Path) -> None:
     app = tmp_path / "Some Folder" / "Capsule.app"
     wrapper = build_app.write_wrapper(app)
@@ -2124,6 +2221,31 @@ def test_the_pairing_check_says_when_its_harness_is_missing(
     assert "suite --copy-to" in capsys.readouterr().out
 
 
+@pytest.mark.parametrize(
+    "module", ["switchboard.client", "tests._lucille", "tests._process", "tests._run"]
+)
+@pytest.mark.parametrize("there", [False, True], ids=["missing", "without-its-names"])
+def test_the_pairing_check_fails_cleanly_whichever_harness_import_fails(
+    module: str,
+    there: bool,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # Each import the check needs, made to fail by itself: missing, or there without the names the
+    # check takes from it (an ImportError that is not a ModuleNotFoundError). Set in sys.modules,
+    # a tests.* module fails even when another test has already imported it, so this holds
+    # whatever order the suite runs in.
+    monkeypatch.setitem(sys.modules, module, types.ModuleType(module) if there else None)
+    monkeypatch.setattr("subprocess.run", lambda *a, **k: pytest.fail("ran a program"))
+    checker = check_app.Checker()
+    check_app.check_pairing(tmp_path / "Capsule.app", checker, tmp_path / "check")
+    assert checker.failures == ["the pairing check finds Switchboard and the test harness"]
+    # It names the import that failed, and the interpreter to run the check with.
+    out = capsys.readouterr().out
+    assert module in out and "suite --copy-to" in out
+
+
 # --- The Open panel, on every macOS the jobs run: check_app.py ui -----------------------------
 # On macOS 26 and 27 (the smoke jobs, 2026-11-02) `button "Allow Capsule to Use This Folder" of
 # window 1` was not found, where macOS 15 finds it. The ui check now looks for the panel's buttons
@@ -2197,6 +2319,116 @@ def test_what_the_windows_hold_names_their_buttons_and_sheets() -> None:
     assert lines.count("try") == lines.count("end try") == 3
 
 
+_Block = tuple[str, list["str | _Block"]]
+
+
+def _blocks(script: str) -> list[str | _Block]:
+    """The AppleScript ``script`` as nested blocks: a line that opens one (``try``, ``repeat
+    ...``, an ``if ... then`` that ends the line) is ``(line, [what it holds])``, and each must be
+    closed by the ``end`` of its own kind. A one-line ``if ... then set ...`` is a line."""
+    top: list[str | _Block] = []
+    within: list[_Block] = [("", top)]
+    for line in script.splitlines():
+        first = line.split(" ", 1)[0]
+        if line == "try" or first == "repeat" or (first == "if" and line.endswith(" then")):
+            block: _Block = (line, [])
+            within[-1][1].append(block)
+            within.append(block)
+        elif first == "end":
+            opened = within.pop()[0]
+            assert opened.split(" ", 1)[0] == line.removeprefix("end "), (opened, line)
+        else:
+            within[-1][1].append(line)
+    assert len(within) == 1, within[-1][0]
+    return top
+
+
+def test_each_place_the_panel_walk_reads_below_a_window_is_in_a_try_of_its_own() -> None:
+    # A sheet or group that cannot be read (one closing while the walk runs) ends its own loop,
+    # not the script, so the places after it are still read and the Return fallback still runs.
+    def loop(place: str, over: str, *inside: _Block) -> _Block:
+        return ("try", [(f"repeat with {place} in {over}", [f"look in {place}", *inside])])
+
+    def groups_of(place: str) -> _Block:
+        return loop("theInner", f"groups of {place}")
+
+    assert _blocks(check_app._in_each_place("look in {place}\n")) == [
+        (
+            "repeat with theWindow in windows",
+            [
+                "look in theWindow",
+                loop("theSheet", "sheets of theWindow", groups_of("theSheet")),
+                loop("theGroup", "groups of theWindow", groups_of("theGroup")),
+                loop("theGroup", "splitter groups of theWindow", groups_of("theGroup")),
+            ],
+        )
+    ]
+
+
+def test_the_panel_lookup_sets_the_target_only_while_none_is_found() -> None:
+    # The walk reads the window itself outside any try, so the lookup's own try is what keeps a
+    # window that cannot be read from ending the script before Return is pressed.
+    found = 'button "Open" of {place}'
+    assert _blocks(check_app._click_in_place("Open")) == [
+        (
+            "if theTarget is missing value then",
+            [("try", [f"if exists ({found}) then set theTarget to {found}"])],
+        )
+    ]
+
+
+def test_the_panel_script_clicks_or_stops_only_on_a_target_it_found() -> None:
+    # It starts with no target, clicks only a prompt it found, and stops without pressing anything
+    # only on one of the app's own windows it found. Neither found, it reaches its top level's
+    # end: what the windows hold, then Return.
+    def walk(name: str) -> list[str | _Block]:
+        return _blocks(check_app._in_each_place(check_app._click_in_place(name)))
+
+    found = "if theTarget is not missing value then"
+    script = _blocks(check_app.CHOOSE_IN_PANEL)
+    assert script[:-1] == [
+        "set theTarget to missing value",
+        *walk(check_app.OPEN_PROMPT),
+        (found, ["click theTarget", "delay 2", 'return "clicked"']),
+        *[block for after in check_app.AFTER_THE_PANEL for block in walk(after)],
+        (found, ['return "already past the Open panel: it shows " & (name of theTarget as text)']),
+        *_blocks(check_app.WINDOWS_HOLD),
+        "set frontmost to true",
+        "key code 36",
+        "delay 2",
+    ]
+    assert isinstance(script[-1], str) and script[-1].startswith("return ")
+
+
+def test_what_follows_the_panel_is_known_by_every_button_of_its_windows_but_cancel() -> None:
+    # The name dialog, the broad-folder question and the whole-disk note (App/HostModel.swift):
+    # one found means the panel has chosen, and Return would answer that window instead. Cancel
+    # is left out, as the Open panel has one of its own.
+    model = (build_app.SWIFT_DIR / "HostModel.swift").read_text(encoding="utf-8")
+    titles: set[str] = set()
+    for signature in (
+        "private func askForAlias(",
+        "private func confirmBroadFolder(",
+        "private func refuseWholeDisk(",
+    ):
+        body = _swift_function(model, signature)
+        titles |= set(re.findall(r'addButton\(withTitle: "([^"]+)"\)', body))
+    assert set(check_app.AFTER_THE_PANEL) == titles - {"Cancel"}
+
+
+def test_what_the_windows_hold_reads_each_sheet_and_closes_each_window() -> None:
+    *_, (windows, [(guard, window)]) = _blocks(check_app.WINDOWS_HOLD)
+    assert (windows, guard) == ("repeat with theWindow in windows", "try")
+    # Each window's part is closed after whatever its own trys could read.
+    assert window[0].startswith('set held to held & " [" & ')
+    assert window[-1] == 'set held to held & "]"'
+    assert [block[0] for block in window[1:-1]] == ["try", "try"]
+    # A sheet's part reads the sheet's elements, not its window's again.
+    [(sheets, [read])] = window[2][1]
+    assert sheets == "repeat with theSheet in sheets of theWindow"
+    assert "of theSheet" in read and "theWindow" not in read
+
+
 @pytest.mark.parametrize(
     ("answer", "worked", "note"),
     [
@@ -2237,6 +2469,153 @@ def test_going_to_a_folder_chooses_through_the_panel_script(
     assert (f"note: choosing {folder} in the Open panel: {answer[1]}" in printed) is note
     if not worked:
         assert done[1] == f"choosing the folder: {answer[1]}"
+
+
+def test_the_panel_script_is_given_ninety_seconds(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # CHOOSE_IN_PANEL walks the app's windows, sheets and groups up to four times (the prompt,
+    # then each of AFTER_THE_PANEL) and then says what they hold.
+    timeouts: dict[str, float] = {}
+
+    def fake(body: str, timeout: float = 30) -> tuple[bool, str]:
+        timeouts[body] = timeout
+        return True, "clicked"
+
+    monkeypatch.setattr(check_app, "_system_events", fake)
+    monkeypatch.setattr(check_app, "_screenshot", lambda path: None)
+    check_app._go_to_folder(Path("/Users/runner/My Project Files"), tmp_path, "5-open-panel.png")
+    assert timeouts[check_app.CHOOSE_IN_PANEL] >= 90
+
+
+@pytest.mark.parametrize(
+    ("answer", "read"),
+    [
+        ((True, f"Cancel\n{check_app.OPEN_PROMPT}"), (True, ["Cancel", check_app.OPEN_PROMPT])),
+        ((True, ""), (True, [])),
+        ((False, "execution error: no process"), (False, ["execution error: no process"])),
+    ],
+)
+def test_the_panel_buttons_are_read_from_every_window_sheet_and_group(
+    monkeypatch: pytest.MonkeyPatch, answer: tuple[bool, str], read: tuple[bool, list[str]]
+) -> None:
+    calls: list[tuple[str, float]] = []
+
+    def fake(body: str, timeout: float = 30) -> tuple[bool, str]:
+        calls.append((body, timeout))
+        return answer
+
+    monkeypatch.setattr(check_app, "_system_events", fake)
+    assert check_app._panel_buttons() == read
+    [(script, timeout)] = calls
+    # One list, empty to begin with, gathers the names from every place; a place that cannot be
+    # read is passed over, not the end of the walk. Then one name per line.
+    assert script.startswith("set found to {}\n")
+    for place in _PLACES:
+        assert f"try\nset found to found & (name of every button of {place})\nend try\n" in script
+    assert "window 1" not in script
+    assert script.endswith(f"{check_app.LINES}return found as text")
+    assert timeout >= 90
+
+
+def _what_was_sent(body: str) -> str:
+    """A short name for an AppleScript body the whole-disk walk sends to System Events."""
+    if body.startswith("set found to {}\n") and "(name of every button of theInner)" in body:
+        return "read the panel's buttons"
+    for button in ("Choose a Smaller Folder", "Cancel"):
+        if body.startswith(f'click button "{button}" of window 1'):
+            return button
+    if body.splitlines()[:2] == ["set frontmost to true", "key code 53"]:
+        return "Escape"
+    return body
+
+
+def _walk_the_whole_disk(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    chosen: tuple[bool, str],
+    answers: dict[str, list[tuple[bool, str]]],
+) -> tuple[list[str], list[str]]:
+    """Run ``_drive_whole_disk`` with the first folder chosen as ``chosen`` says, the app refusing
+    each folder, and System Events answering each kind of body from ``answers`` in turn (else
+    ``(True, "")``): what it did, in order, and the checks that failed."""
+    steps: list[str] = []
+
+    def system_events(body: str, timeout: float = 30) -> tuple[bool, str]:
+        steps.append(_what_was_sent(body))
+        queue = answers.get(steps[-1])
+        return queue.pop(0) if queue else (True, "")
+
+    def choose(folder: Path, screens: Path, shot: str) -> tuple[bool, str]:
+        steps.append("choose")
+        return chosen
+
+    def go_to(folder: Path, screens: Path, shot: str) -> tuple[bool, str]:
+        steps.append("go to")
+        return True, "clicked"
+
+    def refused(checker: check_app.Checker, chosen: str, shot: Path) -> bool:
+        steps.append("refused")
+        return True
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    monkeypatch.setattr(check_app, "_system_events", system_events)
+    monkeypatch.setattr(check_app, "_choose_folder", choose)
+    monkeypatch.setattr(check_app, "_go_to_folder", go_to)
+    monkeypatch.setattr(check_app, "_whole_disk_refused", refused)
+    monkeypatch.setattr(check_app, "_roots", lambda python: {})
+    checker = check_app.Checker()
+    check_app._drive_whole_disk(checker, tmp_path / "python", tmp_path)
+    return steps, checker.failures
+
+
+def test_the_whole_disk_walk_reads_the_panel_once_each_click_is_done(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # Each check that the Open panel came back, or did not, reads the buttons once the click
+    # that should have done it is done.
+    panel = [(True, f"Cancel\n{check_app.OPEN_PROMPT}"), (True, "")]
+    steps, failed = _walk_the_whole_disk(
+        monkeypatch, tmp_path, (True, "clicked"), {"read the panel's buttons": panel}
+    )
+    assert failed == []
+    assert steps == [
+        "choose",
+        "refused",
+        "Choose a Smaller Folder",
+        "read the panel's buttons",
+        "go to",
+        "refused",
+        "Cancel",
+        "read the panel's buttons",
+        "Cancel",
+        "Cancel",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("cancel", "cleanup"),
+    [(True, ["Cancel", "Cancel"]), (False, ["Cancel", "Escape", "Cancel", "Escape"])],
+)
+def test_the_whole_disk_cleanup_presses_escape_where_cancel_cannot_be_clicked(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, cancel: bool, cleanup: list[str]
+) -> None:
+    # The Open panel's Cancel may not be a button of window 1. Where clicking it fails, the
+    # cleanup makes the app frontmost, as a key code goes to the frontmost app, and sends Escape;
+    # on each of its two passes.
+    steps, _ = _walk_the_whole_disk(
+        monkeypatch, tmp_path, (False, "no process"), {"Cancel": [(cancel, "")] * 2}
+    )
+    assert steps == ["choose", *cleanup]
+
+
+def test_the_home_folder_check_reads_the_panel_once_choose_a_smaller_folder_is_clicked() -> None:
+    # _drive_whole_disk is run above; _drive_folders, which needs the host's roots to change as the
+    # app is driven, is read.
+    folders = _python_function(_CHECK_APP.read_text(encoding="utf-8"), "_drive_folders")
+    assert folders.index('click button "Choose a Smaller Folder" of window 1') < folders.index(
+        "worked, buttons = _panel_buttons()"
+    )
 
 
 def test_the_panel_checks_read_every_window_sheet_and_group() -> None:
