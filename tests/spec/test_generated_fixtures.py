@@ -19,6 +19,7 @@ message or document that holds the pattern (spec/PROTOCOL.md, "Fixtures"). These
 from __future__ import annotations
 
 import copy
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -38,7 +39,23 @@ def test_running_the_generator_writes_exactly_the_committed_files() -> None:
 
 
 def test_the_generator_writes_into_the_packaged_fixtures() -> None:
-    assert FIXTURES_DIR.resolve() == spec.fixture_paths("request")[0].parent.parent.resolve()
+    # The generator writes into the package's source, which the wheel packages whole; and the
+    # fixtures the imported package ships are those files, byte for byte. That holds whether the
+    # package was imported from this checkout or from an installed wheel, as when
+    # tools/macos/check_app.py suite runs this suite with the Mac app's own copy of the host.
+    source = (gen_fixtures.REPO_ROOT / "src" / "lucille_host").resolve()
+    assert FIXTURES_DIR.resolve().is_relative_to(source)
+    packaged = spec.fixture_paths("request")[0].parent.parent
+
+    def files(top: Path) -> dict[str, bytes]:
+        return {
+            path.relative_to(top).as_posix(): path.read_bytes()
+            for path in top.rglob("*")
+            if path.is_file() and "__pycache__" not in path.parts
+        }
+
+    written = files(FIXTURES_DIR)
+    assert written and files(packaged) == written
 
 
 @pytest.mark.parametrize("slot", SLOTS, ids=[f"{s.field.msg}/{s.name}" for s in SLOTS])

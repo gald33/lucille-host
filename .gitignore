@@ -13,3 +13,7 @@ venv/
 .pytest_cache/
 .ruff_cache/
 .mypy_cache/
+
+# Swift Package Manager: build products, object files and links, and Xcode's package state
+.build/
+.swiftpm/

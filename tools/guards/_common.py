@@ -30,6 +30,8 @@ SKIP_DIRS = frozenset(
         "node_modules",
         "build",
         "dist",
+        ".build",
+        ".swiftpm",
     }
 )
 

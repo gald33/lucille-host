@@ -64,11 +64,14 @@ final class CancelToken: @unchecked Sendable {
 }
 
 /// Runs the host's command line. It is the only program the app starts: the Python interpreter
-/// inside the app, with `-I` (isolated: no PYTHON* variables, no user site-packages, no current
-/// folder on the import path) and `-B` (no .pyc writes inside the signed app), running the
-/// `lucille_host` package on the app's own profile. Arguments go as an argv array, never through
-/// a shell. The environment is fixed, not inherited. Every short run has a time limit, and the
-/// user can cancel one; the long-lived children, `pair` and `run`, are each a `HostChild`.
+/// inside the app (`lucille-host-runtime`, the bundled runtime's renamed interpreter), with `-I`
+/// (isolated: no PYTHON* variables, no user site-packages, no current folder on the import path),
+/// `-B` (no .pyc writes inside the signed app; the app ships none) and `-X utf8` (UTF-8 text
+/// whatever the locale), running the `lucille_host` package on the app's own profile. These are
+/// the flags the build's wrapper and checks use (decisions/0002 §6). Arguments go as an argv
+/// array, never through a shell. The environment is fixed, not inherited. Every short run has a
+/// time limit, and the user can cancel one; the long-lived children, `pair` and `run`, are each a
+/// `HostChild`.
 struct HostCLI: Sendable {
     /// The profile the app runs every verb on: its own folders, Keychain item, run lock and
     /// version record, apart from a command-line host's `default` (decisions/0002 §9).
@@ -93,7 +96,7 @@ struct HostCLI: Sendable {
 
     /// The interpreter inside an app bundle.
     static func python(inApp app: URL) -> URL {
-        app.appendingPathComponent("Contents/Resources/python/bin/python3")
+        app.appendingPathComponent("Contents/Resources/runtime/bin/lucille-host-runtime")
     }
 
     /// The home folder the host uses: HOME when it is an absolute path, as the host reads it.
@@ -105,7 +108,7 @@ struct HostCLI: Sendable {
     }
 
     func arguments(for verb: [String]) -> [String] {
-        ["-I", "-B", "-m", "lucille_host"] + ["--profile", profile] + verb
+        ["-I", "-B", "-X", "utf8", "-m", "lucille_host"] + ["--profile", profile] + verb
     }
 
     /// The whole environment a run gets. Nothing else from the app's own environment passes.

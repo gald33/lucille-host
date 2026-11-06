@@ -1,12 +1,21 @@
 name: ci
 
+# Every pull request and every push to main build and check the Mac app too, with no path filter
+# (decisions/0002 §18). workflow_dispatch is the only run that uploads the ad-hoc app.
 on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
+
+# A new push to a pull request cancels that pull request's older run; every other run, each push
+# to main among them, has a group of its own and runs to the end.
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 # GitHub-hosted runners only, and every action pinned by full commit SHA
 # (tools/guards/workflow_lint.py fails the build otherwise).
@@ -60,6 +69,9 @@ jobs:
       - name: Workflow lint
         if: ${{ !cancelled() }}
         run: uv run --no-sync python tools/guards/workflow_lint.py .
+      - name: Mac lint
+        if: ${{ !cancelled() }}
+        run: uv run --no-sync python tools/guards/macos_lint.py .
       - name: Private-string check
         if: ${{ !cancelled() }}
         env:
@@ -74,3 +86,316 @@ jobs:
         run: |
           uv run --no-sync ruff check .
           uv run --no-sync ruff format --check .
+
+  # The Mac app, built and signed ad hoc on macos-15, then checked (decisions/0002 §18 and §19).
+  # No job here holds a signing secret, signs with a certificate or notarizes. Every value from
+  # GitHub reaches a shell through env:, never inside run:.
+  macos-app:
+    name: build and check the app (macos-15, arm64)
+    runs-on: macos-15
+    # Each step that could hang has a limit of its own, well inside this one, so a hang fails that
+    # step and the logs and screenshots are still uploaded at the end.
+    timeout-minutes: 90
+    outputs:
+      built: ${{ steps.built.outputs.built }}
+      cache_key: ${{ steps.handoff.outputs.cache_key }}
+      dmg_sha256: ${{ steps.handoff.outputs.dmg_sha256 }}
+      selftest_sha256: ${{ steps.handoff.outputs.selftest_sha256 }}
+    env:
+      RUN_NUMBER: ${{ github.run_number }}
+      REF_TYPE: ${{ github.ref_type }}
+      REF_NAME: ${{ github.ref_name }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          version: "0.11.32"
+          python-version: "3.13"
+          enable-cache: false
+      - name: Select the pinned Xcode
+        run: uv run --no-project python tools/macos/build_app.py toolchain --github-env "$GITHUB_ENV"
+      - name: Show the machine and the tools
+        run: |
+          sw_vers
+          uname -m
+          xcodebuild -version
+          xcrun swiftc --version
+          uv --version
+      # A build from a tag passes --tag; any other build passes the run number (decisions/0002 §7).
+      - name: Check the pins (plan)
+        run: |
+          if [ "$REF_TYPE" = tag ]; then set -- --tag "$REF_NAME"; else set -- --build-number "$RUN_NUMBER"; fi
+          uv run --no-project python tools/macos/build_app.py plan "$@"
+      - name: Build the host wheel
+        id: wheel
+        run: uv run --no-project python tools/macos/build_app.py wheel --out build/macos/host-wheel --github-output "$GITHUB_OUTPUT"
+      - name: Build the app (unsigned tarball, ad-hoc signature, disk image)
+        id: build
+        env:
+          HOST_WHEEL: ${{ steps.wheel.outputs.path }}
+          HOST_WHEEL_SHA256: ${{ steps.wheel.outputs.sha256 }}
+        run: |
+          if [ "$REF_TYPE" = tag ]; then set -- --tag "$REF_NAME"; else set -- --build-number "$RUN_NUMBER"; fi
+          uv run --no-project python tools/macos/build_app.py build --host-wheel "$HOST_WHEEL" --host-wheel-sha256 "$HOST_WHEEL_SHA256" "$@"
+      - name: Compile the Swift self-test, once, for this job and the smoke jobs
+        run: uv run --no-project python tools/macos/check_app.py selftest --to build/macos/handoff/selftest
+      - name: Hand the disk image and the self-test to the smoke jobs
+        id: handoff
+        env:
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: uv run --no-project python tools/macos/check_app.py handoff --run-id "$RUN_ID" --run-attempt "$RUN_ATTEMPT" --github-output "$GITHUB_OUTPUT"
+      # A cache entry, not an artifact: only a workflow run of this repository can restore it
+      # (decisions/0002 §18). The smoke jobs refuse it unless its sha256 is the one output here.
+      - name: Keep them in the Actions cache
+        uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        with:
+          path: build/macos/handoff
+          key: ${{ steps.handoff.outputs.cache_key }}
+      - name: Check that the cache entry exists
+        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        with:
+          path: build/macos/handoff
+          key: ${{ steps.handoff.outputs.cache_key }}
+          lookup-only: true
+          fail-on-cache-miss: true
+      - name: Let the smoke jobs run
+        id: built
+        run: echo "built=true" >> "$GITHUB_OUTPUT"
+      - name: "Check: no symbolic link, the expected Mach-O files, each signed ad hoc by this build"
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: uv run --no-project python tools/macos/check_app.py bundle
+      - name: "Check: the wheels are uv.lock's, and every site-packages file is a file of its wheel (M10)"
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        env:
+          HOST_WHEEL_SHA256: ${{ steps.wheel.outputs.sha256 }}
+        run: uv run --no-project python tools/macos/check_app.py record --host-wheel-sha256 "$HOST_WHEEL_SHA256" --summary "$GITHUB_STEP_SUMMARY"
+      - name: "Check: the version rule and MANIFEST.json (M11)"
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: |
+          if [ "$REF_TYPE" = tag ]; then set -- --tag "$REF_NAME"; else set -- --build-number "$RUN_NUMBER"; fi
+          uv run --no-project python tools/macos/check_app.py version "$@"
+      - name: "Check: libraries, paths, minimum macOS, and what the app imports"
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: uv run --no-project python tools/macos/check_app.py links
+      - name: "Check: the signature"
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: uv run --no-project python tools/macos/check_app.py signature
+      - name: "Check: the wrapper and the app's flags write no bytecode into a writable copy"
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: uv run --no-project python tools/macos/check_app.py wrapper
+      - name: Make the bundle read-only (M8)
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: chmod -R a-w build/macos/*.app
+      - name: "Check: the bundled host runs with the app's flags"
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: uv run --no-project python tools/macos/check_app.py host
+      - name: "Probe: the host's status, pair and run verbs as the app will run them (printed only)"
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: uv run --no-project python tools/macos/check_app.py probe
+      - name: "Check: nothing in the environment changes what the runtime loads (M6)"
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: uv run --no-project python tools/macos/check_app.py environment
+      - name: "Check: --version and status from the read-only bundle, then its signature (M8)"
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: uv run --no-project python tools/macos/check_app.py readonly
+      - name: "Check: the app's Swift code against the real command line"
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        timeout-minutes: 12
+        run: uv run --no-project python tools/macos/check_app.py swift --selftest build/macos/handoff/selftest
+      - name: "Check: a copy in another folder still works"
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        timeout-minutes: 14
+        run: uv run --no-project python tools/macos/check_app.py relocate --selftest build/macos/handoff/selftest
+      - name: Snapshot ~/Library (M12)
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: uv run --no-project python tools/macos/check_app.py library-snapshot --to build/macos/library/before.json
+      - name: "Check: the app launches and keeps running"
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: uv run --no-project python tools/macos/check_app.py launch
+      - name: "Check: the menu, driven as a user would"
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        timeout-minutes: 15
+        run: uv run --no-project python tools/macos/check_app.py ui --require-driven
+      - name: "Check: ~/Library against the allowlist (M12)"
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: uv run --no-project python tools/macos/check_app.py library-diff --before build/macos/library/before.json
+      - name: "Gatekeeper's verdict (printed only; ad hoc builds are refused)"
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: uv run --no-project python tools/macos/check_app.py gatekeeper
+      - name: "Check: the disk image"
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: uv run --no-project python tools/macos/check_app.py dmg
+      - name: Measure start-up time with no .pyc (decisions/0002 §6)
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: uv run --no-project python tools/macos/check_app.py startup --summary "$GITHUB_STEP_SUMMARY"
+      - name: "Check: the host's whole test suite on a copy of the bundled runtime"
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        timeout-minutes: 20
+        run: uv run --no-project python tools/macos/check_app.py suite --copy-to "$RUNNER_TEMP/suite"
+      # Pairs the app's own profile with a local hub and a fake Lucille, then drives the app through
+      # the pairing window, run's supervision, Quit and Disconnect. It needs Switchboard's hub and
+      # the test harness, so this script runs with the interpreter of the copy the suite step made,
+      # which holds both (the smoke jobs have no such copy, and do not run it). Its own limit keeps
+      # a hang from using up the job's, which would cancel the upload of the screenshots below.
+      - name: "Check: pairing and run, end to end, with a local hub and a fake Lucille"
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        timeout-minutes: 20
+        run: |
+          set -- "$RUNNER_TEMP"/suite/*.app/Contents/Resources/runtime/bin/lucille-host-runtime
+          if [ "$#" -ne 1 ] || [ ! -x "$1" ]; then echo "the suite step made no copy of the runtime: $*"; exit 1; fi
+          "$1" -I -B tools/macos/check_app.py pairing --require-driven
+      - name: "Check: the signature, after every run (M8)"
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: uv run --no-project python tools/macos/check_app.py signature
+      # The unsigned app, built a second time in another folder, compared by sha256 (decisions/0002
+      # §18). Recorded in the job summary as SAME, DIFFERENT or FAILED; not a gate.
+      - name: "Build again in another folder: the host wheel (recorded, not a gate)"
+        id: repeat-wheel
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        continue-on-error: true
+        run: uv run --no-project python tools/macos/build_app.py wheel --out build/macos-repeat/host-wheel --github-output "$GITHUB_OUTPUT"
+      - name: "Build again in another folder: the unsigned app (recorded, not a gate)"
+        if: ${{ !cancelled() && steps.repeat-wheel.outcome == 'success' }}
+        continue-on-error: true
+        env:
+          HOST_WHEEL: ${{ steps.repeat-wheel.outputs.path }}
+          HOST_WHEEL_SHA256: ${{ steps.repeat-wheel.outputs.sha256 }}
+        run: |
+          if [ "$REF_TYPE" = tag ]; then set -- --tag "$REF_NAME"; else set -- --build-number "$RUN_NUMBER"; fi
+          uv run --no-project python tools/macos/build_app.py assemble --out build/macos-repeat --cache build/macos/cache --host-wheel "$HOST_WHEEL" --host-wheel-sha256 "$HOST_WHEEL_SHA256" "$@"
+      - name: "Compare the two unsigned tarballs: SAME, DIFFERENT or FAILED"
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        continue-on-error: true
+        run: uv run --no-project python tools/macos/build_app.py compare build/macos build/macos-repeat >> "$GITHUB_STEP_SUMMARY"
+      # Logs and UI snapshots only, on every run. Never the ~/Library snapshots, which are kept
+      # outside check/, and never the self-test executable.
+      - name: Upload the logs and UI snapshots
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: capsule-macos-app-logs
+          path: |
+            build/macos/check/screens/*.png
+            build/macos/check/*.txt
+            build/macos/check/*.json
+          if-no-files-found: warn
+          retention-days: 7
+      # The ad-hoc app, from a manual run whose every check passed: for the maintainer's own Mac,
+      # never offered to anyone else (decisions/0002 §18). Its name says it is signed ad hoc and
+      # which commit built it, so it cannot be taken for a release asset.
+      - name: Upload the ad-hoc app (manual runs only, kept 3 days)
+        if: ${{ success() && github.event_name == 'workflow_dispatch' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: capsule-adhoc-macos-arm64-dmg-workflow_dispatch-${{ github.sha }}
+          path: build/macos/*-adhoc-macOS-arm64.dmg
+          if-no-files-found: error
+          retention-days: 3
+
+  # The same bytes on macOS 26 and on macOS 27 (the xcode-27 image): the disk image and the
+  # self-test macos-app built, restored from the cache and refused unless their sha256 is the one
+  # macos-app gave. Nothing is built here. Runs whenever macos-app got as far as handing them on.
+  # The xcode-27 leg runs and shows its result, but a failure there does not fail the run: the
+  # maintainer's decision of 2026-11-02 (decisions/0002 §18). macos-26 gates like every other job.
+  macos-smoke:
+    name: smoke (${{ matrix.runner }})
+    needs: macos-app
+    if: ${{ !cancelled() && needs.macos-app.outputs.built == 'true' }}
+    runs-on: ${{ matrix.runner }}
+    continue-on-error: ${{ matrix.runner == 'xcode-27' }}
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [macos-26, xcode-27]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          version: "0.11.32"
+          python-version: "3.13"
+          enable-cache: false
+      - name: Show the machine
+        run: |
+          sw_vers
+          uname -m
+          test "$(uname -m)" = arm64
+      - name: Restore the disk image and the self-test macos-app built
+        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        with:
+          path: build/macos/handoff
+          key: ${{ needs.macos-app.outputs.cache_key }}
+          fail-on-cache-miss: true
+      - name: Refuse anything but the bytes macos-app built
+        env:
+          DMG_SHA256: ${{ needs.macos-app.outputs.dmg_sha256 }}
+          SELFTEST_SHA256: ${{ needs.macos-app.outputs.selftest_sha256 }}
+        run: uv run --no-project python tools/macos/check_app.py handoff-check --dmg-sha256 "$DMG_SHA256" --selftest-sha256 "$SELFTEST_SHA256"
+      - name: Copy the app out of the disk image
+        id: unpacked
+        run: uv run --no-project python tools/macos/check_app.py unpack-dmg
+      - name: "Check: the disk image"
+        if: ${{ !cancelled() && steps.unpacked.outcome == 'success' }}
+        run: uv run --no-project python tools/macos/check_app.py dmg
+      - name: "Check: no symbolic link, the expected Mach-O files, each signed ad hoc by the build"
+        if: ${{ !cancelled() && steps.unpacked.outcome == 'success' }}
+        run: uv run --no-project python tools/macos/check_app.py bundle
+      - name: "Check: the signature"
+        if: ${{ !cancelled() && steps.unpacked.outcome == 'success' }}
+        run: uv run --no-project python tools/macos/check_app.py signature
+      - name: "Check: the wrapper and the app's flags write no bytecode into a writable copy"
+        if: ${{ !cancelled() && steps.unpacked.outcome == 'success' }}
+        run: uv run --no-project python tools/macos/check_app.py wrapper
+      - name: Make the bundle read-only (M8)
+        if: ${{ !cancelled() && steps.unpacked.outcome == 'success' }}
+        run: chmod -R a-w build/macos/*.app
+      - name: "Check: the bundled host runs with the app's flags"
+        if: ${{ !cancelled() && steps.unpacked.outcome == 'success' }}
+        run: uv run --no-project python tools/macos/check_app.py host
+      - name: "Probe: the host's status, pair and run verbs as the app will run them (printed only)"
+        if: ${{ !cancelled() && steps.unpacked.outcome == 'success' }}
+        run: uv run --no-project python tools/macos/check_app.py probe
+      - name: "Check: nothing in the environment changes what the runtime loads (M6)"
+        if: ${{ !cancelled() && steps.unpacked.outcome == 'success' }}
+        run: uv run --no-project python tools/macos/check_app.py environment
+      - name: "Check: --version and status from the read-only bundle, then its signature (M8)"
+        if: ${{ !cancelled() && steps.unpacked.outcome == 'success' }}
+        run: uv run --no-project python tools/macos/check_app.py readonly
+      - name: "Check: the app's Swift code against the real command line"
+        if: ${{ !cancelled() && steps.unpacked.outcome == 'success' }}
+        timeout-minutes: 12
+        run: uv run --no-project python tools/macos/check_app.py swift --selftest build/macos/handoff/selftest
+      - name: Snapshot ~/Library (M12)
+        if: ${{ !cancelled() && steps.unpacked.outcome == 'success' }}
+        run: uv run --no-project python tools/macos/check_app.py library-snapshot --to build/macos/library/before.json
+      - name: "Check: the app launches and keeps running"
+        if: ${{ !cancelled() && steps.unpacked.outcome == 'success' }}
+        run: uv run --no-project python tools/macos/check_app.py launch
+      # Not being able to drive the app through System Events on these images is recorded, not a
+      # failure. Where it can, each driven step is checked as in macos-app, and one that fails fails.
+      - name: "Check: the menu, driven as a user would where macOS allows it"
+        if: ${{ !cancelled() && steps.unpacked.outcome == 'success' }}
+        timeout-minutes: 15
+        run: uv run --no-project python tools/macos/check_app.py ui
+      - name: "Check: ~/Library against the allowlist (M12)"
+        if: ${{ !cancelled() && steps.unpacked.outcome == 'success' }}
+        run: uv run --no-project python tools/macos/check_app.py library-diff --before build/macos/library/before.json --control-run
+      - name: "Check: the signature, after every run (M8)"
+        if: ${{ !cancelled() && steps.unpacked.outcome == 'success' }}
+        run: uv run --no-project python tools/macos/check_app.py signature
+      - name: Upload the logs and UI snapshots
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: capsule-macos-smoke-${{ matrix.runner }}-logs
+          path: |
+            build/macos/check/screens/*.png
+            build/macos/check/*.txt
+            build/macos/check/*.json
+          if-no-files-found: warn
+          retention-days: 7

@@ -1033,6 +1033,41 @@ def test_outside_git_the_bytecode_cache_is_not_reported(tmp_path: Path) -> None:
     assert ast_lint.check(tmp_path) == []
 
 
+def _swiftpm_outputs(root: Path) -> None:
+    """What `swift build` and Xcode leave beside a Swift package: a link to the configuration's
+    folder, libraries and object files under .build/, and Xcode's state under .swiftpm/."""
+    source = root / "src" / "lucille_host" / "cli.py"
+    source.parent.mkdir(parents=True)
+    source.write_text("import json\n")
+    build = root / "macos" / ".build"
+    debug = build / "arm64-apple-macosx" / "debug"
+    debug.mkdir(parents=True)
+    (build / "debug").symlink_to("arm64-apple-macosx/debug")
+    (debug / "libCapsuleKit.dylib").write_bytes(b"\0")
+    (debug / "CapsuleKit.build").mkdir()
+    (debug / "CapsuleKit.build" / "HostCLI.swift.o").write_bytes(b"\0")
+    xcode = root / "macos" / ".swiftpm" / "xcode"
+    xcode.mkdir(parents=True)
+    (xcode / "package.xcworkspace").symlink_to(debug)
+    (xcode / "libPlugin.so").write_bytes(b"\0")
+
+
+def test_swiftpm_outputs_are_ignored(tmp_path: Path) -> None:
+    # With the repository's own .gitignore, nothing SwiftPM writes is part of the repository.
+    _git(tmp_path, "init", "-q")
+    (tmp_path / ".gitignore").write_text(
+        (REPO_ROOT / ".gitignore").read_text(encoding="utf-8"), encoding="utf-8"
+    )
+    _swiftpm_outputs(tmp_path)
+    assert ast_lint.check(tmp_path) == []
+
+
+def test_outside_git_swiftpm_outputs_are_not_reported(tmp_path: Path) -> None:
+    # The walk skips the same folders the .gitignore names.
+    _swiftpm_outputs(tmp_path)
+    assert ast_lint.check(tmp_path) == []
+
+
 # --- Re-exported modules ----------------------------------------------------------------------
 # A module that an allowed standard-library module binds is that module, under whatever name it
 # is bound (tools/guards/_reexports.py); so is a watched module bound under its name with leading

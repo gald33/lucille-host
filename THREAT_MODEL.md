@@ -26,14 +26,18 @@ release must have. The full design is [decisions/0001-host-design.md](decisions/
   pinned in `uv.lock`. The package itself declares ranges (`agent-switchboard==2.6.*`, `keyring>=25`),
   and `pipx` or `uv tool` resolve those on the day they run, without reading the lock. How a release
   carries exact pins to your install is not decided yet. The disk image of Capsule, the Mac app, is one
-  way: its build installs the lock's exact pins, by hash. It is built in `macos/`, and not released yet.
+  way: its build installs the lock's exact pins, by hash. Its Swift sources are in `macos/` and its build
+  scripts in `tools/macos/`, and it is not released yet.
 - **For Capsule, also what builds it.** The app embeds a CPython runtime from python-build-standalone,
-  pinned by sha256 in `macos/runtime.toml`. Its host wheel is built with a build backend pinned by hash in
-  `macos/build-constraints.txt`. uv builds that wheel, and writes from `uv.lock` the list of hashes that
-  pip checks as it installs the dependencies. The workflow pins uv by version, not by hash, and the
-  `setup-uv` action, pinned by commit, downloads it. The app is compiled and signed on GitHub's hosted
-  `macos-15` runner, with that image's Xcode toolchain. Whoever controls the runtime's releases, uv's
-  releases, or the runner image and its toolchain, could change what the app runs.
+  pinned by sha256 in `tools/macos/pins.toml`. Its host wheel is built with a build backend pinned by hash
+  in `tools/macos/build-constraints.txt`. uv builds that wheel, reading no uv configuration file and no
+  `UV_*` variable, either of which could turn off the isolation that keeps the pinned backend in use.
+  The build downloads each locked wheel from the URL in `uv.lock` and refuses it unless its sha256 is
+  the lock's, and uv installs them with hashes required. The workflow pins uv by version, not by
+  hash, and the `setup-uv` action, pinned by commit, downloads it. The app is compiled and signed on
+  GitHub's hosted `macos-15` runner, with the Xcode version the pins name, from that image. Whoever
+  controls the runtime's releases, uv's releases, or the runner image and its toolchain, could change
+  what the app runs.
 - **Not Lucille's backend.** The host treats every request as possibly hostile. Lucille's backend is
   bounded only by what you enable, on the folders you add.
 

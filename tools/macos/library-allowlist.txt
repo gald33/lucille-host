@@ -1,0 +1,13 @@
+# What the app may change under ~/Library while CI runs it (M12, decisions/0002 §22). Read by
+# tools/macos/check_app.py library-diff, which fails on any new, changed or removed path whose
+# name holds the bundle id, the app's name or "lucille" that no line here allows, and prints
+# every other change.
+#
+# One path per line, relative to ~/Library, then "#" and the reason. {bundle_id} and {app_name}
+# are the pins' (tools/macos/pins.toml). A line ending in "/**" allows that folder and everything
+# in it; any other line is matched one path segment at a time, so "*" never crosses a "/".
+#
+# A line is added only after a run shows the path, with the run and the reason.
+
+Application Support/lucille-host/**  # the host's own config and state folders (src/lucille_host/paths.py)
+Preferences/{bundle_id}.plist  # the app's defaults, which macOS keeps for any app

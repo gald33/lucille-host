@@ -4,7 +4,7 @@ import Foundation
 /// `Supervisor`, `ConnectionText`) without a screen: the host's golden fixtures through the JSON
 /// reader and the two state machines, fake children through the child runner, and, against a
 /// built app, the calls the menu makes, through the same code, with a temporary HOME. CI compiles
-/// it with those files (`macos/check_app.py swift`). Exit status 1 on any failure.
+/// it with those files (`tools/macos/check_app.py swift`). Exit status 1 on any failure.
 ///
 ///     selftest --vectors alias-vectors.json [--fixtures DIR] [--home DIR]
 ///              [--app NAME.app --home DIR --version V]
@@ -294,8 +294,8 @@ struct SelfTest {
         let env = cli.environment()
         report.expect(Set(env.keys).isSubset(of: ["HOME", "PATH", "LANG", "USER", "LOGNAME", "TMPDIR"]),
                       "the environment is fixed", "\(env.keys.sorted())")
-        report.expect(cli.arguments(for: ["pause"]) == ["-I", "-B", "-m", "lucille_host", "--profile", "mac-app", "pause"],
-                      "the interpreter runs isolated, without writing bytecode, on the app's own profile")
+        report.expect(cli.arguments(for: ["pause"]) == ["-I", "-B", "-X", "utf8", "-m", "lucille_host", "--profile", "mac-app", "pause"],
+                      "the interpreter runs isolated, in UTF-8 mode, without writing bytecode, on the app's own profile")
         report.expect(env["PATH"] == "/var/empty", "PATH names an empty folder", "\(env["PATH"] ?? "none")")
 
         let shown = cli.run(["--version"])
@@ -1811,8 +1811,8 @@ extension SelfTest {
         let script = home + "/fake-host"
         let text = """
             #!/bin/sh
-            # A stand-in for the interpreter: -I -B -m lucille_host --profile NAME come first.
-            shift 6
+            # A stand-in for the interpreter: -I -B -X utf8 -m lucille_host --profile NAME come first.
+            shift 8
             printf '%s\\n' "$@" > "$HOME/argv"
             case "$1" in
             replay)
@@ -2023,7 +2023,7 @@ extension SelfTest {
     /// passes `--store-file`, so it reaches the code without the Keychain.
     static func checkPairingVerbs(python: URL, home: String, _ report: Report) {
         let cli = HostCLI(python: python, home: home, profile: "selftest-pair", timeout: 60)
-        report.expect(cli.arguments(for: ["status"]) == ["-I", "-B", "-m", "lucille_host", "--profile", "selftest-pair", "status"],
+        report.expect(cli.arguments(for: ["status"]) == ["-I", "-B", "-X", "utf8", "-m", "lucille_host", "--profile", "selftest-pair", "status"],
                       "the profile is HostCLI's to choose, for tests")
         let storeCodes: Set<String> = ["insecure_keyring", "store_error"]
         let state = VerbOutcome(cli.run(["--json", "status"]))

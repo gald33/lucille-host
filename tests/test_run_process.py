@@ -16,7 +16,7 @@ condition: CI runs the suite as an ordinary user.
 
 Every wait has a bound, and every child is killed at the end, whatever happened. The children,
 the hub's configuration and the waits come from tests/_process.py, which the Mac app's
-end-to-end check (``macos/check_app.py pairing``) uses too.
+end-to-end check (``tools/macos/check_app.py pairing``) uses too.
 """
 
 from __future__ import annotations

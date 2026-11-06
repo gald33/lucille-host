@@ -16,32 +16,38 @@ release follows it once, on a clean machine, and reports each step they could no
   every message Lucille can send, every reply the host can give, and the rules each side follows. Its
   JSON Schemas and golden fixtures are in `src/lucille_host/spec/v1/`, and ship in the wheel.
 
-**What CI runs.** The workflow `ci` (`.github/workflows/ci.yml`) runs on every push to `main` and on every
-pull request.
+**What CI runs.** The workflow `ci` (`.github/workflows/ci.yml`) runs on every push to `main`, on every
+pull request, and when started by hand. It has no path filter.
 - Job `test`, on GitHub-hosted `ubuntu-latest` and `macos-latest`, with Python 3.11 and 3.13: it runs
   `uv sync --locked --extra conformance`, then `pytest`. `--locked` fails if `uv.lock` does not match
   `pyproject.toml`, so the exact pins you read are the pins that ran.
-- Job `guards`, on `ubuntu-latest`: it runs the four guards below on the whole repository, then
+- Job `guards`, on `ubuntu-latest`: it runs the five guards below on the whole repository, then
   `ruff check` and `ruff format --check`.
+- Job `macos-app`, on GitHub-hosted `macos-15` (Apple silicon): it builds the Mac app, Capsule, and its
+  disk image with the Xcode version `tools/macos/pins.toml` names, signed ad hoc, then runs the checks
+  [macos/README.md](macos/README.md#what-ci-checks) lists, among them the host's whole test suite on a copy
+  of the app's own Python runtime, and then, with that copy's interpreter, the end-to-end check of pairing
+  and supervision, against a hub of its own and a stand-in for Lucille. It also builds the unsigned app a
+  second time, in another folder, and writes to the job summary whether the two tarballs are the same.
+  That is recorded, not a gate.
+- Jobs `macos-smoke`, on `macos-26` and on `xcode-27` (GitHub's macOS 27 image): each takes the disk image
+  `macos-app` built from the Actions cache, refuses it unless its sha256 is the one `macos-app` gave, and
+  runs the checks that need no build on it. They build nothing, and do not run the pairing check, which
+  needs the suite's copy of the runtime. The `xcode-27` job is `continue-on-error`: its failure does not
+  fail the workflow run (the maintainer's decision of 2026-11-02, decisions/0002 §18).
 - The workflow's token can only read the repository (`permissions: contents: read`), and the checkout
-  keeps no credentials (`persist-credentials: false`).
+  keeps no credentials (`persist-credentials: false`). The only secret it uses is the private-string
+  list, in the `guards` job; no Mac job uses a secret, and none signs with a certificate.
+- Every run uploads the Mac jobs' logs and screenshots, kept 7 days. The ad-hoc disk image is uploaded
+  only by a run started by hand whose every check passed, kept 3 days; any signed-in GitHub user can
+  download it meanwhile. A pull request from a fork runs the fork's copy of the workflow, which can upload
+  anything: an artifact on that run is the fork's build, whatever its name. The artifact's name says which
+  event and which commit built it, and the image's name ends `-adhoc-macOS-arm64.dmg`: it is not a
+  release. Whether a fork's pull request runs workflows before a maintainer approves it is a repository
+  setting ("Approval for running fork pull request workflows from contributors"), which no file here can
+  show.
 
-The workflow `macos-app` (`.github/workflows/macos-app.yml`) runs on pull requests that change `macos/`,
-`src/`, `pyproject.toml`, `uv.lock` or the workflow itself, on pushes to `main`, and by hand.
-- Job `app`, on GitHub-hosted `macos-15` (Apple silicon): it builds the Mac app, Capsule, and its disk
-  image, signed ad hoc, then runs the checks [macos/README.md](macos/README.md#what-ci-checks) lists,
-  then the host's test suite on the app's trimmed Python runtime, then the end-to-end check of pairing
-  and supervision.
-- Its token can only read the repository, its checkout keeps no credentials, and it uses no secret. It
-  uploads the disk image only from a run started by hand (`workflow_dispatch`), only when every check
-  passed, and keeps it 3 days; any signed-in GitHub user can download it meanwhile. A pull request from a
-  fork runs the fork's copy of the workflow, which can upload anything: an artifact on that run is the
-  fork's build, whatever its name. The artifact's name says which event and which commit built it, and
-  the image's name ends `-adhoc-macOS-arm64.dmg`: it is not a release.
-  Whether a fork's pull request runs workflows before a maintainer approves it is a repository setting
-  ("Approval for running fork pull request workflows from contributors"), which no file here can show.
-
-**The four guards.** What the guards are for: they catch accidental and casual violations of the rules
+**The five guards.** What the guards are for: they catch accidental and casual violations of the rules
 below, in the forms they list. They are not a sandbox, and they are not a defence against an author who
 sets out to get past them. A maintainer reviews every pull request before it merges, and that review is
 the backstop. Each guard's section below says what it cannot see.
@@ -273,6 +279,47 @@ enforces.
      Dependabot secret.
    - So you cannot run this check yourself without the list. You can read that the code does what this
      section says.
+5. **Mac lint** (`tools/guards/macos_lint.py`, tested by `tests/guards/test_macos_lint.py`). It reads
+   every Swift file, the Python files and pins under `tools/macos/`, any plist, entitlements or strings
+   file, and every workflow, and fails:
+   - in Swift, on the names [decisions/0002](decisions/0002-macos-app.md) §20 lists and on other
+     ways to start a process, use the network, listen (a Mach or distributed-objects port included)
+     or read a URL that is not a file: `URLSession`, `NW*`, `WebKit`, XPC, sockets, streams,
+     `NSWorkspace`, `LSOpen*`, `NSUser*Task`, `fork`, `exec*`, `dlopen`, `/bin/sh` and the like,
+     every `URL(string:` or `URL.init(string:`, and `UserDefaults` and `SWITCHBOARD_`. It reads the
+     Swift three ways: the text with its comments, the code with its comments blanked (so
+     `connect/**/(` is still a call), and each string literal decoded (so `https:\u{2F}/` is still a
+     URL). One exception, in tests only: in a Swift file under a `Tests` folder, `#!/bin/sh` alone on
+     the first line of a multi-line string literal, the script the self-test writes and starts through
+     the app's child runner as a stand-in for the interpreter (decisions/0002 §20). Any other shell,
+     and `/bin/sh` anywhere else, is still a failure there;
+   - in Swift, on `Process` anywhere but `macos/App/HostCLI.swift`, and if that file does not write
+     the bundled runtime's path, `Contents/Resources/runtime/bin/lucille-host-runtime`, and its
+     arguments, `["-I", "-B", "-X", "utf8", "-m", "lucille_host"]`, outside its comments;
+   - in Swift, on a read of the pasteboard or of what is dropped on the app (writing, for Copy
+     Diagnostics, is allowed here; until Copy Diagnostics is built, `tests/test_macos_build.py` and
+     `check_app.py links` refuse `NSPasteboard` altogether), and on an `http://`, `https://`, `ws://`,
+     `wss://` or `ftp://` URL;
+   - on a phrase [PRIVACY.md](PRIVACY.md) says this project must never claim, as a whole word in any
+     case, in the string literals of the app's Swift (decoded; the self-test's are not read), in the
+     strings of the functions that render `Info.plist`, in the pins the plist takes the app's name
+     from, and in any plist or strings file. It reads the list from PRIVACY.md, and fails if it finds
+     fewer than 15 phrases;
+   - on `CFBundleURLTypes` or `CFBundleURLSchemes`, or a URL handler in Swift, anywhere it reads, except
+     in the set of keys the build refuses; on a daemon (`LaunchDaemon`, `SMAppService.daemon`,
+     `SMJobBless`, `launchctl` and the like); and on an installer package, a `*.pkg` file in the
+     repository, or `.pkg`, `pkgbuild`, `productbuild`, `productsign` or `installer` with `-pkg` later
+     on its line, in Swift, the build tools (where string constants joined with `+` are read joined) or
+     a workflow;
+   - on a Swift file it cannot read (an unterminated string or comment, an unknown escape, a regex
+     literal), and on a file that does not parse.
+
+   It reads names written in the files. It cannot see a phrase split by an interpolation, or across
+   Swift literals joined with `+`; an invisible or look-alike character inside a phrase or a name; a
+   function used without being called where it is named (`let make = socket`, then `make(...)`); a
+   name built at run time; an Objective-C runtime lookup; shell quoting inside a word of a workflow; or
+   whether the file that starts the host passes the runtime's path and arguments to the process it
+   starts (only that it writes them). Review covers the rest.
 
 **One more test that matters here.** `tests/test_import_graph.py` imports every runtime module in a fresh
 Python process, with the `[conformance]` extra installed so that `fastapi` and `uvicorn` could be
@@ -340,6 +387,7 @@ uv run pytest
 uv run python tools/guards/workflow_lint.py .
 uv run python tools/guards/ast_lint.py .
 uv run python tools/guards/switchboard_lint.py .
+uv run python tools/guards/macos_lint.py .
 ```
 
 ## 2. Check provenance (needs a release)

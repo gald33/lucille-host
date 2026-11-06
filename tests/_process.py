@@ -5,7 +5,7 @@ spec/CLI.md section 13.1 asks of a shell; :class:`LoopbackHub` is what
 :class:`tests._lucille.FakeLucille` asks of a hub, for a real Switchboard hub started as a child
 (``switchboard serve``, which the ``conformance`` extra installs beside the interpreter running
 this). tests/test_run_process.py uses them, and so does the Mac app's end-to-end check
-(``macos/check_app.py pairing``), which imports this module only when that check runs.
+(``tools/macos/check_app.py pairing``), which imports this module only when that check runs.
 
 Every wait has a bound.
 """

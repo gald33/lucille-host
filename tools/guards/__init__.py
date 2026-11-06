@@ -14,6 +14,10 @@ does not report clean.
   the installed ``lucille-host``.
 - ``switchboard_lint``: the runtime imports and uses Switchboard in one module; nothing registers,
   invites, or mints a shared room; only the parts of Switchboard the host needs are used.
+- ``macos_lint``: the Mac app's Swift starts no process but the bundled runtime, from one file,
+  and uses no network, no pasteboard read and no ``http(s)`` URL; what the app shows uses no
+  phrase from ``PRIVACY.md``'s must-never-claim list; no URL scheme, no daemon and no installer
+  package.
 - ``private_strings``: no tracked file contains a string from a list kept in a repository secret.
 
 They read source code and configuration. Each module's docstring is its exact list of rules, and

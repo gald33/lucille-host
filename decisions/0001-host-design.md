@@ -668,9 +668,9 @@ where there is one (`waiting`, `sas_pending`, `confirmed`, `leaked`, `expired`, 
 - Runtime dependencies are `agent-switchboard==2.6.*` (base) and `keyring`, with their own dependencies,
   all pinned exactly in the release's lock. The wheel's metadata declares the ranges, not the lock's
   pins, so an install with `pipx` or `uv tool` can resolve other versions. How a release carries the
-  exact pins to an install is not decided yet. The build of Capsule, the Mac app (`macos/`), is one
-  channel: it installs the lock's exact pins, by hash, into the Python runtime it embeds. No Mac
-  release exists yet.
+  exact pins to an install is not decided yet. The build of Capsule, the Mac app (`macos/` and
+  `tools/macos/`), is one channel: it installs the lock's exact pins, by hash, into the Python runtime it
+  embeds. No Mac release exists yet.
 - An extra, `[conformance]`, adds `agent-switchboard[server]` at the runtime pin and `starlette>=1.9`, for
   the conformance suite only. A test asserts that the runtime import graph never reaches `fastapi` or
   `uvicorn`.
@@ -771,6 +771,7 @@ template test, which needs that hub's injected clock. It may spawn only the loca
 **CI guards:**
 - the workflow lint and the AST lint above;
 - the Switchboard-surface lint above;
+- the Mac lint, for the Mac app's sources ([0002](0002-macos-app.md) §20);
 - a private-string check for strings private to Lucille that must never appear in this repository. Its
   list lives in a repository secret, because a committed denylist would publish the strings it protects.
   It reads every path git tracks (a gitlink's path included) and every tracked file's contents, as UTF-8

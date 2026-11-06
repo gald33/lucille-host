@@ -7,13 +7,14 @@ command line and files.
 
 ## Status: a first build, not a release
 
-This folder builds a first, small version of Capsule. It is not a release and it is not ready for
-anyone who is not developing it. It can connect this Mac to Lucille: you paste the code Lucille's page
-shows, then compare the number the app shows with the one on Lucille's page. While it is open, it keeps
-the host running. This way of connecting is only for the repository owner's own Mac, because anyone can
-make a code that passes the host's checks ([decisions/0002](../decisions/0002-macos-app.md) §11.1).
-Builds stay ad hoc signed, for that Mac. The disk image is not notarized, so macOS refuses to open it
-normally (see [The disk image from CI](#the-disk-image-from-ci)).
+This folder holds the Swift sources of a first, small version of Capsule; the scripts that build and check
+it are in [`tools/macos/`](../tools/macos/). It is not a release and it is not ready for anyone who is not
+developing it. It can connect this Mac to Lucille: you paste the code Lucille's page shows, then compare
+the number the app shows with the one on Lucille's page. While it is open, it keeps the host running.
+This way of connecting is only for the repository owner's own Mac, because anyone can make a code that
+passes the host's checks ([decisions/0002](../decisions/0002-macos-app.md) §11.1). Builds stay ad hoc
+signed, for that Mac. The disk image is not notarized, so macOS refuses to open it normally (see [The
+disk image from CI](#the-disk-image-from-ci)).
 
 The design of the full app is [decisions/0002-macos-app.md](../decisions/0002-macos-app.md). It says what this
 build is, and what is planned after it.
@@ -21,20 +22,44 @@ build is, and what is planned after it.
 ## What this builds
 
 - **`Capsule.app`**, a menu bar app for Apple silicon Macs with macOS 15 or later. It has no main
-  window and no Dock icon.
-- Inside it, a Python 3.13 runtime from [python-build-standalone](https://github.com/astral-sh/python-build-standalone),
-  pinned in [`runtime.toml`](runtime.toml) by its URL and its sha256. The build refuses any other file.
-- Installed into that runtime: the host's wheel, built from this checkout, and the exact dependency
-  wheels `uv.lock` pins, installed by hash (`pip install --require-hashes --no-deps --only-binary :all:`).
-  The host package is the same code as in `src/lucille_host/`, unchanged.
-- The host's wheel is built with the build backend that [`build-constraints.txt`](build-constraints.txt)
-  pins by hash (`uv build --build-constraints build-constraints.txt --require-hashes`). Those are the
-  versions `pyproject.toml`'s `[build-system]` requires, and a test checks that the two agree.
-- Inside the app, `Contents/Resources/build-manifest.json`, which records what went into it: the commit,
-  the host's exact version, the host wheel's name and sha256, the runtime's file name, URL and sha256, the
-  name and version of each installed distribution, what the build removed from the runtime, the `swiftc`
-  version and the kind of signature. It does not hold a sha256 for each installed wheel. The `dmg` check
-  prints it.
+  window and no Dock icon. Its Swift sources are in [`App/`](App/).
+- Inside it, at `Contents/Resources/runtime`, a Python 3.13 runtime from
+  [python-build-standalone](https://github.com/astral-sh/python-build-standalone), pinned in
+  [`tools/macos/pins.toml`](../tools/macos/pins.toml) by its URL and its sha256. The build refuses any
+  other file. It uninstalls the runtime's own pip, removes what
+  [`tools/macos/prune.txt`](../tools/macos/prune.txt) lists (see
+  [What the build removes from the runtime](#what-the-build-removes-from-the-runtime)), and renames the
+  interpreter `lucille-host-runtime`, so that Activity Monitor and macOS's prompts name it rather than
+  `python3.13` (not yet seen on a Mac).
+- Installed into that runtime by `uv`, with hashes required, wheels only and no dependency resolved: the
+  exact dependency wheels `uv.lock` pins for this Mac, each downloaded from the lock's URL and refused
+  unless its sha256 is the lock's; then the host's wheel, built from this checkout, by the sha256 the build
+  is given. The host package is the same code as in `src/lucille_host/`, unchanged. The build deletes what
+  the installer writes that no wheel holds (its `.lock` file, the console scripts and each
+  `uv_cache.json`), then refuses to go on unless every file in `site-packages` is byte for byte a file of
+  its wheel, apart from the files an installer writes in each `*.dist-info` folder.
+- No `.pyc` file anywhere: nothing is precompiled, and the app runs Python with `-B`, so it writes none
+  either. Each start compiles the modules it imports in memory. CI measures how long that takes
+  ([decisions/0002](../decisions/0002-macos-app.md) §6).
+- The host's wheel is built with the build backend that
+  [`tools/macos/build-constraints.txt`](../tools/macos/build-constraints.txt) pins by hash
+  (`uv build --build-constraints … --require-hashes`), with no uv configuration file and no `UV_*`
+  variable, either of which could turn build isolation off. Those are the versions `pyproject.toml`'s
+  `[build-system]` requires, and a test checks that the two agree.
+- `Contents/Resources/bin/lucille-host`, a three-line `sh` wrapper for Terminal users. It runs the bundled
+  host as the app does, with the app's flags and on the app's profile, `mac-app` (a `--profile` you give it
+  replaces that one), and finds the bundle from its own real path, so a link to it from a folder on `PATH`
+  works too.
+- `Contents/Resources/licenses/`, the licence texts of the Python runtime and of every installed
+  distribution, one folder each.
+- `Contents/Resources/MANIFEST.json`, which records what went into the app: its name, identifiers and
+  version strings; the commit, the build number or tag, the Xcode version and the `swiftc` version; the
+  host's exact version and its wheel's name and sha256; the runtime's file name, URL and sha256, and what
+  the build removed from it; and every installed wheel's name, version, file name, URL and sha256. It
+  holds no time and no signature.
+- `Capsule-unsigned-macOS-arm64.tar.gz`, the app before it is signed, as a tarball whose bytes depend only
+  on the files: entries sorted, each with the commit's time and owner 0. CI builds it twice and compares
+  the two.
 - **`Capsule-<version>-<commit>-adhoc-macOS-arm64.dmg`**, a disk image whose volume is named Capsule. It holds
   the app and a link to the Applications folder. The file name says the signature is ad hoc and names
   the commit, so the image cannot be taken for a release asset.
@@ -56,10 +81,10 @@ the pairing window again, or says why that connection ended.
 The menu bar item is named "Capsule", or "Capsule, paused", for VoiceOver. While something needs
 attention, the icon is a warning sign; the name stays the same.
 
-The `Info.plist` holds the same sentences under each of the five keys macOS reads before it asks about
-Documents, Desktop, Downloads, and removable and network volumes. macOS is meant to show them under its
-question. Whether it does, and whether that question names Capsule at all, is not tested yet (see
-[What CI does not check](#what-ci-does-not-check)).
+The `Info.plist` holds the same sentences under each of the six keys macOS reads before it asks about
+Documents, Desktop, Downloads, removable and network volumes, and file providers. macOS is meant to show
+them under its question. Whether it does, and whether that question names Capsule at all, is not tested yet
+(see [What CI does not check](#what-ci-does-not-check)).
 
 ## What the menu does
 
@@ -284,10 +309,11 @@ This has not been tried on a Mac: CI never makes a profile with two connections.
 
 - The app drives the host only through the host's command line. The one program it starts is the
   interpreter inside the bundle, as
-  `Contents/Resources/python/bin/python3 -I -B -m lucille_host --profile mac-app <verb> ...`:
+  `Contents/Resources/runtime/bin/lucille-host-runtime -I -B -X utf8 -m lucille_host --profile mac-app <verb> ...`:
   - `-I` is isolated mode: no `PYTHON*` variables, no user site-packages, and no current folder on the
     import path.
   - `-B` writes no `.pyc` file, so nothing is written inside the signed app.
+  - `-X utf8` makes text UTF-8 whatever the locale.
   - `--profile mac-app` is the app's own profile: its own folders, abilities, Keychain item, run lock and
     version record, apart from the `default` profile a command-line install uses (see [Moving from an
     earlier build](#moving-from-an-earlier-build)).
@@ -295,7 +321,7 @@ This has not been tried on a Mac: CI never makes a profile with two connections.
   on the command line, and the app writes it to no log.
 - The environment is fixed. It holds `HOME`, `USER`, `LOGNAME`, `TMPDIR`, `PATH=/var/empty` and `LANG`,
   and nothing else from the app's own environment. `PATH` names an empty folder, so nothing is found
-  there; the host runs its operations with a `PATH` of its own.
+  there; the host runs its operations with a `PATH` of its own. The working folder is `/`.
 - The app reads JSON ([spec/CLI.md](../spec/CLI.md)) from `status`, the pairing verbs, `forget`, `kill`,
   `pause` and `resume`, and `run`'s events. It still reads the text of `--version`, `ops list` and
   `roots list`, and the failure lines of `ops`, `roots`, `pause` and `resume`.
@@ -322,12 +348,18 @@ This has not been tried on a Mac: CI never makes a profile with two connections.
 All of this is in [`App/HostCLI.swift`](App/HostCLI.swift) and [`App/Connection.swift`](App/Connection.swift).
 Two checks keep it so, and neither is a proof:
 
-- `tests/test_macos_build.py` reads the Swift sources. It fails if any file but `HostCLI.swift` names
-  Foundation's `Process`, if any file uses one of the other ways to start a process it lists (`posix_spawn`,
-  `fork`, `exec`, `NSWorkspace`, ...) or one of the ways to reach the network it lists (`URLSession`,
-  Network's types, sockets, `URL(string:)`, reading `contentsOf:` a URL, ...), if any file reads the
-  pasteboard or passes `--hub` or `--store-file`, and if a file imports anything but Foundation, AppKit
-  and SwiftUI (Foundation and the C library alone, for the files the self-test runs).
+- The Mac lint, [`tools/guards/macos_lint.py`](../tools/guards/macos_lint.py), reads the Swift sources
+  ([VERIFYING.md](../VERIFYING.md) lists its rules). It fails if any file but `HostCLI.swift` names
+  Foundation's `Process`; if `HostCLI.swift` does not write the bundled runtime's path and the arguments
+  above; if any file uses one of the other ways to start a process it lists (`posix_spawn`, `fork`,
+  `exec`, `NSWorkspace`, ...) or one of the ways to reach the network it lists (`URLSession`, Network's
+  types, sockets, `URL(string:)`, reading `contentsOf:` a URL, ...); and if any file reads the
+  pasteboard. It lets a file name a shell in one place only: the first line of the script the self-test
+  writes and starts through `HostCLI.swift`, as a stand-in for the interpreter.
+  `tests/test_macos_build.py` pins the lines where `HostCLI.swift` gives that path and those arguments
+  to the `Process`, and fails if a file names the pasteboard at all, passes `--hub` or `--store-file`, or
+  imports anything but Foundation, AppKit and SwiftUI (Foundation and the C library alone, for the files
+  the self-test runs).
 - `check_app.py links` reads what the built app's executable imports (`nm -u`). It fails on the C
   functions that start a process or open a socket, on the classes that do either, on `NSPasteboard`, and
   on a link to Network, CFNetwork or WebKit.
@@ -351,37 +383,50 @@ Builds before this one ran every verb on the host's `default` profile, the one a
 
 ## Building it on a Mac
 
-You need an Apple silicon Mac with macOS 15 or later, Xcode or the Xcode command line tools, `uv`, and
-network access to GitHub and PyPI. From the repository's root:
+You need an Apple silicon Mac with macOS 15 or later, Xcode 16.4 (the version `tools/macos/pins.toml`
+names; the build refuses any other), `uv`, and network access to GitHub and PyPI. The build uses
+`/Applications/Xcode_16.4.app`, where GitHub's images keep it, unless `DEVELOPER_DIR` names another Xcode's
+`Contents/Developer` folder. From the repository's root, build the host's wheel, then the app from that
+wheel and its sha256:
 
 ```sh
-uv run --no-project python macos/build_app.py build
+uv run --no-project python tools/macos/build_app.py wheel --out build/macos/host-wheel
+# It prints the wheel's path and its sha256; pass both on.
+uv run --no-project python tools/macos/build_app.py build \
+  --host-wheel build/macos/host-wheel/lucille_host-<version>-py3-none-any.whl \
+  --host-wheel-sha256 <its sha256> --build-number 1
 ```
 
-The app and the disk image land in `build/macos/`, which git ignores. Then run the checks CI runs:
+A build takes exactly one of `--build-number N`, which becomes `CFBundleVersion` (CI passes its run
+number), and `--tag vX.Y.Z`, for a build from that tag, whose version must then be `X.Y.Z` with no
+suffix. `assemble`, with the same arguments, stops before signing, and leaves the unsigned app and its
+tarball.
+
+The app, its tarball and the disk image land in `build/macos/`, which git ignores. Then run the checks CI
+runs, in the order it runs them:
 
 ```sh
-for check in host probe swift relocate links signature launch ui gatekeeper dmg; do
-  uv run --no-project python macos/check_app.py "$check"
+check() { uv run --no-project python tools/macos/check_app.py "$@"; }
+check bundle
+check record
+check version --build-number 1
+for c in links signature wrapper; do check "$c"; done
+chmod -R a-w build/macos/Capsule.app
+for c in host probe environment readonly swift relocate launch ui gatekeeper dmg startup; do
+  check "$c"
 done
-```
-
-`pairing` needs Switchboard's hub and the test harness, which the checks above do without. The workflow
-runs it in an environment made from a copy of the app's own interpreter, as these lines do:
-
-```sh
-mkdir -p /tmp/capsule-check
-ditto build/macos/Capsule.app /tmp/capsule-check/Capsule.app
-export UV_PROJECT_ENVIRONMENT=/tmp/capsule-check/venv
-uv venv --python /tmp/capsule-check/Capsule.app/Contents/Resources/python/bin/python3 "$UV_PROJECT_ENVIRONMENT"
-uv sync --locked --extra conformance --python "$UV_PROJECT_ENVIRONMENT/bin/python"
-uv run --no-sync python macos/check_app.py pairing
+check suite --copy-to /tmp/capsule-check
+/tmp/capsule-check/Capsule.app/Contents/Resources/runtime/bin/lucille-host-runtime -I -B \
+  tools/macos/check_app.py pairing
+check signature
+chmod -R u+w build/macos/Capsule.app   # so that the next build can replace it
 ```
 
 On your own Mac, `ui` and `pairing` need your terminal to have Accessibility permission (System
 Settings, Privacy & Security, Accessibility), and they take over the screen: `ui` for about two minutes,
-`pairing` for several. Without that permission they drive nothing and say so; with `--require-driven`, as
-CI runs them, that is a failure. Both work on the app's profile, `mac-app`, for your own HOME:
+`pairing` for several. Without that permission they drive nothing and say so; with `--require-driven`,
+as the `macos-app` job runs them, that is a failure. Both work on the app's profile, `mac-app`, for your
+own HOME:
 
 - `ui` changes the host's settings while it runs (it pauses, switches an ability, adds folders) and puts
   them back at the end.
@@ -389,41 +434,59 @@ CI runs them, that is a failure. Both work on the app's profile, `mac-app`, for 
   the profile's folder aside first, says where, and puts it back at the end. If it is killed part way,
   the folder stays at that place.
 
-`uv run --no-project python macos/build_app.py plan` runs on any system. It checks the pins and the build
-constraints, and writes the `Info.plist` the app would get, without running any other program.
+`library-snapshot` and `library-diff`, which CI runs around `launch` and `ui`, read your own `~/Library`
+and print what changed, which on a Mac in use is a lot. `suite --copy-to DIR` runs the host's test suite
+on a copy of the app's runtime in `DIR`, with the test dependencies installed into the copy only.
+`pairing` needs Switchboard's hub and the test harness, which the other checks do without, so it runs
+with that copy's interpreter, as above and as CI runs it.
 
-[`build_app.py`](build_app.py) says what each build step does, and [`check_app.py`](check_app.py)
-says what each check proves.
+`uv run --no-project python tools/macos/build_app.py plan --build-number 1` runs on any system. It checks
+the pins, the build constraints and the prune list, and writes the `Info.plist` the app would get, without
+running any other program.
+
+[`build_app.py`](../tools/macos/build_app.py) says what each build step does, and
+[`check_app.py`](../tools/macos/check_app.py) says what each check proves.
 
 ## What the build removes from the runtime
 
 The app never uses these, so the build removes them from python-build-standalone's files:
 
-- every program in `bin/` except `python3`, including pip's;
+- pip, uninstalled whole by its own `RECORD` before anything is installed, which removes `bin/pip`,
+  `bin/pip3` and `bin/pip3.13` too. It is the only `*.dist-info` folder the build removes;
+- every other program in `bin/` but the interpreter, `python3.13`, which the build renames
+  `lucille-host-runtime`;
 - `include/` and `share/`;
-- everything in `lib/` except `python3.13/`: `libpython3.13.dylib`, since `python3` links Python
-  statically, the Tcl/Tk libraries, and the pkg-config files;
-- from the standard library, `tkinter`, `_tkinter`, `idlelib`, `turtle`, `turtledemo`, `ensurepip`
-  and `config-3.13-darwin`;
-- pip itself, after it has installed the wheels.
+- everything in `lib/` except `python3.13/`: `libpython3.13.dylib`, since the interpreter links Python
+  statically, the Tcl/Tk libraries and packages, and the pkg-config files;
+- from the standard library, `tkinter`, `_tkinter`, `idlelib`, `turtle`, `turtledemo`, `ensurepip` and
+  `config-3.13-darwin`, and the three stale `.pyc` files in `encodings/__pycache__`;
+- `site-packages/README.txt`.
 
-CI runs the host's whole test suite on the trimmed runtime. A module the host needs cannot go missing
-without a test failing.
+[`tools/macos/prune.txt`](../tools/macos/prune.txt) lists all of these but pip, one path per line, each
+group with its reason. The build refuses an entry the pinned runtime does not hold. It does not delete
+what the list misses: it refuses a runtime that is not then exactly the interpreter and `lib/python3.13/`,
+with an empty `site-packages`. CI runs the host's whole test suite on a copy of the trimmed runtime, so a
+module the host needs cannot go missing without a test failing.
 
 ## Signing
 
-The build signs every Mach-O file in the bundle, innermost first, and then the bundle. The signature
-is ad hoc (`codesign -s -`), with the hardened runtime and no entitlements. It never uses `--deep` to
-sign. CI checks the following on every build:
+The build signs every Mach-O file in the bundle, innermost first, then the interpreter, and then the
+bundle. The signature is ad hoc (`codesign -s -`), with the hardened runtime, as
+`tools/macos/pins.toml` asks, and no entitlements. It never uses `--deep` to sign. Each file gets its own
+identifier: the interpreter `com.lucille-ai.capsule.runtime`, and every other one
+`com.lucille-ai.capsule.` followed by its path in the bundle. CI checks the following on every build:
 
+- the app and every Mach-O file in it were signed ad hoc by the build, not only by the linker, with the
+  identifier the build gave each and no Team ID, and the Mach-O files are exactly the expected ones;
 - `codesign --verify --deep --strict` passes on the app after the host has run from the bundle, so the
   runs wrote nothing into it;
 - `codesign --verify --strict` passes on each Mach-O file in the bundle on its own. The interpreter and
   the dependencies' native libraries are under `Contents/Resources`, where the bundle's signature may
   seal them as plain files and not check their own signatures, so this is checked separately;
-- every Mach-O file has the hardened runtime flag;
+- every Mach-O file has the hardened runtime flag, exactly when the pins ask for it;
 - the dependencies' native code (cffi, cryptography, and keyring's macOS backend) loads under the
-  hardened runtime with no entitlement.
+  hardened runtime with no entitlement: in the `macos-app` job on macOS 15, and in the smoke jobs on
+  macOS 26 and 27.
 
 A signature that macOS trusts needs a Developer ID certificate and notarization. This build does
 neither. Whether the native code still loads with no entitlement under a Developer ID signature is
@@ -433,24 +496,38 @@ There is reason to expect that it does: BeeWare's Briefcase signs the Mach-O fil
 
 ## What CI checks
 
-The `macos-app` workflow builds the app on a GitHub-hosted Apple silicon runner (`macos-15`) and runs
-each check in [`check_app.py`](check_app.py). Its token can only read the repository, and it uses no
-secret. A check that finds a problem fails the build.
+The workflow `ci` (`.github/workflows/ci.yml`) builds and checks the app on every pull request and every
+push to `main`. Its job `macos-app` builds the app on a GitHub-hosted Apple silicon runner (`macos-15`) and
+runs each check in [`check_app.py`](../tools/macos/check_app.py). Its jobs `macos-smoke`, on `macos-26` and
+on `xcode-27` (macOS 27), take the disk image and the compiled Swift self-test that `macos-app` built,
+refuse them unless their sha256 is the one `macos-app` gave, and run the checks marked "both" on them; they
+build nothing. The workflow's token can only read the repository, and the Mac jobs use no secret. A check
+that finds a problem fails its job. On `xcode-27` alone, a failed job does not fail the workflow run
+(`continue-on-error`, the maintainer's decision of 2026-11-02, decisions/0002 §18).
 
-| Check | What it shows |
-|---|---|
-| `host` | The interpreter in the bundle runs the host in isolated mode, with nonsense in `PYTHONHOME` and `PYTHONPATH`: `--version`, `ops list`, a `roots` round trip, `pause` and `resume`, and the refusal of a home folder. The dependencies' native code loads. |
-| `probe` | Prints what `status`, `pair status`, `pair --code-stdin` and `run` do on the runner, run as the app runs them, under a fresh HOME and under the runner's own. It gates nothing. |
-| `swift` | The app's Swift code that draws nothing, compiled with a self-test. Against the real command line, through the same calls the menu makes: the folder name suggestions and corrections, which folders are the whole disk (a link to one included), that the command line the app builds for them never has `--allow-home-or-root` and that the host then adds nothing, the plain sentence for each refusal, the time limit and Cancel; every verb on `--profile mac-app` with `PATH=/var/empty`; and, on a throwaway profile, `status`, `pair status`, `pair --code-stdin` (which refuses a text that is not a code once it has read it from standard input) and `run` with the lifeline. Against the host's golden JSON fixtures: every object read through the app's reader. The pairing flow's rules (They Match counts only on the drawn number, after a `status` read that shows the same connection and deadline; They Differ stays; `pair status` only while the window shows), and the supervisor's (the exit of every `run` fixture, the back-off, the five-crash stop, the quit and log out steps, never resuming by itself), each also walked through 40,000 seeded random steps. The child runner, against stand-in children: a signal read as a signal, the lifeline ending a stand-in `run` while a later child lives, the code on standard input and never in argv, input too long for the pipe refused, lines too long or ending in a carriage return dropped, a burst of 5000 events. |
-| `relocate` | A copy of the app in another folder, with a space in its path, passes `host` and `swift`. |
-| `links` | Every library a Mach-O file loads is macOS's own (`/usr/lib/`, `/System/Library/`), or resolves to a file that exists inside the bundle. `@loader_path`, `@executable_path` and `@rpath` are resolved as dyld resolves them, `..` included, so a path that climbs out of the bundle, and a library the build removed, both fail. Every run path must resolve inside the bundle. The log shows where each library and run path resolves. No Mach-O file needs a newer macOS than the app's minimum, and no file holds the build folder's path. The app's executable imports nothing on the lists above. |
-| `signature` | The signature is valid after the runs above, on the app and on each Mach-O file in it; every Mach-O file has the hardened runtime, and nothing has entitlements. The interpreter's signing identifier is `com.lucille-ai.capsule.python3`. The log shows each Mach-O file's signing identifier. |
-| `launch` | The app opens the way Finder opens it, and is still running 10 seconds later. SIGTERM then ends it within 15 seconds, though nothing has closed its note about the menu bar. A copy still running from an earlier step fails this check and the `ui` and `pairing` checks, and is then killed. |
-| `ui` | Driven through System Events as a user would: the app says what it is for and where its menu is when it opens, and again when it is opened while it runs; the menu bar item's title or description, which VoiceOver reads as its name, is "Capsule" (its tooltip does not count); the menu shows the version, "Not connected to Lucille" and every item, and lists abilities in plain words, each with its sentence on what Lucille gets; Pause Lucille and Resume Lucille change the host's pause flag, the status line and the menu bar item's name; an ability switches on, shows a checkmark, and switches off; Add a Folder… goes through the Open panel and the name dialog, where a typed name the host would refuse comes back corrected, and adds the folder; Remove in the Folders submenu removes it; the home folder brings up the question first, Choose a Smaller Folder goes back to the Open panel, and Add Anyway adds it; the Data volume, then `/` through a link to it, each bring up the note that refuses the whole disk, with Choose a Smaller Folder, which goes back to the Open panel, and Cancel, and no button that adds the folder, and neither is added (that the note has no other button is checked in its source by the build tests). Then the pairing window: with a code-shaped text on the pasteboard, Connect to Lucille… opens it with its field empty, and the field stays empty once it has the focus; a typed word gets the hint, and Connect stays off; Command-V pastes exactly the text copied; Connect hands it to the host, which refuses it as no code, and the app says so; nothing is connected, and neither text reaches the app's standard output or error. Each step is checked against what the host's command line then reports, on the app's profile. With `--require-driven`, as CI runs it, a machine where System Events cannot drive the app fails the check. Screenshots are kept as the artifact `capsule-macos-screenshots`. |
-| `gatekeeper` | Prints `spctl`'s verdict. It is "rejected", as expected for an ad hoc signature, and does not fail the build. |
-| `dmg` | Exactly one disk image was built, its name ends `-adhoc-macOS-arm64.dmg`, and it verifies, mounts, and holds the app, with a valid signature, and a link to `/Applications`. |
-| test suite | The host's whole test suite passes on the trimmed runtime. |
-| `pairing` | With a hub of its own and a stand-in for Lucille, a test harness connects the app's profile through the command line (`pair --code-stdin` with `--hub` and `--store-file`, which the app never passes), leaving the number to confirm. Then, driven through System Events: Finish Connecting… shows Lucille's number, once and no other; Return and Space answer nothing; They Match confirms. `run` is the app's child, on the app's profile, with a pipe on its standard input; a second `run` of the profile is refused (exit 21); `run` reads the work room Lucille offers, and the menu says "Connected to Lucille"; the app itself holds no network connection. A folder and `files.sha256` added through the command line, then one request on that folder, answered with the file's fingerprint. `run` killed with SIGKILL while the app's note about the menu bar is up is started again before the note is closed; the app killed with SIGKILL leaves `run` to finish and exit. Quit, chosen in that note during a 20-second request, asks first, shows the finishing panel with Stop now, and quits once `run` has finished and drained. Quit then Stop now, during a longer request, tells Lucille the request failed (`killed_locally`) and pauses the host; the next launch says it is paused, and it stays paused until Resume. Disconnect lets `run` finish, then forgets the connection, and says Lucille was told. The profile is set aside first and put back after, and the app's signature still verifies. Screenshots are kept with the others. |
+| Check | Where | What it shows |
+|---|---|---|
+| `bundle` | both | No symbolic link, no `.pyc` and no `__pycache__` in the bundle. Its Mach-O files are exactly the expected five: the app's executable, the interpreter, `lib-dynload`'s `_dbm`, and the two wheel extensions. The app and each of them is signed ad hoc by the build, not only by the linker, with no Team ID and the identifier the build gave it. |
+| `record` | `macos-app` | Each wheel `MANIFEST.json` names is one `uv.lock` pins (name, version, file, URL and sha256), and the host wheel's sha256 is the one the wheel step output. Each, the host's included, is found again and hashed; the installed distributions are exactly those; every file in `site-packages` is byte for byte a file of its wheel, apart from the installer's own files in each `*.dist-info` folder. Each Mach-O file is compared with its wheel's after `codesign --remove-signature` on a copy of each, and that comparison is reported in the job summary, not failed: SAME, or DIFFERENT with both sizes, or, where codesign fails on either copy, which copy and what it said, with nothing compared. |
+| `version` | `macos-app` | `Info.plist`'s two version strings follow the version rule, and `MANIFEST.json`, the bundled host's `--version` and the pins agree with them. |
+| `links` | `macos-app` | Every library a Mach-O file loads is macOS's own (`/usr/lib/`, `/System/Library/`), or resolves to a file that exists inside the bundle. `@loader_path`, `@executable_path` and `@rpath` are resolved as dyld resolves them, `..` included, so a path that climbs out of the bundle, and a library the build removed, both fail. Every run path must resolve inside the bundle. The log shows where each library and run path resolves. No Mach-O file needs a newer macOS than the app's minimum, and no file holds the build folder's path. The app's executable imports nothing on the lists above. |
+| `signature` | both | The signature is valid, on the app and on each Mach-O file in it; each is signed ad hoc as `bundle` says, with the hardened runtime exactly when the pins ask for it, and nothing has entitlements. It runs again as the last check, so a run that wrote into the bundle fails it. |
+| `wrapper` | both | On a writable copy of the app, the wrapper runs the host through a link to it from another folder, and never a runtime beside the link; it runs on the app's profile, `mac-app`, not on `default`. Neither it nor the interpreter run with the app's flags writes any bytecode; the same run without `-B` does, so the check can see one. |
+| `host` | both | On the bundle made read-only (`chmod -R a-w`), the interpreter runs the host with the app's flags and nonsense in `PYTHONHOME` and `PYTHONPATH`: `--version`, through the wrapper too, `ops list`, a `roots` round trip, `pause` and `resume`, and the refusal of a home folder. The dependencies' native code loads. |
+| `probe` | both | Prints what `status`, `pair status`, `pair --code-stdin` and `run` do on the runner, run as the app runs them, under a fresh HOME and under the runner's own. It gates nothing. |
+| `environment` | both | A module or startup file planted where `PYTHONPATH`, `PYTHONHOME`, `PYTHONSTARTUP`, the user site, `PYTHONUSERBASE` and the working folder would load it never loads with the app's flags. For each, a control run without `-I` must load it, or the check fails. `PYTHONSTARTUP` is read only by an interactive interpreter, so no run the app makes could load it, and its control runs `-i`. No `.pth` file is missing from the installed `RECORD` files. |
+| `readonly` | both | The bundle cannot be written; `--version`, `status` and `status --json` work from it, and the wrapper too; no file in it changed and no bytecode appeared; then its signature still verifies. |
+| `swift` | both | The app's own Swift code that runs the command line and reads its output works against the real command line, through the same calls the menu makes: the folder name suggestions and corrections, which folders are the whole disk (a link to one included), that the command line the app builds for them never has `--allow-home-or-root` and that the host then adds nothing, the plain sentence for each refusal, the time limit and Cancel; every verb on `--profile mac-app` with `PATH=/var/empty`; and, on a throwaway profile, `status`, `pair status`, `pair --code-stdin` (which refuses a text that is not a code once it has read it from standard input) and `run` with the lifeline. Against the host's golden JSON fixtures: every object read through the app's reader. The pairing flow's rules (They Match counts only on the drawn number, after a `status` read that shows the same connection and deadline; They Differ stays; `pair status` only while the window shows), and the supervisor's (the exit of every `run` fixture, the back-off, the five-crash stop, the quit and log out steps, never resuming by itself), each also walked through 40,000 seeded random steps. The child runner, against stand-in children: a signal read as a signal, the lifeline ending a stand-in `run` while a later child lives, the code on standard input and never in argv, input too long for the pipe refused, lines too long or ending in a carriage return dropped, a burst of 5000 events. `macos-app` compiles the self-test once, with the pinned Xcode, and the smoke jobs run that same program. |
+| `relocate` | `macos-app` | A copy of the app in another folder, with a space in its path, passes `host` and `swift`. |
+| `launch` | both | The app opens the way Finder opens it, and is still running 10 seconds later. SIGTERM then ends it within 15 seconds, though nothing has closed its note about the menu bar. A copy still running from an earlier step fails this check and the `ui` and `pairing` checks, and is then killed. |
+| `ui` | both | Driven through System Events as a user would: the app says what it is for and where its menu is when it opens, and again when it is opened while it runs; the menu bar item's title or description, which VoiceOver reads as its name, is "Capsule" (its tooltip does not count); the menu shows the version, "Not connected to Lucille" and every item, and lists abilities in plain words, each with its sentence on what Lucille gets; Pause Lucille and Resume Lucille change the host's pause flag, the status line and the menu bar item's name; an ability switches on, shows a checkmark, and switches off; Add a Folder… goes through the Open panel and the name dialog, where a typed name the host would refuse comes back corrected, and adds the folder; Remove in the Folders submenu removes it; the home folder brings up the question first, Choose a Smaller Folder goes back to the Open panel, and Add Anyway adds it; the Data volume, then `/` through a link to it, each bring up the note that refuses the whole disk, with Choose a Smaller Folder, which goes back to the Open panel, and Cancel, and no button that adds the folder, and neither is added (that the note has no other button is checked in its source by the build tests). The Open panel's buttons are looked for in every window of the app, and in each sheet and group in it, since where they sit differs between macOS versions; where its prompt is nowhere, Return, its default button, chooses the folder, and what the app shows next is checked as before. Then the pairing window: with a code-shaped text on the pasteboard, Connect to Lucille… opens it with its field empty, and the field stays empty once it has the focus; a typed word gets the hint, and Connect stays off; Command-V pastes exactly the text copied; Connect hands it to the host, which refuses it as no code, and the app says so; nothing is connected, and neither text reaches the app's standard output or error. Each step is checked against what the host's command line then reports, on the app's profile. In `macos-app` (`--require-driven`), a machine where System Events cannot drive the app fails the check; the smoke jobs record whether it could, and where it could, a driven step that fails fails the check there too. Screenshots are kept in the job's logs artifact. |
+| `library-snapshot`, `library-diff` | both | `~/Library` is walked before `launch` and after `ui`. A new, changed or removed path whose name holds the bundle identifier, the app's name or "lucille", and that [`tools/macos/library-allowlist.txt`](../tools/macos/library-allowlist.txt) does not allow, fails the check; every other change is printed. The state folder of the app's profile, `mac-app`, must be among the changes (in the smoke jobs, the check makes those writes itself first), or the check fails. It skips `~/Library/Developer` and `~/Library/Android`, and cannot see a write to a path whose name says nothing of the app. The snapshots are never uploaded. |
+| `gatekeeper` | `macos-app` | Prints `spctl`'s verdict. It is "rejected", as expected for an ad hoc signature, and does not fail the build. |
+| `dmg` | both | Exactly one disk image was built, its name ends `-adhoc-macOS-arm64.dmg`, and it verifies, mounts, and holds the app, with a valid signature, and a link to `/Applications`. |
+| `startup` | `macos-app` | The median and the fastest of ten runs of `--version` and of `status --json` with no `.pyc`, as shipped; then, on a writable copy, with `checked-hash` files for the standard library, then for everything. Written to the job summary; not a gate. |
+| `suite` | `macos-app` | The host's whole test suite passes on a copy of the app's runtime, with the test dependencies installed into the copy only, by hash, and the host's wheel and agent-switchboard installed again by `MANIFEST.json`'s sha256, so that their commands sit beside the copy's interpreter. |
+| `pairing` | `macos-app` | It needs Switchboard's hub and the test harness, so it runs with the interpreter of the copy of the runtime that `suite` made, after it; the smoke jobs have no such copy, and do not run it. With a hub of its own and a stand-in for Lucille, a test harness connects the app's profile through the command line (`pair --code-stdin` with `--hub` and `--store-file`, which the app never passes), leaving the number to confirm. Then, driven through System Events: Finish Connecting… shows Lucille's number, once and no other; Return and Space answer nothing; They Match confirms. `run` is the app's child, on the app's profile, with a pipe on its standard input; a second `run` of the profile is refused (exit 21); `run` reads the work room Lucille offers, and the menu says "Connected to Lucille"; the app itself holds no network connection. A folder and `files.sha256` added through the command line, then one request on that folder, answered with the file's fingerprint. `run` killed with SIGKILL while the app's note about the menu bar is up is started again before the note is closed; the app killed with SIGKILL leaves `run` to finish and exit. Quit, chosen in that note during a 20-second request, asks first, shows the finishing panel with Stop now, and quits once `run` has finished and drained. Quit then Stop now, during a longer request, tells Lucille the request failed (`killed_locally`) and pauses the host; the next launch says it is paused, and it stays paused until Resume. Disconnect lets `run` finish, then forgets the connection, and says Lucille was told. The profile is set aside first and put back after, and the app's signature still verifies. Screenshots are kept with the others. |
+| a second build | `macos-app` | The unsigned app is built again, in another folder, and the two tarballs are compared by sha256. The job summary says SAME, DIFFERENT or FAILED, with both digests. Not a gate. |
 
 ## What CI does not check
 
@@ -458,11 +535,11 @@ CI adds its folders under the home folder, where macOS asks nothing, and it conn
 harness with a hub of its own. These need a Mac and a person, and none has been done yet:
 
 - **A folder in Documents, Desktop or Downloads.** Whether macOS asks at all after the Open panel,
-  whether its question names Capsule rather than `python3` and shows Capsule's sentence on what it is for,
-  and whether the folder is added after Allow. After Don't Allow, whether the app says that macOS is
-  blocking it, and whether System Settings, Privacy & Security, Files & Folders then shows a switch
-  under Capsule.
-- **A folder on an external or network drive, and one in iCloud Drive.**
+  whether its question names Capsule rather than `lucille-host-runtime` and shows Capsule's sentence on
+  what it is for, and whether the folder is added after Allow. After Don't Allow, whether the app says
+  that macOS is blocking it, and whether System Settings, Privacy & Security, Files & Folders then shows a
+  switch under Capsule.
+- **A folder on an external or network drive, one in iCloud Drive, and one from another file provider.**
 - **A stalled network drive.** Whether Cancel works, and whether the menu then says a folder check is
   stuck.
 - **The app's own `pair --code-stdin` reaching the number against a hub.** In CI, a pasted text reaches
@@ -470,8 +547,9 @@ harness with a hub of its own. These need a Mac and a person, and none has been 
   the harness answering the code. The app never passes `--hub`, so it reaches only Lucille's own hub.
 - **The Keychain.** CI's harness keeps the connection in a file (`--store-file`). Keeping it in the
   Keychain, and what macOS asks about it on each new ad hoc build, is untested.
-- **Paste on macOS 26 and 27,** and whether macOS shows a paste alert there. CI runs macOS 15. Paste
-  through the Control-click menu is not driven in CI either.
+- **Paste on macOS 26 and 27,** and whether macOS shows a paste alert there. The `macos-app` job pastes
+  on macOS 15; the smoke jobs reach the code window on macOS 26 and 27 only where System Events can drive
+  the app there. Paste through the Control-click menu is not driven in CI either.
 - **They Match's click time.** CI presses They Match through accessibility, which carries no event,
   so the app takes the time of the press as now. That a real click made before the number was drawn
   is refused is checked in the self-test only.
@@ -501,10 +579,11 @@ CI cannot log out. To try it on your own Mac, connect the app, then turn on `hos
 profile. It is for testing, and the menu does not list it:
 
 ```sh
-/Applications/Capsule.app/Contents/Resources/python/bin/python3 -I -B -m lucille_host --profile mac-app ops enable host.sleep
+/Applications/Capsule.app/Contents/Resources/bin/lucille-host --profile mac-app ops enable host.sleep
 ```
 
-Change the path if the app is somewhere else. `-B` keeps Python from writing into the signed app. Have
+Change the path if the app is somewhere else. The wrapper runs the bundled runtime with the app's flags
+and on the app's profile (the command names it anyway), so nothing is written into the signed app. Have
 Lucille send this Mac a `host.sleep` request with `n` set to 60, and log out while it runs. Capsule should
 show "Finishing the current task…", with a line saying that it stops the task after 20 seconds. Lucille
 should then get the request back as `failed` `killed_locally`. When you log in and open Capsule again, it
@@ -513,16 +592,23 @@ should say it is paused, and stay paused until you choose Resume. Afterwards, ru
 
 ## The disk image from CI
 
-The `macos-app` workflow uploads the disk image only from a run started by hand (`workflow_dispatch`),
-and only when every check passed. A push or a pull request uploads none. The artifact is named
-`capsule-adhoc-macos-arm64-dmg-<event>-<commit>`, and is kept for 3 days. While it is kept, any
-signed-in GitHub user can download it, because this repository is public.
+The workflow `ci` uploads the disk image only from a run started by hand (its `workflow_dispatch` trigger,
+from the Actions tab), and only when every check of `macos-app` passed, as the artifact
+`capsule-adhoc-macos-arm64-dmg-workflow_dispatch-<commit>`, kept for 3 days. A pull request or a push
+uploads no app. While it is kept, any signed-in GitHub user can download it, because this repository is
+public. Every run uploads its logs and screenshots, as `capsule-macos-app-logs` and
+`capsule-macos-smoke-<runner>-logs`, kept for 7 days.
 
-A pull request from a fork runs the fork's own copy of the workflow, as well as the fork's build code,
+The smoke jobs get the disk image through GitHub's Actions cache, not as an artifact: only a workflow run
+can restore a cache entry, and nobody can download one (a reading of GitHub's documentation, not tested).
+A pull request's run, a fork's included, can restore what a run on `main` put there; it could equally
+build the same app from the same source ([decisions/0002](../decisions/0002-macos-app.md) §18).
+
+A pull request opened from a fork runs the fork's copy of the workflow, as well as the fork's build code,
 and that copy can upload anything, under any name. So an artifact on a fork's pull request run is the
 fork's build. The repository's Actions setting "Approval for running fork pull request workflows from
 contributors", at its strictest, makes every such run wait for a maintainer. It is a setting, which no
-file here can enforce or show. Take a disk image only from a run started by hand on this repository; the
+file here can enforce or show. Take a disk image only from a run of this repository started by hand; the
 artifact's name says which event and which commit built it.
 
 **It is ad hoc signed and not notarized**, and its name ends `-adhoc-macOS-arm64.dmg`. When it is
@@ -551,6 +637,8 @@ anyone to work around the warning.
 - **What comes after connecting**: offering again the folders and abilities a new connection set aside,
   Activity, Stop What's Running, Reset Settings, About, Copy Diagnostics, and a check of each folder at
   launch.
+- **ripgrep.** The design bundles it as `Contents/Helpers/rg`, with its licence. The pins hold an empty
+  ripgrep commit until then.
 - **Updates.** There are none. A new version is a new disk image. When Lucille asks for a newer host,
   the app says so, and offers no Download or Prepare to Update.
 - **Uninstall.** Dragging the app to the Trash removes it. The host's own folder,
@@ -569,27 +657,25 @@ anyone to work around the warning.
 
 The design ([decisions/0002-macos-app.md](../decisions/0002-macos-app.md)) may change each of these.
 
-- **The app runs the runtime's own `python3`.** The design renames it `lucille-host-runtime`, signed with
-  the identifier `com.lucille-ai.capsule.runtime`, so that macOS's prompts and Activity Monitor name it. The
-  first build keeps the name `python3`, and signs it with `--prefix com.lucille-ai.capsule.`, which gives it
-  the identifier `com.lucille-ai.capsule.python3`; the `signature` check checks that. A small native
-  launcher that embeds Python, so that the bundle holds no general-purpose interpreter, is an option the
-  design has not decided. Chosen for the first build; the design may change it.
-- **Python lives in `Contents/Resources/python`.** If notarization objects to code there, see "Not done
+- **The app runs python-build-standalone's own interpreter, renamed `lucille-host-runtime`.** A small
+  native launcher that embeds Python, so that the bundle holds no general-purpose interpreter, is an
+  option the design has not decided.
+- **Python lives in `Contents/Resources/runtime`.** If notarization objects to code there, see "Not done
   yet" for the two ways out.
 - **The app's working name is Capsule, with the bundle identifier `com.lucille-ai.capsule`.** The code
-  takes both from `runtime.toml`: `build_app.py` writes them into `Info.plist`, the Swift code reads the
-  name back from there (`HostText.appName`), and `check_app.py` reads it from `runtime.toml`. Outside the
-  app, as in the self-test, the Swift code says "the app" instead, so the `ui` check fails if the app
-  stops reading its name. A new name also changes five lines of the workflow (the app's paths and the
-  artifacts' names) and the values `tests/test_macos_build.py` pins; those tests fail until all of them
-  agree with `runtime.toml`. The name may change before the first signed build. Only the app has the
-  name: the host program inside is still `lucille-host`, with its folder at
-  `~/Library/Application Support/lucille-host`. The identifier must not change after the first signed
-  release, because changing it makes macOS ask the user again about every folder and Keychain item.
+  takes both from `tools/macos/pins.toml`: `build_app.py` writes them into `Info.plist`, the Swift code
+  reads the name back from there (`HostText.appName`), and `check_app.py` reads it from the pins. Outside
+  the app, as in the self-test, the Swift code says "the app" instead, so the `ui` check fails if the app
+  stops reading its name. A new name also changes the three artifact names in `.github/workflows/ci.yml`
+  and the values `tests/test_macos_build.py` pins; those tests fail until all of them agree with the pins.
+  The name may change before the first signed build. Only the app has the name: the host program inside
+  is still `lucille-host`, with its folder at `~/Library/Application Support/lucille-host`. The
+  identifiers must not change after the first signed release, because changing them makes macOS ask the
+  user again about every folder and Keychain item.
 - **`CFBundleShortVersionString` holds the version's release numbers** (`0.1.0` for `0.1.0.dev0`), because
-  Apple allows only three numbers there. The exact version is in the `LucilleHostVersion` key, in
-  `build-manifest.json`, and in the menu.
+  Apple allows only three numbers there, and `CFBundleVersion` the build number (CI's run number). The
+  exact version is in `MANIFEST.json` and in the menu. A build from a `v*` tag needs a version with no
+  suffix, which both keys then hold.
 - **macOS 15 or later, Apple silicon only.**
 - **The app reads JSON for connecting and running, and text for the rest.** It reads `status`, the
   pairing verbs, `forget`, `kill`, `pause`, `resume` and `run`'s events as JSON
@@ -606,10 +692,10 @@ The design ([decisions/0002-macos-app.md](../decisions/0002-macos-app.md)) may c
 - **The app refuses `/System` and `/System/Volumes` too.** The design refuses `/` and the Data volume
   outright. The two folders between them hold the Data volume, so the first build refuses them as well,
   where the design would ask about them as folders that hold the home folder.
-- **`.pyc` files are hash-checked**, so a copied app with new file times still uses them, and Python
-  never needs to write one.
-- **`PATH` is `/var/empty`**, as the design has it, but the working directory is `/`, and the
-  interpreter runs without `-X utf8`. The design runs it in the host's state folder, with `-X utf8`.
+- **`PATH` is `/var/empty`**, as the design has it, but the working folder is `/`. The design runs the
+  host's command line in the host's own state folder.
+- **The `Info.plist`'s folder usage text is the two sentences on what Capsule is for** that this page
+  opens with, not the shorter sentence the design proposes.
 - **The disk image is a plain `hdiutil` image**, with no background picture or window layout.
 
 These depart from the design's screens and what it says the app does. Each was chosen for the first

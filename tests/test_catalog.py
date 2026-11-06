@@ -22,6 +22,7 @@ from lucille_host.ops import (
     catalog_version,
 )
 from tests._host import MakeContext
+from tools.guards import macos_lint
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 PLACEHOLDER = re.compile(r"\{[a-z_][a-z0-9_]*\}")
@@ -182,21 +183,17 @@ def test_copy_fields_outside_definition_hash() -> None:
 
 
 def _must_never_claim() -> list[str]:
+    # One reading of PRIVACY.md's list, the Mac lint's: a phrase the file wraps across lines is
+    # one phrase, and fewer than 15 phrases fails.
     text = (REPO_ROOT / "PRIVACY.md").read_text(encoding="utf-8")
-    section = text.split("## What this project must never claim", 1)[1].split("\n## ", 1)[0]
-    # A phrase the file wraps across lines is one phrase.
-    phrases = [" ".join(found.split()) for found in re.findall(r'"([^"]+)"', section)]
-    assert len(phrases) >= 15, phrases
-    return phrases
+    return macos_lint.must_not_claim_phrases(text)
 
 
 def test_catalog_copy_must_not_claim() -> None:
     phrases = _must_never_claim()
     for name, op in OPERATIONS.items():
         for words in (op.about.summary, op.about.sends):
-            for phrase in phrases:
-                found = re.search(rf"(?<![\w-]){re.escape(phrase)}(?![\w-])", words, re.IGNORECASE)
-                assert found is None, (name, phrase, words)
+            assert macos_lint.claims(words, phrases) == [], (name, words)
         assert 0 < len(op.about.summary) <= 60 and 0 < len(op.about.sends) <= 300
         assert op.about.summary.isascii() and op.about.sends.isascii()
     sha = OPERATIONS["files.sha256"].about
