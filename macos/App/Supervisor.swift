@@ -111,6 +111,8 @@ enum Health: Equatable, Sendable {
 ///   drops every pending restart.
 /// - A quit during a Disconnect still runs `forget` once `run` has exited, before the reply.
 /// - `resume` runs only when the user asks.
+/// - `pairGone` comes from the step that halts on a reason that ends the pair, a status read or
+///   an exit, and from every such step, so that the app's login item goes exactly then.
 struct RunSupervisor: Equatable, Sendable {
     static let crashWindow: TimeInterval = 600
     static let crashLimit = 5
@@ -241,6 +243,9 @@ struct RunSupervisor: Equatable, Sendable {
         case hideFinishing
         /// Lucille asked for a newer release: say so, once for the highest version asked.
         case tellHostTooOld(minVersion: String, hostVersion: String)
+        /// The pair is gone (`LoginRules.pairGone`): take the app's login item away, if it has
+        /// one (decisions/0002 §9).
+        case pairGone
         /// One diagnostic line on standard error. It never holds a code or a SAS.
         case log(String)
     }
@@ -574,6 +579,9 @@ struct RunSupervisor: Equatable, Sendable {
             // Not confirmed yet: the pairing flow's business, and `run` waits for it.
             phase = .idle
         }
+        if case .halted(.notConnected(let why)) = phase, LoginRules.pairGone(why) {
+            return [.pairGone]
+        }
         return []
     }
 
@@ -703,6 +711,9 @@ struct RunSupervisor: Equatable, Sendable {
                 effects.append(.readStatus)
             case .notConnected(let why):
                 phase = .halted(.notConnected(why))
+                if LoginRules.pairGone(why) {
+                    effects.append(.pairGone)
+                }
             case .needsAttention(let attention):
                 phase = .halted(.needsAttention(attention))
             case .drainedAsAsked:

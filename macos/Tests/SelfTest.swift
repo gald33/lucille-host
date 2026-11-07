@@ -39,6 +39,7 @@ struct SelfTest {
         checkPairing(fixtures, report)
         checkSetup(fixtures, report)
         checkSupervisor(fixtures, report)
+        checkLoginRules(fixtures, report)
         if let home = options["home"] {
             // First among the checks that start anything: until it opens the latch, nothing can.
             checkSpawnLatch(home: home, report)
@@ -2542,11 +2543,47 @@ extension SelfTest {
         let toReady = flow.handle(.next)
         let readyShown: [SetupFlow.Effect] = [.show(.ready)]
         report.expect(toReady == readyShown, "then to Ready", "\(toReady)")
+        report.expect(flow.openAtLogin, "Ready's box, Open at Login, starts checked")
         let closing = flow.handle(.done)
         let closed: [SetupFlow.Effect] = [.close]
-        report.expect(closing == closed && !flow.owed && !flow.windowOpen && !flow.offersReopen,
-                      "Done closes the window, and Set Up is no longer owed", "\(closing)")
+        let closedAndRegistered: [SetupFlow.Effect] = [.close, .registerLoginItem]
+        report.expect(closing == closedAndRegistered && !flow.owed && !flow.windowOpen && !flow.offersReopen,
+                      "Done, with Ready's box checked, closes the window and asks to register the login item; Set Up is no longer owed",
+                      "\(closing)")
         report.expect(flow.handle(.connected).isEmpty, "Connected again opens nothing")
+        report.expect(flow.handle(.done).isEmpty, "and Done again asks for nothing")
+
+        // Ready's box (decisions/0002 §3.1 step 10): registering is the user's click on Done with
+        // it checked. Unchecked, Done only closes; the window closed on Ready ends Set Up as Done
+        // does, and registers nothing; a click while Ready is not shown counts for nothing.
+        func atReady() -> SetupFlow {
+            var made = connected(startedAt: start, objects: [])
+            _ = made.handle(.next)
+            _ = made.handle(.next)
+            return made
+        }
+        var boxUnchecked = atReady()
+        let uncheckedClick = boxUnchecked.handle(.openAtLogin(false))
+        let doneUnchecked = boxUnchecked.handle(.done)
+        report.expect(boxUnchecked.page == nil && uncheckedClick.isEmpty && doneUnchecked == closed && !boxUnchecked.owed,
+                      "with Ready's box unchecked, Done only closes the window", "\(uncheckedClick) \(doneUnchecked)")
+        var rechecked = atReady()
+        _ = rechecked.handle(.openAtLogin(false))
+        _ = rechecked.handle(.openAtLogin(true))
+        let doneRechecked = rechecked.handle(.done)
+        report.expect(doneRechecked == closedAndRegistered, "checked again, Done asks to register", "\(doneRechecked)")
+        var closedOnReady = atReady()
+        let closedThere = closedOnReady.handle(.windowClosed)
+        report.expect(closedThere.isEmpty && !closedOnReady.owed && !closedOnReady.offersReopen,
+                      "the window closed on Ready ends Set Up and registers nothing", "\(closedThere)")
+        var clickedEarly = connected(startedAt: start, objects: [])
+        _ = clickedEarly.handle(.openAtLogin(false))
+        _ = clickedEarly.handle(.next)
+        let clickedOnAbilities = clickedEarly.handle(.openAtLogin(false))
+        _ = clickedEarly.handle(.next)
+        let doneAfterEarlyClicks = clickedEarly.handle(.done)
+        report.expect(clickedOnAbilities.isEmpty && doneAfterEarlyClicks == closedAndRegistered,
+                      "a click on the box before Ready is shown counts for nothing: Ready starts it checked", "\(doneAfterEarlyClicks)")
 
         // Skip, a window closed before its last page, and the menu item that opens it again.
         flow = connected(startedAt: start, objects: pairObjects)
@@ -2589,6 +2626,9 @@ extension SelfTest {
         let afterTerminal = relaunched.handle(.connected)
         report.expect(afterTerminal.isEmpty && !relaunched.offersReopen,
                       "nor does a pairing confirmed in Terminal, which no They Match here confirmed")
+        let relaunchedClick = relaunched.handle(.openAtLogin(true))
+        let relaunchedDone = relaunched.handle(.done)
+        report.expect(relaunchedClick.isEmpty && relaunchedDone.isEmpty, "and nothing there asks to register the login item")
 
         // The Folders page's words for each check of a folder (spec/CLI.md §9.2).
         let states: [FolderCheck.State] = [.ok, .deniedByMacOS, .denied, .missing, .error(errno: "EIO")]
@@ -2632,9 +2672,15 @@ extension SelfTest {
         var random = Seeded(state: 20_261_107)
         var flow = SetupFlow(home: home)
         var violations: [String] = []
+        var registerViolations: [String] = []
         var reads = 0
         var restores = 0
         var opens = 0
+        var registers = 0
+        var declined = 0
+        // Ready's box as the walk last set it on an open Ready page; it starts checked each time
+        // Ready is shown from What Lucille may do.
+        var boxOn = true
         // What the walk itself saw since the last pairEnded: the latest attempt's epoch, whether
         // its child set the policy aside, the epoch They Match confirmed in, whether Connected
         // came after a They Match; the read it waits for; the rows the user checked, those checked
@@ -2731,10 +2777,36 @@ extension SelfTest {
         }
 
         for step in 0..<40_000 {
+            // Ready's box, clicked every third step without drawing from `random`, so that the
+            // inputs below are the same sequence as before the box was added.
+            if step % 3 == 0 {
+                let on = step % 2 == 0
+                let onReady = flow.windowOpen && flow.page == .ready
+                let clicked = flow.handle(.openAtLogin(on))
+                if !clicked.isEmpty {
+                    registerViolations.append("\(step): Ready's box asked for \(clicked)")
+                }
+                if onReady {
+                    boxOn = on
+                }
+            }
             let input = random.next(10) < 7 ? guided() : noise()
             let before = flow.page
             let wasOpen = flow.windowOpen
             let effects = flow.handle(input)
+            var doneOnReady = false
+            if case .done = input, wasOpen, before == .ready {
+                doneOnReady = true
+            }
+            let registered = effects.contains(.registerLoginItem)
+            if registered != (doneOnReady && boxOn) || (registered && !mayShow) {
+                registerViolations.append("\(step): register \(registered) on \(input) on \(String(describing: before)), box \(boxOn)")
+            }
+            if registered {
+                registers += 1
+            } else if doneOnReady {
+                declined += 1
+            }
             switch input {
             case .pairStarted(_, let given):
                 startEpoch = given
@@ -2803,6 +2875,11 @@ extension SelfTest {
                     if before == nil {
                         opens += 1
                     }
+                    if page == .ready && before == .abilities {
+                        boxOn = true
+                    }
+                case .registerLoginItem:
+                    break
                 case .note, .close:
                     break
                 }
@@ -2813,6 +2890,11 @@ extension SelfTest {
                       violations.prefix(5).joined(separator: "; "))
         report.expect(reads >= 500 && restores >= 100 && opens >= 1000,
                       "the walk read policy previous \(reads) times, added back \(restores) rows and opened the window \(opens) times")
+        report.expect(registerViolations.isEmpty,
+                      "over 40000 seeded steps, the login item is asked for only by Done on Ready with its box checked, after They Match here then Connected, and by every such Done",
+                      registerViolations.prefix(5).joined(separator: "; "))
+        report.expect(registers > 0 && declined > 0,
+                      "the walk asked to register \(registers) times, and Done with the box unchecked asked for nothing \(declined) times")
     }
 
     // MARK: - checkSupervisor
@@ -2858,8 +2940,20 @@ extension SelfTest {
                       "a pair not confirmed yet starts nothing")
         fresh()
         _ = send(.start)
-        report.expect(send(.statusRead(status(.noPair))).isEmpty && sup.phase == .halted(.notConnected(.notPaired)),
-                      "no pair: not connected")
+        let noPairRead = send(.statusRead(status(.noPair)))
+        let pairGone: [RunSupervisor.Effect] = [.pairGone]
+        report.expect(noPairRead == pairGone && sup.phase == .halted(.notConnected(.notPaired)),
+                      "no pair: not connected, and the pair is gone, so the login item goes", "\(noPairRead)")
+        fresh()
+        _ = send(.start)
+        let refusedRead = send(.statusRead(status(.refused(name: pairName))))
+        report.expect(refusedRead.isEmpty && sup.phase == .halted(.notConnected(.noGate)),
+                      "a gate that can't open: not connected, and the pair is kept until Stop Connecting", "\(refusedRead)")
+        fresh()
+        _ = send(.start)
+        let expiredRead = send(.statusRead(status(.expired(name: pairName, deadline: sampleTime))))
+        report.expect(expiredRead == pairGone && sup.phase == .halted(.notConnected(.expired)),
+                      "an expired pairing: not connected, and gone", "\(expiredRead)")
         fresh()
         _ = send(.start)
         _ = send(.statusRead(status(.unreadable(code: "store_error"))))
@@ -2942,6 +3036,27 @@ extension SelfTest {
         }
         if !fixtures.isEmpty {
             report.expect(Set(table.keys).isSubset(of: Set(fixtures.keys)), "every outcome in the table has its fixture")
+        }
+        // The pair gone (decisions/0002 §9): each run-events fixture's exit, after what run said
+        // before it, says so exactly when its reason ends the pair, and the app's login item goes.
+        let gone: Set<String> = ["run-events-ended", "run-events-expired", "run-events-leaked", "run-events-not-paired"]
+        for (name, fixture) in fixtures.sorted(by: { $0.key < $1.key }) where name.hasPrefix("run-events-") {
+            spawned()
+            for object in fixture.objects {
+                _ = send(.object(object))
+            }
+            let ended = send(.exited(ChildExit(end: .exited(fixture.exit), stdoutComplete: true)))
+            let saidGone = ended.contains(.pairGone)
+            let isGone = gone.contains(name)
+            report.expect(saidGone == isGone, "\(name): its exit \(isGone ? "says" : "does not say") the pair is gone", "\(ended)")
+            if isGone {
+                // The status read before the spawn still says confirmed: a click must not register.
+                let mayAfter = LoginRules.mayRegister(confirmed: true, phase: sup.phase)
+                report.expect(!mayAfter, "\(name): after its exit, a click can't register the login item", "\(sup.phase)")
+            }
+        }
+        if !fixtures.isEmpty {
+            report.expect(gone.isSubset(of: Set(fixtures.keys)), "every run-events fixture that ends the pair is given")
         }
         let drained = StopReason.drained(cause: .stdinEnd)
         report.expect(RunSupervisor.classify(exit: .exited(0), stopped: drained, asked: true) == .drainedAsAsked
@@ -3278,8 +3393,10 @@ extension SelfTest {
         var sup = RunSupervisor()
         var clock: TimeInterval = 1000
         var violations: [String] = []
+        var goneViolations: [String] = []
         var spawns = 0
         var stops = 0
+        var pairEnds = 0
         let wall0 = Date(timeIntervalSince1970: 1_800_000_000)
         let pairs: [StatusPair] = [.confirmed(name: pairName), .noPair, .waiting(name: pairName),
                                    .unreadable(code: "store_error"), .severalPairs]
@@ -3355,6 +3472,19 @@ extension SelfTest {
             if effects.contains(.stopWhatsRunning) != stopAsked || (stopAsked && effects != [.stopWhatsRunning]) {
                 violations.append("\(step): stop what's running \(effects) on \(input) in \(phaseBefore)")
             }
+            // The pair gone: said only by the step that makes a halt that ends the pair, and by
+            // every such step, so the app's login item goes exactly then (decisions/0002 §9).
+            var endsPair = false
+            if case .halted(.notConnected(let why)) = sup.phase, LoginRules.pairGone(why), sup.phase != phaseBefore {
+                endsPair = true
+            }
+            let saysGone = effects.contains(.pairGone)
+            if saysGone {
+                pairEnds += 1
+            }
+            if saysGone != endsPair {
+                goneViolations.append("\(step): pair gone \(saysGone) on \(input) in \(phaseBefore), now \(sup.phase)")
+            }
             if case .pairingStarted = input {
                 switch sup.phase {
                 case .backoff, .otherRun, .awaitingStatus:
@@ -3373,6 +3503,150 @@ extension SelfTest {
                       violations.prefix(5).joined(separator: "; "))
         report.expect(spawns > 0, "the walk started run (\(spawns) times)")
         report.expect(stops > 0, "the walk stopped what's running (\(stops) times)")
+        report.expect(goneViolations.isEmpty,
+                      "over 40000 seeded steps, the pair is said to be gone only by a step that halts on a reason that ends it, and by every such step",
+                      goneViolations.prefix(5).joined(separator: "; "))
+        report.expect(pairEnds > 0, "the walk saw the pair end (\(pairEnds) times)")
+    }
+
+    // MARK: - checkLoginRules
+
+    /// Open at Login's rules (decisions/0002 §3.3, §9): which ends of a pair take the login item
+    /// away, read from the host's own fixtures; when a launch is paired, which decides the note
+    /// about the menu bar; the note at launch; what came of a register and of an unregister, from
+    /// macOS's state afterwards; and what Disconnect's note adds.
+    static func checkLoginRules(_ fixtures: [String: Fixture], _ report: Report) {
+        let wall = Date(timeIntervalSince1970: 1_800_000_000)
+        let gone: Set<String> = [
+            "status-unpaired", "run-events-ended", "run-events-expired", "run-events-leaked", "run-events-not-paired",
+        ]
+        let kept: Set<String> = [
+            "status-paired", "status-unreadable", "run-events-no-gate", "run-events-several-pairs",
+            "run-events-pair-unusable", "run-events-insecure-keyring",
+        ]
+        for name in gone.union(kept).sorted() {
+            guard let fixture = fixtures[name] else {
+                report.expect(fixtures.isEmpty, "the fixture \(name) is given")
+                continue
+            }
+            var judged = false
+            if name.hasPrefix("status-") {
+                // As the supervisor reads status at launch.
+                var sup = RunSupervisor()
+                _ = sup.handle(.start, epoch: sup.epoch, now: 1000, wall: wall)
+                if case .status(let found)? = fixture.objects.first {
+                    let effects = sup.handle(.statusRead(found), epoch: sup.epoch, now: 1000, wall: wall)
+                    judged = effects.contains(.pairGone)
+                } else {
+                    report.expect(false, "\(name) reads as status")
+                }
+            } else {
+                let outcome = RunSupervisor.classify(exit: .exited(fixture.exit), stopped: fixture.stopped, asked: false)
+                if case .notConnected(let why) = outcome {
+                    judged = LoginRules.pairGone(why)
+                }
+            }
+            let isGone = gone.contains(name)
+            report.expect(judged == isGone, "\(name): the pair is \(isGone ? "gone, and the login item goes" : "kept, and so is the login item")")
+        }
+        let reasons: [NotConnected] = [.notPaired, .noGate, .leaked, .expired, .ended, .forgotten, .other]
+        let goneReasons: [NotConnected] = reasons.filter { LoginRules.pairGone($0) }
+        let endsThePair: [NotConnected] = [.notPaired, .leaked, .expired, .ended, .forgotten]
+        report.expect(goneReasons == endsThePair,
+                      "the pair is gone for notPaired, leaked, expired, ended and forgotten; noGate keeps it until Stop Connecting, and a reason this release does not know ends nothing",
+                      "\(goneReasons)")
+
+        // Stop Connecting's `pair reject` forgot the pair, or the host found none: the login item
+        // goes too. A pair whose gate record was lost is ended only this way.
+        let notes: [PairingNote] = [
+            .rejected(lucilleTold: true, afterDiffer: false), .rejected(lucilleTold: false, afterDiffer: true),
+            .refused(code: "none", message: nil, afterSAS: false), .refused(code: "no_gate", message: nil, afterSAS: false),
+            .refused(code: "expired", message: nil, afterSAS: true), .confirmed, .confirmedAnother, .notConfirmed,
+            .confirmUnknown, .rejectFailed(nil), .notStarted,
+        ]
+        let forgotten: [Bool] = notes.map { LoginRules.pairForgotten($0) }
+        let forgottenExpected: [Bool] = [true, true, true, false, false, false, false, false, false, false, false]
+        report.expect(forgotten == forgottenExpected,
+                      "the pairing flow's note says the pair is gone only when pair reject forgot it, or there is none",
+                      "\(forgotten)")
+
+        // A click registers only while a pair is confirmed, and never once the supervisor has
+        // halted because the Mac is not connected, whatever status said before.
+        let phases: [RunSupervisor.Phase] = [
+            .idle, .awaitingStatus(.start), .backoff(until: 1), .halted(.needsAttention(.keepsStopping)), .halted(.quitDone),
+            .halted(.notConnected(.ended)), .halted(.notConnected(.forgotten)), .halted(.notConnected(.noGate)),
+            .halted(.notConnected(.other)),
+        ]
+        let mayConfirmed: [Bool] = phases.map { LoginRules.mayRegister(confirmed: true, phase: $0) }
+        let mayUnconfirmed: [Bool] = phases.map { LoginRules.mayRegister(confirmed: false, phase: $0) }
+        let mayConfirmedExpected: [Bool] = [true, true, true, true, true, false, false, false, false]
+        let mayUnconfirmedExpected: [Bool] = [false, false, false, false, false, false, false, false, false]
+        report.expect(mayConfirmed == mayConfirmedExpected && mayUnconfirmed == mayUnconfirmedExpected,
+                      "a click registers the login item only while confirmed, and never once the supervisor halted because the Mac is not connected",
+                      "\(mayConfirmed) \(mayUnconfirmed)")
+
+        // Paired at launch means a confirmed pair, and nothing else.
+        let pairs: [StatusPair?] = [
+            nil, .noPair, .waiting(name: pairName), .sasReady(name: pairName), .sasPending(name: pairName, deadline: sampleTime),
+            .confirmed(name: pairName), .refused(name: pairName), .expired(name: pairName, deadline: sampleTime), .severalPairs,
+            .unreadable(code: "store_error"), .other("moon"),
+        ]
+        let paired: [Bool] = pairs.map { LoginRules.isPaired($0) }
+        let onlyConfirmed: [Bool] = [false, false, false, false, false, true, false, false, false, false, false]
+        report.expect(paired == onlyConfirmed,
+                      "only a confirmed pair counts as paired at launch: with anything else, or no status, the app says where its menu is",
+                      "\(paired)")
+        let launches: [(String, Bool)] = [("status-paired", true), ("status-unpaired", false), ("status-unreadable", false)]
+        for (name, expected) in launches {
+            if case .status(let found)? = fixtures[name]?.objects.first {
+                let read = LoginRules.isPaired(found.pair)
+                report.expect(read == expected, "\(name): paired at launch \(expected)", "\(read)")
+            }
+        }
+
+        // The note at launch: only while paired, with the login item waiting for approval; none
+        // for notRegistered, which may be the user's own choice.
+        let states: [LoginState] = [.notRegistered, .enabled, .requiresApproval, .notFound]
+        let names: [String] = states.map(\.rawValue)
+        report.expect(names == ["notRegistered", "enabled", "requiresApproval", "notFound"],
+                      "each state's name, as the app writes it on standard error", "\(names)")
+        let notedPaired: [Bool] = states.map { LoginRules.launchNote(paired: true, state: $0) }
+        let notedUnpaired: [Bool] = states.map { LoginRules.launchNote(paired: false, state: $0) }
+        let notedPairedExpected: [Bool] = [false, false, true, false]
+        let notedUnpairedExpected: [Bool] = [false, false, false, false]
+        report.expect(notedPaired == notedPairedExpected && notedUnpaired == notedUnpairedExpected,
+                      "a note at launch only while paired and the login item waits for approval", "\(notedPaired) \(notedUnpaired)")
+
+        // What came of a register: macOS's state afterwards decides, a throw only when it is not
+        // on and not waiting for approval, with macOS's words for Show Details.
+        let refusal = "The operation couldn't be completed."
+        let quiet: [LoginOutcome] = states.map { LoginRules.afterRegister(state: $0, error: nil) }
+        let quietExpected: [LoginOutcome] = [.failed(detail: nil), .enabled, .requiresApproval, .failed(detail: nil)]
+        report.expect(quiet == quietExpected, "a register is what macOS's state says afterwards", "\(quiet)")
+        let threw: [LoginOutcome] = states.map { LoginRules.afterRegister(state: $0, error: refusal) }
+        let threwExpected: [LoginOutcome] = [.failed(detail: refusal), .enabled, .requiresApproval, .failed(detail: refusal)]
+        report.expect(threw == threwExpected, "a register that threw is still on, or waiting, if macOS says so; else it failed, with macOS's words", "\(threw)")
+
+        // What came of an unregister: nothing to take away unless it was on or waiting; taken
+        // away once macOS no longer has it; failed while macOS still does.
+        let nothing = LoginRules.removal(before: .notRegistered, after: .notRegistered)
+        let notFound = LoginRules.removal(before: .notFound, after: .notFound)
+        let removed = LoginRules.removal(before: .enabled, after: .notRegistered)
+        let removedWaiting = LoginRules.removal(before: .requiresApproval, after: .notFound)
+        let stayed = LoginRules.removal(before: .enabled, after: .enabled)
+        let stayedWaiting = LoginRules.removal(before: .requiresApproval, after: .requiresApproval)
+        let removals: [LoginRemoval] = [nothing, notFound, removed, removedWaiting, stayed, stayedWaiting]
+        let removalsExpected: [LoginRemoval] = [.nothingToRemove, .nothingToRemove, .removed, .removed, .failed, .failed]
+        report.expect(removals == removalsExpected, "an unregister is what macOS's state says before and after", "\(removals)")
+
+        // Disconnect's note: a sentence when a login item was taken away, the way to take it away
+        // by hand when it could not be, and nothing when there was none.
+        let kinds: [LoginRemoval] = [.nothingToRemove, .removed, .failed]
+        let added: [String?] = kinds.map { LoginText.afterDisconnect($0) }
+        let addedExpected: [String?] = [nil, "\(HostText.appName) won't open when you log in.", LoginText.removeByHand]
+        report.expect(added == addedExpected, "Disconnect's note adds what became of the login item", "\(added)")
+        let byHand = LoginText.removeByHand.hasSuffix("System Settings › General › Login Items & Extensions.")
+        report.expect(byHand, "and says where to turn it off by hand when it could not", LoginText.removeByHand)
     }
 
     // MARK: - checkSpawnLatch

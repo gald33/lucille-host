@@ -249,6 +249,14 @@ jobs:
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         timeout-minutes: 20
         run: uv run --no-project python tools/macos/check_app.py suite --copy-to "$RUNNER_TEMP/suite"
+      # M12 for what the pairing check makes the app do, Set Up and registering its login item
+      # among it: a snapshot of ~/Library of its own, and a diff right after it (macOS keeps the
+      # item's own record elsewhere, believed to be outside ~/Library, which no diff sees). The diff
+      # runs the control: the pairing check sets the app's profile aside and puts it back, so it
+      # may leave no write of its own under the profile's state folder to see.
+      - name: Snapshot ~/Library before the pairing check (M12)
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: uv run --no-project python tools/macos/check_app.py library-snapshot --to build/macos/library/before-pairing.json
       # Pairs the app's own profile with a local hub and a fake Lucille, then drives the app through
       # the pairing window, run's supervision, Quit and Disconnect. It needs Switchboard's hub and
       # the test harness, so this script runs with the interpreter of the copy the suite step made,
@@ -261,6 +269,9 @@ jobs:
           set -- "$RUNNER_TEMP"/suite/*.app/Contents/Resources/runtime/bin/lucille-host-runtime
           if [ "$#" -ne 1 ] || [ ! -x "$1" ]; then echo "the suite step made no copy of the runtime: $*"; exit 1; fi
           "$1" -I -B tools/macos/check_app.py pairing --require-driven
+      - name: "Check: ~/Library against the allowlist, after the pairing check (M12)"
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: uv run --no-project python tools/macos/check_app.py library-diff --before build/macos/library/before-pairing.json --control-run
       - name: "Check: the signature, after every run (M8)"
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         run: uv run --no-project python tools/macos/check_app.py signature

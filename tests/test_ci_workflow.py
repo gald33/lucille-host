@@ -487,6 +487,40 @@ def test_ci_macos_jobs() -> None:
     assert not (build_app.REPO_ROOT / ".github" / "workflows" / "macos-app.yml").exists()
 
 
+def test_the_pairing_check_has_a_library_snapshot_and_diff_of_its_own() -> None:
+    # M12 for what the pairing check makes the app do, Set Up's window and what registering the
+    # login item writes under ~/Library among it: a second snapshot of ~/Library once the suite
+    # has run, right before the pairing check, and a second diff right after it, before the last
+    # signature check. The diff runs the control (--control-run): the check sets the app's profile
+    # aside and puts it back, so it may leave no write of its own under the profile's state folder
+    # to see. The first pair still holds placement, launch and ui, and the .index() checks of
+    # test_ci_macos_jobs find it first.
+    doc = _ci()
+    checks = _checks(doc, "macos-app")
+    snaps = [index for index, check in enumerate(checks) if check == "library-snapshot"]
+    diffs = [index for index, check in enumerate(checks) if check == "library-diff"]
+    assert len(snaps) == 2 and len(diffs) == 2, checks
+    assert snaps[0] < checks.index("install") and checks.index("ui") < diffs[0]
+    pairing = checks.index("pairing")
+    assert checks.index("suite") < snaps[1] == pairing - 1
+    assert diffs[1] == pairing + 1 and checks[diffs[1] + 1 :] == ["signature"]
+    runs = [run.strip() for run in _runs(doc, "macos-app")]
+    check = "uv run --no-project python tools/macos/check_app.py"
+    assert [run for run in runs if "check_app.py library-snapshot" in run] == [
+        f"{check} library-snapshot --to build/macos/library/before.json",
+        f"{check} library-snapshot --to build/macos/library/before-pairing.json",
+    ]
+    assert [run for run in runs if "check_app.py library-diff" in run] == [
+        f"{check} library-diff --before build/macos/library/before.json",
+        f"{check} library-diff --before build/macos/library/before-pairing.json --control-run",
+    ]
+    names = [str(step.get("name", "")) for step in _steps(doc, "macos-app")]
+    assert "Snapshot ~/Library before the pairing check (M12)" in names
+    assert "Check: ~/Library against the allowlist, after the pairing check (M12)" in names
+    # The smoke jobs run no pairing check, and keep one pair.
+    assert _checks(doc, "macos-smoke").count("library-snapshot") == 1
+
+
 def test_only_the_xcode_27_leg_may_fail_without_failing_the_run() -> None:
     # The maintainer's decision of 2026-11-02 (decisions/0002 §18): the xcode-27 leg still runs and
     # shows its result, but a failure there does not fail the run. Every other job gates.

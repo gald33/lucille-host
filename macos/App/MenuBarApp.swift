@@ -28,12 +28,14 @@ struct MenuBarApp: App {
     }
 }
 
-/// Says what the app is for and where the menu is when the app opens, and when it is opened again
-/// while it runs: it has no window and no Dock icon, so otherwise nothing would seem to happen.
-/// Quit is offered too, for when the menu bar has no room for the icon. Once that note is first
-/// closed, `Connection` says whether the host is paused and picks up a pairing left unfinished, so
-/// nothing it shows at launch races the note. A copy anywhere but /Applications/<name>.app shows
-/// its placement note instead, each time, and never launches `Connection`.
+/// Says what the app is for and where the menu is when the app opens with no confirmed pair, and
+/// whenever it is opened again while it runs, paired or not: it has no window and no Dock icon, so
+/// otherwise nothing would seem to happen (decisions/0002, What is built today). Quit is offered
+/// too, for when the menu bar has no room for the icon. At launch the note waits for the first `status` read; a paired launch
+/// shows none, and goes straight on. Once the note is first closed, or at once when paired,
+/// `Connection` says whether the host is paused and picks up a pairing left unfinished, so nothing
+/// it shows at launch races the note. A copy anywhere but /Applications/<name>.app shows its
+/// placement note instead, each time, and never launches `Connection`.
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var noteQueued = false
@@ -47,10 +49,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
             return
         }
+        Connection.shared.onFirstStatusRead = { [weak self] paired in
+            self?.launchRead(paired: paired)
+        }
         Connection.shared.launch()
-        Task { @MainActor in
-            try? await Task.sleep(for: .seconds(1))
-            self.showWhereTheMenuIs()
+    }
+
+    /// The first `status` read at launch has come. Paired, the app says nothing about its menu
+    /// and goes on; not paired, it says where the menu is, and goes on once that note is closed.
+    /// A reopen before it, whose note was closed, has handled the launch already.
+    private func launchRead(paired: Bool) {
+        guard !launchHandled else {
+            return
+        }
+        if paired {
+            launchHandled = true
+            Connection.shared.afterWelcome()
+        } else {
+            showWhereTheMenuIs()
         }
     }
 
@@ -221,6 +237,22 @@ struct HostItems: View {
             }
         }
         Button(ConnectionText.activityItem) { connection.activityChosen() }
+        // While connected: Open at Login, whose switch shows what macOS says (decisions/0002 §9),
+        // and, while the settings file can't be read, Reset Settings… (§14).
+        if connection.connected {
+            Menu(LoginText.settingsMenu) {
+                Toggle(
+                    LoginText.openAtLoginItem,
+                    isOn: Binding(
+                        get: { connection.openAtLogin },
+                        set: { connection.openAtLoginChosen($0) }
+                    )
+                )
+                if model.problem?.offersReset == true {
+                    Button(ConnectionText.resetSettingsItem) { model.resetSettingsChosen() }
+                }
+            }
+        }
         Divider()
         if connection.items.connect {
             Button(ConnectionText.connectItem) { connection.connectChosen() }

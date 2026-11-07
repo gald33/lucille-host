@@ -13,6 +13,8 @@ import AppKit
 ///   Checked is on only while one is checked; Skip is the default.
 /// - A switch on What Lucille may do shows what the host last said. A click asks for the change,
 ///   which the menu makes through its own gates, and the switch then follows the host's answer.
+/// - Ready's box, Open <name> when you log in, starts checked, and its click only tells the flow:
+///   Done asks macOS, as the flow says.
 /// - Its views sit straight in the window, in no group, as in a note.
 @MainActor
 final class SetupPanel: NSObject, NSWindowDelegate {
@@ -22,6 +24,8 @@ final class SetupPanel: NSObject, NSWindowDelegate {
     var onSkip: (() -> Void)?
     /// Continue, on the Folders page and on What Lucille may do.
     var onNext: (() -> Void)?
+    /// Ready's box was clicked: checked or not.
+    var onOpenAtLogin: ((Bool) -> Void)?
     var onDone: (() -> Void)?
     /// The user closed the window.
     var onClosed: (() -> Void)?
@@ -281,10 +285,17 @@ final class SetupPanel: NSObject, NSWindowDelegate {
         return layout(rows, buttons: [next])
     }
 
+    /// Ready: what Lucille can now do, the box Open <name> when you log in, checked, and the line
+    /// that says macOS will show its own notice once Done registers the app.
     private func readyPage() -> NSView {
+        let box = NSButton(checkboxWithTitle: SetupText.openAtLoginBox, target: self, action: #selector(openAtLoginChanged(_:)))
+        box.state = .on
         let done = NSButton(title: SetupText.doneButton, target: self, action: #selector(donePressed(_:)))
         done.keyEquivalent = "\r"
-        return layout([title(SetupText.readyTitle), label(SetupText.readyText)], buttons: [done])
+        let rows: [NSView] = [
+            title(SetupText.readyTitle), label(SetupText.readyText), box, label(SetupText.openAtLoginNotice, secondary: true),
+        ]
+        return layout(rows, buttons: [done])
     }
 
     /// What a switch shows of an ability, apart from its position: a switch is set again in place
@@ -409,6 +420,10 @@ final class SetupPanel: NSObject, NSWindowDelegate {
 
     @objc private func nextPressed(_ sender: Any?) {
         onNext?()
+    }
+
+    @objc private func openAtLoginChanged(_ sender: NSButton) {
+        onOpenAtLogin?(sender.state == .on)
     }
 
     @objc private func donePressed(_ sender: Any?) {

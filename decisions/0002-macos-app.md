@@ -73,8 +73,8 @@ developing the app. Its builds stay ad hoc signed, for the repository owner's ow
   `request` events, in words, newest first, kept in memory only and at most 500; and, behind **Show the
   Host's Log**, the last 200 lines of `log --json --limit 200`, as the host wrote them.
 - **Reset Settings…** (§10, §14), offered only while the host cannot read the settings file: in the note
-  behind the menu's line that says so, and in the one behind `run`'s Needs attention line for `policy`
-  `invalid`. It asks first, with Cancel the default, then runs `policy reset --json`, which sets the file
+  behind the menu's line that says so, in the one behind `run`'s Needs attention line for `policy`
+  `invalid`, and, while connected, in the Settings submenu. It asks first, with Cancel the default, then runs `policy reset --json`, which sets the file
   aside as `policy.invalid.toml` and writes the fresh policy, and takes `not_invalid` as done; Try Again is
   offered only for `policy_lock_failed`.
 - **Set Up** (§3.1 steps 8 to 10, §11.6): the first time the status line says Connected after **They Match**
@@ -91,6 +91,32 @@ developing the app. Its builds stay ad hoc signed, for the repository owner's ow
   may do**, a switch for each operation but those for testing, `host.describe` as it is; and **Capsule is
   ready**, with **Done**. Closed before its last page, the menu offers **Set Up Folders and Abilities…**.
   Nothing is offered after a relaunch or for a pair confirmed in Terminal.
+- **Open at Login** (§3.1 step 10, §3.3, §9). Set Up's last page has the box "Open Capsule when you log
+  in", checked, and the sentence that announces macOS's notice. **Done** with the box checked registers
+  the app itself as its login item (`SMAppService.mainApp`), and says what came of it from the state
+  macOS then gives: nothing while it is on; "macOS needs your OK before Capsule can open when you log in",
+  with **Open Login Items Settings** and **Not Now**, while it waits for approval; otherwise "Capsule
+  couldn't turn on opening at login", with macOS's words behind Show Details when it gave any. While
+  connected, the menu
+  has a **Settings** submenu: **Open at Login**, whose checkmark is what macOS says each time the menu
+  opens, and which registers or takes the item away; and **Reset Settings…** while the settings file
+  can't be read. At launch while connected, the app reads the item's state, and only for
+  `requiresApproval` says "Capsule won't start when you log in", with **Open Login Items Settings** and
+  **Keep It Off**, which takes the item away. Neither Done nor the switch registers once `run`'s exit has
+  said the Mac is not connected, though `status` may not have been read since, nor during a Disconnect.
+  The item is taken away whenever the pair ends: `run`'s exit, or a `status` read the supervisor asked
+  for, for `not_paired`, `leaked`, `expired`, `ended` or `forgotten` (not `no_gate`, whose pair stays
+  until Stop Connecting forgets it); Stop Connecting, whose `pair reject` forgets a pair that was never
+  confirmed here or whose gate record was lost, or finds none, as does any step of a pairing that finds
+  none (`none`); a `status` that finds no pair once one was seen; and Disconnect, whether or not a
+  quit came during it, once `forget` is done. Disconnect's note, when one is shown, then adds "Capsule
+  won't open when you log in." when an item was taken away, or how to turn it off in System Settings
+  when that failed. A pair Lucille ends while a quit drains `run` keeps the item until the next launch's
+  `status` read finds it gone. Only the copy at `/Applications/Capsule.app` asks
+  macOS anything about it, and each time it acts or checks at launch it writes one line on standard
+  error, the state's name only. The note that says where the menu is now shows at launch only while no
+  pair is confirmed, and always when the app is opened again while it runs: a launch while connected may
+  be a login.
 - **Only the copy at `/Applications/Capsule.app` acts** (§3.3, §13), with the name its `Info.plist` gives
   and the case of each letter as there, reached through no link. Any other copy (on its disk image or
   another disk, in a folder inside Applications, in the Applications folder in the home folder, anywhere
@@ -114,8 +140,8 @@ developing the app. Its builds stay ad hoc signed, for the repository owner's ow
   can carry a file's contents is turned on only after a question, though no operation in this release
   sends file contents), Set Up Folders and Abilities… while Set Up's window was closed before its last
   page, Add a Folder… (its name dialog starting from the alias the host suggests), the folders with
-  Remove, Activity…, the pairing items (Connect to Lucille…, Finish Connecting…, Stop Connecting…,
-  Disconnect from Lucille…), and Quit Capsule;
+  Remove, Activity…, while connected the Settings submenu, the pairing items (Connect to Lucille…,
+  Finish Connecting…, Stop Connecting…, Disconnect from Lucille…), and Quit Capsule;
   while a request's process runs, Stop What's Running; and, while Lucille needs a newer release, the
   update notice's line and Prepare to Update…. A copy that is not at `/Applications/Capsule.app` shows only
   the line that says why, and Quit Capsule.
@@ -129,7 +155,7 @@ developing the app. Its builds stay ad hoc signed, for the repository owner's ow
   on macOS 26 and 27, without the end-to-end check (§18, §19). Logs and UI snapshots are uploaded on every
   run. The disk image is uploaded only by a manual run whose every check passed, and kept 3 days.
 
-Not built yet: the typed gate and the Connect flow (§11.2, §11.4; proposed), opening at login, the check
+Not built yet: the typed gate and the Connect flow (§11.2, §11.4; proposed), the check
 after a folder is added from the menu, and at launch (`roots check`, §12; Set Up's Folders page runs it),
 the Welcome and main windows, updates, **Remove Capsule…** (section 17), Copy
 Diagnostics (§15), Developer ID signing and notarization, ripgrep (`Helpers/rg`; the pins hold an empty
@@ -181,12 +207,17 @@ made for the first build", says why for most of them:
   the operation: Stop now during a quit, `kill` after 330 s during a Disconnect. The menu offers it from a
   request's `started` to its `finished` (§14);
 - Reset Settings… is a button in the notes behind the menu's lines that say the settings file can't be
-  read, not an item of a Settings submenu (§14), which comes with Open at Login. The menu's own line, from
-  `ops list`'s refusal `policy_invalid`, offers it whenever the file can't be read; while `run` runs, its
-  Needs attention line offers it too;
+  read, and an item of the Settings submenu (§14) only while connected, since that submenu is shown only
+  then. The menu's own line, from `ops list`'s refusal `policy_invalid`, offers it whenever the file can't
+  be read; while `run` runs, its Needs attention line offers it too;
+- the Settings submenu holds Open at Login and Reset Settings… only; **Disconnect from Lucille…** stays
+  in the main menu, where §14 puts it under Settings, because the end-to-end check drives it there, and
+  **Remove Capsule…** is not built. Open at Login's checkmark shows `enabled` only: an item that waits for
+  approval shows unchecked;
 - steps 8 to 10 of §3.1 are the pages of one Set Up window of their own, which opens by itself once
   the status line says Connected, rather than pages after the Welcome window, and the menu stays: the
-  Welcome and main windows are not built. Its last page has no "Open Capsule when you log in" yet. Add
+  Welcome and main windows are not built. Its last page, **Capsule is ready**, has step 10's box and
+  sentence; closing the window there ends Set Up, as Done does, and registers nothing. Add
   back is offered only for a pairing this run of the app started and They Match confirmed in that same
   attempt, from Connect to Lucille… to They Match (§11.6): the app keeps nothing across a relaunch, so a
   pairing finished after one, or in Terminal, gets no offer. Nor does one finished from **Finish
@@ -312,7 +343,7 @@ never published, because anyone can make a code that passes the host's code chec
 | Clicked **Don't Allow** on a folder prompt | "macOS is blocking Capsule from this folder" | **Open Privacy Settings** (§12) |
 | Chose a folder that is too broad | A second sheet, safe choice as default (§12) | **Choose a Smaller Folder** |
 | Moved, renamed or unplugged a chosen folder | "The folder documents can't be found" (from `roots check`, at launch and in Folders) | **Choose Again**, which removes the alias and adds the folder from the Open panel. A different folder later created at the old path is not detected (not decided yet, §12) |
-| Turned off the login item in System Settings | On next open: "Capsule won't start when you log in" | **Turn Back On** |
+| Turned off the login item in System Settings | On next open, while connected and only while macOS waits for approval (`requiresApproval`): "Capsule won't start when you log in". That macOS reads an item turned off there as `requiresApproval` is not yet tested on a Mac; if it reads it as not registered, the app says nothing | **Open Login Items Settings**, to turn it on there; or **Keep It Off**, which takes the item away, so that the note does not come again (that taking it away ends `requiresApproval` is not yet tested on a Mac). Nothing for an item that is simply not registered, which may be the user's choice |
 | Quit the app and forgot | Lucille's page shows the computer as not answering (Lucille policy as of 2026-10-29; not proven by this repository) | Open the app |
 | Paused and forgot, or a task was stopped at Quit or log out (§9) | A pause badge on the icon; at launch, "Capsule is paused" | **Resume** |
 | The Mac's clock is off by more than 300 s | "Your Mac's clock is off by 7 minutes, so Lucille can't reach it" | **Open Date & Time Settings** |
@@ -758,7 +789,20 @@ login ─► Capsule (menu bar; an "Open at Login" item)
 - **Open at login: on by default, with a switch** (decided by the maintainer on 2026-10-29). The app registers itself as a
   login item (`SMAppService.mainApp`) when onboarding finishes, and unregisters whenever the pair ends. The
   finish screen announces macOS's notice. A switch in Settings turns it off. The command line is unchanged:
-  nothing starts `lucille-host run` at login.
+  nothing starts `lucille-host run` at login. As built: it registers only from the user's click (Done on
+  the finish screen with its box checked, or the switch), from the copy at `/Applications/Capsule.app`,
+  while the pair is confirmed, and not once `run`'s exit has said the Mac is not connected (before
+  `status` is read again), nor during a Disconnect; the launch note's buttons register nothing. It
+  unregisters on each end of the pair: `run`'s exit, or a `status` read the supervisor asked for, for
+  `not_paired`, `leaked`, `expired`, `ended` or `forgotten`; Stop Connecting, once `pair reject` has
+  forgotten the pair or found none, and any step of a pairing that finds none (`none`); a `status` that
+  finds no pair once one was seen; and Disconnect, quit or not, once `forget` is done. `no_gate` keeps the
+  pair, and the item, until Stop Connecting: Disconnect is not offered for it. One end is left to the
+  next launch: a pair Lucille ends, or another command forgets, while a quit drains `run`, since the drain
+  does not read what `run` said; the next launch's `status` read finds no pair, and the item goes then, at
+  a launch that may itself be a login. It calls `unregister()` only for an item that is `enabled` or
+  `requiresApproval`. Its state is read only from `SMAppService`, again each time; the app keeps none of
+  it.
 - **The lifeline.** `--exit-on-stdin-eof` makes `run` drain, exactly as on its first SIGTERM, when its standard
   input closes. If the app crashes or is force-quit, the kernel closes the pipe and the host finishes its
   operation, replies, and exits. No host runs unseen. That holds only while no other process holds the
@@ -795,8 +839,10 @@ login ─► Capsule (menu bar; an "Open at Login" item)
   - 0 `drained` the app asked for (Quit, Prepare to Update): done. 0 `drained` it did not ask for (a
     `SIGTERM` from elsewhere, a `stdin_end` or `stdout_gone` it did not cause), one within a few seconds of
     `ready` above all: a crash. 0 `forgotten` or `ended`: Not connected, and the login item is unregistered.
-  - 20: Not connected, by reason (`no_gate`: "Disconnect, then connect again"; `leaked`, `expired`:
-    "Connect again"; `several_pairs`, `pair_unusable`: Needs attention, with Disconnect).
+  - 20: Not connected, by reason (`no_gate`: "Choose Stop Connecting…, then connect again.";
+    `leaked`, `expired`: "Connect again"; `several_pairs`, `pair_unusable`: Needs attention, with
+    Disconnect). For `not_paired`, `leaked` and `expired` the pair is gone, and the login item is
+    unregistered; `no_gate` keeps both until Stop Connecting's `pair reject` forgets the pair.
   - 21: the app asks `status --json`. While `run` is `running`, a `run` is still finishing, likely its own from
     before a relaunch, which drains once its pipe closed: "Finishing a task from before…", and it tries again
     with the back-off. Once `run` is `stopped` or `not_seen`, it starts at once. If it stays `running` past the
@@ -1521,8 +1567,10 @@ recording the Finder's message, then the update flow of §16; the Finder's real 
 the disk image, and a copy opened from Downloads after a browser download (App Translocation), recording
 what each copy says and that it starts nothing; hiding the menu-bar icon; the app beside a
 `pipx` install; and deleting the app instead of Remove, recording what Login Items & Extensions lists
-afterwards. Stop now, Quit, Disconnect and Remove are run once by hand as well, to see the screens a user
-sees. A MacBook Neo is a target no test has run on yet. A virtual machine restored to a snapshot between
+afterwards. With Open at Login on: a real login, recording that the app opens at it and the notice macOS
+shows; then the item turned off in System Settings, recording which state macOS then gives, and the next
+launch's note with Open Login Items Settings and Keep It Off. Stop now, Quit, Disconnect and Remove are
+run once by hand as well, to see the screens a user sees. A MacBook Neo is a target no test has run on yet. A virtual machine restored to a snapshot between
 privacy tests is the reliable way to repeat them.
 
 **With people.** Before anyone but the repository owner is offered the app: three people who have never used
@@ -1693,9 +1741,11 @@ allow. The allowlist starts with the host's own folder (`Application Support/luc
 does not catch a write to a path whose name says nothing of the app, which it only prints; nor anything
 under `~/Library/Developer` or `~/Library/Android`, which it skips because the runner images keep their
 own tools there; nor a folder macOS does not let it read, which it lists; nor anything outside
-`~/Library`; nor what the app writes in a run that does not take the paths CI drives; nor what it writes
-on a path only the `pairing` check drives, since that check runs after the diff (the Set Up window among
-them: the diff sees the Set Up panel the app makes at launch, not the window shown). The state folder of
+`~/Library`; nor what the app writes in a run that does not take the paths CI drives. In `macos-app`, a
+second snapshot and diff around the `pairing` check see what that check makes the app write (the Set Up
+window shown, and what registering the login item writes under `~/Library`; macOS keeps the item's own
+record elsewhere, believed to be outside `~/Library`, which no diff sees). The smoke jobs do not run
+`pairing`, so there those paths stay unseen. The state folder of
 the app's profile (`mac-app`) must appear among the changes, so a walk that saw nothing, of the wrong
 folder say, fails rather than passes. On the smoke jobs, where the menu may not be driven, the check makes
 those writes itself first (`pause`, then `resume`).
