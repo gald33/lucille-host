@@ -408,9 +408,13 @@ ripgrep.
   `check`, compiles each again and compares it with the file, byte for byte. Any difference stops the
   build, before anything is signed. So does a check run that does not end as the program ends: Python
   exits 1 on an exception too, with nothing printed, so exit 1 counts as findings only when the lines it
-  printed add up to its count. `check_app.py bytecode` runs the same check on the signed bundle in
-  `macos-app` and in both smoke jobs. It writes nothing, so a person can run it on a copy they downloaded
-  (`macos/README.md`, "The disk image from CI"); that is not yet tried on a Mac.
+  printed add up to its count. So does a count of no file at all, "0 of 0", on which the program exits 0
+  with only that line: an app with no `.py` in its library, or a check that found none, would otherwise
+  pass. Linux tests refuse both in the build, and the second in `check_app.py bytecode`, which already
+  refused the first (read: `check_bytecode`, which requires `bool(sources)`). `check_app.py bytecode` runs
+  the same check on the signed bundle in `macos-app` and in both smoke jobs. It writes nothing, so a
+  person can run it on a copy they downloaded (`macos/README.md`, "The disk image from CI"); that is not
+  yet tried on a Mac.
   - **What `checked-hash` means.** The header holds the source's hash, and the interpreter checks it
     against the `.py` at each import. If they differ, it ignores the file and compiles the source in
     memory; with `-B` it writes nothing (run on Linux, CPython 3.13.14). The app's flags leave
@@ -437,8 +441,10 @@ ripgrep.
     compiling loaded 23 modules (run). Comparing unmarshalled code objects instead would be weaker: their `==`
     ignores `co_filename` and `co_qualname` (run on Linux, with CPython 3.13.14 and 3.11.15). Each `.pyc`
     names its source by its path from the runtime (`lib/python3.13/json/__init__.py`). The importer replaces
-    that with the real path when it loads the file, so no `.pyc` holds the build folder. Whether the bundled
-    3.13.18 writes the same bytes twice is what the build's own check shows, on macOS; not yet seen in CI.
+    that with the real path when it loads the file, so no `.pyc` holds the build folder. The bundled
+    3.13.18 writes the same bytes twice on macOS (seen in CI, `macos-15`, runs 42341849296 and
+    42343639399: in each, the build wrote 860 of 860 files and its second run found the same bytes in 860
+    of 860; so did the build in another folder, and `check_app.py bytecode` on the signed bundle).
   - **Start-up.** `ci.yml`'s `macos-app` job measures it on every run, into the job summary
     (`check_app.py startup`): the median and the fastest of ten runs each of `--version` and
     `status --json`, from the bundle as shipped, then from a writable copy with every `.pyc` removed. In
@@ -447,14 +453,34 @@ ripgrep.
     | bytecode | `--version` median | fastest | `status --json` median | fastest |
     |---|---|---|---|---|
     | none, as shipped (main at 915529e, run 42284964912) | 670 | 601 | 643 | 620 |
-    | `checked-hash`, as shipped | not yet seen in CI | | | |
-    | none, a copy with every `.pyc` removed | not yet seen in CI | | | |
+    | `checked-hash`, as shipped (#15's merge ref 33fbd4f, run 42341849296) | 243 | 232 | 236 | 205 |
+    | none, a copy with every `.pyc` removed (the same run) | 924 | 799 | 924 | 769 |
+    | `checked-hash`, as shipped (main at b727d3f, run 42343639399) | 194 | 176 | 180 | 174 |
+    | none, a copy with every `.pyc` removed (the same run) | 803 | 673 | 686 | 593 |
 
-    The first row is the app before these files. Runs 41407347108 and 42284964912 also timed a copy with
-    `checked-hash` files that `compileall` wrote; for everything, the second gave 183 and 204 ms. Those
-    copies also held some timestamp files that `compileall` left (inferred), so those rows only suggest
-    the median falls to under a third. The maintainer ruled on 2026-11-07 that about 0.7 s per command was
-    too slow (gald33/lucille-host#13, comment 6699819761), so the app ships these files.
+    The first row is the app before these files, and the second and fourth the app with them, each read
+    from its run's start-up step. The pull request's run built 33fbd4f, a merge of #15's 258bdfc into its
+    parent 469dd8a (read: its log), so it has 258bdfc's tree (inferred), which is main's at b727d3f
+    (`git rev-parse b727d3f^{tree} 258bdfc^{tree}` gives one tree). All four medians with the files are at
+    most half the first's: 243 and 194 against 335 (half of 670), and 236 and 180 against 321.5 (half of
+    643). Runs 41407347108 and 42284964912 also timed a copy with `checked-hash` files that `compileall`
+    wrote; for everything, the second gave 183 and 204 ms. Those copies also held some timestamp files that
+    `compileall` left (inferred), so those rows only suggested the median would fall to under a third.
+    Measured, it fell to 36 and 37 per cent of the first row's in run 42341849296, and to 29 and 28 per
+    cent in run 42343639399 (computed from the rows). The maintainer ruled on 2026-11-07 that about 0.7 s
+    per command was too slow (gald33/lucille-host#13, comment 6699819761), so the app ships these files.
+
+    The two rows with every `.pyc` removed are above the first, though all three run the host with no
+    `.pyc`: 924 and 924 in one run, 803 and 686 in the other, against 670 and 643. Their cause is not
+    established. The same tree on the same image gave those two rows medians 121 and 238 ms apart, and its
+    two as-shipped rows 49 and 56 ms apart (computed from the rows). Among what differs between the first
+    row and those two, read from the jobs' logs and from `check_startup` at each commit: another runner each
+    time, on the same image (`macos-15-arm64` 20261104.0514.1, macOS 15.8.2, in all three); the first row
+    timed the bundle itself, read-only by then, where the others time a writable copy that `ditto` made in a
+    temporary folder, after the bundle's own runs; and #14's change to the Swift app lies between 915529e
+    and 258bdfc. The host's source and lock did not change (`git diff 915529e 258bdfc -- src pyproject.toml
+    uv.lock` is empty), so a larger host is not the cause. Neither the copy nor the runner was tested apart.
+    The comparison above is of the as-shipped rows, so it does not rest on these.
 - **It is renamed** so that Activity Monitor and any macOS prompt name it, not `python3.13`, and it has its own
   signing identifier (`com.lucille-ai.capsule.runtime`, from the pins; §7).
 - **`MANIFEST.json`**, as built, holds: the app's name, identifiers, deployment target and two version
@@ -494,9 +520,15 @@ ripgrep.
   decided yet** until that build.
 - **Size**: the dependencies are 18 MB (measured). The first build's disk image was 37.9 MB (seen in CI),
   with hash-checked `.pyc` files that `compileall` wrote. At 915529e, with no `.pyc`, it was 25.2 MB (seen
-  in CI, run 42284964912: 25,201,353 bytes). The `.pyc` files add about 16.5 MB to the app, and about 6.3 MB
-  compressed (measured on Linux with CPython 3.13.14: 16,515,088 bytes for 860 files; zlib level 9 of
-  their bodies, 6,285,541 bytes). The disk image with them is not yet seen in CI.
+  in CI, run 42284964912: 25,201,353 bytes). With the build's `.pyc` files it is 41.2 MB (seen in CI:
+  41,194,088 bytes in run 42341849296, and 41,194,307 in run 42343639399), 16.0 MB more. The `.pyc` files
+  add about 16.5 MB to the app (measured on Linux with CPython 3.13.14: 16,515,088 bytes for 860 files).
+  The estimate before those runs, about 6.3 MB more in the disk image, was about 2.5 times too low: it was
+  zlib level 9 of the files' bodies on Linux (6,285,541 bytes), never a disk image. Why the disk image grew
+  by close to the files' full size is not established (their size on macOS was not measured; the Linux
+  figure is assumed to carry over). The Swift app changed in that time too (#14), its binary by about
+  80 KB (inferred: its signature hashes 264 pages of 4,096 bytes at 915529e, and 284 at 33fbd4f and at
+  b727d3f, in each run's signature check).
 
 **What we did not choose, and why.**
 - **`unchecked-hash` `.pyc` files.** The interpreter loads them without looking at the source, so a file
@@ -1230,14 +1262,22 @@ the app's files and folders in sorted order, each with the commit's time, owner 
 and mode 0755 or 0644, in a gzip file with no name or time in its header. `macos-app` compares its two
 builds' tarballs by the sha256 of the gzip file and of the tar inside it, and writes SAME, DIFFERENT or
 FAILED to the job summary. It holds the `.pyc` files, so `compare` covers them. That is recorded, not a
-gate, until `macos-payload-repro` below exists. With the `.pyc` files, a SAME is not yet seen in CI. Seen
-in CI before the build wrote them (`macos-15`, run 41407347108, 2026-11-02): both builds printed the gzip
-file's sha256
-`67729981ad8b616c6335b3bbf1bc6ae4b20157797b0cba3b355d4b4c698b456e` and the tar's
-`cdb1d07d7edc1c499bdafea0f3e5f0f5f5c94c081f8c5cfc9339a48938acb924`, which `compare` writes as SAME. (Its
-verdict goes to the job summary, which the API does not return; the two digests are in the job's log.) That
-is two builds in one job, on one machine; whether another machine gives the same bytes is what
-`macos-payload-repro` will show.
+gate, until `macos-payload-repro` below exists. Seen in CI with the `.pyc` files (`macos-15`, run
+42341849296, 2026-11-07): both builds printed the gzip file's sha256
+`00d573cd68807f2e80a570c1053cbb55aad3a5a293ed0ea66b7ee902ff26fae4` and the tar's
+`8de6f270265d8392dd342cb505a8a9ecf32d00e3f4b0766504b1153cdb298e8c`, which `compare` writes as SAME, and
+each build wrote 860 `.pyc` files and found the same bytes in 860 of 860. In main's run at b727d3f (run
+42343639399, 2026-11-07), both builds printed the gzip file's sha256
+`17403c6fb8d53f287bc720e065f064cddebbabf45b3c582bbc52d5db0a12c6cb` and the tar's
+`5143773c3ef078382d6167346362cc30bf7e5e09ba1942a3a5fe500be14b3718`, which `compare` writes as SAME, and
+each build wrote 860 `.pyc` files and found the same bytes in 860 of 860. Those digests differ from the
+first run's, which built another commit (inferred: the tarball holds the commit's time, and `MANIFEST.json`
+the commit, §6). Seen in CI before the build wrote them (`macos-15`, run 41407347108, 2026-11-02): both
+builds printed the gzip file's sha256 `67729981ad8b616c6335b3bbf1bc6ae4b20157797b0cba3b355d4b4c698b456e`
+and the tar's `cdb1d07d7edc1c499bdafea0f3e5f0f5f5c94c081f8c5cfc9339a48938acb924`, which `compare` writes
+as SAME. (Its verdict goes to the job summary, which the API does not return; in each run the two digests
+are in the job's log.) Each is two builds in one job, on one machine; whether another machine gives the
+same bytes is what `macos-payload-repro` will show.
 
 **The Mac jobs in `release.yml`.**
 1. `macos-payload` (macOS 15, no secrets): downloads the exact wheel PyPI published and checks its sha256;

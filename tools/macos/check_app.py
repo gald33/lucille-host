@@ -18,10 +18,10 @@ The bundle as built:
   library, and no other bytecode (``build_app.bytecode_layout_problems``); the bundled interpreter,
   running the build's own program, finds each one byte for byte what it compiles from its ``.py``
   now, with its magic number and its source's hash in the header, and that run ends as the program
-  ends (``build_app.bytecode_check_problems``); and ``--version``, run as the app runs it with
-  ``-v``, loads each of its modules in the bundle from its ``.pyc`` and compiles none from source
-  (:func:`loaded_from`). It writes nothing beside the app, so a person can also run it on a copy
-  they downloaded, on the mounted disk image (not yet tried on a Mac).
+  ends and counts at least one ``.py`` (``build_app.bytecode_check_problems``); and ``--version``,
+  run as the app runs it with ``-v``, loads each of its modules in the bundle from its ``.pyc`` and
+  compiles none from source (:func:`loaded_from`). It writes nothing beside the app, so a person can
+  also run it on a copy they downloaded, on the mounted disk image (not yet tried on a Mac).
 - ``record`` (M10): each wheel MANIFEST.json names, the host's among them, is found again and
   hashed; the installed distributions are exactly those; and every file in ``site-packages`` is
   byte for byte a file of its wheel's ``RECORD`` (``payload.record_problems``, the build's own

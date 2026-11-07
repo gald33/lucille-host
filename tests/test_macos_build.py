@@ -1649,9 +1649,23 @@ _CRASH = "Traceback (most recent call last):\nPermissionError: [Errno 13] Permis
         (1, f"one\ntwo\nfound the same bytes in 1 of {_ALL} .pyc files, {TAG}\n"),
         (0, ""),
         (0, f"found the same bytes in 1 of {_ALL} .pyc files, {TAG}\n"),
+        (0, f"found the same bytes in 0 of {_ALL} .pyc files, {TAG}\n"),
         (0, f"found the same bytes in {_ALL} of {_ALL} .pyc files, cpython-0\n"),
+        # The program counts no file only with exit 0 and no line before the count.
+        (1, f"found the same bytes in 0 of 0 .pyc files, {TAG}\n"),
+        (0, f"one\nfound the same bytes in 0 of 0 .pyc files, {TAG}\n"),
     ],
-    ids=["crash", "no-problem-named", "lines-do-not-add-up", "silent", "not-all", "another-tag"],
+    ids=[
+        "crash",
+        "no-problem-named",
+        "lines-do-not-add-up",
+        "silent",
+        "not-all",
+        "none-matched",
+        "another-tag",
+        "none-counted-exit-1",
+        "none-counted-after-a-line",
+    ],
 )
 def test_a_check_run_that_does_not_end_as_the_program_ends_is_a_problem(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, returncode: int, stdout: str
@@ -1679,6 +1693,76 @@ def test_a_check_run_that_crashes_is_a_problem(tmp_path: Path) -> None:
     assert "IsADirectoryError" in done.stderr
     problems = build_app.bytecode_problems(app, tag=TAG)
     assert any(line.startswith("the bytecode check did not run (exit 1): ") for line in problems)
+
+
+_NONE_CHECKED = f"found the same bytes in 0 of 0 .pyc files, {TAG}"
+_NONE_SAID = f"the bytecode check counted no .py file: {_NONE_CHECKED}"
+
+
+@pytest.mark.parametrize(
+    "library",
+    [{"README.txt": b"no module here\n"}, {}],
+    ids=["no-py-in-the-library", "no-library-folder"],
+)
+def test_a_check_that_counts_no_source_is_a_problem(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], library: Mapping[str, bytes]
+) -> None:
+    # The program exits 0 on "0 of 0": nothing differed, because there was nothing to compare.
+    # With no library folder at all, the layout check finds nothing wrong either. The build's own
+    # gate refuses that count, from an app with no .py in its library, as check_app.py bytecode
+    # refuses such an app.
+    empty = _bytecode_app(tmp_path, library)
+    assert _lib(empty).is_dir() == bool(library)
+    done = build_app.run_bytecode_program(empty / build_app.RUNTIME_DIR, "check")
+    assert (done.returncode, done.stdout) == (0, _NONE_CHECKED + "\n"), done
+    assert build_app.bytecode_layout_problems(empty, tag=TAG) == []
+    assert build_app.bytecode_problems(empty, tag=TAG) == [_NONE_SAID]
+    with pytest.raises(build_app.BuildError, match=re.escape(_NONE_SAID)):
+        build_app.compile_bytecode(empty, tag=TAG)
+    assert f"wrote 0 of 0 .pyc files, {TAG}" in capsys.readouterr().out.splitlines()
+
+
+def test_a_check_run_that_counts_no_file_is_a_problem(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # An app whose library is there, and a check run that reports it found none of it.
+    app = _compiled_app(tmp_path)
+    ended = subprocess.CompletedProcess(["program"], 0, _NONE_CHECKED + "\n", "")
+    monkeypatch.setattr(build_app, "run_bytecode_program", lambda runtime, mode: ended)
+    assert build_app.bytecode_problems(app, tag=TAG) == [_NONE_SAID]
+    with pytest.raises(build_app.BuildError, match=re.escape(_NONE_SAID)):
+        build_app.require_bytecode(app, tag=TAG)
+
+
+def test_a_check_that_matches_no_file_names_each_and_one_of_one_passes(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # What is refused above is a count of no .py file, not one where no .pyc matched: with one
+    # byte of every body changed, each .pyc is named as it would be alone, and nothing else is.
+    # And a library of one module passes.
+    app = _compiled_app(tmp_path / "every-body-changed")
+    runtime = app / build_app.RUNTIME_DIR
+    sources = sorted(_lib(app).rglob("*.py"), key=lambda path: path.relative_to(runtime).as_posix())
+    for source in sources:
+        data = bytearray(_pyc_of(source).read_bytes())
+        data[-1] ^= 1
+        _pyc_of(source).write_bytes(bytes(data))
+    capsys.readouterr()
+    assert build_app.bytecode_problems(app, tag=TAG) == [
+        f"{_pyc_of(source).relative_to(runtime).as_posix()} is not what this interpreter "
+        f"compiles from {source.relative_to(runtime).as_posix()}"
+        for source in sources
+    ]
+    assert capsys.readouterr().out.splitlines()[-1] == (
+        f"found the same bytes in 0 of {_ALL} .pyc files, {TAG}"
+    )
+    one = _bytecode_app(tmp_path / "one-module", {"mod.py": _LIBRARY["mod.py"]})
+    build_app.compile_bytecode(one, tag=TAG)
+    assert (
+        capsys.readouterr().out.splitlines()[-1]
+        == f"found the same bytes in 1 of 1 .pyc files, {TAG}"
+    )
+    assert build_app.bytecode_problems(one, tag=TAG) == []
 
 
 def test_the_build_prints_what_both_runs_found(
@@ -2030,6 +2114,27 @@ def test_the_bytecode_check_on_a_downloaded_copy(
         assert failure.startswith(start), checker.failures
     # It writes nothing into the copy it checks.
     assert {path: path.read_bytes() for path in _lib(app).rglob("*") if path.is_file()} == held
+
+
+def test_the_bytecode_check_on_a_copy_refuses_a_check_run_that_counts_no_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # check_app.py bytecode reads a check run as the build's gate does: one that counts no .py
+    # file fails, though the copy's library holds them and the layout and the loads are right.
+    monkeypatch.setattr(build_app, "BYTECODE_TAG", TAG)
+    app = _bytecode_app(tmp_path / "Downloaded Copy", {**_LIBRARY, **_STUB_HOST})
+    stand_in = _BYTECODE_CHECK_RUNTIME.replace("@PYTHON@", shlex.quote(sys.executable))
+    stand_in = stand_in.replace("@SITE@", _OWN_SITE).replace("@PREFIX@", "")
+    check_app.python_in(app).write_text(stand_in, "utf-8")
+    build_app.compile_bytecode(app, tag=TAG)
+    ended = subprocess.CompletedProcess(["program"], 0, _NONE_CHECKED + "\n", "")
+    monkeypatch.setattr(build_app, "run_bytecode_program", lambda runtime, mode: ended)
+    capsys.readouterr()
+    checker = check_app.Checker()
+    check_app.check_bytecode(app, checker)
+    assert len(checker.failures) == 1, checker.failures
+    assert checker.failures[0].startswith(_PROGRAM_FAILS), checker.failures
+    assert _NONE_SAID in capsys.readouterr().out.splitlines()
 
 
 # ---------------------------------------------------------------------------------------------
