@@ -3,12 +3,20 @@ import SwiftUI
 
 /// The menu bar app that runs the host. It has no window and no Dock icon (LSUIElement);
 /// everything it does is in this menu, the pairing window, the Activity window and the notes it
-/// shows.
+/// shows. Only the copy at /Applications/<name>.app does any of it (decisions/0002 §13).
 @main
 struct MenuBarApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @StateObject private var model = HostModel.shared
     @StateObject private var connection = Connection.shared
+
+    /// The one place the latch that lets the app start anything is opened, before anything could
+    /// start: only for the copy at /Applications/<name>.app, the one `Placement` gives a token.
+    init() {
+        if case .placed(let token) = Placement.current {
+            HostCLI.allowSpawns(token)
+        }
+    }
 
     var body: some Scene {
         MenuBarExtra {
@@ -24,13 +32,21 @@ struct MenuBarApp: App {
 /// while it runs: it has no window and no Dock icon, so otherwise nothing would seem to happen.
 /// Quit is offered too, for when the menu bar has no room for the icon. Once that note is first
 /// closed, `Connection` says whether the host is paused and picks up a pairing left unfinished, so
-/// nothing it shows at launch races the note.
+/// nothing it shows at launch races the note. A copy anywhere but /Applications/<name>.app shows
+/// its placement note instead, each time, and never launches `Connection`.
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var noteQueued = false
     private var launchHandled = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        guard Placement.current.isPlaced else {
+            Task { @MainActor in
+                try? await Task.sleep(for: .seconds(1))
+                PlacementNote.show()
+            }
+            return
+        }
         Connection.shared.launch()
         Task { @MainActor in
             try? await Task.sleep(for: .seconds(1))
@@ -39,6 +55,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        guard Placement.current.isPlaced else {
+            PlacementNote.show()
+            return false
+        }
         showWhereTheMenuIs()
         return false
     }
@@ -78,7 +98,48 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 }
 
+/// What a copy that is not at /Applications/<name>.app says when it opens, when it is opened
+/// again, and from its menu's one line (decisions/0002 §3.3 and §13): why it can't run, and how
+/// to fix that. Its one button is Quit, through `Connection.quitChosen`, the app's one way to quit.
+@MainActor
+enum PlacementNote {
+    static func show() {
+        guard let note = ConnectionText.placement(Placement.current) else {
+            return
+        }
+        Alerts.shared.show(key: "placement", front: true, {
+            let alert = NSAlert()
+            alert.alertStyle = .warning
+            alert.messageText = note.title
+            alert.informativeText = note.text
+            alert.addButton(withTitle: ConnectionText.quitButton)
+            return alert
+        }, done: { _ in
+            Connection.shared.quitChosen()
+        })
+    }
+}
+
+/// The menu. A copy that is not at /Applications/<name>.app shows only the line that says why it
+/// can't run, which shows its note again, and Quit.
 struct HostMenu: View {
+    @ObservedObject var model: HostModel
+    @ObservedObject var connection: Connection
+
+    var body: some View {
+        if Placement.current.isPlaced {
+            HostItems(model: model, connection: connection)
+        } else if let note = ConnectionText.placement(Placement.current) {
+            Button(note.title) { PlacementNote.show() }
+        }
+        Divider()
+        Button(HostText.quitApp) { connection.quitChosen() }
+            .keyboardShortcut("q")
+    }
+}
+
+/// Everything the menu of the copy at /Applications/<name>.app holds above Quit.
+struct HostItems: View {
     @ObservedObject var model: HostModel
     @ObservedObject var connection: Connection
 
@@ -96,6 +157,10 @@ struct HostMenu: View {
         }
         if let problem = model.problem {
             Button(problem.message) { model.showProblem() }
+        }
+        if let notice = connection.updateNotice {
+            Button(notice) { connection.showUpdateNotice() }
+            Button(ConnectionText.prepareToUpdateItem) { connection.prepareToUpdateChosen() }
         }
         Divider()
         if connection.operationRunning {
@@ -170,8 +235,5 @@ struct HostMenu: View {
             Button(ConnectionText.disconnectItem) { connection.disconnectChosen() }
                 .disabled(!connection.items.enabled)
         }
-        Divider()
-        Button(HostText.quitApp) { connection.quitChosen() }
-            .keyboardShortcut("q")
     }
 }

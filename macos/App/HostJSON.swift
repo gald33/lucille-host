@@ -559,8 +559,10 @@ extension HostObject {
             }
             self = .request(RequestEvent(jobId: job, phase: phase))
         case "host_too_old":
+            // The minimum is Lucille's, and the update notice shows it: read only in the form the
+            // protocol gives it.
             guard let job = fields.string("job_id"), let least = fields.string("min_host_version"),
-                  let version = fields.string("host_version")
+                  HostObject.isMinHostVersion(least), let version = fields.string("host_version")
             else {
                 return nil
             }
@@ -602,6 +604,35 @@ extension HostObject {
             }
         }
         return true
+    }
+
+    /// Whether `text` is a release in the form a request's `min_host_version` takes (spec/PROTOCOL.md
+    /// §10, `request.schema.json`): MAJOR.MINOR.PATCH, each part ASCII digits, at most 9 of them,
+    /// with no leading zero. Lucille sends it, and the update notice shows it (decisions/0002 §16).
+    static func isMinHostVersion(_ text: String) -> Bool {
+        let digits: ClosedRange<Unicode.Scalar> = "0"..."9"
+        var parts = 1
+        var length = 0
+        var leadingZero = false
+        for scalar in text.unicodeScalars {
+            if scalar == "." {
+                guard length > 0, parts < 3 else {
+                    return false
+                }
+                parts += 1
+                length = 0
+                leadingZero = false
+            } else if digits.contains(scalar) {
+                guard !leadingZero, length < 9 else {
+                    return false
+                }
+                leadingZero = length == 0 && scalar == "0"
+                length += 1
+            } else {
+                return false
+            }
+        }
+        return parts == 3 && length > 0
     }
 
     private static func readPair(_ fields: JSONFields) -> PairState? {

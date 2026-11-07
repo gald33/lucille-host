@@ -19,6 +19,7 @@ import os
 import re
 import shlex
 import shutil
+import stat
 import subprocess
 import sys
 import zipfile
@@ -361,6 +362,8 @@ def test_ci_macos_jobs() -> None:
         "swift",
         "relocate",
         "library-snapshot",
+        "install",
+        "placement",
         "launch",
         "ui",
         "library-diff",
@@ -374,7 +377,8 @@ def test_ci_macos_jobs() -> None:
     # The smoke jobs run the same bytes: they build nothing and repeat no check that depends only
     # on the bytes (M10, M11, the libraries, the suite), and they do not run the pairing check,
     # which needs the suite's copy of the runtime for its harness. The probe prints what the
-    # verbs do on each macOS, and gates nothing.
+    # verbs do on each macOS, and gates nothing. They put the app in /Applications, as macos-app
+    # does, and open it only there once placement has seen every other copy refuse.
     assert smoke_checks == [
         "handoff-check",
         "unpack-dmg",
@@ -389,6 +393,8 @@ def test_ci_macos_jobs() -> None:
         "readonly",
         "swift",
         "library-snapshot",
+        "install",
+        "placement",
         "launch",
         "ui",
         "library-diff",
@@ -399,7 +405,16 @@ def test_ci_macos_jobs() -> None:
         order = [run for run in runs if "chmod" in run or "check_app.py" in run]
         made_readonly = next(i for i, run in enumerate(order) if "chmod -R a-w" in run)
         assert order[made_readonly].strip() == "chmod -R a-w build/macos/*.app"
-        for name in ("host", "environment", "readonly", "swift", "launch", "ui"):
+        for name in (
+            "host",
+            "environment",
+            "readonly",
+            "swift",
+            "install",
+            "placement",
+            "launch",
+            "ui",
+        ):
             first = next(i for i, run in enumerate(order) if f"check_app.py {name}" in run)
             assert first > made_readonly, (job, name)
         wrapper = next(i for i, run in enumerate(order) if "check_app.py wrapper" in run)
@@ -410,12 +425,31 @@ def test_ci_macos_jobs() -> None:
         assert checks.index("bytecode") == checks.index("bundle") + 1, job
         assert checks.index("library-snapshot") < checks.index("launch") < checks.index("ui")
         assert checks.index("ui") < checks.index("library-diff")
+        # The copy every later check opens is put in /Applications from the read-only bundle,
+        # once ~/Library has been walked, and placement sees every other copy refuse before
+        # launch opens it (decisions/0002 §13).
+        assert checks.count("install") == 1 and checks.count("placement") == 1, job
+        assert (
+            checks.index("library-snapshot")
+            < checks.index("install")
+            < checks.index("placement")
+            < checks.index("launch")
+        ), job
         assert not any("build_app.py" in run for run in runs if job == "macos-smoke")
     # macos-app requires the menu to be driven; on the newer images that is recorded, not required.
     ui = [run.strip() for run in _runs(doc, "macos-app") if "check_app.py ui" in run]
     assert ui == ["uv run --no-project python tools/macos/check_app.py ui --require-driven"]
     ui = [run.strip() for run in _runs(doc, "macos-smoke") if "check_app.py ui" in run]
     assert ui == ["uv run --no-project python tools/macos/check_app.py ui"]
+    # The same for placement, which reads the note a misplaced copy shows; install drives nothing.
+    for job, driven in (("macos-app", " --require-driven"), ("macos-smoke", "")):
+        runs = [run.strip() for run in _runs(doc, job)]
+        assert [run for run in runs if "check_app.py install" in run] == [
+            "uv run --no-project python tools/macos/check_app.py install"
+        ], job
+        assert [run for run in runs if "check_app.py placement" in run] == [
+            f"uv run --no-project python tools/macos/check_app.py placement{driven}"
+        ], job
     diff = [run for run in _runs(doc, "macos-smoke") if "library-diff" in run]
     assert len(diff) == 1 and "--control-run" in diff[0]
     # The smoke jobs check the restored bytes before anything else uses them, and run no check
@@ -508,8 +542,8 @@ def test_the_pairing_check_runs_with_the_suites_copy_of_the_runtime() -> None:
     # jobs, at most half the job's as this one's is: a hang in any of them must leave the job the
     # time to upload what shows it.
     for job_id, names in (
-        ("macos-app", ("swift", "relocate", "ui", "suite", "pairing")),
-        ("macos-smoke", ("swift", "ui")),
+        ("macos-app", ("swift", "relocate", "placement", "ui", "suite", "pairing")),
+        ("macos-smoke", ("swift", "placement", "ui")),
     ):
         job = doc["jobs"][job_id]
         for name in names:
@@ -1752,6 +1786,329 @@ def test_relocate_and_suite_leave_their_copies_removable(tmp_path: Path) -> None
         assert path.stat().st_mode & 0o200, path
     shutil.rmtree(tree)
     assert not tree.exists()
+
+
+# ---------------------------------------------------------------------------------------------
+# The copy in /Applications: install, and the checks that open it (decisions/0002 §13)
+
+
+def test_the_checks_that_open_the_app_open_the_installed_copy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Only the copy at /Applications/<name>.app starts anything, so from install on every check
+    # that opens the app opens that copy; placement is given the build copy, which it opens to see
+    # it refuse, and finds the installed one itself.
+    out = (tmp_path / "out").resolve()
+    opened: list[tuple[str, Path]] = []
+    for name in ("check_launch", "check_ui", "check_pairing", "check_placement"):
+
+        def record(app: Path, *rest: Any, _name: str = name, **options: Any) -> None:
+            opened.append((_name, app))
+
+        monkeypatch.setattr(check_app, name, record)
+    for check in ("launch", "ui", "pairing", "placement"):
+        args = check_app._parser().parse_args([check, "--out", str(out)])
+        check_app._run_check(args, out, check_app.Checker())
+    installed = Path("/Applications") / f"{PINS.app_name}.app"
+    assert check_app.installed_app_path() == installed
+    assert opened == [
+        ("check_launch", installed),
+        ("check_ui", installed),
+        ("check_pairing", installed),
+        ("check_placement", check_app.app_path(out)),
+    ]
+
+
+def test_the_signature_check_covers_the_installed_copy_too(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # The last signature step sees whether launch, ui or pairing wrote into the copy they opened
+    # (M8): it checks the installed copy as well as the build copy, once install has put it there.
+    # A copy another build left there, which no check opened, is only named.
+    out = (tmp_path / "out").resolve()
+    app = check_app.app_path(out)
+    _a_build(app, "this build")
+    installed = tmp_path / "Applications" / f"{PINS.app_name}.app"
+    monkeypatch.setattr(check_app, "installed_app_path", lambda: installed)
+    checked: list[Path] = []
+    monkeypatch.setattr(check_app, "check_signature", lambda app, checker: checked.append(app))
+    args = check_app._parser().parse_args(["signature", "--out", str(out)])
+    check_app._run_check(args, out, check_app.Checker())
+    assert checked == [app]
+    assert str(installed) in capsys.readouterr().out
+    shutil.copytree(app, installed)
+    _a_build(installed, "an earlier build")
+    check_app._run_check(args, out, check_app.Checker())
+    assert checked == [app, app]
+    assert f"{installed} is another build" in capsys.readouterr().out
+    shutil.rmtree(installed)
+    shutil.copytree(app, installed)
+    check_app._run_check(args, out, check_app.Checker())
+    assert checked == [app, app, app, installed]
+
+
+def _a_build(app: Path, made: str) -> None:
+    """Give ``app`` the files that tell one build of the app from another
+    (``check_app.BUILD_IDENTITY``), each saying it is of the build ``made``."""
+    for name in check_app.BUILD_IDENTITY:
+        (app / name).parent.mkdir(parents=True, exist_ok=True)
+        (app / name).write_text(f"{name}, of {made}", encoding="utf-8")
+
+
+def _install_world(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> tuple[Path, Path, Path, list[list[str]]]:
+    """A build copy, an Applications folder and a folder to set a copy aside in, all under
+    ``tmp_path``; ditto copies, and every other program it runs only says it ran. The copies of
+    the app it stops, the folders it moves and the copies it removes are said too."""
+    app = check_app.app_path(tmp_path / "out")
+    (app / "Contents").mkdir(parents=True)
+    (app / "Contents" / "built").write_text("the build copy", encoding="utf-8")
+    _a_build(app, "this build")
+    installed = tmp_path / "Applications" / app.name
+    installed.parent.mkdir()
+    aside = tmp_path / "tmp" / f"set-aside-{app.name}"
+    aside.parent.mkdir()
+    monkeypatch.setattr(check_app, "installed_app_path", lambda: installed)
+    monkeypatch.setattr(check_app, "set_aside_path", lambda: aside)
+    ran: list[list[str]] = []
+
+    def run(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        ran.append([str(word) for word in argv])
+        if argv[0] == "ditto":
+            shutil.copytree(argv[1], argv[2], symlinks=True)
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr("subprocess.run", run)
+
+    def stop(checker: check_app.Checker, name: str) -> bool:
+        ran.append(["stop", name])
+        return True
+
+    monkeypatch.setattr(check_app, "_stop_earlier_copies", stop)
+    monkeypatch.setattr(
+        check_app, "check_readonly", lambda app, checker: ran.append(["readonly", str(app)])
+    )
+    move, remove = check_app._move_folder, check_app._remove_copy
+
+    def moved(source: Path, target: Path) -> None:
+        ran.append(["move", str(source), str(target)])
+        move(source, target)
+
+    def removed(path: Path) -> None:
+        ran.append(["remove", str(path)])
+        remove(path)
+
+    monkeypatch.setattr(check_app, "_move_folder", moved)
+    monkeypatch.setattr(check_app, "_remove_copy", removed)
+    return app, installed, aside, ran
+
+
+def test_install_puts_the_read_only_bundle_in_applications(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A copy of the read-only bundle, made read-only in its turn and then held to M8 (the read-only
+    # check), at the one place the app runs from.
+    app, installed, aside, ran = _install_world(tmp_path, monkeypatch)
+    checker = check_app.Checker()
+    check_app.check_install(app, checker)
+    assert not checker.failures, checker.failures
+    assert (installed / "Contents" / "built").read_text(encoding="utf-8") == "the build copy"
+    copied = ran.index(["ditto", str(app), str(installed)])
+    locked = ran.index(["chmod", "-R", "a-w", str(installed)])
+    assert copied < locked < ran.index(["readonly", str(installed)])
+    assert not aside.exists()
+
+
+def test_install_refuses_a_copy_already_there_unless_asked_to_replace_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # On the owner's Mac /Applications may hold their own copy. install leaves it alone and says
+    # how to go on; --replace sets it aside, says how to put it back, and installs; --restore puts
+    # it back. Nothing is ever set aside over a copy set aside before.
+    app, installed, aside, ran = _install_world(tmp_path, monkeypatch)
+    (installed / "Contents").mkdir(parents=True)
+    owners = installed / "Contents" / "owners"
+    owners.write_text("the owner's copy", encoding="utf-8")
+    checker = check_app.Checker()
+    check_app.check_install(app, checker)
+    assert checker.failures
+    assert owners.read_text(encoding="utf-8") == "the owner's copy"
+    assert not any(argv[0] == "ditto" for argv in ran) and not aside.exists()
+    assert "--replace" in capsys.readouterr().out
+    del ran[:]
+    checker = check_app.Checker()
+    check_app.check_install(app, checker, replace=True)
+    assert not checker.failures, checker.failures
+    assert (aside / "Contents" / "owners").read_text(encoding="utf-8") == "the owner's copy"
+    assert (installed / "Contents" / "built").is_file() and not owners.exists()
+    assert "--restore" in capsys.readouterr().out
+    # No copy of the app runs while one is moved.
+    set_aside = ran.index(["move", str(installed), str(aside)])
+    assert (
+        ran.index(["stop", PINS.app_name])
+        < set_aside
+        < ran.index(["ditto", str(app), str(installed)])
+    )
+    checker = check_app.Checker()
+    check_app.check_install(app, checker, replace=True)
+    assert checker.failures
+    assert (aside / "Contents" / "owners").read_text(encoding="utf-8") == "the owner's copy"
+    del ran[:]
+    checker = check_app.Checker()
+    check_app.check_install(app, checker, restore=True)
+    assert not checker.failures, checker.failures
+    assert owners.read_text(encoding="utf-8") == "the owner's copy"
+    assert not (installed / "Contents" / "built").exists() and not aside.exists()
+    assert ran == [
+        ["stop", PINS.app_name],
+        ["remove", str(installed)],
+        ["move", str(aside), str(installed)],
+    ]
+    checker = check_app.Checker()
+    check_app.check_install(app, checker, restore=True)
+    assert checker.failures and owners.is_file()
+
+
+def test_install_holds_this_build_again_and_restore_removes_only_this_build(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # A hand run made again finds this build already in /Applications: install copies nothing,
+    # and holds it to M8 again. With nothing set aside, install --restore puts back what was there
+    # before install, which is nothing: it removes this build's copy, and no other copy.
+    app, installed, aside, ran = _install_world(tmp_path, monkeypatch)
+    checker = check_app.Checker()
+    check_app.check_install(app, checker)
+    assert not checker.failures, checker.failures
+    del ran[:]
+    checker = check_app.Checker()
+    check_app.check_install(app, checker)
+    assert not checker.failures, checker.failures
+    assert ran == [["readonly", str(installed)]]
+    assert "already holds this build" in capsys.readouterr().out
+    del ran[:]
+    checker = check_app.Checker()
+    check_app.check_install(app, checker, restore=True)
+    assert not checker.failures, checker.failures
+    assert not installed.exists() and not aside.exists()
+    assert ran == [["stop", PINS.app_name], ["remove", str(installed)]]
+    checker = check_app.Checker()
+    check_app.check_install(app, checker, restore=True)
+    assert checker.failures
+    shutil.copytree(app, installed)
+    _a_build(installed, "an earlier build")
+    for flags in ({}, {"restore": True}):
+        checker = check_app.Checker()
+        check_app.check_install(app, checker, **flags)
+        assert checker.failures, flags
+        assert (
+            (installed / check_app.BUILD_IDENTITY[0])
+            .read_text(encoding="utf-8")
+            .endswith("of an earlier build")
+        ), flags
+    assert "only when it is this build" in capsys.readouterr().out
+
+
+def test_a_copy_is_this_build_only_by_its_signed_files(tmp_path: Path) -> None:
+    # A copy of the build is this build. One whose executable or signature differs is another
+    # build, and so is one without them, or a link to the build.
+    assert check_app.BUILD_IDENTITY == (
+        f"Contents/MacOS/{PINS.app_name}",
+        "Contents/_CodeSignature/CodeResources",
+    )
+    app = check_app.app_path(tmp_path / "out")
+    _a_build(app, "this build")
+    copy = tmp_path / "Applications" / app.name
+    shutil.copytree(app, copy)
+    assert check_app.is_this_build(copy, app)
+    for number, name in enumerate(check_app.BUILD_IDENTITY):
+        other = tmp_path / f"other-{number}" / app.name
+        shutil.copytree(app, other)
+        (other / name).write_text("another build", encoding="utf-8")
+        assert not check_app.is_this_build(other, app), name
+        (other / name).unlink()
+        assert not check_app.is_this_build(other, app), name
+    link = tmp_path / "link" / app.name
+    link.parent.mkdir()
+    link.symlink_to(app)
+    assert not check_app.is_this_build(link, app)
+    assert not check_app.is_this_build(tmp_path / "nothing" / app.name, app)
+
+
+def test_a_read_only_copy_moves_to_another_folder(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A copy an earlier install made read-only may not move to another folder, which rewrites its
+    # "..": macOS refuses, and so does Linux for anyone but root, as this stand-in does for root
+    # too. install --replace and --restore move it all the same, and it stays read-only.
+    real_rename = Path.rename
+
+    def rename(self: Path, target: Any) -> Path:
+        if self.is_dir() and not self.is_symlink() and not self.stat().st_mode & stat.S_IWUSR:
+            raise PermissionError(13, "Permission denied", str(self))
+        return real_rename(self, target)
+
+    monkeypatch.setattr(Path, "rename", rename)
+    app, installed, aside, ran = _install_world(tmp_path, monkeypatch)
+    (installed / "Contents").mkdir(parents=True)
+    (installed / "Contents" / "owners").write_text("the owner's copy", encoding="utf-8")
+    for path in (installed / "Contents" / "owners", installed / "Contents", installed):
+        path.chmod(0o444 if path.is_file() else 0o555)
+    try:
+        checker = check_app.Checker()
+        check_app.check_install(app, checker, replace=True)
+        assert not checker.failures, checker.failures
+        assert (aside / "Contents" / "owners").is_file()
+        assert stat.S_IMODE(aside.stat().st_mode) == 0o555
+        checker = check_app.Checker()
+        check_app.check_install(app, checker, restore=True)
+        assert not checker.failures, checker.failures
+        assert (installed / "Contents" / "owners").is_file() and not aside.exists()
+        assert stat.S_IMODE(installed.stat().st_mode) == 0o555
+    finally:
+        for path in (installed, aside):
+            if path.exists():
+                check_app.make_writable(path)
+
+
+@pytest.mark.parametrize("check", sorted(check_app.OPENS_INSTALLED))
+def test_the_checks_that_open_the_installed_copy_need_it_to_be_this_build(
+    check: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # launch, ui, pairing and placement open /Applications/<name>.app. With no copy there, or the
+    # copy an earlier build left there, they refuse before they open anything: what that copy did
+    # would otherwise be reported as this build's.
+    assert check_app.OPENS_INSTALLED == {"launch", "ui", "pairing", "placement"}
+    _as_mac(monkeypatch)
+    out = (tmp_path / "out").resolve()
+    app = check_app.app_path(out)
+    _a_build(app, "this build")
+    installed = tmp_path / "Applications" / app.name
+    monkeypatch.setattr(check_app, "installed_app_path", lambda: installed)
+    ran: list[str] = []
+    monkeypatch.setattr(check_app, "_run_check", lambda args, out, checker: ran.append(args.check))
+    assert check_app.main([check, "--out", str(out)]) == 1
+    assert "check_app.py install puts one there" in capsys.readouterr().out and not ran
+    shutil.copytree(app, installed)
+    _a_build(installed, "an earlier build")
+    assert check_app.main([check, "--out", str(out)]) == 1
+    assert "install --replace" in capsys.readouterr().out and not ran
+    shutil.rmtree(installed)
+    shutil.copytree(app, installed)
+    assert check_app.main([check, "--out", str(out)]) == 0
+    assert ran == [check]
+
+
+def test_install_takes_replace_or_restore_not_both(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    for flag in ("--replace", "--restore"):
+        args = check_app._parser().parse_args(["install", flag, "--out", str(tmp_path)])
+        assert (args.replace, args.restore) == (flag == "--replace", flag == "--restore")
+    with pytest.raises(SystemExit) as exited:
+        check_app._parser().parse_args(["install", "--replace", "--restore"])
+    assert exited.value.code == 2
+    assert "not allowed with argument" in capsys.readouterr().err
 
 
 # What a step's shell expands besides its job's and its own env: the files and folder GitHub sets

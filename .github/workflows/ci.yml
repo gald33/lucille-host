@@ -215,6 +215,17 @@ jobs:
       - name: Snapshot ~/Library (M12)
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         run: uv run --no-project python tools/macos/check_app.py library-snapshot --to build/macos/library/before.json
+      # Only the copy at /Applications/<name>.app starts anything (decisions/0002 §13). install puts
+      # one there, made from the read-only bundle and held to M8 in its turn: from here on launch, ui
+      # and pairing open that copy; placement opens it too, and two copies that must refuse. Each
+      # refuses to run unless that copy is this build. The last signature check covers it too.
+      - name: "Check: a read-only copy in /Applications (M8)"
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: uv run --no-project python tools/macos/check_app.py install
+      - name: "Check: a copy anywhere else, or renamed, says so and starts nothing"
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        timeout-minutes: 10
+        run: uv run --no-project python tools/macos/check_app.py placement --require-driven
       - name: "Check: the app launches and keeps running"
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         run: uv run --no-project python tools/macos/check_app.py launch
@@ -379,6 +390,15 @@ jobs:
       - name: Snapshot ~/Library (M12)
         if: ${{ !cancelled() && steps.unpacked.outcome == 'success' }}
         run: uv run --no-project python tools/macos/check_app.py library-snapshot --to build/macos/library/before.json
+      - name: "Check: a read-only copy in /Applications (M8)"
+        if: ${{ !cancelled() && steps.unpacked.outcome == 'success' }}
+        run: uv run --no-project python tools/macos/check_app.py install
+      # As ui, reading the note a misplaced copy shows where macOS allows it, and recording, not
+      # failing, where it does not; the host processes and the profile folder are watched either way.
+      - name: "Check: a copy anywhere else, or renamed, says so and starts nothing"
+        if: ${{ !cancelled() && steps.unpacked.outcome == 'success' }}
+        timeout-minutes: 10
+        run: uv run --no-project python tools/macos/check_app.py placement
       - name: "Check: the app launches and keeps running"
         if: ${{ !cancelled() && steps.unpacked.outcome == 'success' }}
         run: uv run --no-project python tools/macos/check_app.py launch

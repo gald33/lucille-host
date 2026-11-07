@@ -4,7 +4,9 @@
 
 Each check prints what it saw and exits 1 if anything is wrong (2 on a usage error, and off a
 Mac). The app is ``<out>/<name>.app``; every check but ``dmg``, ``unpack-dmg``, ``handoff-check``
-and ``library-snapshot`` refuses to run without it. The interpreter always runs as the app runs
+and ``library-snapshot`` refuses to run without it. Only the copy at ``/Applications/<name>.app``
+starts anything (decisions/0002 §13): ``install`` puts one there, and ``launch``, ``ui`` and
+``pairing`` open that copy and refuse to run without it. The interpreter always runs as the app runs
 it, ``lucille-host-runtime -I -B -X utf8`` (:data:`build_app.RUNTIME_FLAGS`), except the bytecode
 program, which adds ``-S`` and ``-W ignore`` (:data:`build_app.BYTECODE_FLAGS`).
 
@@ -42,8 +44,9 @@ The bundle as built:
   function another way (through the Objective-C runtime, say) is not seen.
 - ``signature``: ``codesign --verify --deep --strict`` passes on the app, and ``codesign --verify
   --strict`` on each Mach-O file in it; each is signed ad hoc as ``bundle`` says, with the
-  hardened runtime exactly when the pins ask for it; nothing carries entitlements. CI runs it
-  again after every other check, so a run that wrote into the bundle fails it.
+  hardened runtime exactly when the pins ask for it; nothing carries entitlements. Then the same
+  for the copy at ``/Applications/<name>.app``, once ``install`` has put it there. CI runs it again
+  after every other check, so a run that wrote into either copy fails it.
 - ``wrapper``: on a writable copy of the app, the Terminal wrapper ``Resources/bin/lucille-host``
   runs the host through a link to it from another folder (and never a runtime beside the link),
   on the app's profile, not on ``default``; neither it nor the interpreter run with the app's
@@ -82,9 +85,28 @@ On the bundle made read-only (CI runs ``chmod -R a-w`` first):
   drives the child runner with fake children, a shell script in place of the interpreter.
 - ``relocate``: copies the app to another folder, whose path has a space in it, and runs ``host``
   and ``swift`` on the copy.
-- ``launch``: opens the app the way Finder does, checks that it is still running 10 seconds later,
-  then stops it.
-- ``ui``: opens the app and drives it as a user would, through System Events: reads the note
+- ``install [--replace | --restore]``: copies the read-only bundle to ``/Applications/<name>.app``
+  with ``ditto``, makes the copy read-only, and runs ``readonly`` on it (M8). A copy of this build
+  already there is only held to M8 again. It leaves any other copy there alone and fails, unless
+  ``--replace``: that sets it aside in the home folder (:func:`set_aside_path`), says where, and
+  installs. ``--restore`` puts back what was there before: it removes the installed copy and puts
+  the one set aside back, or, with none set aside, removes the installed copy if it is this build.
+  It never sets a copy aside over one set aside before. ``placement``, ``launch``, ``ui`` and
+  ``pairing`` refuse to run unless the copy in ``/Applications`` is this build
+  (:func:`is_this_build`), so a copy an earlier build left there never answers for this one.
+- ``placement``: only the copy at ``/Applications/<name>.app`` starts anything. The control first:
+  that copy, opened, starts the host on the app's profile, which the check sees, and says where its
+  menu is. Then, one at a time with no other copy running, the build's copy, and a copy named
+  ``<name> 2.app`` in ``/Applications`` with the copy at the app's own name there and then moved
+  aside: for 10 seconds each starts no host process on the app's profile and changes nothing in the
+  profile's folder, says why it can't run and how to fix that, offers only Quit, and quits when Quit
+  is pressed. The renamed copy is removed and the other put back, whatever happens. Reading the
+  notes needs System Events, as ``ui`` does (``--require-driven`` makes not being able to a
+  failure). Screenshots ``0-placement-*.png`` go to ``check/screens``.
+- ``launch``: opens the copy in ``/Applications`` the way Finder does, checks that it is still
+  running 10 seconds later, then stops it.
+- ``ui``: opens the copy in ``/Applications`` and drives it as a user would, through System Events:
+  reads the note
   that says what the app is for and where the menu is, when the app opens and when it is opened
   again; reads the menu bar item's name and the menu; chooses Pause Lucille, then Resume Lucille,
   and reads the name again; switches an ability on and off; adds a folder through the Open panel
@@ -130,8 +152,12 @@ On the bundle made read-only (CI runs ``chmod -R a-w`` first):
   confirms; the app starts ``run``, which reads the room Lucille offers; a ``files.sha256``
   request on a folder added through the command line is answered; ``run`` killed with SIGKILL is
   started again after the back-off; ``run`` drains when the app itself is killed; the app's own
-  Quit asks first, shows the finishing panel, and waits for ``run`` to drain; Stop now pauses the
-  host, which the app never undoes on its own; Disconnect drains ``run``, then forgets the pair.
+  Quit asks first, shows the finishing panel, and waits for ``run`` to drain; Stop What's Running
+  stops a request and pauses the host; a request that needs a newer release brings one update
+  notice, which no later request brings back, and Prepare to Update asks nothing, lets ``run``
+  drain and quits;
+  Stop now pauses the host, which the app never undoes on its own; Disconnect drains ``run``, then
+  forgets the pair. It drives the copy in ``/Applications``.
   The app's profile, if there was one, is set aside first and put back at the end. Screenshots go
   to ``check/screens``.
 - ``gatekeeper``: prints what ``spctl`` says about the app and the disk image. It never fails: an
@@ -195,6 +221,7 @@ LOGIC_SOURCES: Final = (
     "Supervisor.swift",
     "ConnectionText.swift",
     "RequestLog.swift",
+    "Placement.swift",
 )
 # The host's golden fixtures (spec/CLI.md section 11), which the self-test reads through the
 # app's JSON reader and its pairing and supervision state machines.
@@ -2486,6 +2513,142 @@ def _stop_earlier_copies(checker: Checker, name: str) -> bool:
     return stopped
 
 
+def installed_app_path() -> Path:
+    """The copy of the app that runs: the only one that starts anything (decisions/0002 §13).
+    ``install`` puts it there, and ``placement``, ``launch``, ``ui`` and ``pairing`` open it."""
+    return Path("/Applications") / f"{APP_NAME}.app"
+
+
+def set_aside_path() -> Path:
+    """Where ``install --replace`` keeps the copy that was in /Applications before it, until
+    ``install --restore`` puts it back: in the home folder, on the same disk as /Applications, and
+    not in ``$TMPDIR``, which macOS empties of what has not been used for a few days."""
+    return Path.home() / f"{APP_NAME}.app (set aside by check_app.py install)"
+
+
+# What tells one build of the app from another: its executable, which holds the bundle's
+# signature, and that signature's list of the hash of every other file in the bundle.
+BUILD_IDENTITY: Final = (f"Contents/MacOS/{APP_NAME}", "Contents/_CodeSignature/CodeResources")
+
+
+def is_this_build(copy: Path, app: Path) -> bool:
+    """Whether ``copy`` is a copy of the build at ``app``, not a link to one: the files of
+    :data:`BUILD_IDENTITY` are byte for byte the same in both. False when any cannot be read. A
+    copy an earlier build put in /Applications is not, so no check reports what that copy did as
+    this build's."""
+    if copy.is_symlink():
+        return False
+    try:
+        return all(
+            (copy / name).read_bytes() == (app / name).read_bytes() for name in BUILD_IDENTITY
+        )
+    except OSError:
+        return False
+
+
+def _move_folder(source: Path, target: Path) -> None:
+    """Rename ``source`` to ``target``. A folder made read-only (``chmod -R a-w``) may not move
+    to another folder, which rewrites its ``..``: it gets its owner's write permission for the
+    move, and loses it again after."""
+    try:
+        source.rename(target)
+        return
+    except PermissionError:
+        if source.is_symlink():
+            raise
+    mode = source.stat().st_mode
+    source.chmod(mode | stat.S_IWUSR)
+    try:
+        source.rename(target)
+    finally:
+        (target if target.exists() else source).chmod(mode)
+
+
+def _remove_copy(path: Path) -> None:
+    """Remove a copy of the app (a link to one: only the link), read-only or not."""
+    if path.is_symlink():
+        path.unlink()
+        return
+    make_writable(path)
+    shutil.rmtree(path)
+
+
+def check_install(
+    app: Path, checker: Checker, *, replace: bool = False, restore: bool = False
+) -> None:
+    """Copy the read-only bundle to :func:`installed_app_path`, the one place the app runs from,
+    make the copy read-only in its turn, and hold it to M8 (:func:`check_readonly`). A copy of
+    this build already there is only held to M8 again. Any other copy there is left alone, unless
+    ``replace``: then it is set aside first, at :func:`set_aside_path`. ``restore`` puts back what
+    was there before: it removes the installed copy and puts the one set aside back, or, with none
+    set aside, removes the installed copy only if it is this build. Nothing is ever set aside over
+    a copy set aside before, and no copy of the app may run while one is moved."""
+    target = installed_app_path()
+    aside = set_aside_path()
+    held = target.exists() or target.is_symlink()
+    try:
+        if restore and not (aside.exists() or aside.is_symlink()):
+            if not checker.expect(
+                held and is_this_build(target, app),
+                f"{target} holds this build, which install put there over nothing",
+                "nothing was set aside to put back, and install --restore removes the installed "
+                "copy alone only when it is this build",
+            ):
+                return
+            _stop_earlier_copies(checker, APP_NAME)
+            _remove_copy(target)
+            checker.expect(
+                not (target.exists() or target.is_symlink()), f"this build is removed from {target}"
+            )
+            return
+        if restore:
+            _stop_earlier_copies(checker, APP_NAME)
+            if held:
+                _remove_copy(target)
+            _move_folder(aside, target)
+            checker.expect(
+                target.exists() and not aside.exists(), f"the copy set aside is back at {target}"
+            )
+            return
+        if held and not replace and is_this_build(target, app):
+            print(f"{target} already holds this build: it is held to M8 again")
+            check_readonly(target, checker)
+            return
+        if held:
+            if not checker.expect(
+                replace,
+                f"{target} holds no copy yet, or install is asked to replace it",
+                "it holds one, which install leaves alone: to set it aside and install over it, "
+                "run check_app.py install --replace; install --restore then puts it back",
+            ):
+                return
+            if not checker.expect(
+                not (aside.exists() or aside.is_symlink()),
+                f"nothing that an earlier install --replace set aside is at {aside}",
+                "put that back first: check_app.py install --restore",
+            ):
+                return
+            _stop_earlier_copies(checker, APP_NAME)
+            _move_folder(target, aside)
+            print(
+                f"the copy that was at {target} is set aside at {aside}: "
+                "check_app.py install --restore puts it back"
+            )
+    except OSError as exc:
+        checker.expect(False, f"the copies at {target} and {aside} could be moved", f"{exc}")
+        return
+    done = subprocess.run(
+        ["ditto", str(app), str(target)], capture_output=True, text=True, check=False
+    )
+    if not checker.expect(done.returncode == 0, f"ditto copies the app to {target}", _shown(done)):
+        return
+    done = subprocess.run(
+        ["chmod", "-R", "a-w", str(target)], capture_output=True, text=True, check=False
+    )
+    checker.expect(done.returncode == 0, "the copy is made read-only", _shown(done))
+    check_readonly(target, checker)
+
+
 def check_launch(app: Path, checker: Checker) -> None:
     name = build_app.load_pins().app_name
     _stop_earlier_copies(checker, name)
@@ -2615,6 +2778,43 @@ RESET_BUTTON: Final = "Reset Settings"
 RESET_TITLE: Final = "Settings reset"
 NOTHING_TO_RESET: Final = "Nothing needed resetting"
 UNREADABLE_POLICY: Final = b"this is not toml\n"
+# A copy anywhere but /Applications/<name>.app, as in App/ConnectionText.swift
+# (tests/test_macos_build.py checks that they agree): the title of its note, what the note says of
+# a copy in a folder that is none of the others (the build's), and the steps every such note ends
+# with. Then a copy in /Applications named as the Finder's Keep Both names a second one: its title,
+# and its note's words with the copy at the app's own name there, and with none. Then how long
+# the placement check watches a refusing copy for a host process.
+PLACEMENT_TITLE: Final = f"{APP_NAME} needs to be in your Applications folder"
+PLACEMENT_ELSEWHERE: Final = f"This copy of {APP_NAME} can't run from where it is now."
+MOVING_STEPS: Final = (
+    f"Quit {APP_NAME}, drag it into your Applications folder, then open it from there."
+)
+RENAMED_COPY: Final = f"{APP_NAME} 2"
+RENAMED_TITLE: Final = f"This copy is named {RENAMED_COPY}, so it can't run"
+RENAMED_WITH_ORIGINAL: Final = (
+    f"Quit {APP_NAME}, then move {RENAMED_COPY} to the Trash. Then drag the new {APP_NAME} into "
+    "your Applications folder again, and choose Replace."
+)
+RENAMED_ALONE: Final = (
+    f"Quit {APP_NAME}. In the Finder, rename {RENAMED_COPY} to {APP_NAME}, then open it again."
+)
+REFUSAL_WATCH: Final = 10
+# Lucille asking for a newer release than this one (decisions/0002 §16), as in
+# App/ConnectionText.swift: the minimum the pairing check asks for, which a development build is
+# older than (spec/PROTOCOL.md section 10), a higher one, asked for while the notice is up, and a
+# higher one still, asked for once it is closed; the notice's title for each; where it says to get
+# the update, in words, since there is no Download button; its two buttons, Not Now the default;
+# and the menu's item while a notice is held.
+UPDATE_MIN_VERSION: Final = "999.0.0"
+UPDATE_HIGHER_VERSION: Final = "999.0.1"
+UPDATE_HIGHEST_VERSION: Final = "999.0.2"
+UPDATE_TITLE: Final = f"Lucille needs {APP_NAME} {UPDATE_MIN_VERSION} or newer"
+UPDATE_HIGHER_TITLE: Final = f"Lucille needs {APP_NAME} {UPDATE_HIGHER_VERSION} or newer"
+UPDATE_HIGHEST_TITLE: Final = f"Lucille needs {APP_NAME} {UPDATE_HIGHEST_VERSION} or newer"
+UPDATE_WHERE: Final = f"Get the newer {APP_NAME} from where you got this one."
+PREPARE_TO_UPDATE: Final = "Prepare to Update"
+NOT_NOW: Final = "Not Now"
+PREPARE_TO_UPDATE_ITEM: Final = "Prepare to Update…"
 # The line the app writes on standard error when ``run`` exits after a drain its standard input's
 # end began (``RunSupervisor.describe``), and the start of the one for a ``run`` a signal ended.
 DRAINED_LINE: Final = "run exited 0 (drained, stdin_end)"
@@ -3834,6 +4034,181 @@ def check_ui(app: Path, checker: Checker, work: Path, require_driven: bool = Fal
             print(f"the app's {log.stem.removeprefix('app-')}: {text[-5000:]!r}")
 
 
+def _folder_state(folder: Path) -> tuple[bool, dict[str, tuple[int, int, int]]]:
+    """Whether ``folder`` is there, and :func:`file_listing` of it."""
+    return folder.exists(), file_listing(folder)
+
+
+def _profile_processes_seen(seconds: float, *, first: bool) -> set[int]:
+    """The host's processes on the app's profile seen in ``seconds``, asked every tenth of a
+    second: a short verb may end within one. With ``first``, only until one is seen."""
+    seen: set[int] = set()
+    deadline = time.monotonic() + seconds
+    while True:
+        seen.update(_profile_processes())
+        if (first and seen) or time.monotonic() >= deadline:
+            return seen
+        time.sleep(0.1)
+
+
+def _stop_the_app(checker: Checker, what: str) -> None:
+    """Stop the running copy of the app with SIGTERM, if one runs, and wait for the host's
+    processes on its profile to end."""
+    if _running(APP_NAME):
+        subprocess.run(["pkill", "-TERM", "-x", APP_NAME], check=False)
+        checker.expect(_wait_until(lambda: not _running(APP_NAME), 15), f"{what} stops on SIGTERM")
+    checker.expect(
+        _wait_until(lambda: not _profile_processes(), 30),
+        "no host process of the app's profile runs",
+        f"{_profile_processes()}",
+    )
+
+
+def _placement_control(checker: Checker, screens: Path, require_driven: bool) -> bool:
+    """The control: the copy at :func:`installed_app_path`, opened, starts the host on the app's
+    profile, which :func:`_profile_processes` sees, and says where its menu is, not where it
+    should be. Without it, seeing no host process later would prove nothing. Whether System
+    Events can drive the app here; with ``require_driven``, not being able to is a failure."""
+    installed = installed_app_path()
+    _stop_earlier_copies(checker, APP_NAME)
+    checker.expect(
+        _wait_until(lambda: not _profile_processes(), 30),
+        "no host process of the app's profile runs before the control",
+        f"{_profile_processes()}",
+    )
+    before = _folder_state(_profile_folder())
+    done = subprocess.run(["open", str(installed)], capture_output=True, text=True, check=False)
+    checker.expect(
+        done.returncode == 0 and _wait_until(lambda: bool(_running(APP_NAME)), 15),
+        f"the control: open starts the copy at {installed}",
+        _shown(done),
+    )
+    seen = _profile_processes_seen(30, first=True)
+    checker.expect(
+        bool(seen),
+        "the control: it starts the host on the app's profile, and the check sees it",
+        "no host process of the app's profile was seen in 30 s",
+    )
+    time.sleep(3)
+    driven = _can_drive()
+    if driven:
+        welcomed = _wait_until(lambda: _says(WELCOME_TITLE), 20)
+        _screenshot(screens / "0-placement-control.png")
+        checker.expect(
+            welcomed and not _says(PLACEMENT_TITLE),
+            f"it says {WELCOME_TITLE!r}, and not {PLACEMENT_TITLE!r}",
+            f"{_texts()}",
+        )
+    elif require_driven:
+        checker.expect(False, "System Events drove the app, as --require-driven asks")
+    _stop_the_app(checker, "the copy in Applications")
+    changed = _folder_state(_profile_folder()) != before
+    print(f"the copy in Applications changed the app's profile folder: {changed}")
+    return driven
+
+
+def _refusing_copy(
+    copy: Path, checker: Checker, screens: Path, label: str, words: tuple[str, str], driven: bool
+) -> None:
+    """Open ``copy``, which is not the copy at /Applications/<name>.app, with no other copy of
+    the app running. For :data:`REFUSAL_WATCH` seconds it starts no host process on the app's
+    profile and changes nothing in the profile's folder; it says ``words``, a title and a sentence
+    of its note, which offers only Quit; and Quit quits it. Screenshots ``0-placement-*``."""
+    _stop_the_app(checker, "a copy of the app")
+    folder = _profile_folder()
+    before = _folder_state(folder)
+    done = subprocess.run(["open", str(copy)], capture_output=True, text=True, check=False)
+    if not checker.expect(
+        done.returncode == 0 and _wait_until(lambda: bool(_running(APP_NAME)), 15),
+        f"open starts {copy}",
+        _shown(done),
+    ):
+        return
+    seen = _profile_processes_seen(REFUSAL_WATCH, first=False)
+    checker.expect(
+        not seen and bool(_running(APP_NAME)),
+        f"for {REFUSAL_WATCH} s it runs, and starts no host process of the app's profile",
+        f"seen: {sorted(seen)}; still running: {_running(APP_NAME)}; now: {_profile_processes()}",
+    )
+    checker.expect(
+        _folder_state(folder) == before,
+        f"nothing in {folder} changed",
+        "\n".join(listing_changes(before[1], _folder_state(folder)[1])[:50]),
+    )
+    title, sentence = words
+    if driven:
+        shown = _wait_until(lambda: _says(title), 20)
+        _screenshot(screens / f"0-placement-{label}.png")
+        checker.expect(
+            shown and _says(sentence), f"it says {title!r}, and {sentence!r}", f"{_texts()}"
+        )
+        worked, buttons = _window_list("name of every button")
+        checker.expect(
+            worked and buttons == [QUIT_BUTTON],
+            f"its note offers only {QUIT_BUTTON!r}",
+            f"{buttons}",
+        )
+        worked, said = _press(QUIT_BUTTON)
+        checker.expect(
+            worked and _wait_until(lambda: not _running(APP_NAME), 15),
+            f"{QUIT_BUTTON} quits it",
+            said,
+        )
+    else:
+        _screenshot(screens / f"0-placement-{label}.png")
+        print(f"note: System Events cannot read the app's note here, so {title!r} was not read")
+    _stop_the_app(checker, "it")
+
+
+def check_placement(app: Path, checker: Checker, work: Path, require_driven: bool = False) -> None:
+    """Only the copy at /Applications/<name>.app starts anything (decisions/0002 §13). First the
+    control: that copy, opened, starts the host (:func:`_placement_control`). Then, one at a time
+    with no other copy running, ``app`` (the build's copy, in a folder of its own), and a copy in
+    /Applications named as the Finder's Keep Both names a second one, with the copy at the app's
+    own name there and then set aside: each says why it can't run, offers only Quit, starts no
+    host process and changes nothing in the app's profile (:func:`_refusing_copy`). Whatever
+    happens, the copy set aside goes back and the renamed one is removed. Screenshots go to
+    ``<out>/check/screens``."""
+    screens = work / "screens"
+    screens.mkdir(parents=True, exist_ok=True)
+    installed = installed_app_path()
+    if not checker.expect(
+        installed.is_dir(), f"{installed} is there", "check_app.py install puts it there"
+    ):
+        return
+    driven = _placement_control(checker, screens, require_driven)
+    words = (PLACEMENT_TITLE, PLACEMENT_ELSEWHERE)
+    _refusing_copy(app, checker, screens, "elsewhere", words, driven)
+    renamed = installed.with_name(f"{RENAMED_COPY}.app")
+    # Beside the installed copy, so that it moves within /Applications, and not ending in .app, so
+    # that macOS does not take it for an app.
+    aside = installed.with_name(f".{installed.name}.set-aside-by-placement")
+    if not checker.expect(
+        not renamed.exists() and not aside.exists(), f"neither {renamed} nor {aside} is there yet"
+    ):
+        return
+    try:
+        done = subprocess.run(
+            ["ditto", str(app), str(renamed)], capture_output=True, text=True, check=False
+        )
+        if checker.expect(done.returncode == 0, f"ditto copies the app to {renamed}", _shown(done)):
+            words = (RENAMED_TITLE, RENAMED_WITH_ORIGINAL)
+            _refusing_copy(renamed, checker, screens, "renamed", words, driven)
+            _stop_the_app(checker, "a copy of the app")
+            _move_folder(installed, aside)
+            words = (RENAMED_TITLE, RENAMED_ALONE)
+            _refusing_copy(renamed, checker, screens, "renamed-alone", words, driven)
+    finally:
+        _stop_the_app(checker, "a copy of the app")
+        if aside.exists() and not installed.exists():
+            _move_folder(aside, installed)
+        checker.expect(installed.is_dir() and not aside.exists(), f"{installed} is back")
+        if renamed.exists():
+            make_writable(renamed)
+            shutil.rmtree(renamed)
+        checker.expect(not renamed.exists(), f"{renamed} is removed")
+
+
 # The pairing check's work room, the folder alias it adds, the file it asks the fingerprint of,
 # and how long the requests run during which it quits: the first long enough for the finishing
 # panel to be read before ``run`` drains, the second long enough that only Stop now ends it.
@@ -4573,6 +4948,118 @@ class _PairingCheck:
         _press(QUIT_BUTTON)
         self.need(_wait_until(lambda: not _alive(app), 120), "the app quits once run has drained")
 
+    def too_old_then_prepare(self) -> None:
+        """Lucille asks for a newer release than this one (a development build is older than
+        every minimum, spec/PROTOCOL.md section 10): the host refuses the request host_too_old,
+        and the app says so in one notice, which says in words where to get the update and offers
+        only Not Now and Prepare to Update. A second request, asking for a higher one while the
+        notice is up, brings no second notice. Not Now closes it, and a third request, asking for
+        a higher one still, does not bring it back: the user is told once. The menu then holds
+        its line, with the highest version, which opens the notice again, drawn with that
+        version, and Prepare to Update…, which asks no Quit question, lets run drain, and quits.
+        Stop now's step opens the app again."""
+        self.launch("too-old")
+        run = _value_within(self.run_pid, 60)
+        self.need(run is not None, "opened again, the app starts run")
+        self.need(_wait_until(self.reading, 90), "run reads the room again")
+        app = self.app_pid()
+        sent = self.h.body(min_host_version=UPDATE_MIN_VERSION)
+        self.lucille.request(PAIRING_ROOM, sent)
+        answer = self.answer(sent["job_id"], 90)
+        self.checker.expect(
+            (answer.get("status"), answer.get("code")) == ("refused", "host_too_old"),
+            f"a request that needs {UPDATE_MIN_VERSION} or newer is refused host_too_old",
+            f"{answer}",
+        )
+        noted = _wait_until(lambda: _says(UPDATE_TITLE), 30)
+        _screenshot(self.screens / "p07f-update-notice.png")
+        self.need(noted, f"the app says {UPDATE_TITLE!r}", f"{_texts()}")
+        self.checker.expect(
+            _says(UPDATE_WHERE), f"it says where to get the update: {UPDATE_WHERE!r}", f"{_texts()}"
+        )
+        worked, buttons = _window_list("name of every button")
+        self.checker.expect(
+            worked and sorted(buttons) == sorted([NOT_NOW, PREPARE_TO_UPDATE]),
+            f"it offers {NOT_NOW!r} and {PREPARE_TO_UPDATE!r}, and nothing else",
+            f"{buttons}",
+        )
+        higher = self.h.body(min_host_version=UPDATE_HIGHER_VERSION)
+        self.lucille.request(PAIRING_ROOM, higher)
+        answer = self.answer(higher["job_id"], 90)
+        self.checker.expect(
+            (answer.get("status"), answer.get("code")) == ("refused", "host_too_old"),
+            f"so is one that needs {UPDATE_HIGHER_VERSION}, sent while the notice is up",
+            f"{answer}",
+        )
+        time.sleep(3)
+        self.checker.expect(
+            _says(UPDATE_TITLE) and not _says(UPDATE_HIGHER_TITLE),
+            "it brings no second notice",
+            f"{_texts()}",
+        )
+        worked, said = _press(NOT_NOW)
+        closed = worked and _wait_until(lambda: not _says(UPDATE_TITLE), 10)
+        self.checker.expect(closed, f"{NOT_NOW} closes the notice", said)
+        self.checker.expect(
+            not _wait_until(lambda: _says(UPDATE_HIGHER_TITLE), 5),
+            "and no other notice follows it",
+            f"{_texts()}",
+        )
+        highest = self.h.body(min_host_version=UPDATE_HIGHEST_VERSION)
+        self.lucille.request(PAIRING_ROOM, highest)
+        answer = self.answer(highest["job_id"], 90)
+        self.checker.expect(
+            (answer.get("status"), answer.get("code")) == ("refused", "host_too_old"),
+            f"so is one that needs {UPDATE_HIGHEST_VERSION}, sent once the notice is closed",
+            f"{answer}",
+        )
+        self.checker.expect(
+            not _wait_until(lambda: _says(UPDATE_HIGHEST_TITLE) or _says(UPDATE_TITLE), 5),
+            "it does not bring the notice back: the user is told once",
+            f"{_texts()}",
+        )
+        found, shown = _menu_until(
+            lambda items: UPDATE_HIGHEST_TITLE in items and PREPARE_TO_UPDATE_ITEM in items, 30
+        )
+        _menu_shot(self.screens / "p07g-update-menu.png")
+        self.need(
+            found,
+            f"the menu then holds {UPDATE_HIGHEST_TITLE!r} and {PREPARE_TO_UPDATE_ITEM!r}",
+            f"{shown}",
+        )
+        worked, said = _choose(UPDATE_HIGHEST_TITLE)
+        again = worked and _wait_until(lambda: _says(UPDATE_HIGHEST_TITLE), 15)
+        self.checker.expect(
+            again,
+            "that line shows the notice again, with the highest version",
+            f"{said} {_texts()}",
+        )
+        _press(NOT_NOW)
+        _wait_until(lambda: not _says(UPDATE_HIGHEST_TITLE), 10)
+        worked, said = _choose(PREPARE_TO_UPDATE_ITEM.removesuffix("…"))
+        self.need(worked, f"{PREPARE_TO_UPDATE_ITEM!r} can be chosen", said)
+        asked = _wait_until(lambda: _says(QUIT_QUESTION), 5)
+        _screenshot(self.screens / "p07h-prepare-to-update.png")
+        self.checker.expect(
+            not asked, f"{PREPARE_TO_UPDATE_ITEM} asks no {QUIT_QUESTION!r}", f"{_texts()}"
+        )
+        self.need(
+            _wait_until(lambda: not _alive(app), 120),
+            "the app quits once run has drained",
+        )
+        self.checker.expect(not _alive(run), "run has exited")
+        self.checker.expect(
+            DRAINED_LINE in self.stderr_now(),
+            f"run drained first: the app says on standard error {DRAINED_LINE!r}",
+            self.stderr_now()[-2000:],
+        )
+        status = self.status()
+        self.checker.expect(
+            status.get("run", {}).get("state") == "stopped" and status.get("paused") is False,
+            "status says run stopped, and nothing paused the host",
+            f"{status.get('run')}, paused {status.get('paused')}",
+        )
+
     def stop_now(self) -> None:
         """Quit while a request runs that would outlast the check, then Stop now: ``kill``
         stops the request, Lucille is told, and the host is paused."""
@@ -4720,6 +5207,7 @@ class _PairingCheck:
             ("the app opened again", self.relaunch),
             ("Quit from the note about the menu bar, while a request runs", self.quit_and_drain),
             ("Stop What's Running, while a request runs", self.stop_whats_running),
+            ("Lucille asks for a newer release, then Prepare to Update", self.too_old_then_prepare),
             ("Quit, then Stop now", self.stop_now),
             ("paused at launch", self.paused_at_launch),
             ("Disconnect", self.disconnect),
@@ -4741,8 +5229,9 @@ class _PairingCheck:
 def check_pairing(app: Path, checker: Checker, work: Path, require_driven: bool = False) -> None:
     """Pair the app's profile through the command line with a hub of the check's own and a fake
     Lucille, then drive the app: confirm, ``run`` and its supervision, Activity, Quit, Stop What's
-    Running, Stop now and Disconnect (:class:`_PairingCheck`). It uses the real HOME, where the app
-    keeps its profile, and puts that profile back as it found it. Screenshots go to
+    Running, the update notice and Prepare to Update, Stop now and Disconnect
+    (:class:`_PairingCheck`). ``app`` is the copy in /Applications. It uses the real HOME, where
+    the app keeps its profile, and puts that profile back as it found it. Screenshots go to
     ``<out>/check/screens``."""
     # Imported here, not at the top: every other check runs where neither Switchboard nor the test
     # harness is installed (``uv run --no-project``), and tests/test_macos_build.py imports this
@@ -4927,6 +5416,8 @@ CHECKS: Final = (
     "links",
     "signature",
     "library-snapshot",
+    "install",
+    "placement",
     "launch",
     "ui",
     "library-diff",
@@ -4944,6 +5435,10 @@ CHECKS: Final = (
 # The checks that run with no app at ``<out>``: the disk image's, those that put the app there,
 # and the first ~/Library snapshot.
 NEEDS_NO_APP: Final = frozenset({"dmg", "unpack-dmg", "handoff-check", "library-snapshot"})
+# The checks that open the copy ``install`` put in /Applications, the only one that starts
+# anything (decisions/0002 §13), and refuse to run unless it is a copy of this build: one an
+# earlier build left there would answer for this one.
+OPENS_INSTALLED: Final = frozenset({"launch", "ui", "pairing", "placement"})
 # The options each check cannot run without, by their argparse names.
 REQUIRED: Final = {
     "selftest": ("to",),
@@ -4965,7 +5460,19 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--require-driven",
         action="store_true",
-        help="ui, pairing: fail if System Events cannot drive the app (macos-app passes this)",
+        help="ui, placement, pairing: fail if System Events cannot drive the app (macos-app "
+        "passes this)",
+    )
+    copies = parser.add_mutually_exclusive_group()
+    copies.add_argument(
+        "--replace",
+        action="store_true",
+        help="install: set aside a copy already in /Applications, and install over it",
+    )
+    copies.add_argument(
+        "--restore",
+        action="store_true",
+        help="install: remove the installed copy, and put back the one --replace set aside",
     )
     parser.add_argument(
         "--selftest", type=Path, help="swift, relocate: run this compiled self-test"
@@ -5030,12 +5537,23 @@ def _run_check(args: argparse.Namespace, out: Path, checker: Checker) -> None:
         check_links(app, checker)
     elif check == "signature":
         check_signature(app, checker)
+        installed = installed_app_path()
+        if installed.is_dir() and is_this_build(installed, app):
+            check_signature(installed, checker)
+        elif installed.is_dir():
+            print(f"{installed} is another build, which no check opens: its signature is not read")
+        else:
+            print(f"no copy at {installed} yet to check: check_app.py install puts one there")
     elif check == "library-snapshot":
         check_library_snapshot(args.to.resolve(), checker)
+    elif check == "install":
+        check_install(app, checker, replace=args.replace, restore=args.restore)
+    elif check == "placement":
+        check_placement(app, checker, work, args.require_driven)
     elif check == "launch":
-        check_launch(app, checker)
+        check_launch(installed_app_path(), checker)
     elif check == "ui":
-        check_ui(app, checker, work, args.require_driven)
+        check_ui(installed_app_path(), checker, work, args.require_driven)
     elif check == "library-diff":
         check_library_diff(app, args.before.resolve(), args.control_run, checker)
     elif check == "gatekeeper":
@@ -5047,7 +5565,7 @@ def _run_check(args: argparse.Namespace, out: Path, checker: Checker) -> None:
     elif check == "suite":
         check_suite(app, out, args.copy_to.resolve(), checker)
     elif check == "pairing":
-        check_pairing(app, checker, work, args.require_driven)
+        check_pairing(installed_app_path(), checker, work, args.require_driven)
     elif check == "probe":
         check_probe(app)
     elif check == "selftest":
@@ -5086,6 +5604,16 @@ def main(argv: Sequence[str] | None = None) -> int:
     app = app_path(out)
     checker = Checker()
     if args.check not in NEEDS_NO_APP and not checker.expect(app.is_dir(), f"{app} exists"):
+        return 1
+    installed = installed_app_path()
+    if args.check in OPENS_INSTALLED and not checker.expect(
+        installed.is_dir() and is_this_build(installed, app),
+        f"{installed} is a copy of this build",
+        "check_app.py install puts one there"
+        if not installed.is_dir()
+        else "it is another build or copy: check_app.py install --replace sets it aside and "
+        "installs this one, and install --restore later puts it back",
+    ):
         return 1
     try:
         _run_check(args, out, checker)
