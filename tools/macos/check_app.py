@@ -5,18 +5,28 @@
 Each check prints what it saw and exits 1 if anything is wrong (2 on a usage error, and off a
 Mac). The app is ``<out>/<name>.app``; every check but ``dmg``, ``unpack-dmg``, ``handoff-check``
 and ``library-snapshot`` refuses to run without it. The interpreter always runs as the app runs
-it, ``lucille-host-runtime -I -B -X utf8`` (:data:`build_app.RUNTIME_FLAGS`).
+it, ``lucille-host-runtime -I -B -X utf8`` (:data:`build_app.RUNTIME_FLAGS`), except the bytecode
+program, which adds ``-S`` and ``-W ignore`` (:data:`build_app.BYTECODE_FLAGS`).
 
 The bundle as built:
 
-- ``bundle``: no symbolic link and no bytecode in the bundle; its Mach-O files are exactly the
-  expected five (:data:`RUNTIME_MACHO` and the app's executable); the app and every one of them
-  is signed ad hoc by this build, not merely by the linker, with no Team ID and the identifier
+- ``bundle``: no symbolic link in the bundle; its Mach-O files are exactly the expected five
+  (:data:`RUNTIME_MACHO` and the app's executable); the app and every one of them is signed ad
+  hoc by this build, not merely by the linker, with no Team ID and the identifier
   ``build_app.signing_identifier`` gave it (:func:`codesign_problems`).
+- ``bytecode``: the bundle holds one checked-hash ``.pyc`` beside each ``.py`` of the runtime's
+  library, and no other bytecode (``build_app.bytecode_layout_problems``); the bundled interpreter,
+  running the build's own program, finds each one byte for byte what it compiles from its ``.py``
+  now, with its magic number and its source's hash in the header, and that run ends as the program
+  ends (``build_app.bytecode_check_problems``); and ``--version``, run as the app runs it with
+  ``-v``, loads each of its modules in the bundle from its ``.pyc`` and compiles none from source
+  (:func:`loaded_from`). It writes nothing beside the app, so a person can also run it on a copy
+  they downloaded, on the mounted disk image (not yet tried on a Mac).
 - ``record`` (M10): each wheel MANIFEST.json names, the host's among them, is found again and
   hashed; the installed distributions are exactly those; and every file in ``site-packages`` is
   byte for byte a file of its wheel's ``RECORD`` (``payload.record_problems``, the build's own
-  check), apart from the Mach-O files, which codesign rewrites in place: those are compared after
+  check), apart from the ``.pyc`` files the build writes, which ``bytecode`` checks, and the
+  Mach-O files, which codesign rewrites in place: those are compared after
   ``codesign --remove-signature`` on both copies, and that comparison is reported, not failed.
   A copy codesign could not strip is named, not compared.
 - ``version`` (M11, with ``--tag`` or ``--build-number``): Info.plist's two version strings are
@@ -37,8 +47,11 @@ The bundle as built:
 - ``wrapper``: on a writable copy of the app, the Terminal wrapper ``Resources/bin/lucille-host``
   runs the host through a link to it from another folder (and never a runtime beside the link),
   on the app's profile, not on ``default``; neither it nor the interpreter run with the app's
-  flags writes any bytecode; then, as the control, the same run without ``-B`` does write some,
-  so the check can see it.
+  flags writes anything into the copy (:func:`file_listing` before and after). Every ``.pyc`` the
+  build wrote is valid, so a run without ``-B`` would write none of them again: the copy's
+  ``.pyc`` of ``lucille_host/__init__.py`` is removed first, so that each run compiles that module
+  from source. Then, as the control, the same run without ``-B`` writes a ``.pyc`` there again,
+  so the check can see a write.
 
 On the bundle made read-only (CI runs ``chmod -R a-w`` first):
 
@@ -53,12 +66,15 @@ On the bundle made read-only (CI runs ``chmod -R a-w`` first):
   ``-I`` must load what was planted (otherwise the check proves nothing), and the same run with
   the app's flags must load nothing. PYTHONSTARTUP is read only by an interactive interpreter, so
   no run the app makes (``-m lucille_host``) could load it even without ``-I``; its control runs
-  ``-i``. Then ``--version``, ``status`` and the native probe run with every one of those set,
-  from the planted folder, and load nothing. And no ``.pth`` file in ``site-packages`` is missing
-  from the installed ``RECORD`` files (``record`` compares those with the wheels' own).
+  ``-i``. With PYTHONPYCACHEPREFIX set, which would make the importer read ``.pyc`` files from
+  another tree, the interpreter names the prefix without ``-I`` and none with the app's flags. Then
+  ``--version``, ``status`` and the native probe run with every one of those set, from the planted
+  folder, and load nothing; the probe asserts there is no pycache prefix. And no ``.pth`` file in
+  ``site-packages`` is missing from the installed ``RECORD`` files (``record`` compares those with
+  the wheels' own).
 - ``readonly`` (M8): the bundle cannot be written; ``--version``, ``status`` and ``status
-  --json`` work from it, and the wrapper too; no file in the bundle changed and no bytecode
-  appeared; then ``codesign --verify --strict``, and ``--deep``, still pass.
+  --json`` work from it, and the wrapper too; no file in the bundle changed, and no ``.pyc``
+  appeared or went; then ``codesign --verify --strict``, and ``--deep``, still pass.
 - ``swift``: compiles the app's Swift files that do not draw anything with a test driver
   (``macos/Tests/SelfTest.swift``), or takes the one ``--selftest`` names, and runs it against
   the app. It makes the calls the menu makes, through the same code; reads the host's golden
@@ -96,9 +112,9 @@ On the bundle made read-only (CI runs ``chmod -R a-w`` first):
   walk saw the host's writes at all; ``--control-run`` makes those writes itself (``pause``, then
   ``resume``, on the app's profile), for a job where ``ui`` may not have driven the app. A write
   to a path with an unrelated name is not caught. The snapshots are never uploaded.
-- ``startup``: the median and fastest of ten runs of ``--version`` and ``status --json`` with no
-  ``.pyc`` (as shipped), then on a writable copy with ``checked-hash`` files for the standard
-  library, then for everything (decisions/0002 §6). It prints a table.
+- ``startup``: the median and fastest of ten runs of ``--version`` and ``status --json`` from the
+  bundle as shipped, with its checked-hash ``.pyc`` files, then from a writable copy with every
+  ``.pyc`` removed (decisions/0002 §6). It prints a table, and gates nothing but that both run.
 - ``suite --copy-to DIR``: the host's whole test suite on a copy of the app's runtime: the dev
   and conformance dependencies are installed into the copy only, by hash; the host's wheel and
   agent-switchboard are installed again, by MANIFEST.json's sha256, so that their console
@@ -299,9 +315,13 @@ ADDING_BUTTONS: Final = ("Add", "Allow")
 # pause flag, Keychain item and run lock, apart from a command-line host's ``default``. The ui and
 # pairing checks read and change the host's state on this profile, as the app does.
 APP_PROFILE: Final = build_app.APP_PROFILE
-# Loads the native code of the runtime dependencies, the way the host will.
+# Loads the native code of the runtime dependencies, the way the host will; and checks that the
+# app's flags leave --check-hash-based-pycs at default, so that the interpreter checks the source
+# hash in each checked-hash .pyc's header against its .py when it imports it, and leave no pycache
+# prefix, so that it reads .pyc files only beside their sources (0002 §6).
 NATIVE_PROBE: Final = """\
 import sys
+import _imp
 import _cffi_backend
 import keyring.backends.macOS
 import lucille_host._switchboard
@@ -310,6 +330,8 @@ X25519PrivateKey.generate().public_key()
 assert sys.flags.isolated == 1, sys.flags
 assert sys.flags.dont_write_bytecode == 1, sys.flags
 assert sys.flags.utf8_mode == 1, sys.flags
+assert _imp.check_hash_based_pycs == "default", _imp.check_hash_based_pycs
+assert sys.pycache_prefix is None, sys.pycache_prefix
 print("native code loaded from", sys.prefix)
 """
 # The runs of the host that the environment check makes with every variable it plants set, as
@@ -910,10 +932,6 @@ def check_bundle(app: Path, checker: Checker) -> None:
     pins = build_app.load_pins()
     links = build_app.symlinks_in(app)
     checker.expect(not links, "no symbolic link in the bundle", "\n".join(map(str, links)))
-    bytecode = build_app.bytecode_in(app)
-    checker.expect(
-        not bytecode, "no .pyc and no __pycache__ in the bundle", "\n".join(map(str, bytecode))
-    )
     found = [path.relative_to(app).as_posix() for path in build_app.macho_files(app)]
     problems = macho_set_problems(found, pins)
     checker.expect(
@@ -931,6 +949,68 @@ def check_bundle(app: Path, checker: Checker) -> None:
             "with no Team ID",
             "\n".join([*problems, _shown(done)]),
         )
+
+
+# The lines ``python -v`` writes when the importer has a module's code: from a ``.pyc``, whose
+# path it quotes (``repr``), or compiled from source, whose path it does not (importlib's
+# ``SourceLoader.get_code``).
+_CODE_FROM: Final = "# code object from "
+
+
+def loaded_from(text: str, root: Path) -> tuple[list[str], list[str]]:
+    """``(from .pyc, from source)``: the paths under ``root`` that ``python -v`` output ``text``
+    says each module's code came from, in order, as it printed them."""
+    from_pyc: list[str] = []
+    from_source: list[str] = []
+    for line in text.splitlines():
+        if not line.startswith(_CODE_FROM):
+            continue
+        path = line.removeprefix(_CODE_FROM)
+        quoted = len(path) > 1 and path[0] in "'\"" and path[-1] == path[0]
+        if quoted:
+            path = path[1:-1]
+        if Path(path).is_relative_to(root):
+            (from_pyc if quoted else from_source).append(path)
+    return from_pyc, from_source
+
+
+def check_bytecode(app: Path, checker: Checker) -> None:
+    """The bundle's ``.pyc`` files: where the build writes them, and checked-hash; byte for byte
+    what the bundled interpreter compiles from each ``.py``; and read in place of the sources when
+    the host runs as the app runs it. It writes nothing beside the app."""
+    runtime = app / build_app.RUNTIME_DIR
+    library = runtime / build_app.STDLIB
+    tag = build_app.BYTECODE_TAG
+    sources = [path for path in library.rglob("*.py") if path.parent.name != "__pycache__"]
+    layout = build_app.bytecode_layout_problems(app, tag)
+    checker.expect(
+        bool(sources) and not layout,
+        f"one checked-hash {tag} .pyc beside each of the {len(sources)} .py files of the "
+        "runtime's library, and no other bytecode in the bundle",
+        "\n".join(layout[:100]),
+    )
+    done = build_app.run_bytecode_program(runtime, "check")
+    lines = done.stdout.splitlines()
+    print(lines[-1] if lines else _shown(done), flush=True)
+    found = build_app.bytecode_check_problems(done, tag)
+    checker.expect(
+        not found,
+        "each .pyc has the bundled interpreter's magic number and its .py's source hash, and is "
+        "byte for byte what the bundled interpreter compiles from that .py",
+        "\n".join([*found[:100], *done.stderr.strip().splitlines()[-20:]]),
+    )
+    # The effect: -B stops writes, not reads, so the host as the app runs it loads its modules
+    # from these files. -v says where each module's code came from.
+    argv = [str(python_in(app)), "-v", *build_app.RUNTIME_FLAGS, "-m", "lucille_host", "--version"]
+    with tempfile.TemporaryDirectory(prefix="lucille-host-bytecode-") as tmp:
+        done = _run_in(argv, Path(tmp))
+    from_pyc, from_source = loaded_from(done.stderr, runtime)
+    checker.expect(
+        done.returncode == 0 and bool(from_pyc) and not from_source,
+        f"--version, run as the app runs it, loads {len(from_pyc)} of the bundle's modules from "
+        "their .pyc, and compiles none from source",
+        "\n".join(from_source[:50]) or f"exit {done.returncode}\n{done.stderr[-4000:]}",
+    )
 
 
 def check_signature(app: Path, checker: Checker) -> None:
@@ -1005,7 +1085,7 @@ def _run_in(
 
 
 def check_wrapper(app: Path, checker: Checker) -> None:
-    """The wrapper and the app's flags write no bytecode, on a copy that could take it."""
+    """The wrapper and the app's flags write nothing into a writable copy of the app."""
     version = build_app.host_version()
     with tempfile.TemporaryDirectory(prefix="lucille-host-wrapper-") as tmp:
         root = Path(tmp)
@@ -1016,7 +1096,13 @@ def check_wrapper(app: Path, checker: Checker) -> None:
             make_writable(copy)
             home = root / "home"
             home.mkdir()
-            checker.expect(not build_app.bytecode_in(copy), "the writable copy holds no bytecode")
+            # Every .pyc the build wrote is valid, so the interpreter would write none of them
+            # again, with -B or without it. One is removed first, so that each run below imports
+            # that module from source, and would write a .pyc there if it ran without -B.
+            package = copy / build_app.RUNTIME_DIR / build_app.SITE_PACKAGES / "lucille_host"
+            pyc = package / "__pycache__" / f"__init__.{build_app.BYTECODE_TAG}.pyc"
+            pyc.unlink(missing_ok=True)
+            before = file_listing(copy)
             # A link to the wrapper from a folder that could be on PATH, with a runtime beside
             # the link that must never run: the wrapper finds the bundle from its own real path.
             link = root / "bin" / "lucille-host"
@@ -1057,14 +1143,17 @@ def check_wrapper(app: Path, checker: Checker) -> None:
                 "the interpreter runs the host with the app's flags",
                 _shown(done),
             )
-            written = build_app.bytecode_in(copy)
+            changed = listing_changes(before, file_listing(copy))
             checker.expect(
-                not written,
-                "with -B, none of those runs wrote bytecode into the writable copy",
-                "\n".join(str(path.relative_to(copy)) for path in written[:50]),
+                not changed,
+                "with -B, none of those runs changed anything in the writable copy, though each "
+                "imported lucille_host from source",
+                "\n".join(changed[:50]),
             )
-            # The control: the same run without -B writes bytecode, so the check above could
-            # have seen it.
+            # The control: the same run without -B writes a .pyc there, so the check above could
+            # have seen a write.
+            pyc.unlink(missing_ok=True)
+            before = file_listing(copy)
             argv = [
                 str(copy / build_app.RUNTIME_IN_APP),
                 "-I",
@@ -1075,10 +1164,11 @@ def check_wrapper(app: Path, checker: Checker) -> None:
                 "--version",
             ]
             done = _run_in(argv, home)
+            changed = listing_changes(before, file_listing(copy))
             checker.expect(
-                done.returncode == 0 and bool(build_app.bytecode_in(copy)),
-                "without -B the same run writes bytecode into the copy, so the check above sees it",
-                _shown(done),
+                done.returncode == 0 and bool(changed),
+                "without -B the same run writes into the copy, so the check above sees a write",
+                "\n".join([*changed[:50], _shown(done)]),
             )
         finally:
             make_writable(root)
@@ -1099,6 +1189,14 @@ def file_listing(root: Path) -> dict[str, tuple[int, int, int]]:
     return found
 
 
+def listing_changes(
+    before: Mapping[str, tuple[int, int, int]], after: Mapping[str, tuple[int, int, int]]
+) -> list[str]:
+    """The paths of two :func:`file_listing` results that differ, or that are in one only,
+    sorted."""
+    return sorted(rel for rel in set(before) | set(after) if before.get(rel) != after.get(rel))
+
+
 def _json_lines(text: str) -> list[Any]:
     try:
         return [json.loads(line) for line in text.splitlines() if line.strip()]
@@ -1109,7 +1207,7 @@ def _json_lines(text: str) -> list[Any]:
 def check_readonly(app: Path, checker: Checker) -> None:
     """M8: the bundle cannot be written, the host runs from it, and nothing in it changes."""
     before = file_listing(app)
-    checker.expect(not build_app.bytecode_in(app), "the bundle holds no bytecode before the runs")
+    held = build_app.bytecode_in(app)
     for folder in (
         app / "Contents" / "Resources",
         app / build_app.RUNTIME_DIR / build_app.SITE_PACKAGES,
@@ -1156,12 +1254,13 @@ def check_readonly(app: Path, checker: Checker) -> None:
             "so does the wrapper",
             _shown(done),
         )
-    after = file_listing(app)
-    changed = sorted(rel for rel in set(before) | set(after) if before.get(rel) != after.get(rel))
+    changed = listing_changes(before, file_listing(app))
     checker.expect(
         not changed, "nothing in the bundle changed during the runs", "\n".join(changed[:50])
     )
-    checker.expect(not build_app.bytecode_in(app), "no bytecode appeared in the bundle")
+    checker.expect(
+        build_app.bytecode_in(app) == held, "no .pyc appeared in the bundle or went from it"
+    )
     _verify_strict(app, checker)
 
 
@@ -1338,8 +1437,10 @@ def environment_check(
     """M6 with ``python``, whose standard library is ``stdlib``, planting under ``scratch``. For
     each vector: without ``-I`` (with ``-B``, so nothing is written into the runtime) its control
     must load what was planted, and with the app's flags the same run must load nothing. Then
-    each of ``host_runs`` runs with the app's flags, every vector's variables set and from the
-    planted working folder, and must exit 0 and load nothing."""
+    PYTHONPYCACHEPREFIX, which would make the importer read ``.pyc`` files from another tree:
+    without ``-I`` the interpreter must say it is in force, and with the app's flags that it is
+    not. Last, each of ``host_runs`` runs with the app's flags, every one of those variables set
+    and from the planted working folder, and must exit 0 and load nothing."""
     home = scratch / "home"
     markers = scratch / "markers"
     elsewhere = scratch / "elsewhere"
@@ -1388,7 +1489,29 @@ def environment_check(
             f"{vector.name}: with {flags}, nothing planted loads",
             f"loaded: {sorted(fired)}\n{_shown(done)}",
         )
-    every = dict(base)
+    # No file need be planted for this one: the interpreter says which tree it reads .pyc files
+    # from, and the importer reads sys.pycache_prefix for each one.
+    prefix = {"PYTHONPYCACHEPREFIX": str(scratch / "pycache-prefix")}
+    tell = ("-c", "import sys; print(sys.pycache_prefix)")
+    for argv, said, what in (
+        (
+            [str(python), "-B", *tell],
+            prefix["PYTHONPYCACHEPREFIX"],
+            "without -I, the interpreter reads .pyc files from it, so this check can see it",
+        ),
+        (
+            [str(python), *build_app.RUNTIME_FLAGS, *tell],
+            "None",
+            f"with {flags}, the interpreter reads no .pyc file from it",
+        ),
+    ):
+        done, _ = _fired(markers, argv, {**base, **prefix}, elsewhere)
+        checker.expect(
+            done.returncode == 0 and done.stdout == said + "\n",
+            f"PYTHONPYCACHEPREFIX: {what}",
+            _shown(done),
+        )
+    every = {**base, **prefix}
     for vector in vectors:
         every.update(vector.env)
     working = next((vector.cwd for vector in vectors if vector.cwd is not None), elsewhere)
@@ -1609,7 +1732,8 @@ def check_record(
     """M10 on the signed bundle (the build checked it byte for byte before signing): every wheel
     MANIFEST.json names is one uv.lock pins and the host wheel is the one the wheel step built
     (``host_wheel_sha256``); each is here, with its sha256; the installed distributions are
-    exactly those; and each site-packages file is a file of its wheel."""
+    exactly those; and each site-packages file is a file of its wheel, apart from the ``.pyc``
+    files the build writes, admitted by their names (``bytecode`` checks what they hold)."""
     manifest = _manifest(app)
     lock = payload.parse_lock(build_app.LOCK_FILE.read_text(encoding="utf-8"))
     problems = lock_wheel_problems(manifest, lock, host_wheel_sha256=host_wheel_sha256)
@@ -1635,13 +1759,15 @@ def check_record(
         "\n".join(problems),
     )
     macho = [path.relative_to(site).as_posix() for path in build_app.macho_files(site)]
-    failing, signed = split_record_problems(
-        payload.record_problems(site, list(wheels.values())), macho
+    problems = payload.record_problems(
+        site, list(wheels.values()), bytecode_tag=build_app.BYTECODE_TAG
     )
+    failing, signed = split_record_problems(problems, macho)
     checker.expect(
         not failing,
         "every site-packages file is byte for byte a file of its wheel's RECORD, apart from the "
-        "installer's named files and the Mach-O files signing rewrote (M10)",
+        "installer's named files, the .pyc files the build writes, and the Mach-O files signing "
+        "rewrote (M10)",
         "\n".join(failing[:100]),
     )
     compared = _stripped_comparison(site, macho, list(wheels.values()))
@@ -2139,8 +2265,9 @@ def _timed(python: Path, home: Path) -> dict[str, tuple[float, float]] | None:
 
 
 def check_startup(app: Path, work: Path, checker: Checker, summary: Path | None) -> None:
-    """Time the host with no .pyc, as shipped; then, on a writable copy, with checked-hash .pyc
-    files for the standard library, then for everything."""
+    """Time the host from the bundle as shipped, with the checked-hash .pyc files the build
+    wrote; then from a writable copy with every .pyc removed. The runs keep -B, so the copy
+    stays without them. Nothing is compiled here."""
     results: dict[str, dict[str, tuple[float, float]]] = {}
     with tempfile.TemporaryDirectory(prefix="lucille-host-startup-") as tmp:
         root = Path(tmp)
@@ -2150,25 +2277,20 @@ def check_startup(app: Path, work: Path, checker: Checker, summary: Path | None)
             row = _timed(python_in(app), home)
             if not checker.expect(row is not None, "the host runs from the bundle"):
                 return
-            results["none (as shipped)"] = row or {}
+            results["checked-hash (as shipped)"] = row or {}
             copy = root / app.name
             subprocess.run(["ditto", str(app), str(copy)], check=True)
             make_writable(copy)
-            python = python_in(copy)
-            stdlib = copy / build_app.RUNTIME_DIR / build_app.STDLIB
-            for label, target, skip in (
-                ("checked-hash, standard library", stdlib, ["-x", "site-packages"]),
-                ("checked-hash, everything", stdlib / "site-packages", []),
-            ):
-                argv = [str(python), "-I", "-m", "compileall", "-q", "-j", "0"]
-                argv += ["--invalidation-mode", "checked-hash", *skip, str(target)]
-                done = subprocess.run(argv, capture_output=True, text=True, check=False)
-                if not checker.expect(done.returncode == 0, f"compileall: {label}", _shown(done)):
-                    return
-                row = _timed(python, home)
-                if not checker.expect(row is not None, f"the host runs with {label}"):
-                    return
-                results[label] = row or {}
+            for path in build_app.bytecode_in(copy / build_app.RUNTIME_DIR):
+                if path.name == "__pycache__" and path.is_dir() and not path.is_symlink():
+                    shutil.rmtree(path)
+            left = build_app.bytecode_in(copy)
+            if not checker.expect(not left, "the copy holds no .pyc", "\n".join(map(str, left))):
+                return
+            row = _timed(python_in(copy), home)
+            if not checker.expect(row is not None, "the host runs from the copy with no .pyc"):
+                return
+            results["none (a copy with every .pyc removed)"] = row or {}
         finally:
             make_writable(root)
     work.mkdir(parents=True, exist_ok=True)
@@ -4793,6 +4915,7 @@ def _probe(app: Path) -> None:
 
 CHECKS: Final = (
     "bundle",
+    "bytecode",
     "record",
     "version",
     "host",
@@ -4885,6 +5008,8 @@ def _run_check(args: argparse.Namespace, out: Path, checker: Checker) -> None:
     check = args.check
     if check == "bundle":
         check_bundle(app, checker)
+    elif check == "bytecode":
+        check_bytecode(app, checker)
     elif check == "record":
         check_record(app, out, checker, args.summary, host_wheel_sha256=args.host_wheel_sha256)
     elif check == "version":

@@ -35,6 +35,10 @@ pull request, and when started by hand. It has no path filter.
   runs the checks that need no build on it. They build nothing, and do not run the pairing check, which
   needs the suite's copy of the runtime. The `xcode-27` job is `continue-on-error`: its failure does not
   fail the workflow run (the maintainer's decision of 2026-11-02, decisions/0002 §18).
+- The Mac app ships a `checked-hash` `.pyc` beside each `.py` of its runtime. `check_app.py bytecode`, in
+  `macos-app` and both smoke jobs, checks that each is byte for byte what the bundled interpreter compiles
+  from that `.py`. It is meant to be run on a copy you downloaded too
+  ([macos/README.md](macos/README.md#the-disk-image-from-ci)); that is not yet tried on a Mac.
 - The workflow's token can only read the repository (`permissions: contents: read`), and the checkout
   keeps no credentials (`persist-credentials: false`). The only secret it uses is the private-string
   list, in the `guards` job; no Mac job uses a secret, and none signs with a certificate.
