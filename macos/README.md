@@ -93,10 +93,12 @@ them under its question. Whether it does, and whether that question names Capsul
 | "Capsule *version*" | `--version` |
 | The status line | Nothing. It says what `status --json` and `run`'s events last said (see the table below). While the host is paused, " · Paused" is added. |
 | A line under it, when there is one | Nothing until it is chosen. It says what needs attention, or why this Mac is no longer connected. Choosing it shows a note that says what to do, with **Try Again** or **Disconnect from Lucille…** where one helps, and **Show Details** for the host's own words or the last lines `run` wrote on standard error. |
+| Stop What's Running | `kill --json`, which stops the process of the request that runs and pauses the host. Shown only while a request's process runs, from its `started` to its `finished`, and not while `run` drains for a quit or a Disconnect, whose own steps stop it then: Stop now during a quit, `kill` after 330 seconds during a Disconnect. Then a note says "Stopped, and paused. Resume when you're ready."; the host stays paused until Resume Lucille. |
 | Pause Lucille / Resume Lucille | `pause --json` / `resume --json`. While the host is paused, a line says that Lucille's requests are turned away until you resume, and the icon changes. |
 | Abilities | `ops list`. Each ability shows in a few plain words, such as "Check a file's fingerprint", with a checkmark when it is enabled, and a sentence under it says what Lucille gets: "Lucille gets a code that identifies one file's exact contents, not the contents." Choosing one runs `ops enable` or `ops disable`. `host.sleep`, which is for testing, is not listed. Nor is `host.describe`; while it is on, the menu says what it shares: "Lucille sees which abilities are on and your folders' names", once connected. |
 | Add a Folder… | See below. |
 | Folders | `roots list`. Each folder has a **Remove** item, which runs `roots remove <alias>`. |
+| Activity… | Opens the Activity window (see [Activity](#activity)), and reads `ops list --json` for the words each request is said in. |
 | Connect to Lucille… | Opens the pairing window (see [Connecting to Lucille](#connecting-to-lucille)). Shown while this Mac has no connection. |
 | Finish Connecting… | Opens the pairing window again, on a connection being set up whose window was closed. |
 | Stop Connecting… | Asks first, then runs `pair reject --json`. Shown while a connection is being set up, or once it expired or can no longer be finished. |
@@ -166,6 +168,30 @@ take more than a moment. A run the app gave up on (see below) may still hold the
 change its settings, and then every change to folders or abilities waits for it. While such a run is
 still going, the menu says that a folder check is stuck, and a change that times out or is cancelled
 says so too, rather than blaming its own folder.
+
+## Activity
+
+The Activity window says what Lucille asked this Mac to do since Capsule opened, newest first, from the
+`request` events `run` writes, each with the time Capsule first saw it: "Lucille asked to check a file's
+fingerprint: “a.txt” in documents. Finished on this Mac." The words for the operation are the core's
+own summary of it, from `ops list --json`; the path Lucille asked for is shown in quotes, cut in the
+middle past 60 characters, or as "a path that can't be shown" when it holds a control, format, line or
+paragraph separator character, or a quotation mark that opens or closes (a curly quote or apostrophe, a
+guillemet), which could end Capsule's own quotes; the folder is named only by a valid alias. A request
+turned away says why as a fact ("Turned away: that ability is off on this Mac."), with no button:
+nothing in the window offers to turn an ability on. "Finished on this Mac." never means that Lucille got
+the reply. A request that was still going when `run` stopped reads "Stopped when Capsule's helper
+program stopped." A request read before `run` restarted and decided after it keeps its entry; one that
+ended is never written again, so a request Lucille sends later with the same job id, which the host
+forgets 15 minutes after the request's deadline, gets an entry of its own.
+
+Capsule keeps this in memory only, at most 500 requests, and it is gone when Capsule quits. Nothing in the
+window can be selected or copied.
+
+**Show the Host's Log** runs `log --json --limit 200` and shows those lines as the host wrote them, each
+cut at 2000 characters, under "As the host wrote it. Anything running as you can change this file.": the
+log is a file in your own folder, which proves nothing, and its format is not part of the contract. It is
+read again each time it is shown.
 
 ## Connecting to Lucille
 
@@ -270,7 +296,8 @@ The app reads `run`'s events in memory only.
   every restart of `run` until it closed.
 - **Paused at the next launch.** After Stop now, or a log out that reached `kill`, the host is paused.
   The next launch says "Capsule is paused": "Lucille's requests are turned away until you resume. You
-  paused Capsule, or a task was stopped when Capsule quit or you logged out." Only **Resume** resumes.
+  paused Capsule or chose Stop What's Running, or a task was stopped when Capsule quit or you logged
+  out." Only **Resume** resumes.
 
 ### Disconnect
 
@@ -323,8 +350,9 @@ This has not been tried on a Mac: CI never makes a profile with two connections.
   and nothing else from the app's own environment. `PATH` names an empty folder, so nothing is found
   there; the host runs its operations with a `PATH` of its own. The working folder is `/`.
 - The app reads JSON ([spec/CLI.md](../spec/CLI.md)) from `status`, the pairing verbs, `forget`, `kill`,
-  `pause` and `resume`, and `run`'s events. It still reads the text of `--version`, `ops list` and
-  `roots list`, and the failure lines of `ops`, `roots`, `pause` and `resume`.
+  `pause` and `resume`, `run`'s events, and, for Activity, `log --limit 200` and `ops list`. It still
+  reads the text of `--version`, `ops list` and `roots list` for the menu, and the failure lines of
+  `ops`, `roots`, `pause` and `resume`.
 - Two of its children live long: `pair --code-stdin --json`, while it waits for Lucille, and `run`. One
   routine starts every child, under one lock, and keeps the ends of the pipes the app holds out of every
   later child, so no other child holds `run`'s lifeline. Each child's two outputs are read on threads of
@@ -517,16 +545,16 @@ that finds a problem fails its job. On `xcode-27` alone, a failed job does not f
 | `probe` | both | Prints what `status`, `pair status`, `pair --code-stdin` and `run` do on the runner, run as the app runs them, under a fresh HOME and under the runner's own. It gates nothing. |
 | `environment` | both | A module or startup file planted where `PYTHONPATH`, `PYTHONHOME`, `PYTHONSTARTUP`, the user site, `PYTHONUSERBASE` and the working folder would load it never loads with the app's flags. For each, a control run without `-I` must load it, or the check fails. `PYTHONSTARTUP` is read only by an interactive interpreter, so no run the app makes could load it, and its control runs `-i`. No `.pth` file is missing from the installed `RECORD` files. |
 | `readonly` | both | The bundle cannot be written; `--version`, `status` and `status --json` work from it, and the wrapper too; no file in it changed and no bytecode appeared; then its signature still verifies. |
-| `swift` | both | The app's own Swift code that runs the command line and reads its output works against the real command line, through the same calls the menu makes: the folder name suggestions and corrections, which folders are the whole disk (a link to one included), that the command line the app builds for them never has `--allow-home-or-root` and that the host then adds nothing, the plain sentence for each refusal, the time limit and Cancel; every verb on `--profile mac-app` with `PATH=/var/empty`; and, on a throwaway profile, `status`, `pair status`, `pair --code-stdin` (which refuses a text that is not a code once it has read it from standard input) and `run` with the lifeline. Against the host's golden JSON fixtures: every object read through the app's reader. The pairing flow's rules (They Match counts only on the drawn number, after a `status` read that shows the same connection and deadline; They Differ stays; `pair status` only while the window shows), and the supervisor's (the exit of every `run` fixture, the back-off, the five-crash stop, the quit and log out steps, never resuming by itself), each also walked through 40,000 seeded random steps. The child runner, against stand-in children: a signal read as a signal, the lifeline ending a stand-in `run` while a later child lives, the code on standard input and never in argv, input too long for the pipe refused, lines too long or ending in a carriage return dropped, a burst of 5000 events. `macos-app` compiles the self-test once, with the pinned Xcode, and the smoke jobs run that same program. |
+| `swift` | both | The app's own Swift code that runs the command line and reads its output works against the real command line, through the same calls the menu makes: the folder name suggestions and corrections, which folders are the whole disk (a link to one included), that the command line the app builds for them never has `--allow-home-or-root` and that the host then adds nothing, the plain sentence for each refusal, the time limit and Cancel; every verb on `--profile mac-app` with `PATH=/var/empty`; and, on a throwaway profile, `status`, `pair status`, `pair --code-stdin` (which refuses a text that is not a code once it has read it from standard input) and `run` with the lifeline. Against the host's golden JSON fixtures: every object read through the app's reader. The pairing flow's rules (They Match counts only on the drawn number, after a `status` read that shows the same connection and deadline; They Differ stays; `pair status` only while the window shows), and the supervisor's (the exit of every `run` fixture, the back-off, the five-crash stop, the quit and log out steps, never resuming by itself, and Stop What's Running asking for `kill` only while `run` runs), each also walked through 40,000 seeded random steps. Activity's request log: one entry per request from the `request` fixture, each said in words, with its path quoted, cut, or not shown at all; a request closed as stopped when `run` ends; one written again after a restart kept in its entry, and a job id used again after its request ended given an entry of its own; at most 500, a running one kept. The child runner, against stand-in children: a signal read as a signal, the lifeline ending a stand-in `run` while a later child lives, the code on standard input and never in argv, input too long for the pipe refused, lines too long or ending in a carriage return dropped, a burst of 5000 events. `macos-app` compiles the self-test once, with the pinned Xcode, and the smoke jobs run that same program. |
 | `relocate` | `macos-app` | A copy of the app in another folder, with a space in its path, passes `host` and `swift`. |
 | `launch` | both | The app opens the way Finder opens it, and is still running 10 seconds later. SIGTERM then ends it within 15 seconds, though nothing has closed its note about the menu bar. A copy still running from an earlier step fails this check and the `ui` and `pairing` checks, and is then killed. |
-| `ui` | both | Driven through System Events as a user would: the app says what it is for and where its menu is when it opens, and again when it is opened while it runs; the menu bar item's title or description, which VoiceOver reads as its name, is "Capsule" (its tooltip does not count); the menu shows the version, "Not connected to Lucille" and every item, and lists abilities in plain words, each with its sentence on what Lucille gets; Pause Lucille and Resume Lucille change the host's pause flag, the status line and the menu bar item's name; an ability switches on, shows a checkmark, and switches off; Add a Folder… goes through the Open panel and the name dialog, where a typed name the host would refuse comes back corrected, and adds the folder; Remove in the Folders submenu removes it; the home folder brings up the question first, Choose a Smaller Folder goes back to the Open panel, and Add Anyway adds it; the Data volume, then `/` through a link to it, each bring up the note that refuses the whole disk, with Choose a Smaller Folder, which goes back to the Open panel, and Cancel, and no button that adds the folder, and neither is added (that the note has no other button is checked in its source by the build tests). The Open panel's buttons are looked for in every window of the app, and in each sheet and group in it, since where they sit differs between macOS versions; where its prompt is nowhere, Return, its default button, chooses the folder, and what the app shows next is checked as before. Then the pairing window: with a code-shaped text on the pasteboard, Connect to Lucille… opens it with its field empty, and the field stays empty once it has the focus; a typed word gets the hint, and Connect stays off; Command-V pastes exactly the text copied; Connect hands it to the host, which refuses it as no code, and the app says so; nothing is connected, and neither text reaches the app's standard output or error. Each step is checked against what the host's command line then reports, on the app's profile. In `macos-app` (`--require-driven`), a machine where System Events cannot drive the app fails the check; the smoke jobs record whether it could, and where it could, a driven step that fails fails the check there too. Screenshots are kept in the job's logs artifact. |
+| `ui` | both | Driven through System Events as a user would: the app says what it is for and where its menu is when it opens, and again when it is opened while it runs; the menu bar item's title or description, which VoiceOver reads as its name, is "Capsule" (its tooltip does not count); the menu shows the version, "Not connected to Lucille" and every item, and lists abilities in plain words, each with its sentence on what Lucille gets; Pause Lucille and Resume Lucille change the host's pause flag, the status line and the menu bar item's name; an ability switches on, shows a checkmark, and switches off; Add a Folder… goes through the Open panel and the name dialog, where a typed name the host would refuse comes back corrected, and adds the folder; Remove in the Folders submenu removes it; the home folder brings up the question first, Choose a Smaller Folder goes back to the Open panel, and Add Anyway adds it; the Data volume, then `/` through a link to it, each bring up the note that refuses the whole disk, with Choose a Smaller Folder, which goes back to the Open panel, and Cancel, and no button that adds the folder, and neither is added (that the note has no other button is checked in its source by the build tests). The Open panel's buttons are looked for in every window of the app, and in each sheet and group in it, since where they sit differs between macOS versions; where its prompt is nowhere, Return, its default button, chooses the folder, and what the app shows next is checked as before. Then Activity…: its window says what it keeps and for how long, its one button is Show the Host's Log, and that shows the host's own log lines as it wrote them; its close button closes it (that nothing in it can be selected is checked in its source by the build tests). Then the pairing window: with a code-shaped text on the pasteboard, Connect to Lucille… opens it with its field empty, and the field stays empty once it has the focus; a typed word gets the hint, and Connect stays off; Command-V pastes exactly the text copied; Connect hands it to the host, which refuses it as no code, and the app says so; nothing is connected, and neither text reaches the app's standard output or error. Each step is checked against what the host's command line then reports, on the app's profile. In `macos-app` (`--require-driven`), a machine where System Events cannot drive the app fails the check; the smoke jobs record whether it could, and where it could, a driven step that fails fails the check there too. Screenshots are kept in the job's logs artifact. |
 | `library-snapshot`, `library-diff` | both | `~/Library` is walked before `launch` and after `ui`. A new, changed or removed path whose name holds the bundle identifier, the app's name or "lucille", and that [`tools/macos/library-allowlist.txt`](../tools/macos/library-allowlist.txt) does not allow, fails the check; every other change is printed. The state folder of the app's profile, `mac-app`, must be among the changes (in the smoke jobs, the check makes those writes itself first), or the check fails. It skips `~/Library/Developer` and `~/Library/Android`, and cannot see a write to a path whose name says nothing of the app. The snapshots are never uploaded. |
 | `gatekeeper` | `macos-app` | Prints `spctl`'s verdict. It is "rejected", as expected for an ad hoc signature, and does not fail the build. |
 | `dmg` | both | Exactly one disk image was built, its name ends `-adhoc-macOS-arm64.dmg`, and it verifies, mounts, and holds the app, with a valid signature, and a link to `/Applications`. |
 | `startup` | `macos-app` | The median and the fastest of ten runs of `--version` and of `status --json` with no `.pyc`, as shipped; then, on a writable copy, with `checked-hash` files for the standard library, then for everything. Written to the job summary; not a gate. |
 | `suite` | `macos-app` | The host's whole test suite passes on a copy of the app's runtime, with the test dependencies installed into the copy only, by hash, and the host's wheel and agent-switchboard installed again by `MANIFEST.json`'s sha256, so that their commands sit beside the copy's interpreter. |
-| `pairing` | `macos-app` | It needs Switchboard's hub and the test harness, so it runs with the interpreter of the copy of the runtime that `suite` made, after it; the smoke jobs have no such copy, and do not run it. With a hub of its own and a stand-in for Lucille, a test harness connects the app's profile through the command line (`pair --code-stdin` with `--hub` and `--store-file`, which the app never passes), leaving the number to confirm. Then, driven through System Events: Finish Connecting… shows Lucille's number, once and no other; Return and Space answer nothing; They Match confirms. `run` is the app's child, on the app's profile, with a pipe on its standard input; a second `run` of the profile is refused (exit 21); `run` reads the work room Lucille offers, and the menu says "Connected to Lucille"; the app itself holds no network connection. A folder and `files.sha256` added through the command line, then one request on that folder, answered with the file's fingerprint. `run` killed with SIGKILL while the app's note about the menu bar is up is started again before the note is closed; the app killed with SIGKILL leaves `run` to finish and exit. Quit, chosen in that note during a 20-second request, asks first, shows the finishing panel with Stop now, and quits once `run` has finished and drained. Quit then Stop now, during a longer request, tells Lucille the request failed (`killed_locally`) and pauses the host; the next launch says it is paused, and it stays paused until Resume. Disconnect lets `run` finish, then forgets the connection, and says Lucille was told. The profile is set aside first and put back after, and the app's signature still verifies. Screenshots are kept with the others. |
+| `pairing` | `macos-app` | It needs Switchboard's hub and the test harness, so it runs with the interpreter of the copy of the runtime that `suite` made, after it; the smoke jobs have no such copy, and do not run it. With a hub of its own and a stand-in for Lucille, a test harness connects the app's profile through the command line (`pair --code-stdin` with `--hub` and `--store-file`, which the app never passes), leaving the number to confirm. Then, driven through System Events: Finish Connecting… shows Lucille's number, once and no other; Return and Space answer nothing; They Match confirms. `run` is the app's child, on the app's profile, with a pipe on its standard input; a second `run` of the profile is refused (exit 21); `run` reads the work room Lucille offers, and the menu says "Connected to Lucille"; the app itself holds no network connection. A folder added through the command line, then a `files.sha256` request on it while that ability is off: the host turns it away, and Activity says "Turned away: that ability is off on this Mac." with no button but its disclosure (M18). Then `files.sha256` turned on through the command line, and a request like it, answered with the file's fingerprint, which Activity says finished. `run` killed with SIGKILL while the app's note about the menu bar is up is started again before the note is closed; the app killed with SIGKILL leaves `run` to finish and exit. Quit, chosen in that note during a 20-second request, asks first, shows the finishing panel with Stop now, and quits once `run` has finished and drained. Opened again, while no request runs, the menu does not offer Stop What's Running; during a longer request it does, and choosing it tells Lucille the request failed (`killed_locally`), says "Stopped, and paused. Resume when you're ready.", and pauses the host while `run` goes on; ten seconds later the host is still paused, and Resume Lucille, from the menu, resumes it. Quit then Stop now, during a longer request, tells Lucille the request failed (`killed_locally`) and pauses the host; the next launch says it is paused, and it stays paused until Resume. Disconnect lets `run` finish, then forgets the connection, and says Lucille was told. The profile is set aside first and put back after, and the app's signature still verifies. Screenshots are kept with the others. |
 | a second build | `macos-app` | The unsigned app is built again, in another folder, and the two tarballs are compared by sha256. The job summary says SAME, DIFFERENT or FAILED, with both digests. Not a gate. |
 
 ## What CI does not check
@@ -565,6 +593,19 @@ harness with a hub of its own. These need a Mac and a person, and none has been 
 - **A real Lucille, sleep and wake, and closing the lid.**
 - **That no child the app starts holds `run`'s lifeline, in every order children start in.** The
   self-test shows it for one order. The one lock around every start is the argument for the rest.
+- **Activity, beyond the requests CI sends.** Its words for `path_outside_root` and `host_too_old`, for a
+  request dropped when its connection changed, for one stopped with `run`, for one written again after
+  `run` restarted, and for a job id used again, and its 500-request bound, are checked in the self-test
+  only. That each other refusal and each failure has a sentence of its own is checked as a table by the
+  build tests only. Not reached by CI: "Reading the host's log…", "Capsule couldn't read the
+  host's log.", Hide the Host's Log, an entry from an earlier day drawn with its date, and the first
+  drawing before `ops list` answers, which names the operation in quotes. Not checked anywhere: a log
+  line that holds an operation's output (the host writes one only with `log_results = true`).
+- **Stop What's Running, beyond the one CI drives.** Not reached by CI: the note when it fails ("Capsule
+  couldn't stop what's running." with "It may still be running…" or the host's own words), its race
+  with the request's own end, where `kill` finds nothing running and the host is paused all the same,
+  and the menu leaving it out while `run` drains (the self-test checks only that the supervisor asks for
+  nothing then).
 - **Screens CI does not reach**, whose words and rules only the self-test checks: They Differ; a code
   from another hub; "Capsule keeps stopping" and its Show Details; every Needs attention line (the
   clock, Lucille not reached, a message that cannot be opened, a connection the host left, the helper
@@ -635,8 +676,9 @@ anyone to work around the warning.
   the owner's own Mac only.
 - **Opening at login.** The app keeps `run` running while it is open, and only then.
 - **What comes after connecting**: offering again the folders and abilities a new connection set aside,
-  Activity, Stop What's Running, Reset Settings, About, Copy Diagnostics, and a check of each folder at
-  launch.
+  Reset Settings, About, Copy Diagnostics, and a check of each folder at launch.
+- **Activity in words for the log.** Activity says the live `request` events in words, and shows the
+  host's log as it was written: the contract has no typed history to say it in words from.
 - **ripgrep.** The design bundles it as `Contents/Helpers/rg`, with its licence. The pins hold an empty
   ripgrep commit until then.
 - **Updates.** There are none. A new version is a new disk image. When Lucille asks for a newer host,
@@ -651,7 +693,7 @@ anyone to work around the warning.
 - **Open Privacy Settings and Open Date & Time Settings buttons.** When macOS blocks a folder, or the
   Mac's clock is wrong, the app says where to go in System Settings, but cannot open it: that needs
   `NSWorkspace`, which the checks above keep out of the app.
-- An app icon, and reading `ops` and `roots` as JSON.
+- An app icon, and reading `ops` and `roots` as JSON for the menu.
 
 ## Choices made for the first build
 
@@ -677,13 +719,15 @@ The design ([decisions/0002-macos-app.md](../decisions/0002-macos-app.md)) may c
   exact version is in `MANIFEST.json` and in the menu. A build from a `v*` tag needs a version with no
   suffix, which both keys then hold.
 - **macOS 15 or later, Apple silicon only.**
-- **The app reads JSON for connecting and running, and text for the rest.** It reads `status`, the
-  pairing verbs, `forget`, `kill`, `pause`, `resume` and `run`'s events as JSON
-  ([spec/CLI.md](../spec/CLI.md)). For `--version`, `ops list` and `roots list`, `App/HostText.swift`
-  follows the text, and the Swift self-test checks it against the real command line on every build.
-- **The words for each ability are in the app** (`App/HostText.swift`). The host's catalog now carries
-  its own words for each operation (`ops list --json`), so that every app can show the same reviewed
-  words; the app does not use them yet. A test fails when the catalog has an operation the app neither
+- **The app reads JSON for connecting, running and Activity, and text for the rest.** It reads `status`,
+  the pairing verbs, `forget`, `kill`, `pause`, `resume`, `run`'s events and, for Activity, `log` and
+  `ops list` as JSON ([spec/CLI.md](../spec/CLI.md)). For `--version`, and for `ops list` and
+  `roots list` in the menu, `App/HostText.swift` follows the text, and the Swift self-test checks it
+  against the real command line on every build.
+- **The words for each ability in the menu are in the app** (`App/HostText.swift`). The host's catalog
+  now carries its own words for each operation (`ops list --json`), so that every app can show the same
+  reviewed words; the menu does not use them yet, and Activity says each request with its operation's
+  summary from them. A test fails when the catalog has an operation the app neither
   names nor leaves out of the menu.
 - **The app asks about the home folder before the user names it**, when it can tell from the path (the
   home folder, or a folder above it). The host still decides; when it refuses a folder the app did not
@@ -719,9 +763,9 @@ build; the design may change it.
 - **The Mac's gate is a click, as decisions/0001 has it.** The app shows the number, and you click They
   Match or They Differ. The design's typed number (§11.2) is a proposal; the maintainer decided on
   2026-11-02 to build 0001's gate now.
-- **The note about a pause at launch names both causes**: "You paused Capsule, or a task was stopped when
-  Capsule quit or you logged out." The pause flag holds only a time, and the app keeps nothing of its
-  own, so it cannot tell which.
+- **The note about a pause at launch names every cause**: "You paused Capsule or chose Stop What's
+  Running, or a task was stopped when Capsule quit or you logged out." The pause flag holds only a time,
+  and the app keeps nothing of its own, so it cannot tell which.
 - **Quit asks first only while `run` runs, and only the app's own Quit.** A quit from macOS or another
   app, log out included, never asks.
 - **Needs attention shows in the menu and in the icon**, and its note opens only when its line is chosen.

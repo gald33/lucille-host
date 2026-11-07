@@ -1,10 +1,11 @@
 import Foundation
 
 /// Runs the app's code that draws nothing (`Alias`, `HostCLI`, `HostText`, `HostJSON`, `Pairing`,
-/// `Supervisor`, `ConnectionText`) without a screen: the host's golden fixtures through the JSON
-/// reader and the two state machines, fake children through the child runner, and, against a
-/// built app, the calls the menu makes, through the same code, with a temporary HOME. CI compiles
-/// it with those files (`tools/macos/check_app.py swift`). Exit status 1 on any failure.
+/// `Supervisor`, `ConnectionText`, `RequestLog`) without a screen: the host's golden fixtures
+/// through the JSON reader, Activity's request log and the two state machines, fake children
+/// through the child runner, and, against a built app, the calls the menu makes, through the same
+/// code, with a temporary HOME. CI compiles it with those files (`tools/macos/check_app.py
+/// swift`). Exit status 1 on any failure.
 ///
 ///     selftest --vectors alias-vectors.json [--fixtures DIR] [--home DIR]
 ///              [--app NAME.app --home DIR --version V]
@@ -31,6 +32,7 @@ struct SelfTest {
             report.expect(!fixtures.isEmpty, "the host's CLI fixtures are given with --fixtures")
         }
         checkJSON(fixtures, report)
+        checkRequestLog(fixtures, report)
         checkPairing(fixtures, report)
         checkSupervisor(fixtures, report)
         if let home = options["home"] {
@@ -731,6 +733,39 @@ extension SelfTest {
                           == .object(.error(HostError(code: "new_code", message: "the host's words", kind: nil))),
                       "an error code this release does not know reads")
 
+        // What Activity reads (spec/CLI.md §6): a request at each step, the log's lines, and the
+        // operations' summaries. A request's phase is open; its decision and status are closed.
+        report.expect(HostObject.knownTypes.isSuperset(of: ["request", "log_line", "op"]),
+                      "Activity's types are among those the app reads", "\(HostObject.knownTypes.sorted())")
+        let jobNine = "00000000-0000-4000-8000-000000000009"
+        func request(_ rest: String) -> JSONLines.Item {
+            line(#"{"v":1,"type":"request","job_id":"00000000-0000-4000-8000-000000000009","# + rest + "}")
+        }
+        report.expect(request(#""phase":"received","op":null,"root":null,"path":null"#)
+                          == .object(.request(RequestEvent(jobId: jobNine, phase: .received(op: nil, root: nil, path: nil)))),
+                      "a request the host could not read has no op, folder or path")
+        report.expect(request(#""phase":"moon""#) == .object(.request(RequestEvent(jobId: jobNine, phase: .other("moon")))),
+                      "a request phase this release does not know is kept as other")
+        report.expect(request(#""phase":"finished","status":"abandoned""#)
+                          == .object(.request(RequestEvent(jobId: jobNine, phase: .finished(.abandoned)))),
+                      "an abandoned request reads")
+        report.expect(request(#""phase":"finished","status":"failed","code":"killed_locally","exit_code":null,"duration_ms":5,"stdout_bytes":null,"stderr_bytes":null,"reply_bytes":300"#)
+                          == .object(.request(RequestEvent(jobId: jobNine, phase: .finished(.failed("killed_locally"))))),
+                      "a request that failed reads, with its code")
+        for closed in [#""phase":"decided","decision":"later""#, #""phase":"decided","decision":"refused""#,
+                       #""phase":"finished","status":"moon""#, #""phase":"finished","status":"refused""#] {
+            report.expect(!isObject(request(closed)),
+                          "a request with a decision or a status this release does not know, or with no code, is dropped", closed)
+        }
+        report.expect(!isObject(line(#"{"v":1,"type":"request","phase":"started"}"#)), "a request with no job is dropped")
+        report.expect(line(#"{"v":1,"type":"log_line","text":"a line, ? as the host wrote it"}"#)
+                          == .object(.logLine("a line, ? as the host wrote it")),
+                      "a log line reads as the host wrote it")
+        report.expect(!isObject(line(#"{"v":1,"type":"log_line"}"#)), "a log line with no text is dropped")
+        report.expect(line(#"{"v":1,"type":"op","name":"host.nothing","state":"not_in_catalog","enabled":false}"#)
+                          == .object(.op(name: "host.nothing", summary: nil)),
+                      "an operation this release does not have reads, with no summary")
+
         // Short verbs: how they ended comes first (spec/CLI.md §4.3).
         func result(_ status: Int32, _ stdout: String, signal: Bool = false) -> CLIResult {
             CLIResult(status: status, stdout: stdout, stderr: "", timedOut: false, cancelled: false,
@@ -825,6 +860,269 @@ extension SelfTest {
                               return false
                           }).count == 13,
                       "run's events read: ready, state, requests, host_too_old, stopped", "\(requests.count) objects")
+        // The 13 request objects, field by field: four requests, each at each of its steps.
+        func job(_ number: Int) -> String {
+            "00000000-0000-4000-8000-00000000000\(number)"
+        }
+        let events = requests.compactMap { (object: HostObject) -> RequestEvent? in
+            if case .request(let event) = object {
+                return event
+            }
+            return nil
+        }
+        let expected: [RequestEvent] = [
+            RequestEvent(jobId: job(1), phase: .received(op: "host.describe", root: nil, path: nil)),
+            RequestEvent(jobId: job(1), phase: .decided(run: true, code: nil)),
+            RequestEvent(jobId: job(1), phase: .finished(.done)),
+            RequestEvent(jobId: job(2), phase: .received(op: "files.sha256", root: "docs", path: "a.txt")),
+            RequestEvent(jobId: job(2), phase: .decided(run: true, code: nil)),
+            RequestEvent(jobId: job(2), phase: .started),
+            RequestEvent(jobId: job(2), phase: .finished(.done)),
+            RequestEvent(jobId: job(3), phase: .received(op: "files.sha256", root: "docs", path: nil)),
+            RequestEvent(jobId: job(3), phase: .decided(run: false, code: "path_outside_root")),
+            RequestEvent(jobId: job(3), phase: .finished(.refused("path_outside_root"))),
+            RequestEvent(jobId: job(4), phase: .received(op: "host.describe", root: nil, path: nil)),
+            RequestEvent(jobId: job(4), phase: .decided(run: false, code: "host_too_old")),
+            RequestEvent(jobId: job(4), phase: .finished(.refused("host_too_old"))),
+        ]
+        report.expect(events == expected, "each request object reads with its job, its phase and that phase's fields", "\(events)")
+    }
+
+    // MARK: - checkRequestLog
+
+    /// Activity (decisions/0002 §15): `run`'s `request` events kept in memory, one entry per
+    /// request, updated in place and closed as stopped when `run` ends; what Lucille asked for in
+    /// words, its path quoted or not shown at all; and no sentence that says a reply was received.
+    static func checkRequestLog(_ fixtures: [String: Fixture], _ report: Report) {
+        let start = Date(timeIntervalSince1970: 1_800_000_000)
+        func at(_ seconds: Int) -> Date {
+            start.addingTimeInterval(TimeInterval(seconds))
+        }
+        func jobId(_ number: Int) -> String {
+            let digits = String(number)
+            return "00000000-0000-4000-8000-" + String(repeating: "0", count: max(0, 12 - digits.count)) + digits
+        }
+        func event(_ number: Int, _ phase: RequestPhase) -> RequestEvent {
+            RequestEvent(jobId: jobId(number), phase: phase)
+        }
+        func outcome(_ log: RequestLog) -> String? {
+            log.entries.first.flatMap { RequestText.outcome(for: $0) }
+        }
+        func lineOf(_ phase: RequestPhase, _ summaries: [String: String]) -> String {
+            var one = RequestLog()
+            one.note(event(30, phase), at: at(1))
+            return one.entries.first.map { RequestText.line(for: $0, summaries: summaries) } ?? ""
+        }
+        let summaries = ["host.describe": "Describe this computer's host", "files.sha256": "Check a file's fingerprint"]
+        let fingerprint = RequestPhase.received(op: "files.sha256", root: "docs", path: "a.txt")
+        // Every sentence Activity said here, for the last check.
+        var said: [String] = []
+
+        // The summaries and the log's lines, from the host's own fixtures.
+        if !fixtures.isEmpty {
+            let listed = VerbOutcome.done(fixtures["ops-list"]?.objects ?? []).summaries
+            report.expect(listed == ["host.describe": "Describe this computer's host", "host.sleep": "Wait up to 4 minutes, for testing",
+                                     "files.sha256": "Check a file's fingerprint"],
+                          "ops list --json gives each operation's summary, in the core's words", "\(listed)")
+            let every = VerbOutcome.done(fixtures["ops-list-every-state"]?.objects ?? []).summaries
+            report.expect(every.count == 3 && every["host.nothing"] == nil,
+                          "a policy entry this release does not have has no summary", "\(every)")
+            report.expect(VerbOutcome.done(fixtures["log"]?.objects ?? []).logLines
+                              == [#"{"kind":"test","n":1}"#, #"{"kind":"test","n":2}"#],
+                          "log --json gives its lines as the host wrote them")
+            report.expect(fixtures["log-empty"] != nil && VerbOutcome.done(fixtures["log-empty"]?.objects ?? []).logLines.isEmpty,
+                          "an empty log gives no line")
+        }
+        report.expect(VerbOutcome.refused(HostError(code: "bad_limit", message: "m", kind: nil)).logLines.isEmpty,
+                      "a log verb that was refused gives no line")
+        let wide = String(repeating: "w", count: 5000)
+        report.expect(RequestText.logLine(wide).count == 2000 && RequestText.logLine(wide).hasSuffix("\u{2026}")
+                          && RequestText.logLine(#"{"kind":"test","n":1}"#) == #"{"kind":"test","n":1}"#,
+                      "a log line is shown as written, cut to 2000 characters")
+
+        // run's events, as the fixture has them: four requests.
+        if let objects = fixtures["run-events-requests"]?.objects {
+            var log = RequestLog()
+            var second = 0
+            var runningAfter: [String] = []
+            for object in objects {
+                guard case .request(let found) = object else {
+                    continue
+                }
+                second += 1
+                log.note(found, at: at(second))
+                if log.operationRunning {
+                    runningAfter.append("\(found.jobId) \(found.phase)")
+                }
+            }
+            report.expect(log.entries.map(\.jobId) == [jobId(1), jobId(2), jobId(3), jobId(4)],
+                          "one entry per request, oldest first", "\(log.entries.map(\.jobId))")
+            report.expect(log.entries.map(\.firstSeen) == [at(1), at(4), at(8), at(11)],
+                          "each entry carries the app's clock of its first event", "\(log.entries.map(\.firstSeen))")
+            report.expect(runningAfter == ["\(jobId(2)) started"],
+                          "an operation runs only from its started to its finished", "\(runningAfter)")
+            let lines = log.entries.map { RequestText.line(for: $0, summaries: summaries) }
+            let ends = log.entries.map { RequestText.outcome(for: $0) }
+            report.expect(lines == [
+                "Lucille asked to describe this computer's host.",
+                "Lucille asked to check a file's fingerprint: \u{201C}a.txt\u{201D} in docs.",
+                "Lucille asked to check a file's fingerprint: \(RequestText.unshownPath) in docs.",
+                "Lucille asked to describe this computer's host.",
+            ], "each request in words, from the core's summary, with Lucille's path quoted", "\(lines)")
+            let wanted: [String?] = [
+                RequestText.finished, RequestText.finished,
+                RequestText.refused["path_outside_root"], RequestText.refused["host_too_old"],
+            ]
+            let newer = RequestText.refused["host_too_old"] ?? ""
+            report.expect(ends == wanted && newer.contains(HostText.appName),
+                          "each says how it ended: finished, or turned away for its path, or for a newer app", "\(ends)")
+            log.runEnded(at: at(20))
+            report.expect(log.entries.map { RequestText.outcome(for: $0) } == ends && !log.operationRunning,
+                          "run ending changes no request that finished")
+            said += lines + ends.compactMap { $0 }
+        }
+
+        // A request with no finished when run ends is closed as stopped.
+        var open = RequestLog()
+        open.note(event(10, .received(op: "host.sleep", root: nil, path: nil)), at: at(1))
+        report.expect(!open.operationRunning && outcome(open) == nil, "a request just received says nothing more yet")
+        open.note(event(10, .decided(run: true, code: nil)), at: at(2))
+        open.note(event(10, .started), at: at(3))
+        report.expect(open.operationRunning && outcome(open) == RequestText.running && RequestText.running == "Running\u{2026}",
+                      "a request that started runs")
+        open.note(event(10, .other("moon")), at: at(4))
+        open.note(event(11, .other("moon")), at: at(4))
+        report.expect(open.operationRunning && open.entries.count == 1 && outcome(open) == RequestText.running,
+                      "a phase this release does not know is ignored, and starts no entry")
+        open.runEnded(at: at(5))
+        report.expect(!open.operationRunning && outcome(open) == RequestText.stoppedWithRun
+                          && RequestText.stoppedWithRun == "Stopped when \(HostText.appName)'s helper program stopped.",
+                      "when run ends, a request with no finished is closed as stopped, and nothing runs")
+        var waiting = RequestLog()
+        waiting.note(event(13, .received(op: "host.describe", root: nil, path: nil)), at: at(1))
+        waiting.note(event(14, .received(op: "host.describe", root: nil, path: nil)), at: at(1))
+        waiting.note(event(14, .decided(run: true, code: nil)), at: at(2))
+        waiting.runEnded(at: at(3))
+        let waitingEnds = waiting.entries.map { RequestText.outcome(for: $0) ?? "nil" }
+        report.expect(waitingEnds == [RequestText.stoppedWithRun, RequestText.stoppedWithRun] && !waiting.operationRunning,
+                      "so is one not decided yet, and one decided to run and not started", "\(waitingEnds)")
+        // Written again from received after a restart: the same entry, updated in place.
+        open.note(event(10, .received(op: "host.sleep", root: nil, path: nil)), at: at(6))
+        report.expect(open.entries.count == 1 && open.entries.first?.firstSeen == at(1) && outcome(open) == nil,
+                      "a request written again from received is the same entry, open again, first seen as before")
+        var moved = RequestLog()
+        moved.note(event(12, fingerprint), at: at(1))
+        moved.note(event(12, .decided(run: true, code: nil)), at: at(2))
+        moved.note(event(12, .received(op: "files.sha256", root: "docs", path: "b.txt")), at: at(3))
+        let now = moved.entries.first.map { RequestText.line(for: $0, summaries: summaries) } ?? ""
+        report.expect(moved.entries.count == 1 && now.contains("\u{201C}b.txt\u{201D}") && !now.contains("a.txt"),
+                      "and says what it asks for now", now)
+        // A request that ended is never written again: a received for its job id, which the host
+        // forgets 15 minutes after the request's deadline, is a new request, and the one that
+        // ended keeps what it said.
+        var reused = RequestLog()
+        reused.note(event(15, fingerprint), at: at(1))
+        reused.note(event(15, .decided(run: true, code: nil)), at: at(2))
+        reused.note(event(15, .finished(.done)), at: at(3))
+        reused.note(event(15, .received(op: "host.describe", root: nil, path: nil)), at: at(1300))
+        reused.note(event(15, .decided(run: false, code: "not_enabled")), at: at(1301))
+        let both = reused.entries.map { RequestText.line(for: $0, summaries: summaries) + " " + (RequestText.outcome(for: $0) ?? "") }
+        let reusedSeen = reused.entries.map(\.firstSeen)
+        report.expect(both == [
+            "Lucille asked to check a file's fingerprint: \u{201C}a.txt\u{201D} in docs. Finished on this Mac.",
+            "Lucille asked to describe this computer's host. Turned away: that ability is off on this Mac.",
+        ] && reusedSeen == [at(1), at(1300)],
+                      "a job id used again after its request ended starts an entry of its own, and the first keeps what it said", "\(both)")
+
+        // How each request ends, in words.
+        let endings: [(RequestPhase, String?)] = [
+            (.finished(.done), "Finished on this Mac."),
+            (.finished(.abandoned), "Dropped: the connection changed."),
+            (.decided(run: false, code: "not_enabled"), "Turned away: that ability is off on this Mac."),
+            (.finished(.refused("not_enabled")), "Turned away: that ability is off on this Mac."),
+            (.finished(.failed("killed_locally")), RequestText.failed["killed_locally"]),
+            (.finished(.failed("timeout")), RequestText.failed["timeout"]),
+            (.finished(.failed("interrupted")), RequestText.failed["interrupted"]),
+        ]
+        for (number, ending) in endings.enumerated() {
+            var one = RequestLog()
+            one.note(event(20 + number, fingerprint), at: at(1))
+            one.note(event(20 + number, ending.0), at: at(2))
+            let got = outcome(one)
+            report.expect(ending.1 != nil && got == ending.1 && !one.operationRunning,
+                          "\(ending.0) reads as \(ending.1 ?? "nothing")", got ?? "nil")
+            said += got.map { [$0] } ?? []
+        }
+        for ending in [RequestPhase.finished(.refused("brand_new")), .finished(.failed("brand_new"))] {
+            var one = RequestLog()
+            one.note(event(40, fingerprint), at: at(1))
+            one.note(event(40, ending), at: at(2))
+            let got = outcome(one) ?? ""
+            report.expect(!got.isEmpty && !got.contains("brand_new"), "a code this release does not know still has words, not the code", got)
+            said.append(got)
+        }
+
+        // What Lucille asked for, in words: quoted, cut, or not shown at all.
+        report.expect(lineOf(.received(op: "new.op", root: nil, path: nil), summaries) == "Lucille asked for \u{201C}new.op\u{201D}.",
+                      "an operation the list lacks is named, in quotes")
+        report.expect(lineOf(.received(op: nil, root: nil, path: nil), summaries) == RequestText.unreadableRequest
+                          && RequestText.unreadableRequest == "Lucille sent a request this Mac couldn't read.",
+                      "a request the host could not read says so")
+        report.expect(lineOf(fingerprint, [:]) == "Lucille asked for \u{201C}files.sha256\u{201D}: \u{201C}a.txt\u{201D} in docs.",
+                      "with no summaries, the operation is named, and its path and folder still said")
+        report.expect(lineOf(.received(op: "files.sha256", root: "Not An Alias", path: "a.txt"), summaries)
+                          == "Lucille asked to check a file's fingerprint: \u{201C}a.txt\u{201D}.",
+                      "a folder name that is not an alias is left out")
+        report.expect(lineOf(.received(op: "files.sha256", root: "docs", path: "a\u{202E}txt.exe"), summaries)
+                          == "Lucille asked to check a file's fingerprint: \(RequestText.unshownPath) in docs."
+                          && RequestText.unshownPath == "a path that can't be shown",
+                      "a path that cannot be shown safely is not shown")
+        report.expect(RequestText.quoted("a.txt") == "\u{201C}a.txt\u{201D}", "Lucille's path is shown in quotes")
+        report.expect(RequestText.quoted("it's a \"b\".txt") == "\u{201C}it's a \"b\".txt\u{201D}",
+                      "a straight apostrophe or quote, which cannot end the app's quotes, is shown")
+        let hidden: [(String, String)] = [
+            ("a right-to-left override", "a\u{202E}txt.exe"), ("a zero-width space", "a\u{200B}b"),
+            ("a byte order mark", "\u{FEFF}a"), ("a line separator", "a\u{2028}b"),
+            ("a paragraph separator", "a\u{2029}b"), ("a bell", "a\u{7}b"), ("a newline", "a\nb"),
+            ("a delete", "a\u{7F}b"), ("a closing curly quote", "x\u{201D} in docs. Finished on this Mac./../a.txt"),
+            ("an opening curly quote", "\u{201C}a"), ("a curly apostrophe", "it\u{2019}s.txt"), ("a guillemet", "a\u{00BB}b"),
+        ]
+        for (what, text) in hidden {
+            report.expect(RequestText.quoted(text) == nil, "a path with \(what) is not shown")
+        }
+        let long = "start-" + String(repeating: "x", count: 1010) + "-end.txt"
+        let cut = RequestText.quoted(long) ?? ""
+        report.expect(long.count == 1024 && cut.count == 62 && cut.hasPrefix("\u{201C}start-") && cut.hasSuffix("-end.txt\u{201D}")
+                          && cut.contains("\u{2026}"),
+                      "a path of 1024 characters is cut to 60, in the middle", cut)
+        let sixty = String(repeating: "p", count: 60)
+        report.expect(RequestText.quoted(sixty) == "\u{201C}" + sixty + "\u{201D}", "one of 60 is shown whole")
+
+        // At most 500 requests are kept.
+        var full = RequestLog()
+        for number in 1...501 {
+            full.note(event(1000 + number, .received(op: "host.describe", root: nil, path: nil)), at: at(number))
+        }
+        report.expect(RequestLog.capacity == 500 && full.entries.count == 500
+                          && full.entries.first?.jobId == jobId(1002) && full.entries.last?.jobId == jobId(1501),
+                      "at most 500 requests are kept, the oldest dropped", "\(full.entries.count)")
+        var busy = RequestLog()
+        busy.note(event(2000, .received(op: "host.sleep", root: nil, path: nil)), at: at(0))
+        busy.note(event(2000, .decided(run: true, code: nil)), at: at(0))
+        busy.note(event(2000, .started), at: at(0))
+        for number in 1...500 {
+            busy.note(event(2000 + number, .received(op: "host.describe", root: nil, path: nil)), at: at(number))
+        }
+        report.expect(busy.entries.count == 500 && busy.operationRunning && busy.entries.first?.jobId == jobId(2000)
+                          && busy.entries.dropFirst().first?.jobId == jobId(2002),
+                      "a request whose process runs is kept while newer ones go: Activity still shows that it runs",
+                      "\(busy.entries.prefix(2).map(\.jobId))")
+
+        said += [RequestText.running, RequestText.finished, RequestText.abandoned, RequestText.stoppedWithRun,
+                 RequestText.unreadableRequest, RequestText.unshownPath, ConnectionText.activityHeader]
+        said += Array(RequestText.refused.values) + Array(RequestText.failed.values)
+        report.expect(said.count > 20 && said.allSatisfy { !$0.lowercased().contains("received") },
+                      "no sentence says anything was received: finished means finished on this Mac")
     }
 
     // MARK: - checkPairing
@@ -1613,6 +1911,37 @@ extension SelfTest {
         }
         report.expect(told, "Lucille asking for a newer release is said once for the highest version")
 
+        // Stop What's Running (decisions/0002 §14): `kill`, which also pauses, only while run runs,
+        // as an effect of its own; it changes nothing in the supervisor, and resumes nothing.
+        spawned()
+        let runningPhase = sup.phase
+        report.expect(send(.userStop) == [.stopWhatsRunning] && sup.phase == runningPhase,
+                      "Stop What's Running, while run runs, asks for kill and nothing else", "\(sup.phase)")
+        fresh()
+        report.expect(send(.userStop).isEmpty && sup.phase == .idle, "with no run, Stop What's Running does nothing")
+        _ = send(.start)
+        report.expect(send(.userStop).isEmpty && sup.phase == .awaitingStatus(.start), "nor while status is read")
+        spawned()
+        _ = send(.quit(.quit))
+        let drainingPhase = sup.phase
+        var drains = false
+        if case .draining = drainingPhase {
+            drains = true
+        }
+        report.expect(drains && send(.userStop).isEmpty && sup.phase == drainingPhase, "nor while run drains", "\(drainingPhase)")
+        spawned()
+        _ = finish(.signaled(9), nil)
+        let backoffPhase = sup.phase
+        var waits = false
+        if case .backoff = backoffPhase {
+            waits = true
+        }
+        report.expect(waits && send(.userStop).isEmpty && sup.phase == backoffPhase, "nor during a back-off", "\(backoffPhase)")
+        fresh()
+        _ = send(.start)
+        _ = send(.statusRead(status(.noPair)))
+        report.expect(send(.userStop).isEmpty && sup.phase == .halted(.notConnected(.notPaired)), "nor once halted")
+
         checkHealth(report)
         checkSupervisorWalk(report)
     }
@@ -1712,13 +2041,15 @@ extension SelfTest {
     }
 
     /// Thousands of inputs in a seeded order: run starts only from a confirmed status read it
-    /// asked for, and resume runs only when the user asks.
+    /// asked for, resume runs only when the user asks, and what's running is stopped only when
+    /// the user asks, while run runs.
     static func checkSupervisorWalk(_ report: Report) {
         var random = Seeded(state: 9_202_611)
         var sup = RunSupervisor()
         var clock: TimeInterval = 1000
         var violations: [String] = []
         var spawns = 0
+        var stops = 0
         let wall0 = Date(timeIntervalSince1970: 1_800_000_000)
         let pairs: [StatusPair] = [.confirmed(name: pairName), .noPair, .waiting(name: pairName),
                                    .unreadable(code: "store_error"), .severalPairs]
@@ -1754,7 +2085,7 @@ extension SelfTest {
             case 8:
                 input = .quit(random.pick([.quit, .logout]))
             case 9:
-                input = random.pick([.stopNow, .disconnect, .spawnFailed])
+                input = random.pick([.stopNow, .disconnect, .spawnFailed, .userStop])
             case 10:
                 input = .pairingStarted
             case 11:
@@ -1784,6 +2115,16 @@ extension SelfTest {
             if resumes != asked {
                 violations.append("\(step): resume \(resumes) on \(input)")
             }
+            var stopAsked = false
+            if case .userStop = input, case .running = phaseBefore {
+                stopAsked = true
+            }
+            if effects.contains(.stopWhatsRunning) {
+                stops += 1
+            }
+            if effects.contains(.stopWhatsRunning) != stopAsked || (stopAsked && effects != [.stopWhatsRunning]) {
+                violations.append("\(step): stop what's running \(effects) on \(input) in \(phaseBefore)")
+            }
             if case .pairingStarted = input {
                 switch sup.phase {
                 case .backoff, .otherRun, .awaitingStatus:
@@ -1797,9 +2138,11 @@ extension SelfTest {
                 sup = RunSupervisor()
             }
         }
-        report.expect(violations.isEmpty, "over 40000 seeded steps, run starts only from a confirmed status read, and resumes only when asked",
+        report.expect(violations.isEmpty,
+                      "over 40000 seeded steps, run starts only from a confirmed status read, resumes only when asked, and stops what's running only when asked while run runs",
                       violations.prefix(5).joined(separator: "; "))
         report.expect(spawns > 0, "the walk started run (\(spawns) times)")
+        report.expect(stops > 0, "the walk stopped what's running (\(stops) times)")
     }
 
     // MARK: - checkChild

@@ -52,8 +52,9 @@ developing the app. Its builds stay ad hoc signed, for the repository owner's ow
   `lucille-host-runtime -I -B -X utf8 -m lucille_host --profile mac-app <verb>`, with an argv and a fixed
   environment (`PATH=/var/empty`). It runs every verb on its own profile, `mac-app` (§9); builds before it
   used `default`, and nothing moves from one to the other. It reads JSON (§8) from `status`, the pairing
-  verbs, `forget`, `kill`, `pause`, `resume` and `run`'s events, and the text of `--version`, `ops list` and
-  `roots list`. It reads and writes none of the host's files, and opens no network connection.
+  verbs, `forget`, `kill`, `pause`, `resume`, `log`, `run`'s events, and `ops list` for Activity's words, and
+  the text of `--version`, `ops list` and `roots list` for the menu. It reads and writes none of the host's
+  files, and opens no network connection.
 - **Pairing by paste, on 0001's gate** (§11.3). The maintainer decided on 2026-11-02 to build it now on
   [0001](0001-host-design.md)'s gate, not the typed one. The user pastes the code; the app passes it to
   `pair --code-stdin --json` on standard input, shows the SAS from `sas_pending`, and the user clicks
@@ -63,11 +64,17 @@ developing the app. Its builds stay ad hoc signed, for the repository owner's ow
 - **Supervision of `run`** (§9): `run --json-events --exit-on-stdin-eof` as the app's child, with the
   lifeline; the exit table; restarts with back-off, and the stop after five crashes in ten minutes; Quit and
   logout with the drain ladder and **Stop now**; paused at the next launch after a `kill`, and never resumed
-  by the app on its own; **Disconnect from Lucille…**, which drains `run` before `forget --json`.
+  by the app on its own; **Disconnect from Lucille…**, which drains `run` before `forget --json`; and
+  **Stop What's Running** (§14), shown while a request's process runs, which runs `kill --json` and leaves
+  the host paused until the user resumes it.
+- **Activity…** (§15): a window with what Lucille asked this Mac to do since the app opened, from `run`'s
+  `request` events, in words, newest first, kept in memory only and at most 500; and, behind **Show the
+  Host's Log**, the last 200 lines of `log --json --limit 200`, as the host wrote them.
 - **The menu** shows the version and a status line read from `status --json` and `run`'s events, with a line
   for what needs attention, and offers Pause and Resume, the abilities (the operations, switched with
-  `ops enable` and `ops disable`), Add a Folder…, the folders with Remove, the pairing items (Connect to
-  Lucille…, Finish Connecting…, Stop Connecting…, Disconnect from Lucille…), and Quit Capsule.
+  `ops enable` and `ops disable`), Add a Folder…, the folders with Remove, Activity…, the pairing items
+  (Connect to Lucille…, Finish Connecting…, Stop Connecting…, Disconnect from Lucille…), and Quit Capsule;
+  and, while a request's process runs, Stop What's Running.
 - **It is signed ad hoc**, with the hardened runtime and no entitlements, each Mach-O file with its own
   identifier and the interpreter with `com.lucille-ai.capsule.runtime` (§7). It is not notarized, so macOS
   refuses to open it normally.
@@ -78,9 +85,8 @@ developing the app. Its builds stay ad hoc signed, for the repository owner's ow
   on macOS 26 and 27, without the end-to-end check (§18, §19). Logs and UI snapshots are uploaded on every
   run. The disk image is uploaded only by a manual run whose every check passed, and kept 3 days.
 
-Not built yet: the typed gate and the Connect flow (§11.2, §11.4; proposed), opening at login, Activity,
-the restore list after a new pairing (§11.6, `policy previous`), Stop What's Running, Reset Settings
-(`policy reset`, §10), Download and Prepare to Update (§16), the app's use of the JSON contract for `ops`
+Not built yet: the typed gate and the Connect flow (§11.2, §11.4; proposed), opening at login, the restore
+list after a new pairing (§11.6, `policy previous`), Reset Settings (`policy reset`, §10), Download and Prepare to Update (§16), the menu's use of the JSON contract for `ops`
 and `roots` (§8), the Welcome and main windows, updates, **Remove Capsule…** (section 17), Copy
 Diagnostics (§15), Developer ID signing and notarization, ripgrep (`Helpers/rg`; the pins hold an empty
 ripgrep commit until then, and `Resources/licenses/` has no ripgrep licence), and the release jobs. The
@@ -112,7 +118,18 @@ made for the first build", says why for most of them:
 - when no `state` arrives for 120 s, the app only says so; it neither restarts `run` nor closes the
   lifeline (§9);
 - the clock's fix is said in words, not offered as an **Open Date & Time Settings** button (§3.3), because
-  the Mac lint and the build's checks keep `NSWorkspace` out of the app (§20).
+  the Mac lint and the build's checks keep `NSWorkspace` out of the app (§20);
+- Activity says only the live `request` events in words. The host's log is shown as the host wrote it,
+  behind a disclosure, under "As the host wrote it. Anything running as you can change this file.": the
+  contract's `log_line` carries text only, which a shell shows as it is or not at all, and a typed history
+  is not in version 1 (spec/CLI.md §6, §14). A request whose `run` ended before it finished reads "Stopped
+  when Capsule's helper program stopped." (§15);
+- Activity is a window of its own that the menu opens, not a part of a main window, and nothing in it can
+  be selected, so nothing in it can be copied: the app adds no copy of its own until Copy Diagnostics
+  (§15), and the pairing field's Command-C and Command-X are AppKit's, for the user's own text;
+- Stop What's Running is not offered while `run` drains for a quit or a Disconnect, whose own ladder stops
+  the operation: Stop now during a quit, `kill` after 330 s during a Disconnect. The menu offers it from a
+  request's `started` to its `finished` (§14).
 
 Where this record says what the app does, it describes the planned app.
 
@@ -664,8 +681,9 @@ login ─► Capsule (menu bar; an "Open at Login" item)
 - **After a kill at Quit or log out**, the host is paused at the next launch, which the user did not choose
   after a log out. The app does not resume it on its own: a pause nobody asked for fails safe. The next
   launch says "Capsule is paused": "Lucille's requests are turned away until you resume. You paused
-  Capsule, or a task was stopped when Capsule quit or you logged out.", with **Resume**. It names both
-  causes, because the pause flag holds only a time (`controls.py`), and the app keeps no memory of its own.
+  Capsule or chose Stop What's Running, or a task was stopped when Capsule quit or you logged out.", with
+  **Resume**. It names every cause, because the pause flag holds only a time (`controls.py`), and the app
+  keeps no memory of its own.
 - **SIGTERM to the app** asks nothing and runs no `kill`: the app closes the lifeline, stops a `pair`
   child as at a quit, and exits within a few seconds. `run` then drains on its own. The app handles it on a
   dispatch queue of its own, never the main queue, which a note or the wait to quit may hold.
@@ -965,7 +983,7 @@ a policy aside, the previous folders and operations come back as unchecked boxes
 |---|---|---|
 | Pause Lucille | `pause` | A pause badge, and a note: "Paused. Lucille's requests will be turned away until you resume." Works offline. |
 | Resume Lucille | `resume` | |
-| Stop What's Running | `kill` | Shown only while an operation runs. Afterwards: "Stopped, and paused. Resume when you're ready." |
+| Stop What's Running | `kill` | Shown only while an operation runs: from its request's `started` to its `finished`. Afterwards: "Stopped, and paused. Resume when you're ready." Nothing resumes but the user's Resume. |
 | Quit Capsule | close the pipe (drain); **Stop now** runs `kill`, which also pauses | §9 |
 | Disconnect from Lucille… (Settings) | `forget` | "Disconnected. Lucille was told." or "Lucille wasn't reachable. In Lucille, open Computers and remove this Mac." |
 | Reset Settings… (Settings) | `policy reset` | Shown when the settings file is invalid (§10) |
@@ -986,10 +1004,18 @@ Nothing Lucille sends can unpause the host. The app offers no remote control of 
     Settings…), or `checking` for more than 30 s ("A folder check is stuck"); `last_left_because` set ("This Mac
     left its room because …", in words); a room `read_stuck`; `last_hub_contact` 120 s old or more ("Lucille
     can't be reached since …"); no `state` at all for 120 s ("Capsule's host is not responding").
-- **Activity** reads `log --limit 200` and the live `request` events, in words: "10:42. Lucille asked for a
-  fingerprint of report.pdf in documents. Finished on this Mac." It never says Lucille received a reply:
+- **Activity** reads `log --limit 200` and the live `request` events, in words: the time in the user's own
+  format ("10:42 AM"), then "Lucille asked to check a file's fingerprint: “report.pdf” in documents.
+  Finished on this Mac." It never says Lucille received a reply:
   `finished` says the request finished on the computer. Each entry carries the app's own clock when its
-  event arrived, since events carry no time. It is kept in memory only. Many `host_too_old` events make one
+  event arrived, since events carry no time. It is kept in memory only, at most 500 requests, the least
+  recently seen dropped first and a running one last. What a request asked for is Lucille's text: its path
+  is shown in quotes, cut in the middle past 60 characters, or as "a path that can't be shown" when it
+  holds a control, format, line or paragraph separator character, or a quotation mark that opens or
+  closes (a curly quote or apostrophe, a guillemet: one could end the app's own quotes); its folder only
+  by a valid alias. A request that ended is never written again, so a `received` for a job id the host
+  has forgotten (15 minutes after the request's deadline) starts an entry of its own. An entry has no
+  button: a refusal for an ability that is off is a fact (§13). Many `host_too_old` events make one
   notice, with the highest `min_host_version` seen, cleared when the app is updated (§16).
 - **The app writes no log of its own.** The child's standard error goes to an in-memory buffer shown under
   Details. Any system log line from the app carries state names only: no paths, arguments or output.
@@ -1242,8 +1268,11 @@ check from `tools/macos/check_app.py`:
 - end to end, with that copy's interpreter, a hub of the check's own on 127.0.0.1 and a stand-in for
   Lucille: the app's profile paired through the command line with the SAS left pending, then, driven
   through System Events, They Match on 0001's gate, `run` as the app's child reading an offered room,
-  `files.sha256` answered, `run` restarted after SIGKILL, `run` drained when the app is killed, Quit with
-  its drain, Stop now (`kill`, then paused at the next launch) and Disconnect (`forget` after the drain);
+  a `files.sha256` request while that ability is off, which Activity shows turned away with no button but
+  its disclosure (M18), then `files.sha256` answered, `run` restarted after SIGKILL, `run` drained when
+  the app is killed, Quit with its drain, Stop What's Running from the menu (`kill`, the host still paused
+  10 s later, then Resume from the menu), Stop now (`kill`, then paused at the next launch) and Disconnect
+  (`forget` after the drain);
 - a probe of the verbs the app uses, run as the app runs them, printed only.
 
 And by its `macos-smoke` jobs on `macos-26` and `xcode-27`, on the same disk image: the disk image, the
@@ -1442,7 +1471,8 @@ These join 0001's "Host invariants and their tests".
 | M15 | One host per profile | a second `run` exits 21 |
 | M16 | A policy change applies to the next decision | remove a folder while `run` runs; the next request for it is refused `path_outside_root` |
 | M17 | Every new pair starts from the fresh policy | pair, enable, forget, pair again: only `host.describe`, no folders |
-| M18 | The app never offers to widen access in answer to Lucille | review, and a UI snapshot of a `not_enabled` entry with no button |
+| M18 | The app never offers to widen access in answer to Lucille | review, and a UI snapshot of a `not_enabled` entry with no button: the pairing check's `p-activity-not-enabled.png`, where Activity's only button is its disclosure |
+| M19 | Text from Lucille is shown only in Activity, its path and operation in quotes and its folder only as a valid alias, and reaches no argument, menu line, button or note | `tests/test_macos_build.py`: only `HostJSON.swift`, which decodes a request's op, folder and path, and `RequestLog.swift`, which keeps them `fileprivate`, read them, and only the Activity panel shows `RequestText`'s words; the self-test: a path with a control, format, line or paragraph separator character, or a quotation mark that opens or closes, is not shown, and a long one is cut |
 
 **What M12's check cannot see.** It is weaker than the invariant. It walks `~/Library` before the app is
 launched and after the menu has been driven, and fails only on a new, changed or removed path whose name
