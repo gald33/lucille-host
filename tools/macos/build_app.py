@@ -849,14 +849,18 @@ _CHECKED_COUNT: Final = re.compile(r"found the same bytes in (\d+) of (\d+) \.py
 
 def bytecode_check_problems(done: subprocess.CompletedProcess[str], tag: str) -> list[str]:
     """What a run of :data:`BYTECODE_PROGRAM` in ``check`` mode says is wrong. It ends with its
-    count, for ``tag``: exit 0 with only that line, every file matched, is nothing wrong; exit 1
-    is the lines before it, one for each file it did not match. Any other ending is a problem of
-    its own, an exception among them: Python then exits 1 too, with nothing on stdout."""
+    count, for ``tag``: exit 0 with only that line, every file matched, is nothing wrong, unless
+    it counts no file at all ("0 of 0"): an app with no ``.py`` in its library, or a check that
+    found none of it, would otherwise pass. Exit 1 is the lines before it, one for each file it
+    did not match. Any other ending is a problem of its own, an exception among them: Python then
+    exits 1 too, with nothing on stdout."""
     lines = done.stdout.splitlines()
     count = _CHECKED_COUNT.fullmatch(lines[-1]) if lines else None
     if count is not None and count[3] == tag:
         found = lines[:-1]
         matched, total = int(count[1]), int(count[2])
+        if done.returncode == 0 and not found and total == 0:
+            return [f"the bytecode check counted no .py file: {lines[-1]}"]
         if done.returncode == 0 and not found and matched == total:
             return []
         if done.returncode == 1 and found and matched + len(found) == total:
