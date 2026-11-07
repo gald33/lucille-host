@@ -47,9 +47,9 @@ lib/python3.13/turtle.py
 lib/python3.13/turtledemo
 lib/python3.13/lib-dynload/_tkinter.cpython-313-darwin.so
 
-# Three timestamp .pyc files the archive ships for the encodings package. Their recorded source
-# times do not match the sources', so the interpreter ignores them; removing them leaves no .pyc
-# and no __pycache__ anywhere in the app.
+# Three stale timestamp .pyc files the archive ships for the encodings package. Their recorded
+# source times do not match the sources', so the interpreter ignores them. The build writes a
+# checked-hash .pyc for every module later, into a runtime that holds none.
 lib/python3.13/encodings/__pycache__
 
 # site-packages' note that third-party packages go there. The build empties site-packages before

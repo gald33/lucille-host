@@ -24,13 +24,16 @@ ignores):
    shape: one program, one library folder, an empty ``site-packages``, no ``.pyc``.
 3. ``site-packages`` filled by :func:`payload.assemble_site_packages`: the lock's wheels for this
    platform and then the host wheel, installed with hashes required, and checked file by file
-   against the wheels. Nothing is precompiled: no ``.pyc`` is shipped, and the app runs the
-   interpreter with ``-B``.
-4. The menu bar app in ``macos/App/`` compiled with ``swiftc``; ``Info.plist`` (:func:`info_plist`);
+   against the wheels. The installer compiles nothing.
+4. The bytecode (:func:`compile_bytecode`): the bundled interpreter writes a checked-hash ``.pyc``
+   beside every ``.py`` of ``lib/python3.13``, and a second run of it checks that each is the
+   same, byte for byte. The app runs the interpreter with ``-B``, so it writes none at run time.
+5. The menu bar app in ``macos/App/`` compiled with ``swiftc``; ``Info.plist`` (:func:`info_plist`);
    the wrapper ``Resources/bin/lucille-host`` for Terminal users; the licence texts in
    ``Resources/licenses/``; and ``Resources/MANIFEST.json`` (:func:`manifest`).
-5. ``<name>-unsigned-macOS-arm64.tar.gz``, the unsigned app as a tarball whose bytes depend on the
-   files alone (:func:`payload.write_tarball`), so that two builds can be compared.
+6. ``<name>-unsigned-macOS-arm64.tar.gz``, the unsigned app as a tarball whose bytes depend on the
+   files alone (:func:`payload.write_tarball`), so that two builds can be compared. It is written
+   only after the bytecode's layout and M10, with the ``.pyc`` files admitted, are checked again.
 
 ``build`` runs ``assemble``, then signs every Mach-O file ad hoc in the order
 :func:`signing_plan` gives (the libraries deepest first, then the interpreter with its own
@@ -109,6 +112,137 @@ MANIFEST_PATH: Final = "Contents/Resources/MANIFEST.json"
 # PYTHON* variable and the user's site folder, -B writes no .pyc into the signed bundle, and
 # -X utf8 makes the text encoding UTF-8 whatever the locale.
 RUNTIME_FLAGS: Final = ("-I", "-B", "-X", "utf8")
+# The .pyc files the build writes (0002 §6): one checked-hash file in __pycache__ beside each .py of
+# the runtime's library, with this tag. The pins allow Python 3.13 only, so the tag is fixed.
+BYTECODE_TAG: Final = "cpython-313"
+# The flags of a .pyc file that is hash-based and checked: at each import, the interpreter checks
+# the source hash in its header against the .py beside it. It does not check the code.
+CHECKED_HASH: Final = 0b11
+# How the build and the checks run BYTECODE_PROGRAM: the app's flags, with -S, so that no .pth file
+# or site step loads a module first, and -W ignore, so that a warning while compiling loads none
+# either. A module loaded first changes the bytes marshal writes (0002 §6). The environment is
+# fixed, not inherited, and the program may run for up to BYTECODE_TIMEOUT seconds.
+BYTECODE_FLAGS: Final = ("-I", "-B", "-S", "-W", "ignore", "-X", "utf8")
+BYTECODE_ENV: Final = {"PATH": "/usr/bin:/bin"}
+BYTECODE_TIMEOUT: Final = 900
+# The program the bundled interpreter runs, as ``-c`` text, to write the .pyc files (``write``) and
+# to check them (``check``), with RUNTIME LIB after the mode (:func:`bytecode_argv`). It compiles
+# every .py under RUNTIME/LIB in memory, with the header the importer gives a checked-hash file:
+# the magic number, the flags, and the source's hash. ``write`` writes each file and refuses a
+# runtime that holds any bytecode; ``check`` compares each file with what it compiles, byte for
+# byte, and prints a line for each that differs. The last line says how many matched. Exit 0 if
+# nothing is wrong, 1 if a file is, 2 on a usage error or if compiling loaded a module. Python also
+# exits 1 on an exception the program does not catch, with nothing on stdout, so a check run's
+# exit 1 is read as findings only when its lines add up (:func:`bytecode_check_problems`).
+#
+# The bytes marshal writes for one source depend on the state of the process that compiles it,
+# not only on the source (measured on Linux, 0002 §6). So the program keeps these rules, each of
+# which a measurement made load-bearing: one program text for both modes (its own constants are
+# part of that state); every file compiled in one process, in sorted order of its path from the
+# runtime; each code object dropped before the next compile; only built-in or frozen modules
+# imported, and none loaded while it compiles (else it stops, with exit 2); -S and -W ignore
+# (BYTECODE_FLAGS), which it checks. The name each .pyc records for its source is its path from
+# the runtime (``lib/python3.13/json/__init__.py``): the importer replaces it with the real path
+# when it loads the file, so no .pyc holds the build folder, and two copies of a runtime get the
+# same bytes. A .py added or removed can change the bytes of the files compiled after it.
+BYTECODE_PROGRAM: Final = """\
+import os
+import sys
+import marshal
+import _imp
+import _frozen_importlib_external as bootstrap
+
+USAGE = "usage: lucille-host-runtime -I -B -S -W ignore -X utf8 -c PROGRAM write|check RUNTIME LIB"
+CHECKED_HASH = (3).to_bytes(4, "little")
+
+
+def main():
+    f = sys.flags
+    if (f.isolated, f.dont_write_bytecode, f.no_site, f.utf8_mode, f.optimize) != (1, 1, 1, 1, 0):
+        print(USAGE)
+        return 2
+    if sys.warnoptions != ["ignore"] or sys.pycache_prefix is not None or len(sys.argv) != 4:
+        print(USAGE)
+        return 2
+    mode, runtime, lib = sys.argv[1:]
+    if mode not in ("write", "check"):
+        print(USAGE)
+        return 2
+    tag = sys.implementation.cache_tag
+    sources = []
+    held = []
+    for folder, dirs, files in os.walk(os.path.join(runtime, lib)):
+        dirs.sort()
+        if "__pycache__" in dirs:
+            dirs.remove("__pycache__")
+            held.append(os.path.join(folder, "__pycache__"))
+        for name in files:
+            if name.endswith(".py"):
+                sources.append(os.path.relpath(os.path.join(folder, name), runtime))
+            elif name.endswith((".pyc", ".pyo")):
+                held.append(os.path.join(folder, name))
+    sources.sort()
+    if mode == "write" and held:
+        print("the runtime already holds bytecode: " + ", ".join(sorted(held)[:10]))
+        return 1
+    loaded = sorted(sys.modules)
+    problems = []
+    done = 0
+    for source in sources:
+        folder, name = os.path.split(source)
+        cached = os.path.join(folder, "__pycache__", name[:-3] + "." + tag + ".pyc")
+        with open(os.path.join(runtime, source), "rb") as handle:
+            data = handle.read()
+        source_hash = _imp.source_hash(bootstrap._RAW_MAGIC_NUMBER, data)
+        try:
+            code = compile(data, source, "exec", dont_inherit=True, optimize=0)
+        except (SyntaxError, ValueError) as error:
+            problems.append(source + " does not compile: " + str(error))
+            continue
+        pyc = bootstrap.MAGIC_NUMBER + CHECKED_HASH + source_hash + marshal.dumps(code)
+        del code
+        path = os.path.join(runtime, cached)
+        if mode == "write":
+            os.makedirs(os.path.dirname(path), mode=0o755, exist_ok=True)
+            handle = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+            try:
+                view = memoryview(pyc)
+                while view:
+                    view = view[os.write(handle, view) :]
+            finally:
+                os.close(handle)
+            done += 1
+            continue
+        try:
+            with open(path, "rb") as handle:
+                found = handle.read()
+        except FileNotFoundError:
+            problems.append(cached + " is missing: " + source + " has no .pyc")
+            continue
+        if found[:4] != bootstrap.MAGIC_NUMBER:
+            problems.append(cached + " has another Python's magic number, not this one's")
+        elif found[4:8] != CHECKED_HASH:
+            flags = str(int.from_bytes(found[4:8], "little"))
+            problems.append(cached + " is not checked-hash: its flags are " + flags)
+        elif found[8:16] != source_hash:
+            problems.append(cached + " has the source hash of another file, not " + source)
+        elif found != pyc:
+            problems.append(cached + " is not what this interpreter compiles from " + source)
+        else:
+            done += 1
+    if sorted(sys.modules) != loaded:
+        added = sorted(set(sys.modules) - set(loaded))
+        print("compiling loaded modules, so the bytes would depend on them: " + ", ".join(added))
+        return 2
+    for problem in problems:
+        print(problem)
+    said = "wrote" if mode == "write" else "found the same bytes in"
+    print(said + " " + str(done) + " of " + str(len(sources)) + " .pyc files, " + tag)
+    return 1 if problems else 0
+
+
+raise SystemExit(main())
+"""
 # The profile the app runs every verb on (0002 §9), apart from the ``default`` profile of a
 # command-line install. The Swift app names it too (``HostCLI.appProfile``).
 APP_PROFILE: Final = "mac-app"
@@ -607,6 +741,168 @@ def bytecode_in(root: Path) -> list[Path]:
         found += [Path(folder) / name for name in dirs if name == "__pycache__"]
         found += [Path(folder) / name for name in files if name.endswith((".pyc", ".pyo"))]
     return sorted(found)
+
+
+def bytecode_argv(runtime: Path, mode: str) -> list[str]:
+    """The command that runs :data:`BYTECODE_PROGRAM` with the runtime's own interpreter, on its
+    ``lib/python3.13``: ``mode`` is ``write`` or ``check``."""
+    return [
+        str(runtime / INTERPRETER),
+        *BYTECODE_FLAGS,
+        "-c",
+        BYTECODE_PROGRAM,
+        mode,
+        str(runtime),
+        STDLIB,
+    ]
+
+
+def run_bytecode_program(runtime: Path, mode: str) -> subprocess.CompletedProcess[str]:
+    """Run :func:`bytecode_argv` from ``/``, with :data:`BYTECODE_ENV`, its output captured as
+    text. It prints the command with the program's name in place of its text."""
+    argv = bytecode_argv(runtime, mode)
+    shown = [argv[0], *BYTECODE_FLAGS, "-c", "BYTECODE_PROGRAM", mode, str(runtime), STDLIB]
+    print("+ " + shlex.join(shown), flush=True)
+    try:
+        return subprocess.run(
+            argv,
+            capture_output=True,
+            text=True,
+            env=dict(BYTECODE_ENV),
+            cwd="/",
+            timeout=BYTECODE_TIMEOUT,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise BuildError(
+            f"the bytecode program did not finish within {BYTECODE_TIMEOUT} s"
+        ) from exc
+
+
+def bytecode_layout_problems(app: Path, tag: str = BYTECODE_TAG) -> list[str]:
+    """Where the app's bytecode differs from what the build writes, from the names alone and the
+    first 16 bytes of each ``.pyc``: one ``<name>.<tag>.pyc`` in ``__pycache__`` beside each
+    ``.py`` of the runtime's library, checked-hash, and no other bytecode anywhere in the app.
+    Paths are from the runtime inside it, and from the app outside it. What each ``.pyc`` holds is
+    :func:`bytecode_problems`' to judge."""
+    runtime = app / RUNTIME_DIR
+    library = runtime / STDLIB
+    suffix = f".{tag}.pyc"
+
+    def shown(path: Path) -> str:
+        return path.relative_to(runtime if runtime in path.parents else app).as_posix()
+
+    problems = []
+    for path in bytecode_in(app):
+        if library not in path.parents:
+            problems.append(f"bytecode outside the runtime's library: {shown(path)}")
+        elif "__pycache__" not in (path.name, path.parent.name):
+            problems.append(f"bytecode outside a __pycache__ folder: {shown(path)}")
+    for folder, dirs, files in os.walk(library):
+        here = Path(folder)
+        dirs.sort()
+        if "__pycache__" in dirs:
+            dirs.remove("__pycache__")
+            cache = here / "__pycache__"
+            entries = [] if cache.is_symlink() else sorted(cache.iterdir())
+            if cache.is_symlink():
+                problems.append(
+                    f"{shown(cache)} is a symbolic link, not the folder the build writes"
+                )
+            elif not entries:
+                problems.append(f"an empty __pycache__ folder: {shown(cache)}")
+            for path in entries:
+                name = path.name
+                if (
+                    path.is_symlink()
+                    or not path.is_file()
+                    or not name.endswith(suffix)
+                    or name == suffix
+                ):
+                    problems.append(
+                        f"{shown(path)} is not a file the build writes: only "
+                        f"<name>.{tag}.pyc goes in __pycache__"
+                    )
+                    continue
+                source = here / (name.removesuffix(suffix) + ".py")
+                if not source.is_file():
+                    problems.append(f"{shown(path)} has no source: there is no {shown(source)}")
+                    continue
+                with path.open("rb") as handle:
+                    head = handle.read(16)
+                flags = int.from_bytes(head[4:8], "little")
+                if len(head) < 16:
+                    problems.append(f"{shown(path)} is too short to be a .pyc")
+                elif flags != CHECKED_HASH:
+                    problems.append(f"{shown(path)} is not checked-hash: its flags are {flags}")
+        for name in sorted(files):
+            if name.endswith(".py"):
+                pyc = here / "__pycache__" / (name.removesuffix(".py") + suffix)
+                if not pyc.is_file():
+                    problems.append(f"{shown(here / name)} has no .pyc: there is no {shown(pyc)}")
+    return problems
+
+
+# The last line of a check run of BYTECODE_PROGRAM: how many .pyc files matched, of how many .py.
+_CHECKED_COUNT: Final = re.compile(r"found the same bytes in (\d+) of (\d+) \.pyc files, (\S+)")
+
+
+def bytecode_check_problems(done: subprocess.CompletedProcess[str], tag: str) -> list[str]:
+    """What a run of :data:`BYTECODE_PROGRAM` in ``check`` mode says is wrong. It ends with its
+    count, for ``tag``: exit 0 with only that line, every file matched, is nothing wrong; exit 1
+    is the lines before it, one for each file it did not match. Any other ending is a problem of
+    its own, an exception among them: Python then exits 1 too, with nothing on stdout."""
+    lines = done.stdout.splitlines()
+    count = _CHECKED_COUNT.fullmatch(lines[-1]) if lines else None
+    if count is not None and count[3] == tag:
+        found = lines[:-1]
+        matched, total = int(count[1]), int(count[2])
+        if done.returncode == 0 and not found and matched == total:
+            return []
+        if done.returncode == 1 and found and matched + len(found) == total:
+            return found
+    said = (done.stdout + done.stderr).strip()
+    return [f"the bytecode check did not run (exit {done.returncode}): {said}"]
+
+
+def bytecode_problems(app: Path, tag: str = BYTECODE_TAG) -> list[str]:
+    """:func:`bytecode_layout_problems`, then what the bundled interpreter finds when it checks
+    each ``.pyc`` (:data:`BYTECODE_PROGRAM` in ``check`` mode): its magic number, its flags, its
+    source's hash, and its bytes against what it compiles from that source now
+    (:func:`bytecode_check_problems`). It prints the check run's count."""
+    problems = bytecode_layout_problems(app, tag)
+    done = run_bytecode_program(app / RUNTIME_DIR, "check")
+    lines = done.stdout.splitlines()
+    if lines:
+        print(lines[-1], flush=True)
+    return problems + bytecode_check_problems(done, tag)
+
+
+def require_bytecode(app: Path, tag: str = BYTECODE_TAG) -> None:
+    """Refuse an app whose bytecode :func:`bytecode_problems` finds anything wrong with."""
+    problems = bytecode_problems(app, tag)
+    if problems:
+        raise BuildError(
+            "the .pyc files are not the ones the build writes:\n  " + "\n  ".join(problems)
+        )
+
+
+def compile_bytecode(app: Path, tag: str = BYTECODE_TAG) -> None:
+    """Write the app's ``.pyc`` files with the bundled interpreter (:data:`BYTECODE_PROGRAM` in
+    ``write`` mode), into a runtime that holds no bytecode yet; then check them with a second,
+    fresh run of the same program (:func:`require_bytecode`). So if the interpreter does not write
+    the same bytes twice, the build stops here, before anything is signed."""
+    runtime = app / RUNTIME_DIR
+    held = bytecode_in(runtime)
+    if held:
+        shown = ", ".join(path.relative_to(runtime).as_posix() for path in held[:10])
+        raise BuildError(f"the runtime already holds bytecode: {shown}")
+    done = run_bytecode_program(runtime, "write")
+    if done.returncode != 0:
+        said = (done.stdout + done.stderr).strip()
+        raise BuildError(f"the bytecode program failed (exit {done.returncode}):\n{said}")
+    print(done.stdout, end="", flush=True)
+    require_bytecode(app, tag)
 
 
 def _run(argv: list[str], *, cwd: Path | None = None, env: Mapping[str, str] | None = None) -> None:
@@ -1138,6 +1434,7 @@ def assemble(
         work=work,
         environ=os.environ,
     )
+    compile_bytecode(app)
 
     executable = contents / "MacOS" / pins.app_name
     compile_app(executable, pins.deployment_target, toolchain)
@@ -1158,8 +1455,15 @@ def assemble(
         removed=removed,
     )
     (app / MANIFEST_PATH).write_text(manifest_text(data), encoding="utf-8")
+    # Before the tarball: no link, the bytecode where the build wrote it, and M10 again, with the
+    # .pyc files the build wrote admitted by their names (compile_bytecode checked their bytes).
     problems = [f"symbolic link in the app: {link}" for link in symlinks_in(app)]
-    problems += [f"bytecode in the app: {path}" for path in bytecode_in(app)]
+    problems += bytecode_layout_problems(app)
+    problems += payload.record_problems(
+        assembly.site,
+        [wheel.path for wheel in assembly.wheels] + [assembly.host.path],
+        bytecode_tag=BYTECODE_TAG,
+    )
     if problems:
         raise BuildError("the app is not ready to sign:\n  " + "\n  ".join(problems))
     tarball = out / unsigned_tarball_name(pins.app_name)

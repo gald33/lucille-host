@@ -1,7 +1,8 @@
 """The parts of tools/macos/build_app.py and tools/macos/check_app.py that run anywhere: the pins,
 the sha256 gate, the hashed build backend, Info.plist, the disk image's name, the parsers the
-checks use, and the rules the Swift sources keep. The build itself runs on a Mac, in ci.yml's
-macos-app job, whose steps tests/test_ci_workflow.py reads.
+checks use, the bytecode program (run here by the interpreter that runs these tests), and the
+rules the Swift sources keep. The build itself runs on a Mac, in ci.yml's macos-app job, whose
+steps tests/test_ci_workflow.py reads.
 """
 
 from __future__ import annotations
@@ -12,10 +13,12 @@ import json
 import os
 import plistlib
 import re
+import shlex
+import shutil
 import subprocess
 import sys
 import types
-from collections.abc import Callable
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 
 import pytest
@@ -465,18 +468,28 @@ def test_macho_detection(tmp_path: Path) -> None:
     assert build_app.symlinks_in(tmp_path) == [tmp_path / "link.so"]
 
 
-def test_nothing_is_precompiled() -> None:
-    # No .pyc is shipped (0002 §6): the build compiles nothing, so the functions that did are
-    # gone, and neither build script runs compileall.
-    for name in (
-        "compile_bytecode",
-        "bytecode_problems",
-        "install_packages",
-        "remove_after_install",
-    ):
+def test_the_build_writes_bytecode_after_the_payload_and_before_the_tarball() -> None:
+    # The installer compiles nothing; the bundled interpreter writes the .pyc files once
+    # site-packages is filled and checked, and they are checked again, with M10, before the
+    # tarball is written (0002 §6). No build script runs compileall or py_compile.
+    for name in ("install_packages", "remove_after_install"):
         assert not hasattr(build_app, name), name
-    for script in ("build_app.py", "payload.py"):
-        assert "compileall" not in (build_app.TOOLS_DIR / script).read_text(encoding="utf-8")
+    assemble = _python_function(
+        (build_app.TOOLS_DIR / "build_app.py").read_text(encoding="utf-8"), "assemble"
+    )
+    steps = (
+        "assemble_site_packages(",
+        "compile_bytecode(app)",
+        "bytecode_layout_problems(app)",
+        "bytecode_tag=BYTECODE_TAG",
+        "write_tarball(",
+    )
+    places = [assemble.find(step) for step in steps]
+    assert -1 not in places and places == sorted(places), dict(zip(steps, places, strict=True))
+    assert "bytecode_in(app)" not in assemble
+    for script in ("build_app.py", "payload.py", "check_app.py"):
+        text = (build_app.TOOLS_DIR / script).read_text(encoding="utf-8")
+        assert "compileall" not in text and "py_compile" not in text, script
     assert "--no-compile" in payload.install_argv(Path("t"), Path("f"), Path("r"), "3.13.18")
 
 
@@ -1331,6 +1344,695 @@ def test_symlinks_replaced_or_refused(
 
 
 # ---------------------------------------------------------------------------------------------
+# The bytecode: one checked-hash .pyc beside each .py of the runtime's library (0002 §6)
+
+# The bundled interpreter runs only on a Mac, so here a stand-in runs the interpreter that runs
+# these tests, and the .pyc files carry its tag. On a Mac, check_app.py suite runs these tests
+# with the bundled interpreter itself.
+TAG = sys.implementation.cache_tag
+ANOTHER_TAG = "cpython-312" if TAG != "cpython-312" else "cpython-313"
+# Plain sources that compile on every Python the tests run on: a module, a package, and a
+# package in site-packages. pkg/checked.py holds what -O or -OO would compile away: a docstring, an
+# assert and an `if __debug__:` block.
+_LIBRARY: Mapping[str, bytes] = {
+    "mod.py": b"VALUE = 1\n\n\ndef double(x):\n    return 2 * x\n",
+    "pkg/__init__.py": b"",
+    "pkg/sub.py": b"WORDS = ('one', 'two')\n",
+    "pkg/checked.py": (
+        b'"""Kept at -O0."""\n\n\n'
+        b"def half(x):\n    assert x % 2 == 0, x\n    return x // 2\n\n\n"
+        b"if __debug__:\n    DEBUG = True\n"
+    ),
+    "site-packages/demo/__init__.py": b"",
+    "site-packages/demo/m.py": b"class Demo:\n    name = 'demo'\n",
+}
+_MOD_PYC = f"lib/python3.13/__pycache__/mod.{TAG}.pyc"
+# Run as the app runs the interpreter, in a process of its own, with pairs of paths: a .py, then
+# its .pyc. It prints each .pyc that is not what the importer would make of its .py: the header
+# the importer checks (this interpreter's magic number, checked-hash, the source's hash), and the
+# code it would compile from that .py (`==` ignores co_filename, which names the source by its
+# path from the runtime).
+_IMPORTER_VIEW = """\
+import importlib.machinery
+import importlib.util
+import marshal
+import sys
+
+for source, cached in zip(sys.argv[1::2], sys.argv[2::2]):
+    with open(source, "rb") as handle:
+        data = handle.read()
+    with open(cached, "rb") as handle:
+        pyc = handle.read()
+    header = importlib.util.MAGIC_NUMBER + (3).to_bytes(4, "little")
+    if pyc[:16] != header + importlib.util.source_hash(data):
+        print("another header:", cached)
+    loader = importlib.machinery.SourceFileLoader("module", source)
+    if marshal.loads(pyc[16:]) != loader.source_to_code(data, source):
+        print("other code:", cached)
+"""
+
+
+def _bytecode_app(root: Path, library: Mapping[str, bytes] = _LIBRARY) -> Path:
+    """An app that holds only a runtime: ``bin/lucille-host-runtime``, a stand-in that runs the
+    interpreter running these tests, and ``library`` under ``lib/python3.13``. No .pyc."""
+    app = root / "Capsule.app"
+    runtime = app / build_app.RUNTIME_DIR
+    interpreter = runtime / build_app.INTERPRETER
+    interpreter.parent.mkdir(parents=True)
+    interpreter.write_text(f'#!/bin/sh\nexec {shlex.quote(sys.executable)} "$@"\n', "utf-8")
+    interpreter.chmod(0o755)
+    for rel, data in library.items():
+        path = runtime / build_app.STDLIB / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(data)
+    return app
+
+
+def _compiled_app(root: Path) -> Path:
+    app = _bytecode_app(root)
+    build_app.compile_bytecode(app, tag=TAG)
+    return app
+
+
+def _lib(app: Path) -> Path:
+    return app / build_app.RUNTIME_DIR / build_app.STDLIB
+
+
+def _pyc_of(source: Path) -> Path:
+    return source.parent / "__pycache__" / f"{source.stem}.{TAG}.pyc"
+
+
+def _mod_pyc(app: Path) -> Path:
+    return _pyc_of(_lib(app) / "mod.py")
+
+
+def _set_flags(flags: int) -> Callable[[Path], None]:
+    def damage(app: Path) -> None:
+        data = _mod_pyc(app).read_bytes()
+        _mod_pyc(app).write_bytes(data[:4] + flags.to_bytes(4, "little") + data[8:])
+
+    return damage
+
+
+def _edit_source(app: Path) -> None:
+    (_lib(app) / "mod.py").write_bytes(_LIBRARY["mod.py"] + b"VALUE = 2\n")
+
+
+def _other_magic(app: Path) -> None:
+    data = _mod_pyc(app).read_bytes()
+    _mod_pyc(app).write_bytes(bytes([data[0] ^ 1]) + data[1:])
+
+
+def _another_body(app: Path) -> None:
+    # The right 16-byte header, and the code of another source, as the program wrote it.
+    body = _pyc_of(_lib(app) / "pkg" / "sub.py").read_bytes()[16:]
+    _mod_pyc(app).write_bytes(_mod_pyc(app).read_bytes()[:16] + body)
+
+
+def _too_short(app: Path) -> None:
+    _mod_pyc(app).write_bytes(_mod_pyc(app).read_bytes()[:10])
+
+
+def _no_source(app: Path) -> None:
+    (_lib(app) / "mod.py").unlink()
+
+
+def _no_pyc(app: Path) -> None:
+    _pyc_of(_lib(app) / "pkg" / "sub.py").unlink()
+
+
+def _plant(rel: str) -> Callable[[Path], None]:
+    """Plant a copy of mod's .pyc at ``rel``, a path from the app."""
+
+    def damage(app: Path) -> None:
+        path = app / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(_mod_pyc(app).read_bytes())
+
+    return damage
+
+
+def _folder_in_pycache(app: Path) -> None:
+    (_mod_pyc(app).parent / "inner").mkdir()
+
+
+def _link_to_the_same_bytes(app: Path) -> None:
+    elsewhere = app.parent / "elsewhere.pyc"
+    elsewhere.write_bytes(_mod_pyc(app).read_bytes())
+    _mod_pyc(app).unlink()
+    _mod_pyc(app).symlink_to(elsewhere)
+
+
+def _empty_pycache(app: Path) -> None:
+    (_lib(app) / "empty" / "__pycache__").mkdir(parents=True)
+
+
+def _folder_named_like_the_pyc(app: Path) -> None:
+    _mod_pyc(app).unlink()
+    _mod_pyc(app).mkdir()
+
+
+def _pycache_is_a_link(app: Path) -> None:
+    # The same files, in a folder outside the library, linked to from where the build writes them.
+    cache = _lib(app) / "__pycache__"
+    elsewhere = app.parent / "elsewhere"
+    shutil.move(cache, elsewhere)
+    cache.symlink_to(elsewhere, target_is_directory=True)
+
+
+_IN_LIB = f"{build_app.RUNTIME_DIR}/{build_app.STDLIB}"
+
+
+@pytest.mark.parametrize(
+    ("damage", "said"),
+    [
+        (_set_flags(1), f"{_MOD_PYC} is not checked-hash: its flags are 1"),
+        (_set_flags(0), f"{_MOD_PYC} is not checked-hash: its flags are 0"),
+        (
+            _edit_source,
+            f"{_MOD_PYC} has the source hash of another file, not lib/python3.13/mod.py",
+        ),
+        (_other_magic, f"{_MOD_PYC} has another Python's magic number"),
+        (
+            _another_body,
+            f"{_MOD_PYC} is not what this interpreter compiles from lib/python3.13/mod.py",
+        ),
+        (_too_short, f"{_MOD_PYC} is too short to be a .pyc"),
+        (_no_source, f"{_MOD_PYC} has no source: there is no lib/python3.13/mod.py"),
+        (_no_pyc, "lib/python3.13/pkg/sub.py has no .pyc"),
+        (
+            _plant(f"{_IN_LIB}/__pycache__/notes.txt"),
+            "lib/python3.13/__pycache__/notes.txt is not a file the build writes",
+        ),
+        (
+            _plant(f"{_IN_LIB}/__pycache__/mod.{TAG}.opt-1.pyc"),
+            f"lib/python3.13/__pycache__/mod.{TAG}.opt-1.pyc is not a file the build writes",
+        ),
+        (
+            _plant(f"{_IN_LIB}/__pycache__/mod.{ANOTHER_TAG}.pyc"),
+            f"lib/python3.13/__pycache__/mod.{ANOTHER_TAG}.pyc is not a file the build writes",
+        ),
+        (_folder_in_pycache, "lib/python3.13/__pycache__/inner is not a file the build writes"),
+        (_folder_named_like_the_pyc, f"{_MOD_PYC} is not a file the build writes"),
+        (
+            _plant(f"{_IN_LIB}/__pycache__/.{TAG}.pyc"),
+            f"lib/python3.13/__pycache__/.{TAG}.pyc is not a file the build writes",
+        ),
+        (_link_to_the_same_bytes, f"{_MOD_PYC} is not a file the build writes"),
+        (
+            _pycache_is_a_link,
+            "lib/python3.13/__pycache__ is a symbolic link, not the folder the build writes",
+        ),
+        (
+            _plant(f"{_IN_LIB}/mod.pyc"),
+            "bytecode outside a __pycache__ folder: lib/python3.13/mod.pyc",
+        ),
+        (_empty_pycache, "an empty __pycache__ folder: lib/python3.13/empty/__pycache__"),
+        (
+            _plant(f"{build_app.RUNTIME_DIR}/bin/__pycache__/x.{TAG}.pyc"),
+            f"bytecode outside the runtime's library: bin/__pycache__/x.{TAG}.pyc",
+        ),
+        (
+            _plant(f"Contents/Resources/bin/__pycache__/x.{TAG}.pyc"),
+            "bytecode outside the runtime's library: "
+            f"Contents/Resources/bin/__pycache__/x.{TAG}.pyc",
+        ),
+    ],
+    ids=[
+        "unchecked-hash",
+        "timestamp",
+        "source-edited",
+        "another-magic",
+        "another-body",
+        "too-short",
+        "no-source",
+        "no-pyc",
+        "text-file",
+        "optimized",
+        "another-tag",
+        "folder",
+        "folder-named-like-the-pyc",
+        "no-module-name",
+        "link",
+        "pycache-link",
+        "beside-its-source",
+        "empty-pycache",
+        "in-the-runtime-outside-the-library",
+        "outside-the-runtime",
+    ],
+)
+def test_every_pyc_is_checked_hash_and_matches_its_source(
+    tmp_path: Path, damage: Callable[[Path], None], said: str
+) -> None:
+    # Acceptance 1: the build writes, with the interpreter it ships, one checked-hash .pyc beside
+    # each .py of the runtime's library, and nothing else; a second run of the same program finds
+    # each one byte for byte what it compiles from its source.
+    app = _compiled_app(tmp_path)
+    sources = sorted(_lib(app).rglob("*.py"))
+    assert len(sources) == len(_LIBRARY)
+    written = sorted(_pyc_of(source) for source in sources)
+    assert [path for path in build_app.bytecode_in(app) if path.is_file()] == written
+    for pyc in written:
+        assert int.from_bytes(pyc.read_bytes()[4:8], "little") == build_app.CHECKED_HASH == 0b11
+    # Each is what the importer, run as the app runs it, would make of its .py.
+    pairs = [str(path) for source in sources for path in (source, _pyc_of(source))]
+    done = subprocess.run(
+        [sys.executable, *build_app.RUNTIME_FLAGS, "-c", _IMPORTER_VIEW, *pairs],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+    assert (done.returncode, done.stdout) == (0, ""), done
+    assert build_app.bytecode_problems(app, tag=TAG) == []
+    build_app.require_bytecode(app, tag=TAG)
+    # Each .pyc the build would not write fails the check and the build's own gate.
+    damage(app)
+    problems = build_app.bytecode_problems(app, tag=TAG)
+    assert any(said in problem for problem in problems), problems
+    with pytest.raises(build_app.BuildError, match=re.escape(said)):
+        build_app.require_bytecode(app, tag=TAG)
+
+
+def test_the_build_stops_if_a_second_run_finds_other_bytes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # An interpreter whose marshal output is not stable writes one thing and, in the build's
+    # second, fresh run, compiles another. Here one byte of one body changes after the first run.
+    real = build_app.run_bytecode_program
+
+    def unstable(runtime: Path, mode: str) -> subprocess.CompletedProcess[str]:
+        done = real(runtime, mode)
+        if mode == "write":
+            pyc = runtime / build_app.STDLIB / "__pycache__" / f"mod.{TAG}.pyc"
+            data = bytearray(pyc.read_bytes())
+            data[-1] ^= 1
+            pyc.write_bytes(bytes(data))
+        return done
+
+    monkeypatch.setattr(build_app, "run_bytecode_program", unstable)
+    said = f"{_MOD_PYC} is not what this interpreter compiles from lib/python3.13/mod.py"
+    with pytest.raises(build_app.BuildError, match=re.escape(said)):
+        build_app.compile_bytecode(_bytecode_app(tmp_path), tag=TAG)
+
+
+_ALL = len(_LIBRARY)
+_CRASH = "Traceback (most recent call last):\nPermissionError: [Errno 13] Permission denied\n"
+
+
+@pytest.mark.parametrize(
+    ("returncode", "stdout"),
+    [
+        # Python exits 1 on an exception it does not catch, and the program prints only at the end.
+        (1, ""),
+        (1, f"found the same bytes in {_ALL} of {_ALL} .pyc files, {TAG}\n"),
+        (1, f"one\ntwo\nfound the same bytes in 1 of {_ALL} .pyc files, {TAG}\n"),
+        (0, ""),
+        (0, f"found the same bytes in 1 of {_ALL} .pyc files, {TAG}\n"),
+        (0, f"found the same bytes in {_ALL} of {_ALL} .pyc files, cpython-0\n"),
+    ],
+    ids=["crash", "no-problem-named", "lines-do-not-add-up", "silent", "not-all", "another-tag"],
+)
+def test_a_check_run_that_does_not_end_as_the_program_ends_is_a_problem(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, returncode: int, stdout: str
+) -> None:
+    # The build's gate and check_app.py bytecode read what a check run found from its exit code
+    # and its lines. An ending the program never gives, an exception among them, is a problem.
+    app = _compiled_app(tmp_path)
+    ended = subprocess.CompletedProcess(["program"], returncode, stdout, _CRASH)
+    monkeypatch.setattr(build_app, "run_bytecode_program", lambda runtime, mode: ended)
+    problems = build_app.bytecode_problems(app, tag=TAG)
+    assert len(problems) == 1, problems
+    assert problems[0].startswith(f"the bytecode check did not run (exit {returncode}): ")
+    assert "PermissionError" in problems[0]
+    with pytest.raises(build_app.BuildError, match="the bytecode check did not run"):
+        build_app.require_bytecode(app, tag=TAG)
+
+
+def test_a_check_run_that_crashes_is_a_problem(tmp_path: Path) -> None:
+    # A folder where a .pyc should be makes the program's open() raise: it exits 1 and prints
+    # nothing. The layout names the folder, and the check run is a problem of its own.
+    app = _compiled_app(tmp_path)
+    _folder_named_like_the_pyc(app)
+    done = build_app.run_bytecode_program(app / build_app.RUNTIME_DIR, "check")
+    assert (done.returncode, done.stdout) == (1, ""), done
+    assert "IsADirectoryError" in done.stderr
+    problems = build_app.bytecode_problems(app, tag=TAG)
+    assert any(line.startswith("the bytecode check did not run (exit 1): ") for line in problems)
+
+
+def test_the_build_prints_what_both_runs_found(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _compiled_app(tmp_path)
+    printed = capsys.readouterr().out.splitlines()
+    assert f"wrote {_ALL} of {_ALL} .pyc files, {TAG}" in printed
+    assert printed[-1] == f"found the same bytes in {_ALL} of {_ALL} .pyc files, {TAG}"
+
+
+def test_two_builds_write_the_same_bytes_wherever_the_runtime_is(tmp_path: Path) -> None:
+    first = _compiled_app(tmp_path / "a")
+    second = tmp_path / "b c" / first.name
+    shutil.copytree(first, second, ignore=shutil.ignore_patterns("__pycache__"))
+    assert build_app.bytecode_in(second) == []
+    build_app.compile_bytecode(second, tag=TAG)
+    built = [
+        {
+            path.relative_to(_lib(app)).as_posix(): path.read_bytes()
+            for path in _lib(app).rglob("*.pyc")
+        }
+        for app in (first, second)
+    ]
+    assert len(built[0]) == len(_LIBRARY) and built[0] == built[1]
+    # No .pyc holds the build folder: each names its source by its path from the runtime, which
+    # the importer replaces with the real path when it loads the file.
+    for rel, data in built[0].items():
+        assert os.fsencode(tmp_path) not in data, rel
+        folder, _, name = rel.rpartition("__pycache__/")
+        source = f"{build_app.STDLIB}/{folder}{name.removesuffix(f'.{TAG}.pyc')}.py"
+        assert source.encode() in data, (rel, source)
+
+
+def _bytecode_run(flags: Sequence[str], args: Sequence[str]) -> subprocess.CompletedProcess[str]:
+    """The bytecode program, run by the interpreter running these tests with ``flags``."""
+    argv = [sys.executable, *flags, "-c", build_app.BYTECODE_PROGRAM, *args]
+    return subprocess.run(
+        argv,
+        capture_output=True,
+        text=True,
+        env=dict(build_app.BYTECODE_ENV),
+        cwd="/",
+        timeout=120,
+        check=False,
+    )
+
+
+_Flags = Callable[[tuple[str, ...]], tuple[str, ...]]
+
+
+def _drop(*dropped: str) -> _Flags:
+    return lambda flags: tuple(flag for flag in flags if flag not in dropped)
+
+
+def _swap(old: str, new: str) -> _Flags:
+    return lambda flags: tuple(new if flag == old else flag for flag in flags)
+
+
+def _add(*added: str) -> _Flags:
+    return lambda flags: (*flags, *added)
+
+
+@pytest.mark.parametrize(
+    ("change", "args"),
+    [
+        (_drop("-I"), ("check", "RUNTIME", "LIB")),
+        (_drop("-B"), ("check", "RUNTIME", "LIB")),
+        (_drop("-S"), ("check", "RUNTIME", "LIB")),
+        (_drop("-W", "ignore"), ("check", "RUNTIME", "LIB")),
+        (_swap("ignore", "default"), ("check", "RUNTIME", "LIB")),
+        (_swap("utf8", "utf8=0"), ("check", "RUNTIME", "LIB")),
+        (_add("-X", "pycache_prefix=/nowhere"), ("check", "RUNTIME", "LIB")),
+        (_add("-O"), ("check", "RUNTIME", "LIB")),
+        (_add(), ("other", "RUNTIME", "LIB")),
+        (_add(), ("check", "RUNTIME")),
+        (_add(), ("check", "RUNTIME", "LIB", "more")),
+    ],
+    ids=[
+        "no-I",
+        "no-B",
+        "no-S",
+        "no-W-ignore",
+        "W-default",
+        "utf8-off",
+        "pycache-prefix",
+        "optimized",
+        "another-mode",
+        "missing-argument",
+        "extra-argument",
+    ],
+)
+def test_the_bytecode_program_runs_only_with_its_flags(
+    tmp_path: Path, change: _Flags, args: tuple[str, ...]
+) -> None:
+    runtime = _bytecode_app(tmp_path) / build_app.RUNTIME_DIR
+    assert build_app.bytecode_argv(runtime, "check") == [
+        str(runtime / build_app.INTERPRETER),
+        "-I",
+        "-B",
+        "-S",
+        "-W",
+        "ignore",
+        "-X",
+        "utf8",
+        "-c",
+        build_app.BYTECODE_PROGRAM,
+        "check",
+        str(runtime),
+        "lib/python3.13",
+    ]
+    # The app's flags, with -S, so that no .pth file or site step loads a module first, and
+    # -W ignore, so that no warning does while it compiles; and a fixed environment.
+    assert set(build_app.RUNTIME_FLAGS) <= set(build_app.BYTECODE_FLAGS)
+    assert _drop("-S", "-W", "ignore")(build_app.BYTECODE_FLAGS) == build_app.RUNTIME_FLAGS
+    assert build_app.BYTECODE_ENV == {"PATH": "/usr/bin:/bin"}
+    usage = "usage: lucille-host-runtime " + " ".join(build_app.BYTECODE_FLAGS)
+    usage += " -c PROGRAM write|check RUNTIME LIB\n"
+    # The control: with its own flags it gets past the usage check, and finds no .pyc.
+    done = _bytecode_run(build_app.BYTECODE_FLAGS, ("check", str(runtime), build_app.STDLIB))
+    assert done.returncode == 1, done
+    assert (
+        done.stdout.splitlines()[-1]
+        == f"found the same bytes in 0 of {len(_LIBRARY)} .pyc files, {TAG}"
+    )
+    places = {"RUNTIME": str(runtime), "LIB": build_app.STDLIB}
+    done = _bytecode_run(change(build_app.BYTECODE_FLAGS), [places.get(a, a) for a in args])
+    assert (done.returncode, done.stdout) == (2, usage), done
+    assert build_app.bytecode_in(runtime) == []
+
+
+def test_the_bytecode_program_refuses_to_write_twice_and_stops_on_a_loaded_module(
+    tmp_path: Path,
+) -> None:
+    app = _compiled_app(tmp_path / "twice")
+    runtime = app / build_app.RUNTIME_DIR
+    held = {path: path.read_bytes() for path in build_app.bytecode_in(app) if path.is_file()}
+    done = build_app.run_bytecode_program(runtime, "write")
+    assert done.returncode == 1, done
+    assert done.stdout.startswith("the runtime already holds bytecode: "), done.stdout
+    with pytest.raises(build_app.BuildError) as raised:
+        build_app.compile_bytecode(app, tag=TAG)
+    assert "already holds bytecode" in str(raised.value) and "__pycache__" in str(raised.value)
+    assert {
+        path: path.read_bytes() for path in build_app.bytecode_in(app) if path.is_file()
+    } == held
+    # A source in another encoding makes the compiler load that codec mid-run, which could change
+    # the bytes marshal writes for every file after it: the program stops and names the module.
+    cookie = b"# -*- coding: cp1252 -*-\nWORD = 'caf\xe9'\n"
+    app = _bytecode_app(tmp_path / "cookie", {**_LIBRARY, "latin.py": cookie})
+    with pytest.raises(build_app.BuildError, match=r"encodings\.cp1252"):
+        build_app.compile_bytecode(app, tag=TAG)
+    done = build_app.run_bytecode_program(app / build_app.RUNTIME_DIR, "check")
+    assert done.returncode == 2, done
+    assert done.stdout.startswith("compiling loaded modules, so the bytes would depend on them: ")
+    assert "encodings.cp1252" in done.stdout
+    problems = build_app.bytecode_problems(app, tag=TAG)
+    assert any(line.startswith("the bytecode check did not run (exit 2): ") for line in problems)
+
+
+def test_the_bytecode_program_imports_only_what_a_fresh_interpreter_has() -> None:
+    import ast
+
+    program = build_app.BYTECODE_PROGRAM
+    tree = ast.parse(program)
+    imported = [
+        alias.name
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Import)
+        for alias in node.names
+    ]
+    assert sorted(imported) == ["_frozen_importlib_external", "_imp", "marshal", "os", "sys"]
+    assert not [node for node in ast.walk(tree) if isinstance(node, ast.ImportFrom)]
+    assert "\\" not in program and max(map(len, program.splitlines())) < 100
+    assert program.endswith("raise SystemExit(main())\n")
+    # It compiles in sorted order of each path from the runtime, not in the walk's own order,
+    # which is the file system's and need not be the same in two builds' folders (0002 §6).
+    (main,) = [node for node in tree.body if isinstance(node, ast.FunctionDef)]
+    steps = [ast.unparse(node).splitlines()[0] for node in main.body]
+    walk = steps.index("for folder, dirs, files in os.walk(os.path.join(runtime, lib)):")
+    assert steps.index("sources.sort()") == walk + 1
+    assert steps.index("for source in sources:") > walk + 1
+    # Each is built in or frozen: importing it reads no file, from the tree or anywhere else.
+    probe = (
+        "import sys, _imp\n"
+        "builtin = sys.builtin_module_names\n"
+        "print([n for n in sys.argv[1:] if not (n in builtin or _imp.is_frozen(n))])\n"
+    )
+    done = subprocess.run(
+        [sys.executable, *build_app.BYTECODE_FLAGS, "-c", probe, *imported],
+        capture_output=True,
+        text=True,
+        env=dict(build_app.BYTECODE_ENV),
+        cwd="/",
+        timeout=60,
+        check=False,
+    )
+    assert (done.returncode, done.stdout) == (0, "[]\n"), done
+    # The build and the checks run it only through bytecode_argv: one program text, for both modes.
+    source = (build_app.TOOLS_DIR / "build_app.py").read_text(encoding="utf-8")
+    (argv_function,) = [
+        node
+        for node in ast.walk(ast.parse(source))
+        if isinstance(node, ast.FunctionDef) and node.name == "bytecode_argv"
+    ]
+    loads = [
+        node.lineno
+        for node in ast.walk(ast.parse(source))
+        if isinstance(node, ast.Name)
+        and node.id == "BYTECODE_PROGRAM"
+        and isinstance(node.ctx, ast.Load)
+    ]
+    assert loads and all(
+        argv_function.lineno <= line <= (argv_function.end_lineno or 0) for line in loads
+    ), loads
+    checks = _CHECK_APP.read_text(encoding="utf-8")
+    assert "BYTECODE_PROGRAM" not in checks
+    assert "marshal" not in checks and "_frozen_importlib_external" not in checks
+    assert "build_app.run_bytecode_program(" in checks
+
+
+def test_the_verbose_import_lines_are_read(tmp_path: Path) -> None:
+    # check_app.py bytecode reads `python -v` to see each module of the bundle loaded from its
+    # .pyc: -B stops writes, not reads. Here mod has the .pyc the program wrote, other has none.
+    app = _bytecode_app(tmp_path / "with space", {"mod.py": b"VALUE = 1\n"})
+    runtime = app / build_app.RUNTIME_DIR
+    done = build_app.run_bytecode_program(runtime, "write")
+    assert done.returncode == 0, done
+    lib = _lib(app)
+    (lib / "other.py").write_bytes(b"VALUE = 2\n")
+    code = f"import sys; sys.path.insert(0, {str(lib)!r}); import mod, other"
+    done = subprocess.run(
+        [sys.executable, "-v", *build_app.RUNTIME_FLAGS, "-S", "-c", code],
+        capture_output=True,
+        text=True,
+        env=dict(build_app.BYTECODE_ENV),
+        cwd="/",
+        timeout=60,
+        check=False,
+    )
+    assert done.returncode == 0, done.stderr
+    pyc = _pyc_of(lib / "mod.py")
+    assert f"# {pyc} matches {lib / 'mod.py'}\n" in done.stderr
+    assert check_app.loaded_from(done.stderr, runtime) == ([str(pyc)], [str(lib / "other.py")])
+    assert not _pyc_of(lib / "other.py").exists()
+    # Nothing outside the root is counted: the interpreter's own modules load from elsewhere.
+    assert check_app.loaded_from(done.stderr, tmp_path / "elsewhere") == ([], [])
+
+
+# A stand-in for the bundled interpreter, for check_app.check_bytecode: the interpreter running
+# these tests, which runs a module (-m) with @SITE@, the stand-in's own site-packages, first on
+# sys.path, as the bundled interpreter has its own. -I ignores PYTHONPATH, so the stand-in puts it
+# there. @PREFIX@ goes before the module's code: nothing, or an option for that run alone.
+_BYTECODE_CHECK_RUNTIME = """\
+#!/bin/sh
+site=@SITE@
+code='import runpy, sys; sys.path.insert(0, sys.argv.pop(1))'
+code="$code; runpy.run_module(sys.argv.pop(1), run_name='__main__', alter_sys=True)"
+count=$#
+while [ "$count" -gt 0 ]; do
+    arg=$1
+    shift
+    count=$((count - 1))
+    if [ "$arg" = -m ]; then
+        set -- "$@" @PREFIX@ -c "$code" "$site" "$1"
+        shift
+        count=$((count - 1))
+    else
+        set -- "$@" "$arg"
+    fi
+done
+exec @PYTHON@ "$@"
+"""
+# The host, as far as `--version` goes: a package and its __main__, in site-packages.
+_STUB_HOST: Mapping[str, bytes] = {
+    "site-packages/lucille_host/__init__.py": b"__version__ = '0.0.0'\n",
+    "site-packages/lucille_host/__main__.py": (
+        b"from lucille_host import __version__\n\nprint('lucille-host', __version__)\n"
+    ),
+}
+# What check_bytecode says when each of its three parts fails.
+_LAYOUT_FAILS = "one checked-hash "
+_PROGRAM_FAILS = "each .pyc has the bundled interpreter's magic number"
+_LOADS_FAIL = "--version, run as the app runs it, loads "
+
+
+def _edit_the_hosts_source(app: Path) -> None:
+    init = _lib(app) / "site-packages" / "lucille_host" / "__init__.py"
+    init.write_bytes(init.read_bytes() + b"EDITED = True\n")
+
+
+def _another_host(app: Path) -> None:
+    # A host outside the bundle, beside the app, where the "another-host" stand-in finds it.
+    for rel, data in _STUB_HOST.items():
+        path = app.parent / "another" / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(data)
+
+
+# Where the stand-in's site-packages is: the bundle's own, or the other host's beside the app.
+_OWN_SITE = '$(cd "${0%/*}/.." && pwd)/lib/python3.13/site-packages'
+_OTHER_SITE = '$(cd "${0%/*}/../../../../.." && pwd)/another/site-packages'
+
+
+@pytest.mark.parametrize(
+    ("damage", "site", "prefix", "said"),
+    [
+        (None, _OWN_SITE, "", []),
+        # The program finds a body that is not what it compiles; layout and the run see nothing.
+        (_another_body, _OWN_SITE, "", [_PROGRAM_FAILS]),
+        # A file the build does not write, in __pycache__: only the layout sees it.
+        (_plant(f"{_IN_LIB}/__pycache__/notes.txt"), _OWN_SITE, "", [_LAYOUT_FAILS]),
+        # The host's source edited after the build: the program sees its .pyc is stale, and the
+        # run compiles that module from source, though the other comes from its .pyc.
+        (_edit_the_hosts_source, _OWN_SITE, "", [_PROGRAM_FAILS, _LOADS_FAIL]),
+        # An interpreter that reads .pyc files from another tree compiles every module of the
+        # host from source, though each .pyc is right.
+        (None, _OWN_SITE, "-X pycache_prefix=/nowhere", [_LOADS_FAIL]),
+        # An interpreter that runs a host from outside the bundle loads none of the bundle's
+        # modules, from their .pyc or from source.
+        (_another_host, _OTHER_SITE, "", [_LOADS_FAIL]),
+    ],
+    ids=["clean", "another-body", "planted", "stale", "reads-elsewhere", "another-host"],
+)
+def test_the_bytecode_check_on_a_downloaded_copy(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    damage: Callable[[Path], None] | None,
+    site: str,
+    prefix: str,
+    said: list[str],
+) -> None:
+    # check_app.py bytecode, as a person runs it on a copy: the layout, then the program in check
+    # mode, then --version with -v, run as the app runs it. Here the .pyc files carry this
+    # interpreter's tag.
+    monkeypatch.setattr(build_app, "BYTECODE_TAG", TAG)
+    app = _bytecode_app(tmp_path / "Downloaded Copy", {**_LIBRARY, **_STUB_HOST})
+    stand_in = _BYTECODE_CHECK_RUNTIME.replace("@PYTHON@", shlex.quote(sys.executable))
+    stand_in = stand_in.replace("@SITE@", site).replace("@PREFIX@", prefix)
+    check_app.python_in(app).write_text(stand_in, "utf-8")
+    build_app.compile_bytecode(app, tag=TAG)
+    if damage is not None:
+        damage(app)
+    held = {path: path.read_bytes() for path in _lib(app).rglob("*") if path.is_file()}
+    checker = check_app.Checker()
+    check_app.check_bytecode(app, checker)
+    assert len(checker.failures) == len(said), checker.failures
+    for failure, start in zip(checker.failures, said, strict=True):
+        assert failure.startswith(start), checker.failures
+    # It writes nothing into the copy it checks.
+    assert {path: path.read_bytes() for path in _lib(app).rglob("*") if path.is_file()} == held
+
+
+# ---------------------------------------------------------------------------------------------
 # Signing, the wrapper, the toolchain, the comparison
 
 
@@ -1425,11 +2127,13 @@ def test_wrapper_text() -> None:
 
 # A stand-in for the bundled runtime, for the runs check_wrapper makes. It keeps the host's layout
 # on macOS (src/lucille_host/paths.py): the last --profile given, or default, whose state folder
-# status makes (link.Session does) and pause writes its flag in; and, unless given -B, it writes
-# bytecode beside itself.
+# status makes (link.Session does) and pause writes its flag in; and, as the real interpreter
+# does, unless given -B it writes the .pyc of lucille_host/__init__.py if there is none, and
+# writes nothing where every .pyc is there.
 _WRAPPER_CHECK_RUNTIME = """\
 #!/bin/sh
 here=${0%/*}
+cache=$here/../lib/python3.13/site-packages/lucille_host/__pycache__
 profile=default
 verb=
 bytecode=yes
@@ -1443,8 +2147,8 @@ while [ "$#" -gt 0 ]; do
     esac
     shift
 done
-if [ "$bytecode" = yes ]; then
-    mkdir -p "$here/__pycache__" || exit 1
+if [ "$bytecode" = yes ] && [ ! -e "$cache/__init__.@TAG@.pyc" ]; then
+    mkdir -p "$cache" && : > "$cache/__init__.@TAG@.pyc" || exit 1
 fi
 state="$HOME/Library/Application Support/lucille-host/$profile/state"
 case $verb in
@@ -1456,6 +2160,14 @@ case $verb in
 esac
 """
 _PAUSE = 'mkdir -p "$state" && : > "$state/paused"'
+# Two stand-ins the wrapper check must fail: one that writes a file that is not bytecode into the
+# bundle even with -B, and one that writes nothing without -B, so the check's control cannot fire.
+_WRITES_WITH_B = _WRAPPER_CHECK_RUNTIME.replace(
+    'state="$HOME', ': > "$here/written" || exit 1\nstate="$HOME'
+)
+_WRITES_NOTHING = _WRAPPER_CHECK_RUNTIME.replace(
+    'mkdir -p "$cache" && : > "$cache/__init__.@TAG@.pyc" || exit 1', ":"
+)
 
 
 def _wrapper_check(
@@ -1463,6 +2175,7 @@ def _wrapper_check(
     monkeypatch: pytest.MonkeyPatch,
     wrapper: str = build_app.WRAPPER_TEXT,
     pause: str = _PAUSE,
+    stand_in: str = _WRAPPER_CHECK_RUNTIME,
 ) -> list[str]:
     """Run check_wrapper on an app holding ``wrapper`` and the stand-in runtime, with ``cp`` for
     ``ditto``, and return what failed."""
@@ -1475,11 +2188,18 @@ def _wrapper_check(
     build_app.write_wrapper(app).write_text(wrapper, encoding="ascii")
     runtime = app / build_app.RUNTIME_IN_APP
     runtime.parent.mkdir(parents=True)
-    script = _WRAPPER_CHECK_RUNTIME.replace("@VERSION@", build_app.host_version())
+    script = stand_in.replace("@VERSION@", build_app.host_version())
+    script = script.replace("@TAG@", build_app.BYTECODE_TAG)
     runtime.write_text(script.replace("@PAUSE@", pause), encoding="ascii")
     runtime.chmod(0o755)
+    # The .pyc the build wrote for the host's package, which the check removes from its copy.
+    package = app / build_app.RUNTIME_DIR / build_app.SITE_PACKAGES / "lucille_host"
+    pyc = package / "__pycache__" / f"__init__.{build_app.BYTECODE_TAG}.pyc"
+    pyc.parent.mkdir(parents=True)
+    pyc.write_bytes(b"the build's .pyc")
     checker = check_app.Checker()
     check_app.check_wrapper(app, checker)
+    assert pyc.read_bytes() == b"the build's .pyc"
     return checker.failures
 
 
@@ -1507,6 +2227,48 @@ def test_the_wrapper_check_fails_a_pause_that_is_not_on_the_apps_profile_alone(
     failures = _wrapper_check(tmp_path, monkeypatch, wrapper, pause)
     assert len(failures) == 1
     assert check_app.APP_PROFILE in failures[0]
+
+
+@pytest.mark.parametrize(
+    ("wrapper", "stand_in", "said"),
+    [
+        (
+            build_app.WRAPPER_TEXT,
+            _WRITES_WITH_B,
+            "with -B, none of those runs changed anything in the writable copy",
+        ),
+        (
+            build_app.WRAPPER_TEXT,
+            _WRITES_NOTHING,
+            "without -B the same run writes into the copy",
+        ),
+        # Every .pyc the build wrote is valid, so a wrapper without -B writes one only where one
+        # is missing: the check removes one first, so that it would.
+        (
+            build_app.WRAPPER_TEXT.replace(" -B", ""),
+            _WRAPPER_CHECK_RUNTIME,
+            "with -B, none of those runs changed anything in the writable copy",
+        ),
+    ],
+    ids=["writes-with-B", "control-cannot-fire", "wrapper-without-B"],
+)
+def test_the_wrapper_check_sees_any_write_and_needs_its_control(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, wrapper: str, stand_in: str, said: str
+) -> None:
+    # The bundle ships .pyc files, so the check compares listings of the copy: it sees a write of
+    # any file, and a .pyc rewritten in place, not only a new .pyc.
+    assert (wrapper, stand_in) != (build_app.WRAPPER_TEXT, _WRAPPER_CHECK_RUNTIME)
+    assert " -B " in build_app.WRAPPER_TEXT
+    failures = _wrapper_check(tmp_path, monkeypatch, wrapper, stand_in=stand_in)
+    assert len(failures) == 1, failures
+    assert said in failures[0]
+
+
+def test_listing_changes_names_each_path_that_differs() -> None:
+    before = {"a": (0o644, 1, 1), "b": (0o644, 1, 1), "c": (0o644, 1, 1)}
+    after = {"a": (0o644, 1, 1), "b": (0o644, 1, 2), "d": (0o644, 1, 1)}
+    assert check_app.listing_changes(before, after) == ["b", "c", "d"]
+    assert check_app.listing_changes(before, dict(before)) == []
 
 
 def test_the_self_test_runs_the_pairing_verbs_on_a_profile_of_its_own() -> None:

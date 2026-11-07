@@ -14,6 +14,8 @@ import hashlib
 import os
 import re
 import shutil
+import subprocess
+import sys
 import tarfile
 import zipfile
 from collections.abc import Callable
@@ -27,6 +29,11 @@ from tools.macos import build_app, check_app, payload
 PINS = build_app.load_pins()
 PYTHON = (3, 13)
 MACOS = (15, 0)
+# The tag of the .pyc files the build writes (build_app.BYTECODE_TAG on the Mac), here this
+# interpreter's, and a .pyc header: record_problems admits a .pyc by its name alone.
+TAG = sys.implementation.cache_tag
+ANOTHER_TAG = "cpython-312" if TAG != "cpython-312" else "cpython-313"
+PYC = b"\xf3\r\r\n" + bytes(12)
 # The distributions the app installs from uv.lock for CPython 3.13 on macOS on Apple silicon,
 # written out here rather than worked out, so that a wrong marker evaluation or a dropped wheel
 # fails this list. The six pins left out are for Linux, Windows or Python before 3.12:
@@ -163,6 +170,36 @@ def test_linux_assembly_matches_every_record(
         problems
     )
     assert any("RECORD has a line its wheel's RECORD does not" in line for line in problems)
+
+
+def test_record_admits_the_bytecode_of_the_real_wheels(
+    linux_assembly: payload.Assembly, tmp_path: Path
+) -> None:
+    # The bytecode program writes a .pyc beside every .py of the real site-packages, and M10
+    # still holds over the real wheels with those admitted. The copy is made of hard links, so
+    # that it takes no room; the program only adds files, in the copy's own __pycache__ folders.
+    runtime = tmp_path / "rt"
+    site = runtime / "site"
+    argv = [sys.executable, *build_app.BYTECODE_FLAGS, "-c", build_app.BYTECODE_PROGRAM]
+    shutil.copytree(linux_assembly.site, site, copy_function=os.link)
+    done = subprocess.run(
+        [*argv, "write", str(runtime), "site"],
+        capture_output=True,
+        text=True,
+        env=dict(build_app.BYTECODE_ENV),
+        cwd="/",
+        timeout=600,
+        check=False,
+    )
+    failed = [line for line in done.stdout.splitlines() if " does not compile: " in line]
+    if failed and sys.version_info < (3, 13):
+        pytest.skip(f"Python {sys.version_info[0]}.{sys.version_info[1]}: " + "; ".join(failed))
+    assert done.returncode == 0, done.stdout
+    sources = list(site.rglob("*.py"))
+    assert len(sources) > 300 and len(list(site.rglob("*.pyc"))) == len(sources)
+    wheels = [wheel.path for wheel in linux_assembly.wheels] + [linux_assembly.host.path]
+    assert payload.record_problems(site, wheels, bytecode_tag=TAG) == []
+    assert build_app.bytecode_in(linux_assembly.site) == []
 
 
 def test_manifest_lists_every_wheel(
@@ -399,6 +436,129 @@ def test_record_problems_finds_what_was_planted(
     plant(site)
     problems = payload.record_problems(site, [wheel])
     assert any(problem in line for line in problems), problems
+
+
+def _plant_bytecode(rel: str) -> Callable[[Path], None]:
+    def plant(site: Path) -> None:
+        path = site / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(PYC)
+
+    return plant
+
+
+def _plant_source_and_pyc(site: Path) -> None:
+    (site / "demo" / "extra.py").write_text("print('extra')\n", encoding="ascii")
+    (site / "demo" / "__pycache__" / f"extra.{TAG}.pyc").write_bytes(PYC)
+
+
+def _plant_empty_pycache(site: Path) -> None:
+    (site / "__pycache__").mkdir()
+
+
+def _plant_pyc_link(site: Path) -> None:
+    pyc = site / "demo" / "__pycache__" / f"m.{TAG}.pyc"
+    pyc.unlink()
+    pyc.symlink_to("../m.py")
+
+
+def _plant_pycache_link(site: Path) -> None:
+    cache = site / "demo" / "__pycache__"
+    shutil.move(cache, site.parent / "elsewhere")
+    cache.symlink_to(site.parent / "elsewhere")
+
+
+@pytest.mark.parametrize(
+    ("plant", "said"),
+    [
+        (
+            _plant_bytecode(f"demo/__pycache__/gone.{TAG}.pyc"),
+            [
+                f"bytecode: demo/__pycache__/gone.{TAG}.pyc",
+                f"demo/__pycache__/gone.{TAG}.pyc is in no wheel's RECORD",
+            ],
+        ),
+        (
+            _plant_bytecode(f"demo/__pycache__/m.{ANOTHER_TAG}.pyc"),
+            [
+                f"bytecode: demo/__pycache__/m.{ANOTHER_TAG}.pyc",
+                f"demo/__pycache__/m.{ANOTHER_TAG}.pyc is in no wheel's RECORD",
+            ],
+        ),
+        (
+            _plant_bytecode(f"demo/__pycache__/m.{TAG}.opt-1.pyc"),
+            [
+                f"bytecode: demo/__pycache__/m.{TAG}.opt-1.pyc",
+                f"demo/__pycache__/m.{TAG}.opt-1.pyc is in no wheel's RECORD",
+            ],
+        ),
+        (
+            _plant_bytecode("demo/__pycache__/notes.txt"),
+            ["demo/__pycache__/notes.txt is in no wheel's RECORD"],
+        ),
+        (
+            _plant_bytecode("demo/m.pyc"),
+            ["bytecode: demo/m.pyc", "demo/m.pyc is in no wheel's RECORD"],
+        ),
+        # The name the build writes, one folder too deep: demo/m.py is listed, but this is not
+        # its __pycache__.
+        (
+            _plant_bytecode(f"demo/sub/m.{TAG}.pyc"),
+            [f"bytecode: demo/sub/m.{TAG}.pyc", f"demo/sub/m.{TAG}.pyc is in no wheel's RECORD"],
+        ),
+        (
+            _plant_bytecode(f"demo/__pycache__/m.{TAG}.pyo"),
+            [
+                f"bytecode: demo/__pycache__/m.{TAG}.pyo",
+                f"demo/__pycache__/m.{TAG}.pyo is in no wheel's RECORD",
+            ],
+        ),
+        (_plant_empty_pycache, ["empty folder: __pycache__"]),
+        (
+            _plant_source_and_pyc,
+            [
+                "demo/extra.py is in no wheel's RECORD",
+                f"bytecode: demo/__pycache__/extra.{TAG}.pyc",
+                f"demo/__pycache__/extra.{TAG}.pyc is in no wheel's RECORD",
+            ],
+        ),
+        (_plant_pyc_link, [f"symbolic link: demo/__pycache__/m.{TAG}.pyc"]),
+        (_plant_pycache_link, ["symbolic link: demo/__pycache__"]),
+    ],
+    ids=[
+        "no-listed-source",
+        "another-tag",
+        "optimized",
+        "text-file",
+        "beside-its-source",
+        "in-a-folder-not-named-pycache",
+        "pyo",
+        "empty-pycache",
+        "planted-source",
+        "link",
+        "folder-link",
+    ],
+)
+def test_record_admits_only_the_bytecode_the_build_writes(
+    tmp_path: Path, plant: Callable[[Path], None], said: list[str]
+) -> None:
+    # Acceptance 3 (M10): with the build's tag, a .pyc is admitted by its name alone, one in
+    # __pycache__ beside each .py a RECORD lists; check_app.py bytecode judges what it holds.
+    site, wheel = _installed_demo(tmp_path)
+    cache = site / "demo" / "__pycache__"
+    cache.mkdir()
+    for name in ("__init__", "m"):
+        (cache / f"{name}.{TAG}.pyc").write_bytes(PYC)
+    assert payload.record_problems(site, [wheel], bytecode_tag=TAG) == []
+    # Without the tag, as when the installer is done and nothing is compiled yet, none is.
+    problems = payload.record_problems(site, [wheel])
+    assert "bytecode folder: demo/__pycache__" in problems
+    assert f"bytecode: demo/__pycache__/m.{TAG}.pyc" in problems
+    assert f"demo/__pycache__/__init__.{TAG}.pyc is in no wheel's RECORD" in problems
+    # Every other .pyc, and anything else in __pycache__, is refused as before.
+    plant(site)
+    problems = payload.record_problems(site, [wheel], bytecode_tag=TAG)
+    assert set(said) <= set(problems), problems
 
 
 def test_record_problems_is_not_vacuous(tmp_path: Path) -> None:
