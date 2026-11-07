@@ -438,6 +438,9 @@ final class Connection: ObservableObject {
     /// The update notice's line while one is held, in memory only (decisions/0002 §16): the menu
     /// shows it as an item that shows the notice again, with Prepare to Update….
     @Published private(set) var updateNotice: String?
+    /// Set Up is owed and its window was closed before its last page: the menu offers Set Up
+    /// Folders and Abilities….
+    @Published private(set) var setUpOffered = false
 
     private let cli: HostCLI
     private var flow = PairingFlow()
@@ -447,6 +450,17 @@ final class Connection: ObservableObject {
     /// and the window that shows it.
     private var requests = RequestLog()
     private let activityPanel: ActivityPanel
+    /// Set Up (decisions/0002 §3.1 steps 8 to 10, §11.6), in memory only, and its window. It is fed
+    /// by this session's own pairing and status line, and leaves the pairing flow as it is.
+    private var setUp = SetupFlow(home: HostCLI.userHome())
+    private let setupPanel: SetupPanel
+    /// A confirmed pair was seen since Set Up last began: when `status` then says there is no pair,
+    /// the pair ended.
+    private var setUpSawPair = false
+    /// The folders, by alias, as Set Up's Folders page last had them checked, and whether a check
+    /// runs.
+    private var setUpCheckedAliases: [String]?
+    private var setUpChecking = false
     /// The latest `status --json` that worked, and the host's words when the latest one did not.
     private var status: HostStatus?
     private var statusDetail: String?
@@ -497,6 +511,7 @@ final class Connection: ObservableObject {
         cli = HostCLI(python: HostCLI.python(inApp: Bundle.main.bundleURL), home: HostCLI.userHome())
         panel = PairingPanel()
         activityPanel = ActivityPanel()
+        setupPanel = SetupPanel()
         wake = MainTimer()
         poll = MainTimer()
         deadline = MainTimer()
@@ -1265,6 +1280,7 @@ final class Connection: ObservableObject {
             }
             Alerts.shared.note(note, warning: !done)
             if done {
+                self.feedSetUp(.pairEnded)
                 self.refreshStatus()
             } else {
                 self.feedRun(.start)
@@ -1320,6 +1336,10 @@ final class Connection: ObservableObject {
             panel.clearCode()
         case .say(let note):
             Alerts.shared.note(ConnectionText.note(note), warning: Connection.isWarning(note))
+            if note == .confirmed {
+                // They Match, clicked here, confirmed the pair: Set Up is owed.
+                feedSetUp(.confirmedHere(epoch: epoch))
+            }
         case .refreshStatus:
             refreshStatus()
         case .startRunCheck:
@@ -1350,6 +1370,10 @@ final class Connection: ObservableObject {
                 guard let self, let child, child === self.pairChild else {
                     return
                 }
+                if object == .policyReset {
+                    // This attempt's own child set the policy aside: Set Up may offer it back.
+                    self.feedSetUp(.policySetAside(epoch: epoch))
+                }
                 self.feedFlow(.childObject(object), epoch: epoch)
             }
         }
@@ -1377,6 +1401,9 @@ final class Connection: ObservableObject {
             return
         }
         pairChild = child
+        // When this attempt started, to the floor of its second: a policy set aside before it is
+        // another pairing's, and Set Up offers it nothing back (spec/CLI.md §6).
+        feedSetUp(.pairStarted(at: Date(), epoch: epoch))
         do {
             try child.start()
         } catch {
@@ -1463,6 +1490,39 @@ final class Connection: ObservableObject {
         panel.onDiffer = { [weak self] in
             self?.feedFlow(.theyDiffer)
         }
+        setupPanel.onChecked = { [weak self] rows in
+            self?.feedSetUp(.checked(rows))
+        }
+        setupPanel.onAddChecked = { [weak self] in
+            self?.feedSetUp(.addChecked)
+        }
+        setupPanel.onSkip = { [weak self] in
+            self?.feedSetUp(.skip)
+        }
+        setupPanel.onNext = { [weak self] in
+            self?.feedSetUp(.next)
+        }
+        setupPanel.onDone = { [weak self] in
+            self?.feedSetUp(.done)
+        }
+        setupPanel.onClosed = { [weak self] in
+            Connection.log("Set Up's window was closed, not by the app")
+            self?.feedSetUp(.windowClosed)
+        }
+        // The Folders page's buttons and the switches are the menu's own: its Open panel, name
+        // dialog and questions, and the host's answer.
+        setupPanel.onAddFolder = {
+            HostModel.shared.addFolder()
+        }
+        setupPanel.onRemoveFolder = { folder in
+            HostModel.shared.removeFolder(folder)
+        }
+        setupPanel.onSwitch = { ability, on in
+            HostModel.shared.setAbility(ability, on: on)
+        }
+        HostModel.shared.onRead = { [weak self] in
+            self?.setUpRead()
+        }
     }
 
     private func askStopConnecting() -> Bool {
@@ -1497,6 +1557,131 @@ final class Connection: ObservableObject {
         let model = HostModel.shared
         return !model.folders.isEmpty
             || model.abilities.contains { ($0.isOn || $0.state == .notInCatalog) && $0.name != "host.describe" }
+    }
+
+    // MARK: Set Up
+
+    /// Set Up Folders and Abilities…, in the menu while Set Up is owed and its window is closed.
+    func setUpChosen() {
+        feedSetUp(.reopen)
+    }
+
+    /// Hand Set Up an input, and run each effect it asks for. The menu's item follows whether it
+    /// offers to open the window again.
+    private func feedSetUp(_ input: SetupFlow.Input) {
+        let effects = setUp.handle(input)
+        for effect in effects {
+            setUpEffect(effect)
+        }
+        if setUpOffered != setUp.offersReopen {
+            setUpOffered = setUp.offersReopen
+        }
+    }
+
+    private func setUpEffect(_ effect: SetupFlow.Effect) {
+        switch effect {
+        case .readPrevious:
+            Connection.log("Set Up reads the policy set aside before it shows a page")
+            // The policy this pairing set aside, then the abilities and folders as they are now:
+            // the offer leaves out what is already set up.
+            Task { [weak self] in
+                guard let self else {
+                    return
+                }
+                let read = await VerbQueue.run(
+                    self.cli, ["--json", "policy", "previous"], on: VerbQueue.other, timeout: SetupFlow.previousLimit
+                )
+                let ops = await VerbQueue.run(self.cli, ["--json", "ops", "list"], on: VerbQueue.other)
+                let roots = await VerbQueue.run(self.cli, ["--json", "roots", "list"], on: VerbQueue.other)
+                let outcome = VerbOutcome(read)
+                if outcome.previousPolicy == nil {
+                    Connection.log("policy previous did not answer for Set Up: exit \(read.status)")
+                }
+                self.feedSetUp(.previousRead(outcome, ops: VerbOutcome(ops).abilities, roots: VerbOutcome(roots).folders))
+            }
+        case .show(let page):
+            Connection.log("Set Up shows \(Connection.setUpPageName(page))")
+            setupPanel.show(page, with: setUpShown())
+            if page == .folders {
+                // Each time the Folders page comes, its folders are checked again.
+                setUpCheckedAliases = nil
+                checkSetUpFolders()
+            }
+        case .restore(let row, let item):
+            // One checked row, through the menu's own gates; then the next, once restore returns:
+            // for a folder, once the host has answered; for an ability, once its switch is turned.
+            Task { [weak self] in
+                await HostModel.shared.restore(item)
+                guard let self else {
+                    return
+                }
+                self.feedSetUp(.itemDone(row: row))
+            }
+        case .note(let error):
+            Alerts.shared.note(
+                ConnectionNote(title: SetupText.previousUnreadableTitle, text: HostText.refusal(error), detail: error.message),
+                warning: true
+            )
+        case .close:
+            Connection.log("Set Up closed by the app")
+            setupPanel.close()
+        }
+    }
+
+    /// A Set Up page's name, for a line on standard error: never what the page lists.
+    private static func setUpPageName(_ page: SetupFlow.Page) -> String {
+        switch page {
+        case .addBack:
+            return "Add back"
+        case .addingBack:
+            return "adding back"
+        case .folders:
+            return "Folders"
+        case .abilities:
+            return "What Lucille may do"
+        case .ready:
+            return "Ready"
+        }
+    }
+
+    /// The menu's set-up was read again: Set Up's window, if open, shows it; on the Folders page,
+    /// a folder that came since the folders were last checked is checked.
+    private func setUpRead() {
+        guard setUp.windowOpen else {
+            return
+        }
+        if setUp.page == .folders {
+            checkSetUpFolders()
+        }
+        setupPanel.update(setUpShown())
+    }
+
+    /// What Set Up's window shows of the menu's set-up: what the menu last read.
+    private func setUpShown() -> SetupPanel.Shown {
+        let model = HostModel.shared
+        return SetupPanel.Shown(
+            folders: model.folders, foldersRead: model.foldersRead, checks: model.folderChecks,
+            abilities: model.abilities, abilitiesRead: model.abilitiesRead
+        )
+    }
+
+    /// `roots check` for the Folders page, one at a time, unless the folders are those last
+    /// checked. With no folder there is nothing to check.
+    private func checkSetUpFolders() {
+        let aliases = HostModel.shared.folders.map(\.alias)
+        guard !setUpChecking, aliases != setUpCheckedAliases else {
+            return
+        }
+        setUpCheckedAliases = aliases
+        guard !aliases.isEmpty else {
+            return
+        }
+        setUpChecking = true
+        Task { [weak self] in
+            await HostModel.shared.checkFolders()
+            self?.setUpChecking = false
+            self?.setUpRead()
+        }
     }
 
     // MARK: status
@@ -1595,6 +1780,14 @@ final class Connection: ObservableObject {
         if statusLine != line {
             statusLine = line
         }
+        if ladder == nil && !exiting {
+            // The first time the line says Connected after They Match here, Set Up opens, whether
+            // or not Lucille is paused.
+            let line = ConnectionText.statusLine(health, paused: false)
+            if line == ConnectionText.connected || line == ConnectionText.connectedWaiting {
+                feedSetUp(.connected)
+            }
+        }
         let why = ConnectionText.reason(health)
         if reason != why {
             reason = why
@@ -1609,6 +1802,14 @@ final class Connection: ObservableObject {
         let confirmed = isConfirmed()
         if connected != confirmed {
             connected = confirmed
+        }
+        if confirmed {
+            setUpSawPair = true
+        } else if setUpSawPair, case .noPair? = status?.pair, !supervisor.runAlive {
+            // The pair held here is gone, whoever ended it: Set Up ends with it. Never while a
+            // pairing is set up, when `status` says no pair yet: no pair was confirmed then.
+            setUpSawPair = false
+            feedSetUp(.pairEnded)
         }
         // Not while `run` drains: the drain's own ladder stops the operation, and the supervisor
         // asks for nothing then.

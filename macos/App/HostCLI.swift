@@ -125,9 +125,35 @@ struct HostCLI: Sendable {
         return env
     }
 
-    /// How many runs the app stopped waiting for have still not ended. One may hold the host's
-    /// policy lock, and then every change to folders and abilities waits for it.
-    static var stuckRuns: Int { leftBehind.running }
+    /// How many runs the app stopped waiting for, of verbs that take the host's policy lock, have
+    /// still not ended. Such a run may hold the lock, and then every change to folders and
+    /// abilities waits for it. A run of a verb that only reads, left behind, holds nothing up, so
+    /// it is not counted.
+    static var stuckRuns: Int { leftBehind.holdingPolicyLock }
+
+    /// The verbs of the app's short runs that take the host's policy lock while they run
+    /// (src/lucille_host/cli.py, `_policy_lock`), by their verb and action: every change to
+    /// abilities and folders, and Reset Settings. `pair --code-stdin` takes it too, but runs as a
+    /// long-lived child (`spawn`), never through `run`. A run of another verb, left behind, holds
+    /// nothing up.
+    static let policyLockVerbs: Set<String> = ["ops enable", "ops disable", "roots add", "roots remove", "policy reset"]
+
+    /// Whether `verb` takes the policy lock: its verb and action, among the words before `--` with
+    /// `--json` left out, are in `policyLockVerbs`, and it is not an alias suggestion, which takes
+    /// no lock (spec/CLI.md §7). A word after `--` is an alias or a path, never an option.
+    static func takesPolicyLock(_ verb: [String]) -> Bool {
+        let words = verb.prefix(while: { $0 != "--" }).filter { $0 != "--json" }
+        guard !words.contains(where: { $0.hasPrefix("--suggest-alias") }) else {
+            return false
+        }
+        return policyLockVerbs.contains(words.prefix(2).joined(separator: " "))
+    }
+
+    /// How many of the runs left behind can hold the policy lock: those still running whose verb
+    /// takes it (`takesPolicyLock`). A read left behind, or a run that has ended, holds nothing.
+    static func lockHolders(_ runs: [(running: Bool, holdsPolicyLock: Bool)]) -> Int {
+        runs.filter { $0.running && $0.holdsPolicyLock }.count
+    }
 
     private static let leftBehind = LeftBehind()
 
@@ -147,7 +173,8 @@ struct HostCLI: Sendable {
     /// that exits without reading it cannot break the write. A run that is stopped gets SIGTERM,
     /// then SIGKILL 2 seconds later. If it still has not ended 2 seconds after that (a process
     /// stuck on a stalled network drive cannot end), the app stops waiting for it, counts it in
-    /// `stuckRuns` until it ends, and the result has the status `notFinished`.
+    /// `stuckRuns` until it ends if it is a run that takes the policy lock (`takesPolicyLock`), and
+    /// the result has the status `notFinished`.
     func run(
         _ verb: [String], input: Data? = nil, cancel: CancelToken? = nil, timeout: TimeInterval? = nil
     ) -> CLIResult {
@@ -198,7 +225,7 @@ struct HostCLI: Sendable {
                     kill(process.processIdentifier, SIGKILL)
                 }
                 if exited.wait(timeout: .now() + 2) == .timedOut {
-                    HostCLI.leftBehind.add(process)
+                    HostCLI.leftBehind.add(process, holdsPolicyLock: HostCLI.takesPolicyLock(verb))
                     return CLIResult(
                         status: CLIResult.notFinished,
                         stdout: "",
@@ -425,23 +452,28 @@ private final class Collected: @unchecked Sendable {
     }
 }
 
-/// The runs the app stopped waiting for because they would not end.
+/// The runs the app stopped waiting for because they would not end, each with whether its verb
+/// takes the host's policy lock.
 private final class LeftBehind: @unchecked Sendable {
     private let lock = NSLock()
-    private var processes: [Process] = []
+    private var processes: [(process: Process, holdsPolicyLock: Bool)] = []
 
-    func add(_ process: Process) {
+    func add(_ process: Process, holdsPolicyLock: Bool) {
         lock.lock()
-        processes.append(process)
+        processes.append((process: process, holdsPolicyLock: holdsPolicyLock))
         lock.unlock()
     }
 
-    /// How many of them are still running. Those that have ended are forgotten.
-    var running: Int {
+    /// How many of them that take the policy lock are still running (`HostCLI.lockHolders`). Those
+    /// that have ended are forgotten.
+    var holdingPolicyLock: Int {
         lock.lock()
         defer { lock.unlock() }
-        processes.removeAll { !$0.isRunning }
-        return processes.count
+        processes.removeAll { !$0.process.isRunning }
+        let runs: [(running: Bool, holdsPolicyLock: Bool)] = processes.map {
+            (running: $0.process.isRunning, holdsPolicyLock: $0.holdsPolicyLock)
+        }
+        return HostCLI.lockHolders(runs)
     }
 }
 

@@ -289,8 +289,8 @@ enum ConnectionText {
     static let resetUnknown = "\(appName) couldn't tell whether its settings were reset. If its menu still says that its settings file can't be read, choose that line to try again."
 
     /// What the app says once `policy reset --json` has run. `earlierRunStuck` is whether a run
-    /// the app stopped waiting for has still not ended (`HostCLI.stuckRuns`), which may hold the
-    /// policy lock.
+    /// the app stopped waiting for, of a verb that takes the policy lock, has still not ended
+    /// (`HostCLI.stuckRuns`): it may hold that lock.
     static func reset(_ outcome: ResetOutcome, earlierRunStuck: Bool = false) -> ConnectionNote {
         switch outcome {
         case .reset:

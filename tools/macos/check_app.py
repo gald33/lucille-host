@@ -81,8 +81,8 @@ On the bundle made read-only (CI runs ``chmod -R a-w`` first):
 - ``swift``: compiles the app's Swift files that do not draw anything with a test driver
   (``macos/Tests/SelfTest.swift``), or takes the one ``--selftest`` names, and runs it against
   the app. It makes the calls the menu makes, through the same code; reads the host's golden
-  fixtures through the app's JSON reader and its pairing and supervision state machines; and
-  drives the child runner with fake children, a shell script in place of the interpreter.
+  fixtures through the app's JSON reader and its pairing, supervision and Set Up state machines;
+  and drives the child runner with fake children, a shell script in place of the interpreter.
 - ``relocate``: copies the app to another folder, whose path has a space in it, and runs ``host``
   and ``swift`` on the copy.
 - ``install [--replace | --restore]``: copies the read-only bundle to ``/Applications/<name>.app``
@@ -149,7 +149,10 @@ On the bundle made read-only (CI runs ``chmod -R a-w`` first):
   command line, as a test harness, with ``--hub`` and ``--store-file`` (which the app never
   passes), and leaves the SAS pending. Then it drives the app: the pairing window, opened from
   the menu, shows the number Lucille's side shows, Return does nothing there, and They Match
-  confirms; the app starts ``run``, which reads the room Lucille offers; a ``files.sha256``
+  confirms; the app starts ``run``, which reads the room Lucille offers; once the menu says
+  Connected, the Set Up window opens by itself, with no Add back page (the app saw no
+  ``policy_reset``, the harness having paired), on Folders, and its switch for ``files.sha256``
+  turns it on and off again, through ``ops``, before Done closes it; a ``files.sha256``
   request on a folder added through the command line is answered; ``run`` killed with SIGKILL is
   started again after the back-off; ``run`` drains when the app itself is killed; the app's own
   Quit asks first, shows the finishing panel, and waits for ``run`` to drain; Stop What's Running
@@ -222,9 +225,10 @@ LOGIC_SOURCES: Final = (
     "ConnectionText.swift",
     "RequestLog.swift",
     "Placement.swift",
+    "Setup.swift",
 )
 # The host's golden fixtures (spec/CLI.md section 11), which the self-test reads through the
-# app's JSON reader and its pairing and supervision state machines.
+# app's JSON reader and its pairing, supervision and Set Up state machines.
 CLI_FIXTURES: Final = build_app.REPO_ROOT.joinpath(
     "src", "lucille_host", "spec", "cli", "v1", "fixtures"
 )
@@ -2751,6 +2755,16 @@ COMPARE_TITLE: Final = "Compare the numbers"
 COMPARE_QUESTION: Final = "Does Lucille's page show this number?"
 THEY_MATCH: Final = "They Match"
 CONFIRMED_TITLE: Final = "Confirmed on this Mac"
+# Set Up's window and its pages, as App/Setup.swift spells them.
+SETUP_TITLE: Final = f"Set Up {APP_NAME}"
+SETUP_ADD_BACK: Final = "Add back what you had before?"
+SETUP_FOLDERS: Final = "Folders Lucille may use"
+SETUP_NO_FOLDERS: Final = "No folders yet"
+SETUP_ABILITIES: Final = "What Lucille may do"
+SETUP_READY: Final = f"{APP_NAME} is ready"
+SETUP_CONTINUE: Final = "Continue"
+SETUP_DONE: Final = "Done"
+SETUP_ITEM: Final = "Set Up Folders and Abilities…"
 # Quit while ``run`` runs: the question, its button, the finishing panel and its button, and the
 # panel's words once Stop now is chosen.
 QUIT_ITEM: Final = f"Quit {APP_NAME}"
@@ -2844,7 +2858,8 @@ def _screenshot(path: Path) -> None:
     done = subprocess.run(
         ["screencapture", "-x", str(path)], capture_output=True, text=True, timeout=30, check=False
     )
-    print(f"screenshot {path.name}: " + ("saved" if path.is_file() else _shown(done)))
+    # Flushed, so that the job log's time for the line is when the screenshot was taken.
+    print(f"screenshot {path.name}: " + ("saved" if path.is_file() else _shown(done)), flush=True)
 
 
 def _open_menu_and_read() -> tuple[bool, list[str]]:
@@ -3352,6 +3367,19 @@ def _press(name: str) -> tuple[bool, str]:
     return _system_events(_target("button", name) + 'click theTarget\nreturn "pressed"')
 
 
+def _toggle(name: str) -> tuple[bool, str]:
+    """Click the checkbox named ``name``, in whichever window of the app holds it."""
+    return _system_events(_target("checkbox", name) + 'click theTarget\nreturn "clicked"')
+
+
+def _checked(name: str) -> str:
+    """Whether the checkbox named ``name`` is checked: ``1``, ``0``, or ``absent``."""
+    worked, said = _system_events(
+        _target("checkbox", name) + "return ((value of theTarget) as text)"
+    )
+    return said if worked else "absent"
+
+
 def _enabled(name: str) -> str:
     """Whether the button named ``name`` is on: ``true``, ``false``, or ``absent``."""
     worked, said = _system_events(
@@ -3370,6 +3398,17 @@ def _window_names() -> list[str]:
     return said.splitlines() if worked else []
 
 
+def _app_windows() -> str:
+    """Every window of the app as System Events lists it, named or not, with what it holds, and
+    whether the app is frontmost, for a failure's detail. A listing that failed says so, where
+    :func:`_window_names` reads it as no window."""
+    worked, said = _system_events(
+        WINDOWS_HOLD + 'return "frontmost " & (frontmost as text) & ", "'
+        ' & ((count of windows) as text) & " window(s):" & held'
+    )
+    return said if worked else f"System Events did not answer: {said}"
+
+
 def _choose(start: str) -> tuple[bool, str]:
     """Open the menu and choose the item whose name starts with ``start``, which spares the
     script the ellipsis some items end with."""
@@ -3380,26 +3419,50 @@ def _choose(start: str) -> tuple[bool, str]:
     )
 
 
-def _menu_until(test: Callable[[list[str]], bool], seconds: float) -> tuple[bool, list[str]]:
+# Close the status menu (:func:`_close_menu`): one Escape, then a second before anything clicks
+# the status item again. The first line sends nothing when System Events finds no menu at all.
+CLOSE_MENU: Final = (
+    f'if not (exists {MENU}) then return "no menu was open, so no Escape was sent"\n'
+    "key code 53\n"
+    "delay 1\n"
+    'return "Escape sent"'
+)
+
+
+def _close_menu() -> None:
+    """Close the status menu, right after a read that found it open: only then is it known to be
+    open. An Escape sent with no menu open goes to the app's key window instead, and closes a
+    panel: in CI run 42395410137 (macos-15) the one a menu screenshot sent after a click that
+    showed no menu closed Set Up's window. In every screenshot taken that run by a click that came
+    right after an Escape, no menu was open. So no Escape is sent but this one, and a second
+    passes before the next click on the status item. System Events cannot be asked instead: in
+    run 42402770764 it still found the menu after every one of 11 Escapes, while each next click
+    opened the menu and read it as usual. Anything but a sent Escape is printed, as a note."""
+    worked, said = _system_events(CLOSE_MENU)
+    if not worked or said != "Escape sent":
+        print(f"note: closing the menu: {said if worked else f'System Events: {said}'}", flush=True)
+
+
+def _menu_until(
+    test: Callable[[list[str]], bool], seconds: float, shot: Path | None = None
+) -> tuple[bool, list[str]]:
     """Open the menu, read it and close it again, until ``test`` holds of what it shows, for at
     most ``seconds``. The menu shows what the app knew when it opened, and opening it starts a
-    refresh, so one read can be a refresh behind."""
+    refresh, so one read can be a refresh behind. With ``shot``, a screenshot of the last read, the
+    menu still open if that read worked. The menu is closed only after a read that worked
+    (:func:`_close_menu`): the check sends no Escape of its own to close a menu it did not see."""
     deadline = time.monotonic() + seconds
     while True:
         worked, shown = _open_menu_and_read()
-        _system_events("key code 53")
-        if worked and test(shown):
-            return True, shown
-        if time.monotonic() >= deadline:
-            return False, shown
+        held = worked and test(shown)
+        last = held or time.monotonic() >= deadline
+        if last and shot is not None:
+            _screenshot(shot)
+        if worked:
+            _close_menu()
+        if last:
+            return held, shown
         time.sleep(3)
-
-
-def _menu_shot(path: Path) -> None:
-    """A screenshot with the menu open."""
-    _system_events(f"click {STATUS_ITEM}\ndelay 1")
-    _screenshot(path)
-    _system_events("key code 53")
 
 
 def _set_pasteboard(text: str) -> None:
@@ -3898,8 +3961,11 @@ def _drive_reset(checker: Checker, python: Path, screens: Path) -> None:
         profile.mkdir(parents=True, exist_ok=True)
         aside.unlink(missing_ok=True)
         settings.write_bytes(UNREADABLE_POLICY)
-        worked, shown = _menu_until(lambda shown: SETTINGS_UNREADABLE in shown, 30)
-        _menu_shot(screens / "21-settings-unreadable.png")
+        worked, shown = _menu_until(
+            lambda shown: SETTINGS_UNREADABLE in shown,
+            30,
+            shot=screens / "21-settings-unreadable.png",
+        )
         if not checker.expect(
             worked,
             f"with a settings file the host cannot read, the menu says {SETTINGS_UNREADABLE!r}",
@@ -4416,6 +4482,20 @@ class _PairingCheck:
     def pair_state(self) -> Any:
         return self.status().get("pair", {}).get("state")
 
+    def op_enabled(self, op: str) -> bool | None:
+        """Whether ``ops list --json`` on the app's profile says ``op`` is on; None when it does
+        not say."""
+        done = self.host("--json", "ops", "list")
+        for line in done.stdout.splitlines():
+            try:
+                found = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(found, dict) and found.get("name") == op:
+                enabled = found.get("enabled")
+                return enabled if isinstance(enabled, bool) else None
+        return None
+
     def run_pid(self) -> int | None:
         run = self.status().get("run", {})
         pid = run.get("pid")
@@ -4621,8 +4701,9 @@ class _PairingCheck:
                 "its close button closes the pairing window",
                 said,
             )
-        found, shown = _menu_until(lambda items: FINISH_ITEM in items, 60)
-        _menu_shot(self.screens / "p02-menu-finish.png")
+        found, shown = _menu_until(
+            lambda items: FINISH_ITEM in items, 60, shot=self.screens / "p02-menu-finish.png"
+        )
         self.need(
             found,
             f"with the SAS pending and no pairing window, the menu offers {FINISH_ITEM!r}",
@@ -4706,8 +4787,13 @@ class _PairingCheck:
         )
         self.lucille.offer(PAIRING_ROOM)
         self.need(_wait_until(self.reading, 90), "run reads the room Lucille offers")
-        found, shown = _menu_until(lambda items: CONNECTED in items, 60)
-        _menu_shot(self.screens / "p05-connected.png")
+        # Where the app's windows are before the menu is opened and once it is closed again, so
+        # that a window that went can be put down to the menu or to what came after it.
+        print(f"the app's windows before the menu is read: {_app_windows()}", flush=True)
+        found, shown = _menu_until(
+            lambda items: CONNECTED in items, 60, shot=self.screens / "p05-connected.png"
+        )
+        print(f"and once it is closed again: {_app_windows()}", flush=True)
         self.checker.expect(found, f"the menu then says {CONNECTED!r}", f"{shown}")
         sockets = subprocess.run(
             ["lsof", "-a", "-p", str(app), "-i"], capture_output=True, text=True, check=False
@@ -4716,6 +4802,122 @@ class _PairingCheck:
             app is not None and not sockets.stdout.strip(),
             "the app itself holds no network connection",
             sockets.stdout,
+        )
+
+    def set_up_after_connected(self) -> None:
+        """Once the menu says Connected after They Match in the app, the Set Up window opens by
+        itself (decisions/0002 section 3.1, steps 8 to 10), and its pages are walked
+        (:meth:`set_up_pages`). A Set Up check that fails does not stop the pairing check: the
+        window is closed and files.sha256 turned off again, and only those two facts, which the
+        later steps need, are needed: the fingerprint step's request while files.sha256 is off
+        must still meet not_enabled (M18)."""
+        self.set_up_pages()
+        if SETUP_TITLE in _window_names():
+            _close_window(SETUP_TITLE)
+        if self.op_enabled("files.sha256") is not False:
+            self.host("--json", "ops", "disable", "files.sha256")
+        self.need(
+            self.op_enabled("files.sha256") is False and SETUP_TITLE not in _window_names(),
+            "after Set Up, files.sha256 is off and no Set Up window is open",
+            f"{_shown(self.host('--json', 'ops', 'list'))} {_window_names()}",
+        )
+
+    def set_up_pages(self) -> None:
+        """Set Up's pages as CI can reach them. It has no Add back page: the harness paired
+        through the command line, so the app saw no policy_reset. It opens on Folders, which lists
+        none. On What Lucille may do, files.sha256's switch shows it off; clicked, the host says it
+        is on, and the switch shows it on; clicked again, both say off. Then Ready, and Done closes
+        the window. Each is expected; at the first one the next steps here need that fails, it
+        returns."""
+        opened = _wait_until(lambda: SETUP_TITLE in _window_names(), 60)
+        # The missing window's detail only when it is missing: it takes a screenshot and reads
+        # the menu, which a window that is open must not have done to it.
+        missing = "" if opened else f"{_window_names()}\n{self.set_up_missing()}"
+        if not self.checker.expect(
+            opened, f"once connected, the app opens {SETUP_TITLE!r} by itself", missing
+        ):
+            return
+        shown = _wait_until(lambda: _says(SETUP_FOLDERS), 15)
+        _screenshot(self.screens / "p-setup-folders.png")
+        if not self.checker.expect(shown, f"it opens on {SETUP_FOLDERS!r}", f"{_texts()}"):
+            return
+        self.checker.expect(
+            not _says(SETUP_ADD_BACK),
+            f"with no {SETUP_ADD_BACK!r} page: the app saw no policy_reset of its own",
+            f"{_texts()}",
+        )
+        self.checker.expect(
+            _says(SETUP_NO_FOLDERS), f"the Folders page says {SETUP_NO_FOLDERS!r}", f"{_texts()}"
+        )
+        worked, said = _press(SETUP_CONTINUE)
+        if not self.checker.expect(
+            worked and _wait_until(lambda: _says(SETUP_ABILITIES), 15),
+            f"Continue goes to {SETUP_ABILITIES!r}",
+            f"{said} {_texts()}",
+        ):
+            return
+        switch = ABILITY_TITLES["files.sha256"]
+        if not self.checker.expect(
+            self.op_enabled("files.sha256") is False and _checked(switch) == "0",
+            f"files.sha256 is off before its switch is used, and {switch!r} shows it off",
+            f"switch {_checked(switch)}; {_shown(self.host('--json', 'ops', 'list'))}",
+        ):
+            return
+        worked, said = _toggle(switch)
+        if not self.checker.expect(
+            worked and _wait_until(lambda: self.op_enabled("files.sha256") is True, 15),
+            f"the switch {switch!r} turns files.sha256 on: ops list says it is enabled",
+            f"{said} {_shown(self.host('--json', 'ops', 'list'))}",
+        ):
+            return
+        self.checker.expect(
+            _wait_until(lambda: _checked(switch) == "1", 15),
+            f"and {switch!r} shows it on",
+            _checked(switch),
+        )
+        _screenshot(self.screens / "p-setup-abilities.png")
+        worked, said = _toggle(switch)
+        if not self.checker.expect(
+            worked and _wait_until(lambda: self.op_enabled("files.sha256") is False, 15),
+            f"clicked again, {switch!r} turns it off",
+            f"{said} {_shown(self.host('--json', 'ops', 'list'))}",
+        ):
+            return
+        self.checker.expect(
+            _wait_until(lambda: _checked(switch) == "0", 15),
+            f"and {switch!r} shows it off",
+            _checked(switch),
+        )
+        worked, said = _press(SETUP_CONTINUE)
+        if not self.checker.expect(
+            worked and _wait_until(lambda: _says(SETUP_READY), 15),
+            f"Continue goes to {SETUP_READY!r}",
+            f"{said} {_texts()}",
+        ):
+            return
+        _screenshot(self.screens / "p-setup-ready.png")
+        worked, said = _press(SETUP_DONE)
+        self.checker.expect(
+            worked and _wait_until(lambda: SETUP_TITLE not in _window_names(), 10),
+            "Done closes the Set Up window",
+            f"{said} {_window_names()}",
+        )
+
+    def set_up_missing(self) -> str:
+        """What tells apart the ways Set Up's window can be missing, for that failure's detail: a
+        screenshot; every window of the app, named or not, and whether it is frontmost; the menu,
+        which offers SETUP_ITEM only once the window opened and was then closed as a user closes it,
+        not when it never opened, nor when the app closed it (App/Setup.swift, ``offersReopen``);
+        the pair and ``run``; and what the app has written on standard error, where it says when
+        Set Up was shown and closed, and by whom."""
+        _screenshot(self.screens / "p-setup-missing.png")
+        _, shown = _menu_until(lambda items: True, 0)
+        offered = "offers" if SETUP_ITEM in shown else "does not offer"
+        return (
+            f"the app's windows: {_app_windows()}\n"
+            f"the menu {offered} {SETUP_ITEM!r}: {shown}\n"
+            f"pair {self.pair_state()}, run {self.run_pid()}\n"
+            f"the app's standard error so far: {self.stderr_now()[-2000:]!r}"
         )
 
     def fingerprint(self) -> None:
@@ -4913,8 +5115,11 @@ class _PairingCheck:
         sent = self.h.body(op="host.sleep", args={"n": STOP_DURING})
         self.lucille.request(PAIRING_ROOM, sent)
         self.need(_wait_until(lambda: _sleeping(run), 60), "a host.sleep request starts")
-        found, shown = _menu_until(lambda items: STOP_WHATS_RUNNING in items, 30)
-        _menu_shot(self.screens / "p07b-stop-whats-running.png")
+        found, shown = _menu_until(
+            lambda items: STOP_WHATS_RUNNING in items,
+            30,
+            shot=self.screens / "p07b-stop-whats-running.png",
+        )
         self.need(found, f"while it runs, the menu offers {STOP_WHATS_RUNNING!r}", f"{shown}")
         worked, said = _choose(STOP_WHATS_RUNNING)
         told = worked and _wait_until(lambda: _says(STOPPED_AND_PAUSED), 30)
@@ -4937,9 +5142,10 @@ class _PairingCheck:
             "ten seconds later the host is still paused: the app resumes only when asked",
         )
         found, shown = _menu_until(
-            lambda items: RESUME_ITEM in items and STOP_WHATS_RUNNING not in items, 30
+            lambda items: RESUME_ITEM in items and STOP_WHATS_RUNNING not in items,
+            30,
+            shot=self.screens / "p07d-paused-menu.png",
         )
-        _menu_shot(self.screens / "p07d-paused-menu.png")
         self.checker.expect(
             found,
             f"the menu offers {RESUME_ITEM!r}, and no longer {STOP_WHATS_RUNNING!r}",
@@ -5027,9 +5233,10 @@ class _PairingCheck:
             f"{_texts()}",
         )
         found, shown = _menu_until(
-            lambda items: UPDATE_HIGHEST_TITLE in items and PREPARE_TO_UPDATE_ITEM in items, 30
+            lambda items: UPDATE_HIGHEST_TITLE in items and PREPARE_TO_UPDATE_ITEM in items,
+            30,
+            shot=self.screens / "p07g-update-menu.png",
         )
-        _menu_shot(self.screens / "p07g-update-menu.png")
         self.need(
             found,
             f"the menu then holds {UPDATE_HIGHEST_TITLE!r} and {PREPARE_TO_UPDATE_ITEM!r}",
@@ -5148,9 +5355,10 @@ class _PairingCheck:
         )
         self.checker.expect(self.pair_state() == "none", "the app's profile then holds no pair")
         found, shown = _menu_until(
-            lambda items: NOT_CONNECTED in items and CONNECT_ITEM in items, 60
+            lambda items: NOT_CONNECTED in items and CONNECT_ITEM in items,
+            60,
+            shot=self.screens / "p14-not-connected.png",
         )
-        _menu_shot(self.screens / "p14-not-connected.png")
         self.checker.expect(
             found, f"the menu then says {NOT_CONNECTED!r}, and offers {CONNECT_ITEM!r}", f"{shown}"
         )
@@ -5209,6 +5417,7 @@ class _PairingCheck:
             ),
             ("They Match, in the app", self.confirm_in_the_app),
             ("run reads the room Lucille offers", self.run_reads_the_room),
+            ("Set Up, once connected", self.set_up_after_connected),
             ("files.sha256 on a folder", self.fingerprint),
             ("run killed while a note is up, and started again", self.backoff),
             ("the app killed", self.app_killed),
@@ -5236,8 +5445,8 @@ class _PairingCheck:
 
 def check_pairing(app: Path, checker: Checker, work: Path, require_driven: bool = False) -> None:
     """Pair the app's profile through the command line with a hub of the check's own and a fake
-    Lucille, then drive the app: confirm, ``run`` and its supervision, Activity, Quit, Stop What's
-    Running, the update notice and Prepare to Update, Stop now and Disconnect
+    Lucille, then drive the app: confirm, ``run`` and its supervision, Set Up, Activity, Quit, Stop
+    What's Running, the update notice and Prepare to Update, Stop now and Disconnect
     (:class:`_PairingCheck`). ``app`` is the copy in /Applications. It uses the real HOME, where
     the app keeps its profile, and puts that profile back as it found it. Screenshots go to
     ``<out>/check/screens``."""

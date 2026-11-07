@@ -2,8 +2,8 @@ import AppKit
 import SwiftUI
 
 /// The menu bar app that runs the host. It has no window and no Dock icon (LSUIElement);
-/// everything it does is in this menu, the pairing window, the Activity window and the notes it
-/// shows. Only the copy at /Applications/<name>.app does any of it (decisions/0002 §13).
+/// everything it does is in this menu, the pairing window, the Set Up window, the Activity window
+/// and the notes it shows. Only the copy at /Applications/<name>.app does any of it (decisions/0002 §13).
 @main
 struct MenuBarApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
@@ -203,6 +203,9 @@ struct HostItems: View {
             }
         }
         Divider()
+        if connection.setUpOffered {
+            Button(SetupText.menuItem) { connection.setUpChosen() }
+        }
         Button("Add a Folder…") { model.addFolder() }
         Menu("Folders") {
             if !model.foldersRead {

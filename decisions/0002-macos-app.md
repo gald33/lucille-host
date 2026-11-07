@@ -54,8 +54,9 @@ developing the app. Its builds stay ad hoc signed, for the repository owner's ow
   environment (`PATH=/var/empty`). It runs every verb on its own profile, `mac-app` (§9); builds before it
   used `default`, and nothing moves from one to the other. It reads JSON (§8) from every verb it runs:
   `--version`, `ops` and `roots`, `status`, the pairing verbs, `forget`, `kill`, `pause`, `resume`, `log`,
-  `policy reset` and `run`'s events. It decides only on their fields, a refusal by its `code`, and shows
-  their words. It reads and writes none of the host's files, and opens no network connection.
+  `policy reset`, `policy previous` and `run`'s events. It decides only on their fields, a refusal by its
+  `code`, and shows their words. It reads and writes none of the host's files, and opens no network
+  connection.
 - **Pairing by paste, on 0001's gate** (§11.3). The maintainer decided on 2026-11-02 to build it now on
   [0001](0001-host-design.md)'s gate, not the typed one. The user pastes the code; the app passes it to
   `pair --code-stdin --json` on standard input, shows the SAS from `sas_pending`, and the user clicks
@@ -76,6 +77,20 @@ developing the app. Its builds stay ad hoc signed, for the repository owner's ow
   `invalid`. It asks first, with Cancel the default, then runs `policy reset --json`, which sets the file
   aside as `policy.invalid.toml` and writes the fresh policy, and takes `not_invalid` as done; Try Again is
   offered only for `policy_lock_failed`.
+- **Set Up** (§3.1 steps 8 to 10, §11.6): the first time the status line says Connected after **They Match**
+  was clicked in this run of the app, one window with pages opens by itself. **Add back what you had
+  before?** comes first only when this run's own `pair --code-stdin` child, for the attempt They Match
+  confirmed, wrote `policy_reset`, and `policy previous --json` says the policy was set aside at or after
+  the second that attempt started. It offers the folders and operations of the policy set aside that the
+  menu's own gates can add, as unchecked boxes: the whole disk is shown with no box, whatever that policy
+  marked it, and a folder already held, a path with U+FFFD, and an operation that is on, meant for testing,
+  one this Mac can't run, one this release lacks or one an update turned off are left out. A checked
+  folder goes through the menu's own steps (the home folder question first when its path shows it, then
+  `roots add`), then `roots check`; a checked operation through its switch. Then **Folders Lucille may
+  use**, with `roots check`'s answer for each folder in words, Add a Folder… and Remove; **What Lucille
+  may do**, a switch for each operation but those for testing, `host.describe` as it is; and **Capsule is
+  ready**, with **Done**. Closed before its last page, the menu offers **Set Up Folders and Abilities…**.
+  Nothing is offered after a relaunch or for a pair confirmed in Terminal.
 - **Only the copy at `/Applications/Capsule.app` acts** (§3.3, §13), with the name its `Info.plist` gives
   and the case of each letter as there, reached through no link. Any other copy (on its disk image or
   another disk, in a folder inside Applications, in the Applications folder in the home folder, anywhere
@@ -97,9 +112,10 @@ developing the app. Its builds stay ad hoc signed, for the repository owner's ow
   for what needs attention, and offers Pause and Resume, the abilities (the operations, in the core's
   words, switched with `ops enable` and `ops disable` and set from the host's answer; one whose replies
   can carry a file's contents is turned on only after a question, though no operation in this release
-  sends file contents), Add a Folder… (its name dialog starting from the alias the host suggests), the
-  folders with Remove, Activity…, the pairing items (Connect to Lucille…, Finish Connecting…, Stop
-  Connecting…, Disconnect from Lucille…), and Quit Capsule;
+  sends file contents), Set Up Folders and Abilities… while Set Up's window was closed before its last
+  page, Add a Folder… (its name dialog starting from the alias the host suggests), the folders with
+  Remove, Activity…, the pairing items (Connect to Lucille…, Finish Connecting…, Stop Connecting…,
+  Disconnect from Lucille…), and Quit Capsule;
   while a request's process runs, Stop What's Running; and, while Lucille needs a newer release, the
   update notice's line and Prepare to Update…. A copy that is not at `/Applications/Capsule.app` shows only
   the line that says why, and Quit Capsule.
@@ -113,9 +129,9 @@ developing the app. Its builds stay ad hoc signed, for the repository owner's ow
   on macOS 26 and 27, without the end-to-end check (§18, §19). Logs and UI snapshots are uploaded on every
   run. The disk image is uploaded only by a manual run whose every check passed, and kept 3 days.
 
-Not built yet: the typed gate and the Connect flow (§11.2, §11.4; proposed), opening at login, the restore
-list after a new pairing (§11.6, `policy previous`), the check after a folder is added (`roots check`,
-§12), the Welcome and main windows, updates, **Remove Capsule…** (section 17), Copy
+Not built yet: the typed gate and the Connect flow (§11.2, §11.4; proposed), opening at login, the check
+after a folder is added from the menu, and at launch (`roots check`, §12; Set Up's Folders page runs it),
+the Welcome and main windows, updates, **Remove Capsule…** (section 17), Copy
 Diagnostics (§15), Developer ID signing and notarization, ripgrep (`Helpers/rg`; the pins hold an empty
 ripgrep commit until then, and `Resources/licenses/` has no ripgrep licence), and the release jobs. The
 first build also departs from this record in these ways, among others; `macos/README.md`, under "Choices
@@ -167,7 +183,28 @@ made for the first build", says why for most of them:
 - Reset Settings… is a button in the notes behind the menu's lines that say the settings file can't be
   read, not an item of a Settings submenu (§14), which comes with Open at Login. The menu's own line, from
   `ops list`'s refusal `policy_invalid`, offers it whenever the file can't be read; while `run` runs, its
-  Needs attention line offers it too.
+  Needs attention line offers it too;
+- steps 8 to 10 of §3.1 are the pages of one Set Up window of their own, which opens by itself once
+  the status line says Connected, rather than pages after the Welcome window, and the menu stays: the
+  Welcome and main windows are not built. Its last page has no "Open Capsule when you log in" yet. Add
+  back is offered only for a pairing this run of the app started and They Match confirmed in that same
+  attempt, from Connect to Lucille… to They Match (§11.6): the app keeps nothing across a relaunch, so a
+  pairing finished after one, or in Terminal, gets no offer. Nor does one finished from **Finish
+  Connecting…** after its pairing window was closed: that picks up whatever connection `status` shows
+  waiting, which may be one started in Terminal, so the app does not tie it to the attempt whose child set
+  the policy aside. The policy set aside stays, and `policy previous` lists it. An operation an update
+  turned off is not offered back, since its
+  Review and Turn On is not built (§13); on What Lucille may do it says so as a fact, and its switch is
+  the menu's. Set Up lists `host.describe` with its switch and the core's words, as §13 has it, where
+  the menu does not. The Folders page says `denied_by_macos` and `missing` in words, with no Open
+  Privacy Settings or Choose Again button (§12);
+- a run the app stopped waiting for is counted as stuck, and said to hold up every change to folders and
+  abilities, only when its verb takes the host's settings lock: of the short runs, `ops enable` and
+  `ops disable`, `roots add` but the alias suggestion, `roots remove` and `policy reset`
+  (`pair --code-stdin` takes it too, but runs as a long-lived child, never as a short run). A run that only
+  reads, left behind, is not counted, so no later change is blamed on it. Its own result still shows the
+  menu's line that a folder check is stuck: such a read waits on a drive that stopped answering, and a
+  change, which loads the same settings and looks at each folder, may wait on it too.
 
 Where this record says what the app does, it describes the planned app.
 
@@ -244,6 +281,11 @@ The app is done when:
 
 From then on an icon in the menu bar shows the state and offers Pause, Stop what's running, Activity, and
 Quit (§14).
+
+As built, steps 8 to 10 are the pages of one Set Up window, which opens the first time the app says
+Connected after They Match in that run of the app, with a page before them, **Add back what you had
+before?**, when the new pairing set an earlier policy aside (§11.6); the menu bar icon and its menu stay
+as they are ("What is built today").
 
 ### 3.2 The first form, for the repository owner's own Mac
 
@@ -977,8 +1019,12 @@ folders and operations. When `pair` accepts a new code, the core moves the curre
 fresh one already, to `policy.previous.toml` (in its own folder) and starts from the fresh one: only
 `host.describe`, no folders. `pair` says "the policy is reset" when it moved one. Only then does the app read
 that file through `policy previous --json` and offer its folders and operations as **unchecked** boxes; a box
-the user checks becomes an ordinary `roots add` or `ops enable`. A pairing from the fresh policy moves nothing,
-and the file then still holds the policy of an earlier pairing, which the app does not offer. This covers
+the user checks becomes an ordinary `roots add` or `ops enable`. It does so only for a pairing started in
+this app session: its own `pair` child said so (`policy_reset`), They Match confirmed that same attempt,
+and the file was set aside at or after the second the app started it. After a relaunch nothing is
+offered, since the app keeps nothing of its own; the file stays, and `policy previous` lists it. A
+pairing from the fresh policy moves nothing, and the file then still holds the policy of an earlier
+pairing, which the app does not offer. This covers
 every way a pair ends: Disconnect, removal on Lucille's side, rejection, the deadline, a deleted Keychain item.
 `THREAT_MODEL.md`'s "only `host.describe` enabled after pairing" becomes true for every pairing.
 
@@ -1646,11 +1692,13 @@ allow. The allowlist starts with the host's own folder (`Application Support/luc
 `Preferences` file, and gains a line only after a run shows the path, with the run and the reason. So it
 does not catch a write to a path whose name says nothing of the app, which it only prints; nor anything
 under `~/Library/Developer` or `~/Library/Android`, which it skips because the runner images keep their
-own tools there; nor a folder macOS does not let it read, which it lists; nor anything outside `~/Library`;
-nor what the app writes in a run that does not take the paths CI drives. The state folder of the app's
-profile (`mac-app`) must appear among the changes, so a walk that saw nothing, of the wrong folder say,
-fails rather than passes. On the smoke jobs, where the menu may not be driven, the check makes those writes
-itself first (`pause`, then `resume`).
+own tools there; nor a folder macOS does not let it read, which it lists; nor anything outside
+`~/Library`; nor what the app writes in a run that does not take the paths CI drives; nor what it writes
+on a path only the `pairing` check drives, since that check runs after the diff (the Set Up window among
+them: the diff sees the Set Up panel the app makes at launch, not the window shown). The state folder of
+the app's profile (`mac-app`) must appear among the changes, so a walk that saw nothing, of the wrong
+folder say, fails rather than passes. On the smoke jobs, where the menu may not be driven, the check makes
+those writes itself first (`pause`, then `resume`).
 
 ## 23. Threats the Mac app adds or bounds
 

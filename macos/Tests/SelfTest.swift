@@ -1,9 +1,10 @@
 import Foundation
 
 /// Runs the app's code that draws nothing (`Alias`, `HostCLI`, `HostText`, `HostJSON`, `Pairing`,
-/// `Supervisor`, `ConnectionText`, `RequestLog`, `Placement`) without a screen: where a copy of
-/// the app may run, the host's golden fixtures through the JSON reader, Activity's request log and
-/// the two state machines, the latch that keeps a misplaced copy from starting anything, fake
+/// `Supervisor`, `ConnectionText`, `RequestLog`, `Placement`, `Setup`) without a screen: where a
+/// copy of the app may run, the host's golden fixtures through the JSON reader, Activity's request
+/// log, the three state machines (pairing, `run`'s supervision and Set Up) and what Set Up offers
+/// to add back, the latch that keeps a misplaced copy from starting anything, fake
 /// children through the child runner, and, against a built app, the calls the menu makes, through
 /// the same code, with a temporary HOME. CI compiles it with those files (`tools/macos/check_app.py
 /// swift`). Exit status 1 on any failure.
@@ -36,6 +37,7 @@ struct SelfTest {
         checkJSON(fixtures, report)
         checkRequestLog(fixtures, report)
         checkPairing(fixtures, report)
+        checkSetup(fixtures, report)
         checkSupervisor(fixtures, report)
         if let home = options["home"] {
             // First among the checks that start anything: until it opens the latch, nothing can.
@@ -318,6 +320,61 @@ struct SelfTest {
         report.expect(HostText.explain(refused("not_enabled", "files.sha256 is not enabled"), earlierRunStuck: true).message
                           == "That ability was already off.",
                       "a refusal is still its own, whatever else is stuck")
+        // Only a run that takes the host's policy lock can hold up a later change to folders and
+        // abilities (the host's `_policy_lock`): a run that only reads, left behind, is not counted
+        // as stuck (`HostCLI.stuckRuns`), so the next change never names one that holds nothing up.
+        let lockVerbs: Set<String> = ["ops enable", "ops disable", "roots add", "roots remove", "policy reset"]
+        report.expect(HostCLI.policyLockVerbs == lockVerbs,
+                      "the verbs that take the policy lock are the changes to abilities and folders, and Reset Settings",
+                      "\(HostCLI.policyLockVerbs)")
+        let locking: [[String]] = [
+            HostText.addFolderArguments(alias: "docs", path: "/Users/a/Documents", confirmedHome: false),
+            HostText.addFolderArguments(alias: "home", path: "/Users/a", confirmedHome: true),
+            ["--json", "roots", "add", "--", "docs", "--suggest-alias"],
+            ["--json", "ops", "enable", "files.sha256"],
+            ["--json", "ops", "--json", "disable", "files.sha256"],
+            ["--json", "roots", "remove", "docs"],
+            ["--json", "policy", "reset"],
+        ]
+        let reading: [[String]] = [
+            HostText.suggestAliasArguments(path: "/Users/a/Documents"),
+            HostText.suggestAliasArguments(path: "-notes"),
+            ["--json", "--version"],
+            ["--json", "ops", "list"],
+            ["--json", "roots", "list"],
+            ["--json", "roots", "check"],
+            ["--json", "roots", "check", "docs"],
+            ["--json", "policy", "previous"],
+            ["--json", "status"],
+            ["--json", "pair", "status"],
+            ["--json", "pair", "confirm"],
+            ["--json", "pair", "reject"],
+            ["--json", "pause"],
+            ["--json", "resume"],
+            ["--json", "kill"],
+            ["--json", "log", "--limit", "200"],
+            ["--json", "forget"],
+        ]
+        let lockingSaid: [Bool] = locking.map { HostCLI.takesPolicyLock($0) }
+        let readingSaid: [Bool] = reading.map { HostCLI.takesPolicyLock($0) }
+        report.expect(lockingSaid.allSatisfy { $0 },
+                      "adding and removing a folder, switching an ability and Reset Settings take the policy lock, read before --",
+                      "\(lockingSaid)")
+        report.expect(readingSaid.allSatisfy { !$0 },
+                      "the alias suggestion, the lists, the checks, the version, policy previous, status, the pair verbs, pause, resume, kill, log and forget take none, so a run of one left behind is not stuck",
+                      "\(readingSaid)")
+        // Of the runs left behind, only one still running whose verb takes the lock is counted.
+        let leftRuns: [(running: Bool, holdsPolicyLock: Bool)] = [
+            (running: true, holdsPolicyLock: false),
+            (running: true, holdsPolicyLock: true),
+            (running: false, holdsPolicyLock: true),
+            (running: false, holdsPolicyLock: false),
+        ]
+        let holding = HostCLI.lockHolders(leftRuns)
+        let noneLeft = HostCLI.lockHolders([])
+        report.expect(holding == 1 && noneLeft == 0,
+                      "of the runs left behind, only those still running whose verb takes the lock count as stuck: not a read, nor one that ended",
+                      "\(holding) \(noneLeft)")
 
         // Where a folder is, and what the name dialog says first.
         let home = "/Users/a"
@@ -499,6 +556,12 @@ struct SelfTest {
         let added = VerbOutcome(cli.run(HostText.addFolderArguments(alias: alias, path: folder.path, confirmedHome: false)))
         report.expect(added.folder == Folder(alias: alias, path: folder.path, broad: false),
                       "roots add -- \(alias) answers with the folder", "\(added)")
+        // Set Up's Folders page, and a folder added back: roots check, for every folder and for one.
+        let checkedAll = VerbOutcome(cli.run(["--json", "roots", "check"], timeout: SetupFlow.checkLimit)).folderChecks
+        let checkedOne = VerbOutcome(cli.run(["--json", "roots", "check", alias], timeout: SetupFlow.checkLimit)).folderChecks
+        let opened = [FolderCheck(alias: alias, path: folder.path, state: .ok)]
+        report.expect(checkedAll == opened && checkedOne == opened,
+                      "roots check --json, and roots check \(alias), say the host can open the folder", "\(checkedAll) \(checkedOne)")
         let listed = VerbOutcome(cli.run(["--json", "roots", "list"])).folders
         report.expect(listed == [Folder(alias: alias, path: folder.path, broad: false)], "the folder is listed", "\(listed)")
         let next = VerbOutcome(cli.run(HostText.suggestAliasArguments(path: folder.path)))
@@ -613,6 +676,12 @@ struct SelfTest {
         let again = ResetOutcome(VerbOutcome(cli.run(["--json", "policy", "reset"])))
         report.expect(again == .nothingToReset && FileManager.default.contents(atPath: setAside) == notToml,
                       "a second reset finds nothing to set aside, which is done, and changes nothing", "\(again)")
+        // Set Up reads the policy a pairing set aside, as the app runs it (spec/CLI.md §7). No
+        // pairing has used this profile (the pairing verbs below use a throwaway one), and Reset
+        // Settings sets its file aside elsewhere, so none was set aside.
+        let previous = VerbOutcome(cli.run(["--json", "policy", "previous"], timeout: SetupFlow.previousLimit))
+        report.expect(previous.previousPolicy == PreviousPolicy.nothingSetAside,
+                      "policy previous --json on a profile no pairing has used says no policy was set aside", "\(previous)")
         checkPairingVerbs(python: cli.python, home: home, report)
         report.expect(HostCLI.stuckRuns == 0, "every run ended, so none is counted as stuck")
     }
@@ -2248,6 +2317,502 @@ extension SelfTest {
         report.expect(violations.isEmpty, "over 40000 seeded steps, pair confirm follows only a drawn, matched, still-pending SAS, and pair status only an open window",
                       violations.prefix(5).joined(separator: "; "))
         report.expect(confirms >= 200, "the walk reached pair confirm often (\(confirms) times)")
+    }
+
+    // MARK: - checkSetup
+
+    /// Set Up (decisions/0002 §3.1 steps 8 to 10, §11.6): once a pair They Match confirmed in this
+    /// app session is connected, one window with pages; Add back first only for a pairing whose
+    /// own `pair --code-stdin` child, started in this session, set the policy aside (spec/CLI.md §6,
+    /// `policy_reset` and `previous_policy`), offering only what the menu's own gates can add, with
+    /// every box unchecked.
+    static func checkSetup(_ fixtures: [String: Fixture], _ report: Report) {
+        let home = "/Users/a"
+        let start = sampleTime
+        let docs = Folder(alias: "docs", path: "/home/me/Documents", broad: false)
+        let setAside = PreviousPolicy.found(setAsideAt: start, ops: ["files.sha256", "host.sleep"], folders: [docs])
+
+        // What the app reads, from the host's own fixtures when it is given them.
+        let pairObjects: [HostObject] = fixtures["pair-code-stdin"]?.objects ?? [
+            .pairCode(name: pairName), .policyReset, .pair(.accepted(name: pairName, clockSkewed: false)),
+        ]
+        let previousObjects: [HostObject] = fixtures["policy-previous"]?.objects ?? [.previousPolicy(setAside)]
+        let noneObjects: [HostObject] = fixtures["policy-previous-none"]?.objects ?? [.previousPolicy(.nothingSetAside)]
+        let previous = VerbOutcome.done(previousObjects)
+        let nothing = VerbOutcome.done(noneObjects)
+        report.expect(pairObjects.contains(.policyReset), "pair --code-stdin says when it set the policy aside", "\(pairObjects)")
+        report.expect(previous.previousPolicy == setAside,
+                      "policy previous reads when the policy was set aside, to the second, with its operations and folders", "\(previous)")
+        report.expect(nothing.previousPolicy == PreviousPolicy.nothingSetAside, "and that none was set aside", "\(nothing)")
+        // Its state is closed, as every state is (spec/CLI.md §12): another state, or a field its
+        // state needs missing or of another type, makes an object this release cannot read.
+        let unreadable = [
+            #"{"v":1,"type":"previous_policy","state":"moon"}"#,
+            #"{"v":1,"type":"previous_policy"}"#,
+            #"{"v":1,"type":"previous_policy","state":"found","ops":[],"folders":[]}"#,
+            #"{"v":1,"type":"previous_policy","state":"found","set_aside_at":"yesterday","ops":[],"folders":[]}"#,
+            #"{"v":1,"type":"previous_policy","state":"found","set_aside_at":"2026-11-01T12:00:00Z","ops":[1],"folders":[]}"#,
+            #"{"v":1,"type":"previous_policy","state":"found","set_aside_at":"2026-11-01T12:00:00Z","ops":[]}"#,
+            #"{"v":1,"type":"previous_policy","state":"found","set_aside_at":"2026-11-01T12:00:00Z","ops":[],"folders":["docs"]}"#,
+            #"{"v":1,"type":"previous_policy","state":"found","set_aside_at":"2026-11-01T12:00:00Z","ops":[],"folders":[{"alias":"docs","path":"/x"}]}"#,
+            #"{"v":1,"type":"previous_policy","state":"found","set_aside_at":"2026-11-01T12:00:00Z","ops":[],"folders":[{"alias":"-x","path":"/x","broad":false}]}"#,
+        ]
+        let readAnyway: [Bool] = unreadable.map { isObject(line($0)) }
+        report.expect(!readAnyway.contains(true),
+                      "a previous_policy in a state this release does not know, without a field its state needs, or with a folder alias not in the host's form, is not read", "\(readAnyway)")
+
+        // The operations as ops list gives them now, on a fresh policy, and with files.sha256
+        // stubbed to send file contents.
+        let describeOn = Ability(name: "host.describe", state: .enabled, enabled: true, summary: "Describe this computer's host",
+                                 sends: "Lucille gets the host's version.", sendsFileContent: false, diagnostic: false)
+        let sleepOff = Ability(name: "host.sleep", state: .disabled, enabled: false, summary: "Wait up to 4 minutes, for testing",
+                               sends: "Lucille gets how long the wait took and how it ended.", sendsFileContent: false, diagnostic: true)
+        let fingerprintOff = Ability(name: "files.sha256", state: .disabled, enabled: false, summary: "Check a file's fingerprint",
+                                     sends: "Lucille gets a code that identifies the file's exact contents, not the contents.",
+                                     sendsFileContent: false, diagnostic: false)
+        let fingerprintSends = Ability(name: "files.sha256", state: .disabled, enabled: false, summary: "Check a file's fingerprint",
+                                       sends: "Lucille gets a code that identifies the file's exact contents, not the contents.",
+                                       sendsFileContent: true, diagnostic: false)
+        var fresh: [Ability] = [describeOn, sleepOff, fingerprintOff]
+        if let listed = fixtures["ops-list"] {
+            fresh = VerbOutcome.done(listed.objects).abilities
+        }
+        var contentOps: [Ability] = [describeOn, sleepOff, fingerprintSends]
+        if let listed = fixtures["ops-list-sends-file-content"] {
+            contentOps = VerbOutcome.done(listed.objects).abilities
+        }
+        let fingerprint = fresh.first(where: { $0.name == "files.sha256" }) ?? fingerprintOff
+        let content = contentOps.first(where: { $0.name == "files.sha256" }) ?? fingerprintSends
+        // What Lucille may do has a switch for every operation but one for testing and a name this
+        // release lacks: host.describe has one, as it is.
+        let onPage: [String] = fresh.filter(\.isOnSetUpPage).map(\.name)
+        let lacking = Ability(name: "old.op", state: .notInCatalog, enabled: true, summary: nil, sends: nil,
+                              sendsFileContent: false, diagnostic: false)
+        let lackingOnPage = lacking.isOnSetUpPage
+        report.expect(onPage == ["host.describe", "files.sha256"] && !lackingOnPage,
+                      "What Lucille may do switches host.describe and files.sha256, not host.sleep, which is for testing, nor a name this release lacks",
+                      "\(onPage)")
+
+        // The way the app feeds it: this session's pairing started at `at`, in the pairing flow's
+        // epoch 1; its child's objects, with policy_reset when it set the policy aside; They
+        // Match confirmed in `confirmedIn`; then Connected.
+        var opened: [SetupFlow.Effect] = []
+        func connected(startedAt at: Date, objects: [HostObject], confirmedIn: Int = 1) -> SetupFlow {
+            var made = SetupFlow(home: home)
+            _ = made.handle(.pairStarted(at: at, epoch: 1))
+            for object in objects where object == .policyReset {
+                _ = made.handle(.policySetAside(epoch: 1))
+            }
+            _ = made.handle(.confirmedHere(epoch: confirmedIn))
+            opened = made.handle(.connected)
+            return made
+        }
+        let readFirst: [SetupFlow.Effect] = [.readPrevious]
+        let foldersFirst: [SetupFlow.Effect] = [.show(.folders)]
+        let foldersPage = SetupFlow.Page.folders
+
+        var flow = connected(startedAt: start, objects: pairObjects)
+        report.expect(opened == readFirst && !flow.windowOpen && flow.owed,
+                      "with policy_reset from this session's own pairing, confirmed by They Match, Connected reads policy previous first", "\(opened)")
+        let docsRow = RestoreRow(item: .folder(docs), offered: true, asks: nil, note: nil)
+        let fingerprintRow = RestoreRow(item: .ability(fingerprint), offered: true, asks: nil, note: nil)
+        let offer = RestoreOffer(rows: [docsRow, fingerprintRow], someNotOffered: true)
+        let offerShown: [SetupFlow.Effect] = [.show(.addBack(offer, checked: []))]
+        let offered = flow.handle(.previousRead(previous, ops: fresh, roots: []))
+        report.expect(offered == offerShown && flow.windowOpen,
+                      "a policy set aside in the second the pairing started is offered back: its folder and files.sha256, unchecked; not host.sleep, which is for testing",
+                      "\(offered)")
+        flow = connected(startedAt: start.addingTimeInterval(0.9), objects: pairObjects)
+        let sameSecond = flow.handle(.previousRead(previous, ops: fresh, roots: []))
+        report.expect(sameSecond == offerShown, "a pairing started later in that same second is offered it too", "\(sameSecond)")
+        // The usual case: the child starts, then sets the policy aside a few seconds later.
+        flow = connected(startedAt: start.addingTimeInterval(-2.5), objects: pairObjects)
+        let secondsAfter = flow.handle(.previousRead(previous, ops: fresh, roots: []))
+        report.expect(secondsAfter == offerShown, "one set aside seconds after the pairing started is offered", "\(secondsAfter)")
+        flow = connected(startedAt: start.addingTimeInterval(1), objects: pairObjects)
+        let secondLater = flow.handle(.previousRead(previous, ops: fresh, roots: []))
+        report.expect(secondLater == foldersFirst && flow.page == foldersPage,
+                      "one set aside before the second this pairing started is another pairing's: no Add back page, Folders first", "\(secondLater)")
+        flow = connected(startedAt: start, objects: [])
+        report.expect(opened == foldersFirst && flow.windowOpen,
+                      "with no policy_reset from this session's own pairing, policy previous is not read: the window opens on Folders", "\(opened)")
+        flow = connected(startedAt: start, objects: pairObjects, confirmedIn: 2)
+        report.expect(opened == foldersFirst,
+                      "nor when They Match confirmed in another attempt than the one whose child set the policy aside", "\(opened)")
+        flow = connected(startedAt: start, objects: pairObjects)
+        let noneShown = flow.handle(.previousRead(nothing, ops: fresh, roots: []))
+        report.expect(noneShown == foldersFirst, "with none set aside, no Add back page", "\(noneShown)")
+        let invalid = HostError(code: "previous_invalid", message: "the earlier policy /x/policy.previous.toml is invalid: y", kind: nil)
+        flow = connected(startedAt: start, objects: pairObjects)
+        let invalidShown = flow.handle(.previousRead(.refused(invalid), ops: fresh, roots: []))
+        report.expect(invalidShown.count == 2 && invalidShown.contains(.note(invalid)) && invalidShown.contains(.show(.folders)),
+                      "a set-aside policy the host can't read: no Add back page, and a note that says so", "\(invalidShown)")
+        let invalidWords = HostText.refusal(invalid)
+        report.expect(invalidWords == HostText.refusals["previous_invalid"] && invalidWords != ConnectionText.appBug,
+                      "the note says it in words of its own", invalidWords)
+        flow = connected(startedAt: start, objects: pairObjects)
+        let lateShown = flow.handle(.previousRead(.timedOut, ops: fresh, roots: []))
+        report.expect(lateShown == foldersFirst, "policy previous past its time limit: no Add back page, and no note", "\(lateShown)")
+        report.expect(SetupFlow.previousLimit == 30 && SetupFlow.checkLimit == 600,
+                      "policy previous has 30 s, and roots check 600 s, as adding a folder has")
+
+        // Never a box: the whole disk, shown with the reason; a path with U+FFFD, which can be shown
+        // but not passed back (spec/CLI.md §4.1); a folder whose alias is held already; an
+        // operation this release lacks, one on already (host.describe) or one for testing
+        // (host.sleep). The home folder, and a folder that holds it, go through the home question,
+        // as the menu's do.
+        let disk = Folder(alias: "disk", path: "/", broad: true)
+        let data = Folder(alias: "data", path: "/System/Volumes/Data", broad: true)
+        let mangled = Folder(alias: "cafe", path: "/Users/a/Caf\u{FFFD}", broad: false)
+        let homeFolder = Folder(alias: "home", path: home, broad: true)
+        let above = Folder(alias: "users", path: "/Users", broad: false)
+        let photos = Folder(alias: "photos", path: "/Users/a/Photos", broad: false)
+        let everything = PreviousPolicy.found(
+            setAsideAt: start, ops: ["files.sha256", "host.describe", "host.sleep", "old.op"],
+            folders: [disk, data, mangled, homeFolder, above, photos, docs]
+        )
+        let filtered = RestoreOffer.items(previous: everything, since: start, ops: fresh, roots: [photos], home: home)
+        let diskRow = RestoreRow(item: .folder(disk), offered: false, asks: nil, note: SetupText.wholeDiskNotOffered)
+        let dataRow = RestoreRow(item: .folder(data), offered: false, asks: nil, note: SetupText.wholeDiskNotOffered)
+        let homeRow = RestoreRow(item: .folder(homeFolder), offered: true, asks: .homeFolder, note: nil)
+        let aboveRow = RestoreRow(item: .folder(above), offered: true, asks: .homeFolder, note: nil)
+        let kept = RestoreOffer(rows: [diskRow, dataRow, homeRow, aboveRow, docsRow, fingerprintRow], someNotOffered: true)
+        report.expect(filtered == kept,
+                      "the whole disk is shown with no box, a U+FFFD path, a folder already held and operations that can't be or are already on are left out, broad folders ask first",
+                      "\(String(describing: filtered))")
+        report.expect(SetupText.wholeDiskNotOffered == "\(HostText.appName) doesn't add your whole disk back, so it isn't offered.",
+                      "the whole disk's row says why", SetupText.wholeDiskNotOffered)
+        // Whatever the set-aside policy marked it: /System/Volumes/Data holds the home folder, and so
+        // is stored broad, only while the home folder is on that volume.
+        let dataNotBroad = Folder(alias: "data2", path: "/System/Volumes/Data", broad: false)
+        let systemNotBroad = Folder(alias: "system", path: "/System", broad: false)
+        let notMarked = RestoreOffer.items(
+            previous: .found(setAsideAt: start, ops: ["files.sha256"], folders: [dataNotBroad, systemNotBroad]),
+            since: start, ops: fresh, roots: [], home: home
+        )
+        let dataNotBroadRow = RestoreRow(item: .folder(dataNotBroad), offered: false, asks: nil, note: SetupText.wholeDiskNotOffered)
+        let systemNotBroadRow = RestoreRow(item: .folder(systemNotBroad), offered: false, asks: nil, note: SetupText.wholeDiskNotOffered)
+        let notMarkedKept = RestoreOffer(rows: [dataNotBroadRow, systemNotBroadRow, fingerprintRow], someNotOffered: false)
+        report.expect(notMarked == notMarkedKept,
+                      "the whole disk has no box even where the policy set aside did not mark it broad",
+                      "\(String(describing: notMarked))")
+        let contentOffer = RestoreOffer.items(
+            previous: .found(setAsideAt: start, ops: ["files.sha256"], folders: []), since: start, ops: contentOps, roots: [], home: home
+        )
+        let contentRow = RestoreRow(item: .ability(content), offered: true, asks: .turnOn, note: nil)
+        let contentKept = RestoreOffer(rows: [contentRow], someNotOffered: false)
+        report.expect(contentOffer == contentKept && content.asksFirst(turningOn: true),
+                      "an operation whose replies carry file contents is added back through the acknowledgement, as the menu's switch is",
+                      "\(String(describing: contentOffer))")
+        let onlyDisk = RestoreOffer.items(
+            previous: .found(setAsideAt: start, ops: ["host.describe"], folders: [disk, mangled]), since: start, ops: fresh, roots: [], home: home
+        )
+        let tooEarly = RestoreOffer.items(previous: setAside, since: start.addingTimeInterval(1), ops: fresh, roots: [], home: home)
+        let minuteAfter = RestoreOffer.items(previous: setAside, since: start.addingTimeInterval(-60), ops: fresh, roots: [], home: home)
+        report.expect(minuteAfter == offer, "a policy set aside a minute after the pairing started is offered",
+                      "\(String(describing: minuteAfter))")
+        let noneSetAside = RestoreOffer.items(previous: .nothingSetAside, since: start, ops: fresh, roots: [], home: home)
+        report.expect(onlyDisk == nil && tooEarly == nil && noneSetAside == nil,
+                      "with nothing left to check, from another pairing, or none set aside, there is no offer")
+
+        // Every box starts unchecked; one with no box, or no row, can't be checked; Add Checked
+        // adds back only what is checked, one row after another, then Folders.
+        flow = connected(startedAt: start, objects: pairObjects)
+        _ = flow.handle(.previousRead(.done([.previousPolicy(everything)]), ops: fresh, roots: [photos]))
+        let unchecked = SetupFlow.Page.addBack(kept, checked: [])
+        report.expect(flow.page == unchecked, "every box starts unchecked", "\(String(describing: flow.page))")
+        report.expect(flow.handle(.addChecked).isEmpty, "Add Checked with nothing checked adds nothing")
+        let boxless = flow.handle(.checked([0, 1, 99]))
+        let stillUnchecked: [SetupFlow.Effect] = [.show(unchecked)]
+        report.expect(boxless == stillUnchecked, "the whole disk's rows, and a row that is not there, can't be checked", "\(boxless)")
+        report.expect(flow.handle(.addChecked).isEmpty, "so Add Checked still adds nothing")
+        _ = flow.handle(.checked([2, 5]))
+        let adding = flow.handle(.addChecked)
+        let addingFirst: [SetupFlow.Effect] = [.show(.addingBack(kept, left: [2, 5])), .restore(row: 2, .folder(homeFolder))]
+        report.expect(adding == addingFirst, "Add Checked adds back the first checked row", "\(adding)")
+        let addingNext = flow.handle(.itemDone(row: 2))
+        let addingSecond: [SetupFlow.Effect] = [.show(.addingBack(kept, left: [5])), .restore(row: 5, .ability(fingerprint))]
+        report.expect(addingNext == addingSecond, "then the next, once it is done", "\(addingNext)")
+        report.expect(flow.handle(.itemDone(row: 2)).isEmpty, "an answer for a row already done is dropped")
+        let addedAll = flow.handle(.itemDone(row: 5))
+        report.expect(addedAll == foldersFirst, "then Folders", "\(addedAll)")
+        let toAbilities = flow.handle(.next)
+        let abilitiesShown: [SetupFlow.Effect] = [.show(.abilities)]
+        report.expect(toAbilities == abilitiesShown, "Continue goes to What Lucille may do", "\(toAbilities)")
+        let toReady = flow.handle(.next)
+        let readyShown: [SetupFlow.Effect] = [.show(.ready)]
+        report.expect(toReady == readyShown, "then to Ready", "\(toReady)")
+        let closing = flow.handle(.done)
+        let closed: [SetupFlow.Effect] = [.close]
+        report.expect(closing == closed && !flow.owed && !flow.windowOpen && !flow.offersReopen,
+                      "Done closes the window, and Set Up is no longer owed", "\(closing)")
+        report.expect(flow.handle(.connected).isEmpty, "Connected again opens nothing")
+
+        // Skip, a window closed before its last page, and the menu item that opens it again.
+        flow = connected(startedAt: start, objects: pairObjects)
+        _ = flow.handle(.previousRead(previous, ops: fresh, roots: []))
+        let skipped = flow.handle(.skip)
+        report.expect(skipped == foldersFirst, "Skip adds nothing and goes to Folders", "\(skipped)")
+        _ = flow.handle(.windowClosed)
+        report.expect(!flow.windowOpen && flow.owed && flow.offersReopen,
+                      "closed before its last page, Set Up is still owed, and the menu offers it")
+        let reopened = flow.handle(.reopen)
+        report.expect(reopened == foldersFirst && flow.windowOpen && !flow.offersReopen,
+                      "Set Up Folders and Abilities… opens it again where it was", "\(reopened)")
+        report.expect(flow.handle(.connected).isEmpty, "Connected again does not open it a second time")
+        let ended = flow.handle(.pairEnded)
+        report.expect(ended == closed && !flow.owed && !flow.offersReopen && flow.page == nil,
+                      "a pair that ends closes it, and nothing is owed", "\(ended)")
+        let connectedAfterEnd = flow.handle(.connected)
+        let reopenedAfterEnd = flow.handle(.reopen)
+        report.expect(connectedAfterEnd.isEmpty && reopenedAfterEnd.isEmpty, "and nothing opens it again")
+
+        // A box clicked while the window is closed checks nothing: opened again, the Add back page
+        // has every box as it was, and Add Checked adds nothing.
+        flow = connected(startedAt: start, objects: pairObjects)
+        _ = flow.handle(.previousRead(.done([.previousPolicy(everything)]), ops: fresh, roots: [photos]))
+        _ = flow.handle(.windowClosed)
+        let clickedWhileClosed = flow.handle(.checked([2]))
+        let reopenedUnchecked = flow.handle(.reopen)
+        let addedAfterReopen = flow.handle(.addChecked)
+        report.expect(clickedWhileClosed.isEmpty && reopenedUnchecked == stillUnchecked && addedAfterReopen.isEmpty,
+                      "a box clicked while the window is closed checks nothing, and the window opens again as it was",
+                      "\(clickedWhileClosed) \(reopenedUnchecked) \(addedAfterReopen)")
+
+        // Not after a relaunch, and not for a pair confirmed in Terminal: no They Match here.
+        var relaunched = SetupFlow(home: home)
+        let afterRelaunch = relaunched.handle(.connected)
+        report.expect(afterRelaunch.isEmpty && !relaunched.owed,
+                      "after a relaunch, Connected opens nothing, and nothing is offered")
+        _ = relaunched.handle(.pairStarted(at: start, epoch: 3))
+        _ = relaunched.handle(.policySetAside(epoch: 3))
+        let afterTerminal = relaunched.handle(.connected)
+        report.expect(afterTerminal.isEmpty && !relaunched.offersReopen,
+                      "nor does a pairing confirmed in Terminal, which no They Match here confirmed")
+
+        // The Folders page's words for each check of a folder (spec/CLI.md §9.2).
+        let states: [FolderCheck.State] = [.ok, .deniedByMacOS, .denied, .missing, .error(errno: "EIO")]
+        let stateWords: [String?] = states.map { SetupText.folderState($0) }
+        let expectedWords: [String?] = [
+            nil, "macOS is blocking \(HostText.appName) from this folder.", SetupText.folderDenied,
+            "This folder isn't there any more.", SetupText.folderUnopened,
+        ]
+        report.expect(stateWords == expectedWords && SetupText.folderDenied != SetupText.folderUnopened,
+                      "a folder that opens says nothing; macOS's block, its permissions, a missing folder and any other error each say so",
+                      "\(stateWords)")
+
+        checkSetupWalk(report)
+    }
+
+    /// Set Up through 40,000 seeded steps, partly the way the app feeds it and partly not: the
+    /// window shows only after They Match then Connected; policy previous is read only for the
+    /// attempt whose own child set the policy aside, which They Match confirmed in the same epoch;
+    /// and nothing is added back but a checked row that has a box.
+    static func checkSetupWalk(_ report: Report) {
+        let home = "/Users/a"
+        let start = sampleTime
+        let fingerprint = Ability(name: "files.sha256", state: .disabled, enabled: false, summary: "Check a file's fingerprint",
+                                  sends: "Lucille gets a code that identifies the file's exact contents, not the contents.",
+                                  sendsFileContent: false, diagnostic: false)
+        let search = Ability(name: "files.search", state: .disabled, enabled: false, summary: "Search inside files",
+                             sends: "Matching lines are sent to Lucille.", sendsFileContent: true, diagnostic: false)
+        let ops: [Ability] = [fingerprint, search]
+        let folders: [Folder] = [
+            Folder(alias: "docs", path: "/Users/a/Documents", broad: false),
+            Folder(alias: "disk", path: "/", broad: true),
+            Folder(alias: "home", path: home, broad: true),
+        ]
+        let found = PreviousPolicy.found(setAsideAt: start, ops: ["files.search", "files.sha256"], folders: folders)
+        let earlier = PreviousPolicy.found(setAsideAt: start.addingTimeInterval(-5), ops: ["files.sha256"], folders: folders)
+        let invalid = HostError(code: "previous_invalid", message: "m", kind: nil)
+        let answers: [VerbOutcome] = [
+            .done([.previousPolicy(found)]), .done([.previousPolicy(found)]), .done([.previousPolicy(earlier)]),
+            .done([.previousPolicy(.nothingSetAside)]), .refused(invalid), .timedOut,
+        ]
+        var random = Seeded(state: 20_261_107)
+        var flow = SetupFlow(home: home)
+        var violations: [String] = []
+        var reads = 0
+        var restores = 0
+        var opens = 0
+        // What the walk itself saw since the last pairEnded: the latest attempt's epoch, whether
+        // its child set the policy aside, the epoch They Match confirmed in, whether Connected
+        // came after a They Match; the read it waits for; the rows the user checked, those checked
+        // when Add Checked was chosen, and those added back since.
+        var startEpoch: Int?
+        var setAside = false
+        var confirmedEpoch: Int?
+        var mayShow = false
+        var waiting = false
+        var userChecked: Set<Int> = []
+        var checkedAtAdd: Set<Int> = []
+        var restored: Set<Int> = []
+
+        func anyEpoch() -> Int {
+            random.next(3)
+        }
+        func when() -> Date {
+            start.addingTimeInterval(Double(random.next(3)) - 1)
+        }
+        func guided() -> SetupFlow.Input {
+            if waiting {
+                return .previousRead(random.pick(answers), ops: ops, roots: [])
+            }
+            if flow.page != nil, !flow.windowOpen, random.next(3) > 0 {
+                return .reopen
+            }
+            switch flow.page {
+            case nil:
+                if flow.owed {
+                    return .connected
+                }
+                guard let begun = startEpoch, random.next(5) > 0 else {
+                    return .pairStarted(at: when(), epoch: anyEpoch())
+                }
+                if !setAside && random.next(3) > 0 {
+                    return .policySetAside(epoch: random.next(4) > 0 ? begun : anyEpoch())
+                }
+                return .confirmedHere(epoch: random.next(4) > 0 ? begun : anyEpoch())
+            case .addBack(let offer, _)?:
+                switch random.next(5) {
+                case 0:
+                    return .skip
+                case 1:
+                    return .addChecked
+                default:
+                    var rows: Set<Int> = []
+                    for row in 0...offer.rows.count where random.next(2) == 0 {
+                        rows.insert(row)
+                    }
+                    return .checked(rows)
+                }
+            case .addingBack(_, let left)?:
+                if let first = left.first, random.next(4) > 0 {
+                    return .itemDone(row: first)
+                }
+                return .itemDone(row: random.next(6))
+            case .folders?, .abilities?:
+                return random.next(8) == 0 ? .windowClosed : .next
+            case .ready?:
+                return random.next(8) == 0 ? .windowClosed : .done
+            }
+        }
+        func noise() -> SetupFlow.Input {
+            switch random.next(14) {
+            case 0:
+                return .pairStarted(at: when(), epoch: anyEpoch())
+            case 1:
+                return .policySetAside(epoch: anyEpoch())
+            case 2:
+                return .confirmedHere(epoch: anyEpoch())
+            case 3:
+                return .connected
+            case 4:
+                return .previousRead(random.pick(answers), ops: ops, roots: [])
+            case 5:
+                return .checked(Set([random.next(6), random.next(6)]))
+            case 6:
+                return .addChecked
+            case 7:
+                return .skip
+            case 8:
+                return .itemDone(row: random.next(6))
+            case 9:
+                return .next
+            case 10:
+                return .done
+            case 11:
+                return .windowClosed
+            case 12:
+                return .reopen
+            default:
+                return .pairEnded
+            }
+        }
+
+        for step in 0..<40_000 {
+            let input = random.next(10) < 7 ? guided() : noise()
+            let before = flow.page
+            let wasOpen = flow.windowOpen
+            let effects = flow.handle(input)
+            switch input {
+            case .pairStarted(_, let given):
+                startEpoch = given
+                setAside = false
+            case .policySetAside(let given):
+                if given == startEpoch {
+                    setAside = true
+                }
+            case .confirmedHere(let given):
+                confirmedEpoch = given
+            case .connected:
+                if confirmedEpoch != nil {
+                    mayShow = true
+                }
+            case .previousRead:
+                waiting = false
+            case .checked(let rows):
+                // Boxes are clicked only in a window that is open: the flow drops any other.
+                if wasOpen, case .addBack? = before {
+                    userChecked = rows
+                }
+            case .addChecked:
+                if case .addBack(_, let checked)? = before {
+                    checkedAtAdd = checked
+                    restored = []
+                }
+            case .pairEnded:
+                startEpoch = nil
+                setAside = false
+                confirmedEpoch = nil
+                mayShow = false
+                waiting = false
+            default:
+                break
+            }
+            for effect in effects {
+                switch effect {
+                case .readPrevious:
+                    reads += 1
+                    waiting = true
+                    let sameAttempt = setAside && startEpoch != nil && confirmedEpoch == startEpoch
+                    if !sameAttempt {
+                        violations.append("\(step): policy previous read after \(input)")
+                    }
+                case .restore(let row, let item):
+                    restores += 1
+                    var shownItem: RestoreItem?
+                    if case .addingBack(let offer, _)? = flow.page, row < offer.rows.count, offer.rows[row].offered {
+                        shownItem = offer.rows[row].item
+                    }
+                    let checkedHere = userChecked.contains(row) && checkedAtAdd.contains(row)
+                    if !checkedHere || restored.contains(row) || shownItem != item {
+                        violations.append("\(step): row \(row) added back after \(input)")
+                    }
+                    restored.insert(row)
+                case .show(let page):
+                    if !mayShow {
+                        violations.append("\(step): the window shown after \(input), before They Match then Connected")
+                    }
+                    if case .addBack(_, let checked) = page, case .previousRead = input {
+                        userChecked = []
+                        if !checked.isEmpty {
+                            violations.append("\(step): Add back opened with \(checked) checked")
+                        }
+                    }
+                    if before == nil {
+                        opens += 1
+                    }
+                case .note, .close:
+                    break
+                }
+            }
+        }
+        report.expect(violations.isEmpty,
+                      "over 40000 seeded steps, the window shows only after They Match then Connected, policy previous is read only for the attempt that set the policy aside and was confirmed here, and only a checked row with a box is added back",
+                      violations.prefix(5).joined(separator: "; "))
+        report.expect(reads >= 500 && restores >= 100 && opens >= 1000,
+                      "the walk read policy previous \(reads) times, added back \(restores) rows and opened the window \(opens) times")
     }
 
     // MARK: - checkSupervisor
