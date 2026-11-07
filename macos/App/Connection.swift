@@ -1491,10 +1491,12 @@ final class Connection: ObservableObject {
     }
 
     /// Whether connecting would set something aside: a folder, or an ability other than
-    /// `host.describe`, which a new pairing's policy has on.
+    /// `host.describe`, which a new pairing's policy has on. A name the policy holds that this
+    /// release does not have is set aside too, though the host says it is not on.
     private func settingsWouldBeSetAside() -> Bool {
         let model = HostModel.shared
-        return !model.folders.isEmpty || model.abilities.contains { $0.isOn && $0.name != "host.describe" }
+        return !model.folders.isEmpty
+            || model.abilities.contains { ($0.isOn || $0.state == .notInCatalog) && $0.name != "host.describe" }
     }
 
     // MARK: status

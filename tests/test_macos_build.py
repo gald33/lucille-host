@@ -26,7 +26,7 @@ import pytest
 
 import lucille_host
 from lucille_host import policy
-from lucille_host.cli import build_parser
+from lucille_host.cli import build_parser, main
 from lucille_host.ops import OPERATIONS
 from tools.guards import ast_lint, macos_lint
 from tools.macos import build_app, check_app, payload
@@ -589,25 +589,104 @@ def _swift_string_set(text: str, name: str) -> set[str]:
     return set(re.findall(r'"([^"]+)"', body.group(1)))
 
 
-def test_every_operation_has_plain_words_or_is_left_out_of_the_menu() -> None:
+def test_the_abilities_menu_says_the_cores_words() -> None:
+    # Each ability's words are the core's (decisions/0002 §8 and §13): its name in the menu is
+    # `ops list --json`'s `summary`, and the sentence under it `sends`. The Swift tables that held
+    # the app's own words are gone, so a catalog entry needs no change in the app to be named.
     text = (build_app.SWIFT_DIR / "HostText.swift").read_text(encoding="utf-8")
-    titles = _swift_string_table(text, "abilityTitles")
-    unlisted = _swift_string_set(text, "unlistedAbilities")
-    assert not set(titles) & unlisted
-    assert set(titles) | unlisted == set(OPERATIONS)
-    assert {"host.sleep", "host.describe"} <= unlisted
-    assert titles == check_app.ABILITY_TITLES
-    for title in titles.values():
-        assert title[0].isupper() and "." not in title, title
+    for path in SWIFT_FILES:
+        source = path.read_text(encoding="utf-8")
+        assert "abilityTitles" not in source and "abilityDetails" not in source, path.name
+    assert "    var title: String { summary ?? name }\n" in text
+    assert "    var detail: String? { sends }\n" in text
+    # The menu leaves out the operations meant for testing, by the core's `diagnostic`, and
+    # host.describe, which is on from the start and is described in the menu instead.
+    assert _swift_string_set(text, "unlistedAbilities") == {"host.describe"}
+    assert (
+        "    var isShown: Bool {\n"
+        "        !diagnostic && state != .notInCatalog"
+        " && !HostText.unlistedAbilities.contains(name)\n"
+        "    }\n"
+    ) in text
+    listed = {
+        name: op.about
+        for name, op in OPERATIONS.items()
+        if not op.about.diagnostic and name != "host.describe"
+    }
+    assert set(listed) == {"files.sha256"}
+    assert OPERATIONS["host.sleep"].about.diagnostic
+    # What the ui check looks for in the menu is the core's words for each listed ability.
+    assert check_app.ABILITY_TITLES == {name: about.summary for name, about in listed.items()}
+    assert check_app.ABILITY_DETAILS == {name: about.sends for name, about in listed.items()}
+    # The one visible change: the sentence under "Check a file's fingerprint" is the core's.
+    assert check_app.ABILITY_DETAILS["files.sha256"] == (
+        "Lucille gets a code that identifies the file's exact contents, not the contents."
+    )
 
 
-def test_every_listed_ability_says_what_lucille_gets() -> None:
-    text = (build_app.SWIFT_DIR / "HostText.swift").read_text(encoding="utf-8")
-    details = _swift_string_table(text, "abilityDetails")
-    assert set(details) == set(_swift_string_table(text, "abilityTitles"))
-    assert details == check_app.ABILITY_DETAILS
-    for detail in details.values():
-        assert detail.startswith("Lucille gets ") and detail.endswith("."), detail
+def _op_states(name: str) -> list[str]:
+    """The states a type's schema allows, in its order (spec/CLI.md section 6)."""
+    schema = json.loads(
+        (check_app.CLI_FIXTURES.parent / f"{name}.schema.json").read_text(encoding="utf-8")
+    )
+    return [
+        schema["$defs"][branch["$ref"].rsplit("/", 1)[1]]["properties"]["state"]["const"]
+        for branch in schema["oneOf"]
+    ]
+
+
+def test_every_type_the_menu_reads_is_decoded() -> None:
+    # The menu reads `--version`, `ops` and `roots` as JSON (spec/CLI.md section 7): each object
+    # type those verbs write is one the app knows, decoded by a case of its own, and every state
+    # of the closed `state`s of `op` and `root_check` is read (section 12). A state this release
+    # does not know makes the object one it cannot read, never a guess.
+    host_json = _swift("HostJSON.swift")
+    known = _swift_string_set(host_json, "knownTypes")
+    menu_types = {"version", "op", "op_removed", "root", "root_removed", "root_check"}
+    assert menu_types | {"alias_suggestion"} <= known, sorted(known)
+    decoder = _function_body(host_json, "    init?(type: String, _ fields: JSONFields) {")
+    for kind in menu_types | {"alias_suggestion"}:
+        assert f'case "{kind}":' in decoder, kind
+    ops = _function_body(host_json, "    private static func readOp(")
+    assert _op_states("op") == [
+        "enabled",
+        "disabled",
+        "disabled_by_upgrade",
+        "unavailable",
+        "not_in_catalog",
+    ]
+    for state in _op_states("op"):
+        assert f'case "{state}":' in ops, state
+    # The switch's position and the acknowledgement depend on fields, never on words: each is
+    # read as a boolean, and an entry of the catalog without one is not read at all.
+    for field in ("enabled", "sends_file_content", "diagnostic"):
+        assert f'fields.bool("{field}")' in ops, field
+    assert 'fields.string("missing_executable")' in ops
+    assert "default:\n            return nil" in ops
+    checks = _function_body(host_json, "    private static func readFolderCheck(")
+    assert _op_states("root_check") == ["ok", "denied_by_macos", "denied", "missing", "error"]
+    for state in _op_states("root_check"):
+        assert f'case "{state}":' in checks, state
+    assert 'fields.string("errno")' in checks
+    assert "default:\n            return nil" in checks
+    # A suggested alias is offered to the user as a name, so it is read only in the form the
+    # host's aliases take.
+    suggestion = decoder.split('case "alias_suggestion":', 1)[1].split("\n        case ", 1)[0]
+    assert "Alias.isValid(" in suggestion
+    # The accessors the menu reads.
+    for accessor in (
+        "    var hostVersion: String? {",
+        "    var abilities: [Ability] {",
+        "    var ability: Ability? {",
+        "    var removedOp: String? {",
+        "    var folders: [Folder] {",
+        "    var folder: Folder? {",
+        "    var removedFolder: String? {",
+        "    var folderChecks: [FolderCheck] {",
+        "    var aliasSuggestion: String? {",
+        "    var error: HostError? {",
+    ):
+        assert accessor in host_json, accessor
 
 
 def _named_in_swift(words: str, reference: str = "appName") -> str:
@@ -643,14 +722,14 @@ _BROAD_FLAG = '"--allow-home-or-root"'
 def test_the_app_never_passes_the_broad_flag_for_the_whole_disk() -> None:
     text = (build_app.SWIFT_DIR / "HostText.swift").read_text(encoding="utf-8")
     model = (build_app.SWIFT_DIR / "HostModel.swift").read_text(encoding="utf-8")
-    # One place builds the argument, and it leaves the flag out for the whole disk. Elsewhere the
-    # app only reads the flag's name in the host's refusals.
+    # One place builds the argument, and it leaves the flag out for the whole disk. The app never
+    # reads the flag's name either: the host's refusal is `broad_folder`, a code.
     for path in SWIFT_FILES:
         source = path.read_text(encoding="utf-8")
         if path.name != "HostText.swift":
             assert _BROAD_FLAG not in source, path.name
     assert text.count(f"append({_BROAD_FLAG})") == 1
-    assert text.count(_BROAD_FLAG) == 1 + text.count(f".contains({_BROAD_FLAG})")
+    assert text.count(_BROAD_FLAG) == 1
     adds = re.search(r"static func addFolderArguments\(.*?\n    \}\n", text, re.DOTALL)
     assert adds is not None
     assert (
@@ -673,6 +752,379 @@ def test_the_app_never_passes_the_broad_flag_for_the_whole_disk() -> None:
     buttons = re.findall(r'addButton\(withTitle: "([^"]+)"\)', refusal.group(1))
     assert buttons == list(check_app.WHOLE_DISK_BUTTONS)
     assert "return alert.runModal() == .alertFirstButtonReturn" in refusal.group(1)
+
+
+def test_roots_add_passes_double_dash_before_the_alias_and_path() -> None:
+    # spec/CLI.md section 7: "A shell passes `--` before the alias and the path, so that neither
+    # is read as an option", with `--json` and `--allow-home-or-root` before it (section 3).
+    text = _swift("HostText.swift")
+    adds = _swift_function(text, "    static func addFolderArguments(")
+    assert '        var verb = ["--json", "roots", "add"]\n' in adds
+    flag = adds.index(f"verb.append({_BROAD_FLAG})")
+    dashes = adds.index('        verb += ["--", alias, path]\n')
+    assert flag < dashes < adds.index("        return verb\n")
+    assert adds.count('"--"') == 1 and adds.count("alias") == 2 and adds.count("verb +=") == 1
+    # The host's golden fixture of `roots add` is the command line the app builds.
+    fixture = json.loads((check_app.CLI_FIXTURES / "roots-add.json").read_text(encoding="utf-8"))
+    assert fixture["argv"] == ["--json", "roots", "add", "--", "docs", "/home/me/Documents"]
+    # The host's own parser reads each form the app builds as the alias and the path, a path that
+    # starts with "-" included; without "--" it would be an option.
+    parser = build_parser()
+    for flags in ([], ["--allow-home-or-root"]):
+        for folder in ("/Users/a/Documents", "-notes", "--json"):
+            args = parser.parse_args(["--json", "roots", "add", *flags, "--", "docs", folder])
+            assert (args.alias, args.path, args.json) == ("docs", folder, True)
+            assert args.allow_home_or_root == bool(flags) and args.suggest_alias is None
+    with pytest.raises(Exception, match="unrecognized arguments: -notes"):
+        parser.parse_args(["--json", "roots", "add", "docs", "-notes"])
+    # No other Swift file builds a `roots add` line, and the app removes a folder by its alias
+    # after `--json`, which `roots remove` takes as its only argument.
+    for path in SWIFT_FILES:
+        source = path.read_text(encoding="utf-8")
+        if path.name != "HostText.swift":
+            assert '"roots", "add"' not in source, path.name
+    assert '["--json", "roots", "remove", folder.alias]' in _swift("HostModel.swift")
+
+
+def test_the_name_dialog_starts_from_the_hosts_suggestion() -> None:
+    # spec/CLI.md section 9.1: the host suggests the alias (`roots add --suggest-alias <path>`,
+    # one `alias_suggestion`), and a path that starts with "-" is written `--suggest-alias=<path>`
+    # (section 7). The app still checks what the user types (`Alias.review`), and when the host's
+    # answer can't be read, the dialog opens with the app's own suggestion, and says nothing.
+    text = _swift("HostText.swift")
+    model = _swift("HostModel.swift")
+    asks = _swift_function(
+        text, "    static func suggestAliasArguments(path: String) -> [String] {"
+    )
+    assert 'path.hasPrefix("-")' in asks
+    assert '["--json", "roots", "add", "--suggest-alias=" + path]' in asks
+    assert '["--json", "roots", "add", "--suggest-alias", path]' in asks
+    parser = build_parser()
+    for folder in ("/Users/a/Café Notes", "/", "-notes", "--json", "-"):
+        if folder.startswith("-"):
+            argv = ["--json", "roots", "add", "--suggest-alias=" + folder]
+        else:
+            argv = ["--json", "roots", "add", "--suggest-alias", folder]
+        args = parser.parse_args(argv)
+        assert (args.suggest_alias, args.alias, args.path, args.json) == (folder, None, None, True)
+    with pytest.raises(Exception, match="expected one argument"):
+        parser.parse_args(["--json", "roots", "add", "--suggest-alias", "-notes"])
+    # The host's answer, when it is one the app can use; else the app's own suggestion.
+    chosen = _swift_function(text, "    static func suggestion(")
+    assert (
+        "    static func suggestion(_ outcome: VerbOutcome, folderName: String, taken: Set<String>)"
+        " -> String {\n"
+    ) in chosen
+    assert (
+        "if let alias = outcome.aliasSuggestion, Alias.isValid(alias), !taken.contains(alias) {"
+    ) in chosen
+    assert "return Alias.suggest(forFolderName: folderName, taken: taken)" in chosen
+    # The menu asks the host once a folder is chosen, off the main thread, and only then shows
+    # the name dialog, in a run loop turn of its own; nothing on that path shows a note.
+    assert model.count("HostText.suggestAliasArguments(path: path)") == 1
+    assert model.count("HostText.suggestion(") == 1
+    assert "Alias.suggest(" not in model
+    naming = _swift_function(model, "    private func nameAndAdd(")
+    asked = naming.index(
+        "let asked = await run(HostText.suggestAliasArguments(path: path), timeout: suggestTimeout)"
+    )
+    turn = naming.index("RunLoopTurn.perform")
+    assert asked < naming.index("HostText.suggestion(") < turn < naming.index("askForAlias(")
+    # What the dialog starts from is the host's answer, through `suggestion`, and nothing else:
+    # the `ui` check's folder gets the same alias from the host and from the app, so only these
+    # lines and the self-test's choice between the two tell them apart.
+    assert (
+        "        let suggestion = HostText.suggestion(VerbOutcome(asked),"
+        " folderName: url.lastPathComponent, taken: taken)\n"
+    ) in naming
+    assert naming.count("asked") == 2 and naming.count("suggestion: suggestion,") == 1
+    assert "suggestion: suggestion, folderName: name, taken: taken, place: place, note: note" in (
+        naming
+    )
+    dialog = _swift_function(model, "    private func askForAlias(")
+    assert "        var current = suggestion\n" in dialog
+    assert "            field.stringValue = current\n" in dialog
+    for alarm in ("showFailure", "showNote", "Alerts.", "explain(", "problem"):
+        assert alarm not in naming, alarm
+    assert "private let suggestTimeout: TimeInterval = 10\n" in model
+    assert model.count("askForAlias(") == 2
+    assert "Task { await nameAndAdd(" in _swift_function(model, "    private func chooseAndAdd() {")
+    # Only the fallback and the check of what the user typed make an alias in the app.
+    for path in SWIFT_FILES:
+        if path.name not in ("HostText.swift", "Alias.swift"):
+            assert "Alias.suggest(" not in path.read_text(encoding="utf-8"), path.name
+    assert (
+        "switch Alias.review(typed: field.stringValue, suggestion: suggestion, taken: taken) {"
+        in (model)
+    )
+
+
+def test_the_hosts_command_line_answers_each_suggestion_the_app_asks_for(
+    home: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # The command lines `HostText.suggestAliasArguments` builds (pinned above), run through the
+    # host's own `main` on the app's profile, so that `_check_usage` and the verb itself read them
+    # too, not only the parser: a path that starts with "-" is written `--suggest-alias=<path>`
+    # and read as the path; written with a space, it is a usage error (spec/CLI.md section 7).
+    def run(*argv: str) -> tuple[int, list[dict[str, Any]]]:
+        capsys.readouterr()
+        try:
+            code = main(["--profile", "mac-app", *argv])
+        except SystemExit as exc:
+            code = exc.code if isinstance(exc.code, int) else 1
+        return code, [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+
+    folder = home / "My Project Files"
+    folder.mkdir()
+    for path, alias in ((str(folder), "my-project-files"), ("-notes", "notes"), ("--json", "json")):
+        argv = ["--suggest-alias=" + path] if path.startswith("-") else ["--suggest-alias", path]
+        answer = {"v": 1, "type": "alias_suggestion", "alias": alias}
+        assert run("--json", "roots", "add", *argv) == (0, [answer]), path
+    code, objects = run("--json", "roots", "add", "--suggest-alias", "-notes")
+    assert code == 2 and [found["code"] for found in objects] == ["usage"]
+
+
+def test_the_menu_reads_ops_roots_and_the_version_as_json() -> None:
+    # The menu reads its version, its abilities and its folders from `--json` (spec/CLI.md
+    # section 7), as it reads everything else, and no longer parses the text those verbs print
+    # (section 2: "A shell never parses human output").
+    text = _swift("HostText.swift")
+    model = _swift("HostModel.swift")
+    reload = _swift_function(model, "    private func reload() async {")
+    for verb in (
+        '["--json", "--version"]',
+        '["--json", "ops", "list"]',
+        '["--json", "roots", "list"]',
+    ):
+        assert f"await run({verb})" in reload, verb
+    for read in (".hostVersion", ".abilities", ".folders"):
+        assert read in reload, read
+    for gone in ("fromVersionOutput", "fromList", "func pairs(", "result.stderr.contains"):
+        assert gone not in text, gone
+    # No Swift file, the self-test included, runs one of these verbs without --json first.
+    text_verbs = re.compile(r'\[\s*"(?:ops|roots|--version)"')
+    for path in [*SWIFT_FILES, _SELF_TEST]:
+        found = text_verbs.findall(path.read_text(encoding="utf-8"))
+        assert not found, (path.name, found)
+    # A home folder is asked about when the host refuses `broad_folder`, a code, never when its
+    # words name the flag.
+    confirm = _swift_function(
+        text, "    static func needsHomeConfirmation(_ result: CLIResult) -> Bool {"
+    )
+    assert "if case .refused(let error) = VerbOutcome(result) {" in confirm
+    assert 'return error.code == "broad_folder"' in confirm
+    assert "stderr" not in confirm
+
+
+def test_a_switch_follows_the_hosts_answer() -> None:
+    # spec/CLI.md section 7: "`ops enable` and `ops disable` write the operation's `op` object as
+    # it is once the change is made, so a shell sets its switch from the host's answer, not from
+    # what it asked for." The switch's position is the host's `enabled`.
+    text = _swift("HostText.swift")
+    model = _swift("HostModel.swift")
+    assert "    var isOn: Bool { enabled }\n" in text
+    turn = _swift_function(model, "    private func turn(_ ability: Ability, on: Bool) {")
+    assert '["--json", "ops", on ? "enable" : "disable", ability.name]' in turn
+    assert "self?.answered(VerbOutcome(result))" in turn
+    answered = _swift_function(model, "    private func answered(_ outcome: VerbOutcome) {")
+    assert "if let found = outcome.ability {" in answered
+    assert "abilities = abilities.map { $0.name == found.name ? found : $0 }" in answered
+    assert "} else if let gone = outcome.removedOp {" in answered
+    assert "abilities.removeAll { $0.name == gone }" in answered
+    assert "on:" not in answered and "isOn" not in answered
+    # One place in the app runs `ops enable` and `ops disable`.
+    for path in SWIFT_FILES:
+        source = path.read_text(encoding="utf-8")
+        expected = 1 if path.name == "HostModel.swift" else 0
+        assert source.count('"ops", on ? "enable" : "disable"') == expected, path.name
+        if path.name != "HostModel.swift":
+            assert '"enable"' not in source and '"disable"' not in source, path.name
+
+
+def test_a_refusal_that_means_done_shows_no_failure() -> None:
+    # Turning off an ability that is already off (`not_enabled`) and removing a folder already
+    # removed (`no_such_alias`) leave things as the user asked: the menu reads its set-up again and
+    # says nothing. Every other refusal still shows its note.
+    # The rule is HostText's, in a file the self-test compiles, and decided on the code alone.
+    text = _swift("HostText.swift")
+    model = _swift("HostModel.swift")
+    assert _swift_string_set(text, "alreadyOff") == {"not_enabled"}
+    assert _swift_string_set(text, "alreadyRemoved") == {"no_such_alias"}
+    done = _swift_function(
+        text, "    static func alreadyDone(_ result: CLIResult, codes: Set<String>) -> Bool {"
+    )
+    assert "if case .refused(let error) = VerbOutcome(result) {" in done
+    assert "return codes.contains(error.code)" in done
+    assert "stderr" not in done and "message" not in done
+    perform = _swift_function(model, "    private func perform(")
+    assert "        done: Set<String> = [],\n" in perform
+    assert "let alreadyDone = HostText.alreadyDone(result, codes: done)" in perform
+    shows = perform.index("showFailure(")
+    assert "!alreadyDone" in perform[:shows]
+    assert perform.index("await reload()") > shows
+    turn = _swift_function(model, "    private func turn(_ ability: Ability, on: Bool) {")
+    assert "done: on ? [] : HostText.alreadyOff" in turn
+    remove = _swift_function(model, "    func removeFolder(_ folder: Folder) {")
+    assert "done: HostText.alreadyRemoved" in remove
+    assert '["--json", "roots", "remove", folder.alias]' in remove
+    # The self-test runs the rule on the real host's refusals of both.
+    selftest = _SELF_TEST.read_text(encoding="utf-8")
+    assert "HostText.alreadyDone(off, codes: HostText.alreadyOff)" in selftest
+    assert "HostText.alreadyDone(missing, codes: HostText.alreadyRemoved)" in selftest
+
+
+def test_content_sending_ops_ask_first() -> None:
+    # spec/CLI.md section 6: a shell "asks the user to acknowledge that before it enables such an
+    # operation, and decides so on this field, never on the words of `sends`" (decisions/0002
+    # §13). The question goes through Alerts, with Cancel the default; only its second button
+    # turns the ability on. Turning one off, or on one that sends no file contents, asks nothing.
+    text = _swift("HostText.swift")
+    model = _swift("HostModel.swift")
+    chosen = _swift_function(model, "    func setAbility(_ ability: Ability, on: Bool) {")
+    assert (
+        "        guard ability.asksFirst(turningOn: on) else {\n"
+        "            turn(ability, on: on)\n"
+        "            return\n"
+        "        }\n"
+    ) in chosen
+    # The rule is Ability's, in a file the self-test compiles: only turning on, only the field.
+    assert (
+        "    func asksFirst(turningOn on: Bool) -> Bool {\n        on && sendsFileContent\n    }\n"
+    ) in text
+    assert "sendsFileContent" not in chosen
+    assert "let question = HostText.turnOnQuestion(ability)" in chosen
+    assert "Alerts.shared.show(" in chosen and "runModal" not in chosen
+    cancel = chosen.index("alert.addButton(withTitle: ConnectionText.cancelButton)")
+    assert cancel < chosen.index("alert.addButton(withTitle: HostText.turnOnButton)")
+    assert (
+        "if response == .alertSecondButtonReturn {\n                self?.turn(ability, on: true)\n"
+    ) in chosen
+    # turn is reached from setAbility alone: its definition and the two calls there.
+    assert len(re.findall(r"\bturn\(", model)) == 3
+    assert _swift("MenuBarApp.swift").count("model.setAbility(ability, on: $0)") == 1
+    # The words: the core's name for the ability, and what Lucille gets, the core's `sends`.
+    question = _swift_function(
+        text,
+        "    static func turnOnQuestion(_ ability: Ability) -> (title: String, text: String) {",
+    )
+    assert '"Turn on \\u{201C}\\(ability.title)\\u{201D}?"' in question
+    assert 'ability.detail ?? ""' in question
+    assert 'static let turnOnButton = "I Understand, Turn On"' in text
+    # Decided on the field the host writes, never on the words.
+    assert "    let sendsFileContent: Bool\n" in text
+    for path in SWIFT_FILES:
+        source = path.read_text(encoding="utf-8")
+        for words in ("sends?.contains", "sends.contains", "detail?.contains", "detail.contains"):
+            assert words not in source, (path.name, words)
+    # The host's fixture that stubs an entry to send file contents is the one the self-test reads.
+    stub = json.loads(
+        (check_app.CLI_FIXTURES / "ops-list-sends-file-content.json").read_text(encoding="utf-8")
+    )
+    assert [op["sends_file_content"] for op in stub["stdout"]] == [False, False, True]
+    selftest = _SELF_TEST.read_text(encoding="utf-8")
+    assert "ops-list-sends-file-content" in selftest
+    assert "let questionOn: [Bool] = content.map { $0.asksFirst(turningOn: true) }" in selftest
+    assert "questionOn == [false, false, true] && questionOff == [false, false, false]" in selftest
+
+
+def test_the_broad_question_follows_the_hosts_kind() -> None:
+    # spec/CLI.md section 5: `broad_folder` carries `kind`, `home`, `holds_home` or `root`. When
+    # the host refuses a folder the app did not see as broad from its path, such as the home
+    # folder by another spelling of it, the question asked is the one for what the host says it
+    # is. The whole disk (`root`) is refused before this is asked.
+    text = _swift("HostText.swift")
+    model = _swift("HostModel.swift")
+    assert "| `kind` | `home`, `holds_home` or `root` |" in SPEC_CLI.read_text(encoding="utf-8")
+    kind = _swift_function(
+        text, "    static func refusedBroadFolder(_ result: CLIResult) -> BroadFolder {"
+    )
+    assert (
+        'if case .refused(let error) = VerbOutcome(result), error.code == "broad_folder",'
+        ' error.kind == "home" {\n            return .home\n        }\n        return .holdsHome\n'
+    ) in kind
+    assert "stderr" not in kind and "message" not in kind
+    adds = _swift_function(model, "    private func addRoot(")
+    asked = adds.index("let kind = HostText.refusedBroadFolder(result)")
+    assert adds.index("if HostText.isWholeDisk(path: path) {") < asked
+    confirm = adds.index("guard await RunLoopTurn.ask({ self.confirmBroadFolder(kind) }) else {")
+    assert asked < confirm
+    assert ".holdsHome" not in adds
+    # The host gives `home` for the home folder by another path to it, which the app's own
+    # check, a comparison of paths, does not see.
+    selftest = _SELF_TEST.read_text(encoding="utf-8")
+    assert "HostText.refusedBroadFolder(broad) == .home" in selftest
+    assert "HostText.refusedBroadFolder(broadResult) == .home" in selftest
+
+
+def test_the_broad_kind_the_host_gives_for_another_path_to_the_home_folder(
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "Users" / "a"
+    home.mkdir(parents=True)
+    other = tmp_path / "link to a"
+    other.symlink_to(home)
+    assert policy.broad_kind(str(other), home=str(home)) == "home"
+    assert policy.broad_kind(str(home) + "/", home=str(home)) == "home"
+    assert policy.broad_kind(str(tmp_path / "Users"), home=str(home)) == "holds_home"
+
+
+def test_a_name_taken_meanwhile_asks_again() -> None:
+    # spec/CLI.md section 7: `roots add --suggest-alias` takes no lock, so another verb may take
+    # the alias before `roots add` runs, "which then refuses with `alias_taken`, and the shell asks
+    # again". The app opens the name dialog again, with its sentence for the refusal, which names
+    # the alias the app asked for, above a name no folder has; no failure note.
+    text = _swift("HostText.swift")
+    model = _swift("HostModel.swift")
+    taken = _swift_function(text, "    static func nameTaken(_ result: CLIResult) -> Bool {")
+    assert "if case .refused(let error) = VerbOutcome(result) {" in taken
+    assert 'return error.code == "alias_taken"' in taken
+    assert "stderr" not in taken and "message" not in taken
+    adds = _swift_function(model, "    private func addRoot(")
+    assert (
+        "    private func addRoot(alias: String, url: URL, place: FolderPlace, confirmedHome: Bool)"
+        " async {\n"
+    ) in adds
+    # The sentence is said with the alias the app asked for, never one read from the host's words.
+    worded = adds.index(
+        "result, during: .addingFolder(HostText.access(of: path), alias: alias),"
+        " earlierRunStuck: stuck"
+    )
+    again = adds.index("if HostText.nameTaken(result) {")
+    failed = adds.index('showFailure(explanation, action: "add the folder")')
+    assert adds.rindex("await reload()") < worded < again < failed
+    asks = adds[again:failed]
+    assert "await nameAndAdd(" in asks and "return" in asks
+    assert "taken: Set(folders.map(\\.alias)).union([alias])" in asks
+    assert "confirmedHome: confirmed, note: explanation.message" in asks
+    # A folder confirmed after the host's refusal stays confirmed when the app asks again.
+    confirmed = adds.index("confirmed = true")
+    assert adds.index("guard await RunLoopTurn.ask({ self.confirmBroadFolder(kind) })") < confirmed
+    assert confirmed < adds.index("confirmedHome: true),")
+    # The note is the dialog's, above the name it starts from.
+    naming = _swift_function(model, "    private func nameAndAdd(")
+    assert "confirmedHome: Bool, note: String? = nil" in naming
+    dialog = _swift_function(model, "    private func askForAlias(")
+    assert "note first: String? = nil" in dialog and "        var note = first\n" in dialog
+    assert "HostText.aliasPrompt(folderName: folderName, note: note, place: place)" in dialog
+    assert "HostText.nameTaken(twice)" in _SELF_TEST.read_text(encoding="utf-8")
+
+
+def test_a_name_this_release_lacks_is_set_aside_by_a_new_pairing() -> None:
+    # spec/CLI.md section 6: `enabled` is false for `not_in_catalog`, yet the name is in the local
+    # policy, which a new pairing sets aside. The pairing window's note still counts it.
+    every = json.loads(
+        (check_app.CLI_FIXTURES / "ops-list-every-state.json").read_text(encoding="utf-8")
+    )
+    lacking = [op for op in every["stdout"] if op["state"] == "not_in_catalog"]
+    assert lacking and all(op["enabled"] is False for op in lacking)
+    aside = _swift_function(
+        _swift("Connection.swift"), "    private func settingsWouldBeSetAside() -> Bool {"
+    )
+    assert "!model.folders.isEmpty" in aside
+    assert (
+        "model.abilities.contains { ($0.isOn || $0.state == .notInCatalog)"
+        ' && $0.name != "host.describe" }'
+    ) in aside
 
 
 def _swift_function(text: str, signature: str) -> str:
@@ -2683,12 +3135,43 @@ def test_every_word_the_app_says_makes_no_claim_privacy_forbids() -> None:
                 assert found is None, (name, phrase, words)
 
 
-def _spec_verb_codes() -> dict[str, set[str]]:
-    """The error codes each verb the app runs can give: its row in spec/CLI.md section 7's table,
+# The verbs whose refusals ConnectionText words: pairing, `status`, `forget`, `run`, Stop What's
+# Running (`pause` is the row of `pause`, `resume` and `kill`), Activity's log, and Reset Settings.
+CONNECTION_VERBS = frozenset(
+    {
+        "status",
+        "forget",
+        "pair --code-stdin [--hub URL] [--store-file]",
+        "pair status",
+        "pair confirm",
+        "pair reject",
+        "run --json-events [--exit-on-stdin-eof] [--allow-downgrade]",
+        "pause",
+        "log [--limit N]",
+        "policy reset",
+    }
+)
+# The verbs the menu's own set-up runs, whose refusals HostText words: the version, the abilities
+# and the folders, with the folder's suggested alias.
+SETTINGS_VERBS = frozenset(
+    {
+        "--version",
+        "ops list",
+        "ops enable <op>",
+        "ops disable <op>",
+        "roots list",
+        "roots add [--allow-home-or-root] [--] <alias> <path>",
+        "roots add --suggest-alias <path>",
+        "roots remove <alias>",
+    }
+)
+
+
+def _spec_verb_codes(wanted: frozenset[str] = CONNECTION_VERBS) -> dict[str, set[str]]:
+    """The error codes each verb in ``wanted`` can give: its row in spec/CLI.md section 7's table,
     and the codes every verb can give, from the sentence before it. A row is named by the first
-    verb in it: ``pause`` is the row of ``pause``, ``resume`` and ``kill``, which Stop What's
-    Running runs, ``log [--limit N]`` is the one Activity's log runs, and ``policy reset`` is
-    Reset Settings'."""
+    verb in it, as the table writes it: ``pause`` is the row of ``pause``, ``resume`` and
+    ``kill``, and ``--version`` the row of ``--version`` and of no verb."""
     text = SPEC_CLI.read_text(encoding="utf-8")
     section = text.split("## 7. Verbs", 1)[1].split("\n## ", 1)[0]
     sentence = re.search(r"one of the codes every verb can give: (.*?)\.\n", section, re.DOTALL)
@@ -2703,18 +3186,6 @@ def _spec_verb_codes() -> dict[str, set[str]]:
         verb = re.match(r"`([^`]+)`", cells[0])
         assert verb is not None, line
         rows[verb.group(1)] = set(re.findall(r"`([a-z_]+)`", cells[-1])) | every
-    wanted = {
-        "status",
-        "forget",
-        "pair --code-stdin [--hub URL] [--store-file]",
-        "pair status",
-        "pair confirm",
-        "pair reject",
-        "run --json-events [--exit-on-stdin-eof] [--allow-downgrade]",
-        "pause",
-        "log [--limit N]",
-        "policy reset",
-    }
     assert wanted <= set(rows), sorted(rows)
     return {verb: rows[verb] for verb in wanted}
 
@@ -2753,6 +3224,79 @@ def test_every_error_code_the_app_meets_has_words() -> None:
     assert refusals["not_invalid"] == (
         "\\(appName)'s settings can be read again, so nothing was changed."
     )
+
+
+def test_every_error_code_the_menus_own_verbs_give_has_words() -> None:
+    # The menu reads its own verbs' refusals by `code` (spec/CLI.md section 10), never by their
+    # words: one sentence for each code `--version`, `ops` and `roots` can give, today's sentences,
+    # in HostText.refusals; two that say more while a folder is added, in `refusal`'s own cases;
+    # and the codes that can only be the app's mistake, which read as ConnectionText.appBug.
+    text = _swift("HostText.swift")
+    refusals = _swift_string_table(text, "refusals")
+    app_bugs = _swift_string_set(_swift("ConnectionText.swift"), "appBugCodes")
+    reader = _function_body(
+        text, "    static func refusal(_ error: HostError, during activity: Activity"
+    )
+    own = set(re.findall(r'case "([a-z_]+)"', reader))
+    assert own == {"alias_taken", "not_a_folder"}
+    codes = _spec_verb_codes(SETTINGS_VERBS)
+    assert codes["--version"] == {
+        "usage",
+        "internal",
+        "bad_profile",
+        "unsupported_platform",
+        "os_error",
+    }
+    met = set().union(*codes.values())
+    assert met - (set(refusals) | own | app_bugs) == set(), sorted(
+        met - (set(refusals) | own | app_bugs)
+    )
+    assert not set(refusals) & app_bugs
+    assert set(refusals) | own <= _spec_error_codes(), sorted(
+        set(refusals) | own - _spec_error_codes()
+    )
+    # Today's sentences, now keyed by the code: none is new but for two codes a Mac does not
+    # meet in practice (on_proc, unstorable_path), which read as the helper program's fault before.
+    assert refusals == {
+        "policy_invalid": "\\(appName)'s settings file can't be read.",
+        "policy_lock_failed": (
+            "\\(appName) couldn't lock its settings file, so nothing was changed. Try again."
+        ),
+        "not_in_catalog": "This version of \\(appName) doesn't have that ability.",
+        "unavailable": "This Mac lacks a program that ability needs.",
+        "not_enabled": "That ability was already off.",
+        "bad_alias": "That name can't be used.",
+        "too_many_roots": (
+            "\\(appName) can use at most \\(maxFolders) folders. Remove one before you add another."
+        ),
+        "not_a_folder": "That folder is no longer there.",
+        "own_folder": "That folder holds \\(appName)'s own settings, so it can't be added.",
+        "on_proc": "That folder can't be used.",
+        "broad_folder": "That folder is your home folder, holds it, or is your whole disk.",
+        "unstorable_path": "That folder's location can't be stored in \\(appName)'s settings.",
+        "no_such_alias": "That folder was already removed.",
+    }
+    # The most folders is the host's (spec/CLI.md section 10, `too_many_roots`), not read from its
+    # words.
+    assert f"    static let maxFolders = {policy.MAX_ROOTS}\n" in text
+    alias_taken = reader.split('case "alias_taken":', 1)[1].split("\n        case ", 1)[0]
+    assert 'return "You already have a folder named \\(alias). Choose another name."' in alias_taken
+    # The host reads a folder macOS keeps from it as no folder at all: while the app itself can
+    # see the folder, or is refused too, macOS is what stands in the way. A file error the host
+    # names (`os_error`) is not read as macOS's: its code does not say which file it was.
+    blocked = 'case "not_a_folder" where access != .missing:\n                return blockedByMacOS'
+    assert blocked in reader
+    assert "os_error" not in reader
+    assert "return refusals[error.code] ?? ConnectionText.appBug" in reader
+    # explain reads the refusal from the `error` object, and offers Reset Settings for its code.
+    explain = _function_body(text, "    static func explain(")
+    assert "if case .refused(let error) = VerbOutcome(result) {" in explain
+    assert "message: refusal(error, during: activity)," in explain
+    for gone in ("hasPrefix", "hasSuffix", "contains("):
+        assert gone not in explain, gone
+    # "explain(" itself holds "plain(": the word-matching helper is looked for as a call of its own.
+    assert not re.search(r"\bplain\(", explain)
+    assert "private static func plain(" not in text
 
 
 def test_every_stopped_reason_is_read() -> None:
@@ -2934,7 +3478,7 @@ def test_modal_loops_never_start_inside_a_main_queue_callout() -> None:
     assert "RunLoopTurn.perform" in _swift_function(model, "    func addFolder() {")
     adds = _swift_function(model, "    private func addRoot(")
     assert "await RunLoopTurn.ask({ self.refuseWholeDisk() })" in adds
-    assert "await RunLoopTurn.ask({ self.confirmBroadFolder(.holdsHome) })" in adds
+    assert "await RunLoopTurn.ask({ self.confirmBroadFolder(kind) })" in adds
     # The modal loops there are, each reached only from one of those turns (or from AppKit's own
     # applicationShouldTerminate, for the quit question).
     assert connection.count("runModal()") == 4
@@ -3204,9 +3748,9 @@ _RESET_VERB = '["--json", "policy", "reset"]'
 
 def test_reset_settings_is_offered_only_while_the_policy_is_invalid() -> None:
     # Reset Settings… is shown only while the settings file is invalid: in the note behind the
-    # menu's problem line, when its explanation is the host's "the policy file … is invalid"
-    # refusal (`offersReset`, set in one place), and in the note behind run's Needs attention line
-    # for `policy` `invalid`. No menu item offers it, and no other note.
+    # menu's problem line, when its explanation is the host's `policy_invalid` refusal
+    # (`offersReset`, set in one place), and in the note behind run's Needs attention line for
+    # `policy` `invalid`. No menu item offers it, and no other note.
     words = _swift("ConnectionText.swift")
     text = _swift("HostText.swift")
     model = _swift("HostModel.swift")
@@ -3222,18 +3766,12 @@ def test_reset_settings_is_offered_only_while_the_policy_is_invalid() -> None:
         if path.name != "HostText.swift":
             assert "offersReset:" not in source, path.name
     # The explanation offers it only when it says the settings file can't be read: false unless
-    # set, and set in one place, from the same test of the host's words as that sentence.
+    # set, and set in one place, from the refusal's code, `policy_invalid`, whose sentence that is
+    # (spec/CLI.md section 10). Never from the host's words: they are for people (section 2).
     assert "    var offersReset = false\n" in text
-    assert re.findall(r"offersReset: ([^)]*\))", text) == ["settingsFileInvalid(reason)"]
-    assert (
-        "        if settingsFileInvalid(reason) {\n"
-        "            return \"\\(appName)'s settings file can't be read.\"\n"
-        "        }\n"
-    ) in text
-    invalid = _swift_function(
-        text, "    static func settingsFileInvalid(_ reason: String) -> Bool {"
-    )
-    assert 'reason.hasPrefix("the policy file ") && reason.contains(" is invalid: ")' in invalid
+    assert re.findall(r"offersReset: ([^\n]*)", text) == ['error.code == "policy_invalid"']
+    assert '"policy_invalid": "\\(appName)\'s settings file can\'t be read.",' in text
+    assert "settingsFileInvalid" not in text
     # The menu's problem line: the note has Reset Settings… only behind offersReset.
     problem = _swift_function(model, "    func showProblem() {")
     assert problem.count("ConnectionText.resetSettingsItem") == 1
@@ -4094,7 +4632,7 @@ def test_the_ui_check_resets_a_settings_file_the_host_cannot_read(tmp_path: Path
     }.items():
         assert f'static let {name} = "{_named_in_swift(said)}"' in words, name
     unreadable = _named_in_swift(check_app.SETTINGS_UNREADABLE)
-    assert f'            return "{unreadable}"\n' in _swift("HostText.swift")
+    assert f'        "policy_invalid": "{unreadable}",\n' in _swift("HostText.swift")
     assert check_app.RESET_ITEM not in check_app.MENU_ITEMS
     for said in (
         check_app.SETTINGS_UNREADABLE,

@@ -403,15 +403,28 @@ enum HostObject: Equatable, Sendable {
     /// One line of the audit log, as `log` prints it, which a shell shows as it is or not at all
     /// (spec/CLI.md §6, `log_line`).
     case logLine(String)
-    /// One operation of `ops list`: its name, and the core's few words for what it does (nil for a
-    /// policy entry this release's catalog does not have). Activity says each request with them.
-    case op(name: String, summary: String?)
+    /// This release's version, and the version of the contract it writes (`--json --version`).
+    case version(hostVersion: String, contract: String)
+    /// One operation of `ops list`, or the one `ops enable` or `ops disable` changed, as it now
+    /// is: the menu's ability, in the core's words. Activity says each request with its summary.
+    case op(Ability)
+    /// `ops disable` took a name this release does not have out of the policy.
+    case opRemoved(name: String)
+    /// One folder of `roots list`, or the one `roots add` added.
+    case root(Folder)
+    /// The folder `roots remove` took out, by its alias.
+    case rootRemoved(alias: String)
+    /// Whether the host can open one folder (`roots check`).
+    case rootCheck(FolderCheck)
+    /// The alias the host suggests for a folder (`roots add --suggest-alias`).
+    case aliasSuggestion(String)
     case unknown(type: String)
 
     /// The types this release reads. Every other type decodes as `unknown`.
     static let knownTypes: Set<String> = [
         "pair_code", "policy_reset", "pair", "error", "status", "forget", "controls", "ready",
-        "state", "request", "host_too_old", "stopped", "log_line", "op",
+        "state", "request", "host_too_old", "stopped", "log_line", "version", "op", "op_removed",
+        "root", "root_removed", "root_check", "alias_suggestion",
     ]
 }
 
@@ -577,11 +590,44 @@ extension HostObject {
                 return nil
             }
             self = .logLine(text)
+        case "version":
+            guard let version = fields.string("host_version"), let contract = fields.string("contract") else {
+                return nil
+            }
+            self = .version(hostVersion: version, contract: contract)
         case "op":
+            guard let ability = HostObject.readOp(fields) else {
+                return nil
+            }
+            self = .op(ability)
+        case "op_removed":
             guard let name = fields.string("name") else {
                 return nil
             }
-            self = .op(name: name, summary: fields.string("summary"))
+            self = .opRemoved(name: name)
+        case "root":
+            guard let alias = fields.string("alias"), let path = fields.string("path"),
+                  let broad = fields.bool("broad")
+            else {
+                return nil
+            }
+            self = .root(Folder(alias: alias, path: path, broad: broad))
+        case "root_removed":
+            guard let alias = fields.string("alias") else {
+                return nil
+            }
+            self = .rootRemoved(alias: alias)
+        case "root_check":
+            guard let check = HostObject.readFolderCheck(fields) else {
+                return nil
+            }
+            self = .rootCheck(check)
+        case "alias_suggestion":
+            // The name dialog offers it to the user: read only in the form the host's aliases take.
+            guard let alias = fields.string("alias"), Alias.isValid(alias) else {
+                return nil
+            }
+            self = .aliasSuggestion(alias)
         default:
             self = .unknown(type: type)
         }
@@ -892,6 +938,78 @@ extension HostObject {
         }
     }
 
+    /// One operation (spec/CLI.md §6, `op`). Its state is closed within version 1: a state this
+    /// release does not know, or a field its state needs that is missing or of another type, makes
+    /// the object one this release cannot read. So the switch's position and the question before an
+    /// ability that sends file contents come only from the host's booleans, never from a guess.
+    private static func readOp(_ fields: JSONFields) -> Ability? {
+        guard let name = fields.string("name"), let state = fields.string("state"),
+              let enabled = fields.bool("enabled")
+        else {
+            return nil
+        }
+        let read: Ability.State
+        switch state {
+        case "enabled":
+            read = .enabled
+        case "disabled":
+            read = .disabled
+        case "disabled_by_upgrade":
+            read = .disabledByUpgrade
+        case "unavailable":
+            guard let missing = fields.string("missing_executable") else {
+                return nil
+            }
+            read = .unavailable(missingExecutable: missing)
+        case "not_in_catalog":
+            // A name this release does not have: the core has no words for it.
+            return Ability(
+                name: name, state: .notInCatalog, enabled: enabled, summary: nil, sends: nil,
+                sendsFileContent: false, diagnostic: false
+            )
+        default:
+            return nil
+        }
+        guard let summary = fields.string("summary"), let sends = fields.string("sends"),
+              let content = fields.bool("sends_file_content"), let diagnostic = fields.bool("diagnostic")
+        else {
+            return nil
+        }
+        return Ability(
+            name: name, state: read, enabled: enabled, summary: summary, sends: sends,
+            sendsFileContent: content, diagnostic: diagnostic
+        )
+    }
+
+    /// One folder's check (spec/CLI.md §6, `root_check`). Its state is closed within version 1, as
+    /// an operation's is.
+    private static func readFolderCheck(_ fields: JSONFields) -> FolderCheck? {
+        guard let alias = fields.string("alias"), let path = fields.string("path"),
+              let state = fields.string("state")
+        else {
+            return nil
+        }
+        let read: FolderCheck.State
+        switch state {
+        case "ok":
+            read = .ok
+        case "denied_by_macos":
+            read = .deniedByMacOS
+        case "denied":
+            read = .denied
+        case "missing":
+            read = .missing
+        case "error":
+            guard let code = fields.string("errno") else {
+                return nil
+            }
+            read = .error(errno: code)
+        default:
+            return nil
+        }
+        return FolderCheck(alias: alias, path: path, state: read)
+    }
+
     private static func readForget(_ fields: JSONFields) -> ForgetResult? {
         guard let state = fields.string("state") else {
             return nil
@@ -1026,16 +1144,143 @@ enum VerbOutcome: Equatable, Sendable {
     /// Each operation's summary from `ops list --json`, by its name, in the core's words (spec/CLI.md
     /// §8). A policy entry the catalog does not have has none.
     var summaries: [String: String] {
-        guard case .done(let objects) = self else {
-            return [:]
-        }
         var found: [String: String] = [:]
-        for object in objects {
-            if case .op(let name, let summary?) = object {
-                found[name] = summary
+        for ability in abilities {
+            if let summary = ability.summary {
+                found[ability.name] = summary
             }
         }
         return found
+    }
+
+    /// The release of `--json --version`.
+    var hostVersion: String? {
+        guard case .done(let objects) = self else {
+            return nil
+        }
+        for object in objects {
+            if case .version(let version, _) = object {
+                return version
+            }
+        }
+        return nil
+    }
+
+    /// Each operation of `ops list --json`, in the host's order: the catalog's, then the policy's
+    /// names this release does not have (spec/CLI.md §7). None when the verb did not work.
+    var abilities: [Ability] {
+        guard case .done(let objects) = self else {
+            return []
+        }
+        var found: [Ability] = []
+        for object in objects {
+            if case .op(let ability) = object {
+                found.append(ability)
+            }
+        }
+        return found
+    }
+
+    /// The operation as it is once `ops enable` or `ops disable` made the change: a switch follows
+    /// this, not what the app asked for (spec/CLI.md §7).
+    var ability: Ability? {
+        guard case .done(let objects) = self else {
+            return nil
+        }
+        for object in objects.reversed() {
+            if case .op(let ability) = object {
+                return ability
+            }
+        }
+        return nil
+    }
+
+    /// The name `ops disable` took out of the policy, which this release does not have.
+    var removedOp: String? {
+        guard case .done(let objects) = self else {
+            return nil
+        }
+        for object in objects {
+            if case .opRemoved(let name) = object {
+                return name
+            }
+        }
+        return nil
+    }
+
+    /// Each folder of `roots list --json`, by alias. None when the verb did not work.
+    var folders: [Folder] {
+        guard case .done(let objects) = self else {
+            return []
+        }
+        var found: [Folder] = []
+        for object in objects {
+            if case .root(let folder) = object {
+                found.append(folder)
+            }
+        }
+        return found
+    }
+
+    /// The folder `roots add --json` added.
+    var folder: Folder? {
+        guard case .done(let objects) = self else {
+            return nil
+        }
+        for object in objects.reversed() {
+            if case .root(let folder) = object {
+                return folder
+            }
+        }
+        return nil
+    }
+
+    /// The alias `roots remove --json` took out.
+    var removedFolder: String? {
+        guard case .done(let objects) = self else {
+            return nil
+        }
+        for object in objects {
+            if case .rootRemoved(let alias) = object {
+                return alias
+            }
+        }
+        return nil
+    }
+
+    /// Each folder's check of `roots check --json`, by alias.
+    var folderChecks: [FolderCheck] {
+        guard case .done(let objects) = self else {
+            return []
+        }
+        var found: [FolderCheck] = []
+        for object in objects {
+            if case .rootCheck(let check) = object {
+                found.append(check)
+            }
+        }
+        return found
+    }
+
+    /// The alias `roots add --suggest-alias --json` suggests.
+    var aliasSuggestion: String? {
+        guard case .done(let objects) = self else {
+            return nil
+        }
+        for object in objects {
+            if case .aliasSuggestion(let alias) = object {
+                return alias
+            }
+        }
+        return nil
+    }
+
+    /// The `error` object of a refusal, and of nothing else.
+    var error: HostError? {
+        if case .refused(let error) = self {
+            return error
+        }
+        return nil
     }
 }
 

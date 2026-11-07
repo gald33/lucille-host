@@ -309,17 +309,18 @@ FORBIDDEN_LIBRARIES: Final = (
     "/NetworkExtension.framework/",
     "/WebKit.framework/",
 )
-# The app's words that the ui check looks for, as in App/HostText.swift and App/HostModel.swift
-# (tests/test_macos_build.py checks that they agree): each listed ability's name and what Lucille
-# gets from it, the note the app shows when it opens and the sentence in it on what the app is for
-# (the same sentence the Info.plist gives macOS), the menu's line while paused, the menu bar item's
-# name, and the Open panel's button. The app's name in them comes from tools/macos/pins.toml, which
-# the app reads back from its Info.plist.
+# The words that the ui check looks for (tests/test_macos_build.py checks each against its source):
+# each listed ability's name and what Lucille gets from it, the core's `summary` and `sends`
+# (src/lucille_host/ops, spec/CLI.md section 8); and, as in App/HostText.swift and
+# App/HostModel.swift, the note the app shows when it opens and the sentence in it on what the app
+# is for (the same sentence the Info.plist gives macOS), the menu's line while paused, the menu bar
+# item's name, and the Open panel's button. The app's name in them comes from tools/macos/pins.toml,
+# which the app reads back from its Info.plist.
 APP_NAME: Final = build_app.load_pins().app_name
 ABILITY_TITLES: Final = {"files.sha256": "Check a file's fingerprint"}
 ABILITY_DETAILS: Final = {
     "files.sha256": (
-        "Lucille gets a code that identifies one file's exact contents, not the contents."
+        "Lucille gets a code that identifies the file's exact contents, not the contents."
     )
 }
 WELCOME_TITLE: Final = f"{APP_NAME} is in your menu bar"
@@ -3153,6 +3154,13 @@ def _name_field() -> tuple[bool, str]:
     return _system_events("return value of text field 1 of window 1")
 
 
+def _name_dialog() -> tuple[bool, str]:
+    """The name dialog's field, once the dialog is up: the app asks the host for the folder's alias
+    (``roots add --suggest-alias``) before it shows it, for 10 seconds at most."""
+    _wait_until(lambda: _name_field()[0], 15)
+    return _name_field()
+
+
 def _acknowledge(checker: Checker, words: str, shot: Path) -> None:
     """The app shows a note holding ``words``; read it and choose OK."""
     time.sleep(2)
@@ -3438,7 +3446,7 @@ def _drive_folders(checker: Checker, python: Path, screens: Path) -> None:
             worked, "Add a Folder… opens the Open panel, and a folder is chosen", said
         ):
             return
-        worked, suggestion = _name_field()
+        worked, suggestion = _name_dialog()
         _screenshot(screens / "6-name-dialog.png")
         checker.expect(
             worked and suggestion == "my-project-files",
@@ -3520,7 +3528,7 @@ def _drive_folders(checker: Checker, python: Path, screens: Path) -> None:
         if not checker.expect(worked, "the home folder can be chosen again", said):
             return
         worked, said = _system_events('click button "Add Anyway" of window 1\ndelay 2')
-        worked, alias = _name_field()
+        worked, alias = _name_dialog()
         checker.expect(
             worked and bool(alias) and str(home) not in _roots(python).values(),
             "Add Anyway goes on to the name dialog, and adds nothing yet",
