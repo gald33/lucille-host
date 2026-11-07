@@ -1,55 +1,118 @@
 import Foundation
 
-/// One catalog operation as `lucille-host ops list` prints it. The menu calls them abilities.
+/// One catalog operation as `lucille-host ops list --json` writes it (spec/CLI.md §6, `op`), or a
+/// name the local policy holds that this release's catalog does not have. The menu calls them
+/// abilities, and says each in the core's words (§8).
 struct Ability: Equatable, Identifiable, Sendable {
+    /// Its state, closed within version 1 of the contract: an `op` object in a state this release
+    /// does not know is one it cannot read (`HostObject.readOp`), never a guess.
+    enum State: Equatable, Sendable {
+        case enabled
+        case disabled
+        /// An update changed it, so it is off until it is turned on again.
+        case disabledByUpgrade
+        /// This Mac cannot run it: the program it needs is not there.
+        case unavailable(missingExecutable: String)
+        /// The local policy names it, and this release does not have it.
+        case notInCatalog
+    }
+
     let name: String
-    let state: String
+    let state: State
+    /// The switch's position, as the host says it: the local policy turns it on, whether or not
+    /// this Mac can run it.
+    let enabled: Bool
+    /// The core's few words for what it does; nil only for a name this release does not have.
+    let summary: String?
+    /// The core's sentence on what Lucille gets when it runs; nil only for a name this release
+    /// does not have.
+    let sends: String?
+    /// A reply can carry the contents of a file. The app asks before it turns such an ability on.
+    let sendsFileContent: Bool
+    /// Meant for testing, as `host.sleep` is.
+    let diagnostic: Bool
 
     var id: String { name }
 
-    /// What the menu calls it: a few plain words, or the catalog name if the app has none.
-    var title: String { HostText.abilityTitles[name] ?? name }
+    /// What the menu calls it: the core's few words, or its name if the core has none.
+    var title: String { summary ?? name }
 
-    /// One plain sentence on what Lucille gets while it is on, if the app has one.
-    var detail: String? { HostText.abilityDetails[name] }
+    /// The sentence the menu shows under it: what Lucille gets while it is on, in the core's words.
+    var detail: String? { sends }
 
-    /// Whether the Abilities menu lists it. Diagnostic and always-on operations are left out, and
-    /// so is a name the policy holds that this release does not have.
-    var isShown: Bool { !HostText.unlistedAbilities.contains(name) && !state.hasPrefix("in the policy") }
+    /// Whether the Abilities menu lists it. Operations meant for testing are left out, and so are
+    /// `host.describe`, which is on from the start and is described in the menu instead, and a
+    /// name the policy holds that this release does not have.
+    var isShown: Bool {
+        !diagnostic && state != .notInCatalog && !HostText.unlistedAbilities.contains(name)
+    }
 
-    /// Shown with a checkmark: the local policy names it.
-    var isOn: Bool { state.hasPrefix("enabled") || state.hasPrefix("in the policy") }
+    /// Shown with a checkmark: the host says the local policy turns it on.
+    var isOn: Bool { enabled }
 
-    /// Whether the menu may switch it: off when it is on, on when nothing stops it.
-    var canChange: Bool { isOn || state == "disabled" || state.hasPrefix("disabled: an upgrade") }
+    /// Whether the menu asks before it switches it: only before it turns on an ability whose
+    /// replies can carry a file's contents, decided on the host's `sends_file_content`, never on
+    /// its words (spec/CLI.md §6; decisions/0002 §13). Turning one off asks nothing.
+    func asksFirst(turningOn on: Bool) -> Bool {
+        on && sendsFileContent
+    }
+
+    /// Whether the menu may switch it: off when it is on, and on when this Mac can run it.
+    var canChange: Bool {
+        switch state {
+        case .enabled, .disabled, .disabledByUpgrade:
+            return true
+        case .unavailable:
+            return enabled
+        case .notInCatalog:
+            return false
+        }
+    }
 
     /// A plain sentence for a state that is more than on or off.
     var note: String? {
-        if state == "enabled" || state == "disabled" {
+        switch state {
+        case .enabled, .disabled:
             return nil
-        }
-        if state.hasPrefix("disabled: an upgrade") {
+        case .disabledByUpgrade:
             return "An update changed this ability, so it was turned off."
-        }
-        if state.hasPrefix("enabled, but not on this computer") {
-            return "On, but this Mac lacks a program it needs."
-        }
-        if state.hasPrefix("disabled; not on this computer") {
-            return "This Mac lacks a program it needs."
-        }
-        if state.hasPrefix("in the policy") {
+        case .unavailable:
+            return enabled ? "On, but this Mac lacks a program it needs." : "This Mac lacks a program it needs."
+        case .notInCatalog:
             return "Not in this version of \(HostText.appName)."
         }
-        return state
     }
 }
 
-/// One folder alias as `lucille-host roots list` prints it.
+/// One folder alias as `lucille-host roots list --json` writes it (spec/CLI.md §6, `root`).
 struct Folder: Equatable, Identifiable, Sendable {
     let alias: String
     let path: String
+    /// It is the home folder, holds it, or is `/`, and was added once the user confirmed it.
+    let broad: Bool
 
     var id: String { alias }
+}
+
+/// Whether the host can open one folder, as `lucille-host roots check --json` writes it
+/// (spec/CLI.md §6 and §9.2, `root_check`). Its state is closed within version 1, as an
+/// ability's is. The menu runs no check yet.
+struct FolderCheck: Equatable, Sendable {
+    enum State: Equatable, Sendable {
+        case ok
+        /// macOS's privacy protection refuses the host this folder.
+        case deniedByMacOS
+        /// The folder's permissions refuse it.
+        case denied
+        /// Nothing is there, or it is not a folder.
+        case missing
+        /// Any other error, by its name, such as `EIO`.
+        case error(errno: String)
+    }
+
+    let alias: String
+    let path: String
+    let state: State
 }
 
 /// What the app tells the user about a run that failed: one short sentence, and the host's own
@@ -57,8 +120,9 @@ struct Folder: Equatable, Identifiable, Sendable {
 struct Explanation: Equatable, Sendable {
     let message: String
     let detail: String?
-    /// Whether the note that shows it offers Reset Settings…: only when it says that the settings
-    /// file can't be read (`HostText.settingsFileInvalid`, decisions/0002 §14).
+    /// Whether the note that shows it offers Reset Settings…: only when the host refused
+    /// `policy_invalid`, whose sentence says that the settings file can't be read (decisions/0002
+    /// §14).
     var offersReset = false
 }
 
@@ -90,31 +154,20 @@ struct FolderPlace: Equatable, Sendable {
     var inCloud = false
 }
 
-/// Reading the text the host's command line prints for the verbs the menu has run from the start:
-/// `--version`, `ops list` and `roots list`, and the failure lines on standard error of those and
-/// of `ops`, `roots`, `pause` and `resume`, which stay text with `--json` too. This follows that
-/// text exactly (`src/lucille_host/cli.py`); the self-test checks it against the real command line
-/// on every build. Pairing, `status`, `forget`, `kill`, `policy reset`, `run`, and the pause state
-/// `pause` and `resume` report, are read as JSON (`HostJSON`); moving these verbs onto `--json` as
-/// well is a later change.
+/// The menu's words; the command lines of `roots add` and `roots add --suggest-alias`; and how the
+/// results of `--version`, `ops` and `roots`, which `HostModel` runs with `--json` first
+/// (spec/CLI.md §3 and §7), are read: through `HostJSON`, as every other verb's are. A refusal is
+/// read by its `error` object's `code`, never by its words, which are for people (§2): they are
+/// shown as the details. Only a usage error, and a run that wrote no `error` object, are said with
+/// the lines on standard error. The self-test checks this against the real command line on every
+/// build.
 enum HostText {
     private static let program = "lucille-host"
 
-    /// The menu's words for each catalog operation it lists. Every operation in the catalog is
-    /// either here or in `unlistedAbilities` (`tests/test_macos_build.py` checks that).
-    static let abilityTitles: [String: String] = [
-        "files.sha256": "Check a file's fingerprint",
-    ]
-
-    /// One plain sentence for each ability the menu lists: what Lucille gets while it is on.
-    /// The menu shows it under the ability (`tests/test_macos_build.py` checks there is one).
-    static let abilityDetails: [String: String] = [
-        "files.sha256": "Lucille gets a code that identifies one file's exact contents, not the contents.",
-    ]
-
-    /// Operations the Abilities menu does not list: `host.describe`, which is on from the start
-    /// and is described in the menu instead, and `host.sleep`, which is for testing.
-    static let unlistedAbilities: Set<String> = ["host.describe", "host.sleep"]
+    /// Operations the Abilities menu does not list, besides those meant for testing (the core's
+    /// `diagnostic`): `host.describe`, which is on from the start and is described in the menu
+    /// instead.
+    static let unlistedAbilities: Set<String> = ["host.describe"]
 
     /// The app's name, from its Info.plist, where build_app.py puts the name tools/macos/pins.toml
     /// holds, so that a new name needs no change here. Code run outside the app, such as the
@@ -168,33 +221,38 @@ enum HostText {
     /// host's policy lock, so every change to folders and abilities waits for it.
     static let stuckRun = "A folder check is still stuck, probably on a network or external drive that stopped answering. Until it ends, \(appName) can't change its folders or abilities. Reconnect the drive, or restart your Mac, then try again."
 
-    /// "lucille-host 0.1.0" gives "0.1.0".
-    static func version(fromVersionOutput text: String) -> String? {
-        let line = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        let prefix = program + " "
-        guard line.hasPrefix(prefix), !line.contains("\n") else {
-            return nil
-        }
-        let version = String(line.dropFirst(prefix.count))
-        return version.isEmpty || version.contains(" ") ? nil : version
-    }
+    /// The most folders the host's policy holds (spec/CLI.md §10, `too_many_roots`).
+    static let maxFolders = 64
 
-    /// Each "name  state" line of `ops list`.
-    static func abilities(fromList text: String) -> [Ability] {
-        pairs(text).map { Ability(name: $0.0, state: $0.1) }
-    }
-
-    /// Each "alias  path" line of `roots list`.
-    static func folders(fromList text: String) -> [Folder] {
-        pairs(text).map { Folder(alias: $0.0, path: $0.1) }
-    }
-
-    /// Whether `roots add` refused because the folder is the home folder, holds it, or is "/".
-    /// The user may then confirm, unless it is the whole disk, and the app adds
-    /// `--allow-home-or-root`.
+    /// Whether `roots add` refused because the folder is the home folder, holds it, or is "/":
+    /// the code `broad_folder`. The user may then confirm, unless it is the whole disk, and the
+    /// app adds the flag that means it (`addFolderArguments`).
     static func needsHomeConfirmation(_ result: CLIResult) -> Bool {
-        result.status == 1 && !result.timedOut && !result.cancelled
-            && result.stderr.contains("--allow-home-or-root")
+        if case .refused(let error) = VerbOutcome(result) {
+            return error.code == "broad_folder"
+        }
+        return false
+    }
+
+    /// Which question to ask about a folder the host refused as `broad_folder`, by the error's
+    /// `kind` (spec/CLI.md §5): `home` is the home folder itself, by whatever path it was chosen;
+    /// any other is a folder that holds it. The whole disk, `root`, is refused before this is
+    /// asked (`isWholeDisk`).
+    static func refusedBroadFolder(_ result: CLIResult) -> BroadFolder {
+        if case .refused(let error) = VerbOutcome(result), error.code == "broad_folder", error.kind == "home" {
+            return .home
+        }
+        return .holdsHome
+    }
+
+    /// Whether `roots add` refused because a folder already has the alias. The host's suggestion
+    /// takes no lock, so another verb may have taken the alias since (spec/CLI.md §7): the app
+    /// then asks for a name again.
+    static func nameTaken(_ result: CLIResult) -> Bool {
+        if case .refused(let error) = VerbOutcome(result) {
+            return error.code == "alias_taken"
+        }
+        return false
     }
 
     /// The whole disk, which the app never adds, whatever the user chooses: the top of the
@@ -227,17 +285,38 @@ enum HostText {
         return wholeDisk.contains { spelling.caseInsensitiveCompare($0) == .orderedSame }
     }
 
-    /// The `roots add` command line for a folder. `--allow-home-or-root` is there only when the
-    /// user confirmed a home folder or a folder holding it, and never for the whole disk, whatever
-    /// was confirmed. It reads the disk (`isWholeDisk`) only for a confirmed folder, which
-    /// `addFolder` has just read, so any other folder gets no read before the run and its window
-    /// with Cancel.
+    /// The `roots add` command line for a folder: `--json` first, and `--` before the alias and
+    /// the path, so that neither is ever read as an option (spec/CLI.md §3 and §7).
+    /// `--allow-home-or-root` is there, before `--`, only when the user confirmed a home folder or
+    /// a folder holding it, and never for the whole disk, whatever was confirmed. It reads the disk
+    /// (`isWholeDisk`) only for a confirmed folder, which `addFolder` has just read, so any other
+    /// folder gets no read before the run and its window with Cancel.
     static func addFolderArguments(alias: String, path: String, confirmedHome: Bool) -> [String] {
-        var verb = ["roots", "add", alias, path]
+        var verb = ["--json", "roots", "add"]
         if confirmedHome && !isWholeDisk(path: path) {
             verb.append("--allow-home-or-root")
         }
+        verb += ["--", alias, path]
         return verb
+    }
+
+    /// The command line that asks the host for a folder's alias (spec/CLI.md §9.1). It takes no
+    /// `--`, so a path that starts with "-" is written `--suggest-alias=<path>`, which the host
+    /// reads as the path (§7).
+    static func suggestAliasArguments(path: String) -> [String] {
+        path.hasPrefix("-")
+            ? ["--json", "roots", "add", "--suggest-alias=" + path]
+            : ["--json", "roots", "add", "--suggest-alias", path]
+    }
+
+    /// The name the name dialog starts from: the host's suggestion, when it gave one the app can
+    /// use, which is a valid alias none of the app's folders has; else the app's own, made from
+    /// the folder's name. The user is not told which it is.
+    static func suggestion(_ outcome: VerbOutcome, folderName: String, taken: Set<String>) -> String {
+        if let alias = outcome.aliasSuggestion, Alias.isValid(alias), !taken.contains(alias) {
+            return alias
+        }
+        return Alias.suggest(forFolderName: folderName, taken: taken)
     }
 
     /// Whether `path` is one the app asks about before it adds it, as far as it can tell from the
@@ -340,14 +419,78 @@ enum HostText {
 
     /// What a run was for, when that changes what the user is told.
     enum Activity: Equatable, Sendable {
-        /// Adding a folder, with what the app itself can see of it.
-        case addingFolder(FolderAccess)
+        /// Adding a folder under the alias the app asked for, with what the app itself can see of
+        /// the folder.
+        case addingFolder(FolderAccess, alias: String)
         case other
     }
 
-    /// What to tell the user when a run failed: a plain sentence for each refusal the host's
-    /// command line gives, and its own words as the detail. `earlierRunStuck` is whether a run
-    /// the app stopped waiting for has still not ended (`HostCLI.stuckRuns`).
+    /// One plain sentence for each code `--version`, `ops` and `roots` can refuse with
+    /// (spec/CLI.md §7 and §10), but `alias_taken` and a `not_a_folder` the app can see, which say
+    /// more while a folder is added (`refusal`), and the codes that can only be the app's own
+    /// mistake (`ConnectionText.appBugCodes`), which read as `ConnectionText.appBug`.
+    static let refusals: [String: String] = [
+        "policy_invalid": "\(appName)'s settings file can't be read.",
+        "policy_lock_failed": "\(appName) couldn't lock its settings file, so nothing was changed. Try again.",
+        "not_in_catalog": "This version of \(appName) doesn't have that ability.",
+        "unavailable": "This Mac lacks a program that ability needs.",
+        "not_enabled": "That ability was already off.",
+        "bad_alias": "That name can't be used.",
+        "too_many_roots": "\(appName) can use at most \(maxFolders) folders. Remove one before you add another.",
+        "not_a_folder": "That folder is no longer there.",
+        "own_folder": "That folder holds \(appName)'s own settings, so it can't be added.",
+        "on_proc": "That folder can't be used.",
+        "broad_folder": "That folder is your home folder, holds it, or is your whole disk.",
+        "unstorable_path": "That folder's location can't be stored in \(appName)'s settings.",
+        "no_such_alias": "That folder was already removed.",
+    ]
+
+    /// The sentence for a refusal, chosen by its code. While a folder is added, a name in use
+    /// names the alias the app asked for, never one read from the host's words; and a folder the
+    /// host found none of, which the app can see or is refused too, is macOS's privacy protection
+    /// at work: the host reads a folder macOS keeps from it as no folder at all.
+    static func refusal(_ error: HostError, during activity: Activity = .other) -> String {
+        if case .addingFolder(let access, let alias) = activity {
+            switch error.code {
+            case "alias_taken":
+                return "You already have a folder named \(alias). Choose another name."
+            case "not_a_folder" where access != .missing:
+                return blockedByMacOS
+            default:
+                break
+            }
+        }
+        return refusals[error.code] ?? ConnectionText.appBug
+    }
+
+    /// The refusal that says an ability being turned off is off already.
+    static let alreadyOff: Set<String> = ["not_enabled"]
+
+    /// The refusal that says a folder being removed is gone already.
+    static let alreadyRemoved: Set<String> = ["no_such_alias"]
+
+    /// Whether `result` is a refusal whose code is one of `codes`: things are already as the user
+    /// asked, so the menu shows no note for it. Decided on the code alone, never on the words.
+    static func alreadyDone(_ result: CLIResult, codes: Set<String>) -> Bool {
+        if case .refused(let error) = VerbOutcome(result) {
+            return codes.contains(error.code)
+        }
+        return false
+    }
+
+    /// The button that turns on an ability whose replies can carry a file's contents, once the
+    /// user has read what Lucille gets (decisions/0002 §13).
+    static let turnOnButton = "I Understand, Turn On"
+
+    /// The question the app asks before it turns on such an ability: its name and what Lucille
+    /// gets, both in the core's words.
+    static func turnOnQuestion(_ ability: Ability) -> (title: String, text: String) {
+        ("Turn on \u{201C}\(ability.title)\u{201D}?", ability.detail ?? "")
+    }
+
+    /// What to tell the user when a run failed: a plain sentence for each refusal, by its code, and
+    /// the host's own words as the detail. `earlierRunStuck` is whether a run the app stopped
+    /// waiting for has still not ended (`HostCLI.stuckRuns`).
     static func explain(
         _ result: CLIResult, during activity: Activity = .other, earlierRunStuck: Bool = false
     ) -> Explanation {
@@ -370,25 +513,33 @@ enum HostText {
         if result.cancelled {
             return Explanation(message: "Stopped.", detail: nil)
         }
-        let reason = reasons(result.stderr)
-        guard !reason.isEmpty else {
+        if case .refused(let error) = VerbOutcome(result) {
+            // Reset Settings… answers only an invalid policy file: the policy a pairing set aside
+            // is another file, which `policy reset` never touches (spec/CLI.md §7).
             return Explanation(
-                message: "Something went wrong in \(appName)'s helper program.",
-                detail: "It stopped with exit status \(result.status)."
+                message: refusal(error, during: activity),
+                detail: details(of: error, stderr: result.stderr),
+                offersReset: error.code == "policy_invalid"
             )
         }
+        // A run that wrote no error object, a signal say, has only standard error to show.
+        let reason = reasons(result.stderr)
         return Explanation(
-            message: plain(reason, during: activity),
-            detail: reason,
-            offersReset: settingsFileInvalid(reason)
+            message: ConnectionText.appBug,
+            detail: reason.isEmpty ? "It stopped with exit status \(result.status)." : reason
         )
     }
 
-    /// Whether the host refused because its policy file is invalid: the one refusal `policy reset`
-    /// answers. The policy a pairing set aside is another file, which it never touches
-    /// (spec/CLI.md §7).
-    static func settingsFileInvalid(_ reason: String) -> Bool {
-        reason.hasPrefix("the policy file ") && reason.contains(" is invalid: ")
+    /// The host's words for a refusal: its sentence, the error object's `message`; for a usage
+    /// error, whose sentence only points to standard error, the parser's words there.
+    private static func details(of error: HostError, stderr: String) -> String {
+        if error.code == "usage" {
+            let words = reasons(stderr)
+            if !words.isEmpty {
+                return words
+            }
+        }
+        return error.message
     }
 
     /// The host's reason for a refusal, from its stderr: the lines that are not a usage summary,
@@ -412,61 +563,6 @@ enum HostText {
         return found.joined(separator: " ")
     }
 
-    /// A plain sentence for each refusal `src/lucille_host/cli.py` can give.
-    private static func plain(_ reason: String, during activity: Activity) -> String {
-        // The host reads a folder macOS keeps from it as no folder at all, or fails with EPERM.
-        // When the app can see that folder, or is refused too, macOS is what stands in the way.
-        var adding = false
-        var seenByApp = false
-        if case .addingFolder(let access) = activity {
-            adding = true
-            seenByApp = access != .missing
-        }
-        let taken = " is already a folder alias; remove it first"
-        if reason.hasSuffix(taken) {
-            let alias = String(reason.dropLast(taken.count))
-            return "You already have a folder named \(alias). Choose another name."
-        }
-        if reason.hasPrefix("the policy holds at most ") {
-            let limit = reason.dropFirst("the policy holds at most ".count).prefix { $0.isNumber }
-            return "\(appName) can use at most \(limit) folders. Remove one before you add another."
-        }
-        if reason.hasSuffix(" is where lucille-host keeps its own files") {
-            return "That folder holds \(appName)'s own settings, so it can't be added."
-        }
-        if reason.hasSuffix(" is not a folder") {
-            return seenByApp ? blockedByMacOS : "That folder is no longer there."
-        }
-        if adding && reason.hasPrefix("Operation not permitted") {
-            return blockedByMacOS
-        }
-        if settingsFileInvalid(reason) {
-            return "\(appName)'s settings file can't be read."
-        }
-        if reason.hasPrefix("cannot lock ") {
-            return "\(appName) couldn't lock its settings file, so nothing was changed. Try again."
-        }
-        if reason.hasPrefix("no folder alias ") {
-            return "That folder was already removed."
-        }
-        if reason.hasSuffix(" is not enabled") {
-            return "That ability was already off."
-        }
-        if reason.hasSuffix(" is not in this release's catalog") {
-            return "This version of \(appName) doesn't have that ability."
-        }
-        if reason.contains(" cannot run here: ") {
-            return "This Mac lacks a program that ability needs."
-        }
-        if reason.hasPrefix("an alias is ") {
-            return "That name can't be used."
-        }
-        if reason.contains("--allow-home-or-root") {
-            return "That folder is your home folder, holds it, or is your whole disk."
-        }
-        return "Something went wrong in \(appName)'s helper program."
-    }
-
     private static func standardized(_ path: String) -> String {
         let clean = (path as NSString).standardizingPath
         return clean.isEmpty ? path : clean
@@ -482,20 +578,5 @@ enum HostText {
             return nil
         }
         return [device.uint64Value, inode.uint64Value]
-    }
-
-    private static func pairs(_ text: String) -> [(String, String)] {
-        var found: [(String, String)] = []
-        for line in text.split(separator: "\n", omittingEmptySubsequences: true) {
-            guard let gap = line.range(of: "  ") else {
-                continue
-            }
-            let head = String(line[..<gap.lowerBound])
-            let tail = String(line[gap.upperBound...])
-            if !head.isEmpty && !tail.isEmpty && !head.contains(" ") {
-                found.append((head, tail))
-            }
-        }
-        return found
     }
 }

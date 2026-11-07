@@ -3,8 +3,10 @@ import Foundation
 /// Folder aliases: the short name Lucille uses for a folder the user adds.
 ///
 /// The host accepts an alias that matches `[a-z][a-z0-9_-]{0,31}` (`valid_alias` in
-/// `src/lucille_host/policy.py`). The app suggests one made from the folder's name, and the user
-/// can change it before the folder is added.
+/// `src/lucille_host/policy.py`). The name dialog starts from the one the host suggests from the
+/// folder's name (`roots add --suggest-alias`, `HostText.suggestion`); the app's own suggestion
+/// here is the dialog's when the host gives none it can use, and is what a name the user typed
+/// becomes when the host would refuse it. The user can change it before the folder is added.
 enum Alias {
     static let maxLength = 32
     static let fallback = "folder"

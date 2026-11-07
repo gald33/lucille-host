@@ -26,6 +26,9 @@ final class HostModel: ObservableObject {
     /// How long adding a folder may take. macOS may first ask the user about the folder, and the
     /// progress window's Cancel button stops the run sooner.
     private let addTimeout: TimeInterval = 600
+    /// How long the app waits for the host's suggestion of a folder's alias, which shows no window:
+    /// past it, the name dialog starts from the app's own suggestion.
+    private let suggestTimeout: TimeInterval = 10
 
     private init() {
         cli = HostCLI(python: HostCLI.python(inApp: Bundle.main.bundleURL), home: HostCLI.userHome())
@@ -88,20 +91,67 @@ final class HostModel: ObservableObject {
         }
     }
 
+    /// The Abilities menu's switch. An ability whose replies can carry a file's contents is turned
+    /// on only once the user says so (`Ability.asksFirst`, decided on the host's
+    /// `sends_file_content`; spec/CLI.md §6; decisions/0002 §13): the question has Cancel as its
+    /// default, and only its second button turns it on. Turning one off, or on one that sends
+    /// none, asks nothing.
     func setAbility(_ ability: Ability, on: Bool) {
-        let action = "turn \(on ? "on" : "off") \u{201C}\(ability.title)\u{201D}"
-        perform(
-            ["ops", on ? "enable" : "disable", ability.name],
-            waiting: "Turning \(on ? "on" : "off") \u{201C}\(ability.title)\u{201D}\u{2026}",
-            failing: action
-        )
+        guard ability.asksFirst(turningOn: on) else {
+            turn(ability, on: on)
+            return
+        }
+        let question = HostText.turnOnQuestion(ability)
+        Alerts.shared.show({
+            let alert = NSAlert()
+            alert.alertStyle = .warning
+            alert.messageText = question.title
+            alert.informativeText = question.text
+            alert.addButton(withTitle: ConnectionText.cancelButton)
+            alert.addButton(withTitle: HostText.turnOnButton)
+            return alert
+        }, done: { [weak self] response in
+            if response == .alertSecondButtonReturn {
+                self?.turn(ability, on: true)
+            }
+        })
     }
 
+    /// `ops enable` or `ops disable`, with the window that has a Cancel button if it takes more
+    /// than a moment. The switch then follows the host's answer, the operation as it now is, not
+    /// what the app asked for (spec/CLI.md §7). Turning off an ability that is already off
+    /// (`HostText.alreadyOff`) leaves it as the user asked, so it shows no note.
+    private func turn(_ ability: Ability, on: Bool) {
+        let action = "turn \(on ? "on" : "off") \u{201C}\(ability.title)\u{201D}"
+        perform(
+            ["--json", "ops", on ? "enable" : "disable", ability.name],
+            waiting: "Turning \(on ? "on" : "off") \u{201C}\(ability.title)\u{201D}\u{2026}",
+            failing: action,
+            done: on ? [] : HostText.alreadyOff
+        ) { [weak self] result in
+            self?.answered(VerbOutcome(result))
+        }
+    }
+
+    /// Set the switch from the host's answer: the operation as `ops enable` or `ops disable` wrote
+    /// it once the change was made, or the row of a name this release does not have, which
+    /// `ops disable` took out of the policy. The menu then reads its set-up again.
+    private func answered(_ outcome: VerbOutcome) {
+        if let found = outcome.ability {
+            abilities = abilities.map { $0.name == found.name ? found : $0 }
+        } else if let gone = outcome.removedOp {
+            abilities.removeAll { $0.name == gone }
+        }
+    }
+
+    /// `roots remove`, by the folder's alias. A folder that is already gone
+    /// (`HostText.alreadyRemoved`) is removed, as the user asked, so it shows no note.
     func removeFolder(_ folder: Folder) {
         perform(
-            ["roots", "remove", folder.alias],
+            ["--json", "roots", "remove", folder.alias],
             waiting: "Removing the folder \u{201C}\(folder.alias)\u{201D}\u{2026}",
-            failing: "remove the folder \(folder.alias)"
+            failing: "remove the folder \(folder.alias)",
+            done: HostText.alreadyRemoved
         )
     }
 
@@ -187,8 +237,8 @@ final class HostModel: ObservableObject {
     }
 
     /// Choose a folder in the standard Open panel, name it, and add it. The whole disk is refused
-    /// outright; the home folder, or a folder that holds it, is confirmed first. The panel and the
-    /// questions are modal, so they start in a `RunLoopTurn` of their own.
+    /// outright; the home folder, or a folder that holds it, is confirmed first. The panel, the
+    /// questions and the name dialog are modal, so they start in a `RunLoopTurn` of their own.
     func addFolder() {
         RunLoopTurn.perform { [weak self] in
             self?.chooseAndAdd()
@@ -215,15 +265,34 @@ final class HostModel: ObservableObject {
                 confirmedHome = true
             }
             let taken = Set(folders.map(\.alias))
-            let suggestion = Alias.suggest(forFolderName: url.lastPathComponent, taken: taken)
-            let name = FileManager.default.displayName(atPath: path)
             let synced = (try? url.resourceValues(forKeys: [.isUbiquitousItemKey]))?.isUbiquitousItem ?? false
             let place = HostText.place(of: path, home: cli.home, synced: synced)
-            guard let alias = askForAlias(suggestion: suggestion, folderName: name, taken: taken, place: place) else {
+            Task { await nameAndAdd(url, taken: taken, place: place, confirmedHome: confirmedHome) }
+            return
+        }
+    }
+
+    /// Ask the host for the folder's alias (spec/CLI.md §9.1), off the main thread, with a short
+    /// time limit and no window; then show the name dialog, starting from it, in a run loop turn
+    /// of its own, and add the folder under the name the user gives. When the host's answer can't
+    /// be used, the dialog starts from the app's own suggestion, and nothing is said about it.
+    /// `note`, when the app asks again, is the sentence that says why, above the name.
+    private func nameAndAdd(
+        _ url: URL, taken: Set<String>, place: FolderPlace, confirmedHome: Bool, note: String? = nil
+    ) async {
+        let path = url.path
+        let asked = await run(HostText.suggestAliasArguments(path: path), timeout: suggestTimeout)
+        let suggestion = HostText.suggestion(VerbOutcome(asked), folderName: url.lastPathComponent, taken: taken)
+        let name = FileManager.default.displayName(atPath: path)
+        RunLoopTurn.perform { [weak self] in
+            guard let self,
+                  let alias = self.askForAlias(
+                      suggestion: suggestion, folderName: name, taken: taken, place: place, note: note
+                  )
+            else {
                 return
             }
-            Task { await addRoot(alias: alias, path: path, confirmedHome: confirmedHome) }
-            return
+            Task { await self.addRoot(alias: alias, url: url, place: place, confirmedHome: confirmedHome) }
         }
     }
 
@@ -246,15 +315,15 @@ final class HostModel: ObservableObject {
     /// Read the version, the abilities and the folders again. Whether the host is paused is
     /// `Connection`'s, from `status`, which opens the Keychain and is not read on every menu.
     private func reload() async {
-        let versionRun = await run(["--version"])
-        let opsRun = await run(["ops", "list"])
-        let rootsRun = await run(["roots", "list"])
+        let versionRun = await run(["--json", "--version"])
+        let opsRun = await run(["--json", "ops", "list"])
+        let rootsRun = await run(["--json", "roots", "list"])
         let results = [versionRun, opsRun, rootsRun]
-        version = versionRun.succeeded ? HostText.version(fromVersionOutput: versionRun.stdout) : nil
+        version = VerbOutcome(versionRun).hostVersion
         abilitiesRead = opsRun.succeeded
         foldersRead = rootsRun.succeeded
-        abilities = opsRun.succeeded ? HostText.abilities(fromList: opsRun.stdout) : []
-        folders = rootsRun.succeeded ? HostText.folders(fromList: rootsRun.stdout) : []
+        abilities = VerbOutcome(opsRun).abilities
+        folders = VerbOutcome(rootsRun).folders
         problem = results.first(where: { !$0.succeeded }).map { HostText.explain($0) }
         stuck = HostCLI.stuckRuns > 0
         labelStatusItem()
@@ -298,18 +367,21 @@ final class HostModel: ObservableObject {
 
     /// Run a verb that changes something, with a window that has a Cancel button if it takes more
     /// than a moment, then hand its result to `then`. A run the user cancels is not a failure,
-    /// unless one the app gave up on still holds things up.
+    /// unless one the app gave up on still holds things up; nor is a refusal whose code is in
+    /// `done`, which says that things are already as the user asked.
     private func perform(
         _ verb: [String],
         waiting message: String,
         failing action: String,
+        done: Set<String> = [],
         then: @escaping (CLIResult) -> Void = { _ in }
     ) {
         Task {
             let result = await runWithProgress(verb, message: message)
             then(result)
             let stuck = HostCLI.stuckRuns > 0
-            if !result.succeeded && (!result.cancelled || stuck || result.status == CLIResult.notFinished) {
+            let alreadyDone = HostText.alreadyDone(result, codes: done)
+            if !result.succeeded && !alreadyDone && (!result.cancelled || stuck || result.status == CLIResult.notFinished) {
                 showFailure(HostText.explain(result, earlierRunStuck: stuck), action: action)
             }
             await reload()
@@ -317,11 +389,16 @@ final class HostModel: ObservableObject {
     }
 
     /// Run `roots add`, with a window that has a Cancel button while the host checks the folder,
-    /// which can take long on a network drive.
-    private func addRoot(alias: String, path: String, confirmedHome: Bool) async {
+    /// which can take long on a network drive. A refusal is read by its code (`HostText.refusal`):
+    /// `broad_folder` asks about the home folder, as the host's `kind` says, unless it is the
+    /// whole disk; and `alias_taken`, an alias another verb took after the host suggested it,
+    /// opens the name dialog again, with the sentence that says so (spec/CLI.md §7).
+    private func addRoot(alias: String, url: URL, place: FolderPlace, confirmedHome: Bool) async {
+        let path = url.path
+        var confirmed = confirmedHome
         let checking = "Checking the folder \u{201C}\(alias)\u{201D}\u{2026}"
         var result = await runWithProgress(
-            HostText.addFolderArguments(alias: alias, path: path, confirmedHome: confirmedHome),
+            HostText.addFolderArguments(alias: alias, path: path, confirmedHome: confirmed),
             message: checking, timeout: addTimeout
         )
         if HostText.needsHomeConfirmation(result) {
@@ -334,18 +411,20 @@ final class HostModel: ObservableObject {
                 }
                 return
             }
-            guard await RunLoopTurn.ask({ self.confirmBroadFolder(.holdsHome) }) else {
+            let kind = HostText.refusedBroadFolder(result)
+            guard await RunLoopTurn.ask({ self.confirmBroadFolder(kind) }) else {
                 await reload()
                 addFolder()
                 return
             }
+            confirmed = true
             result = await runWithProgress(
                 HostText.addFolderArguments(alias: alias, path: path, confirmedHome: true),
                 message: checking, timeout: addTimeout
             )
         }
         await reload()
-        let added = folders.contains(Folder(alias: alias, path: path))
+        let added = folders.contains { $0.alias == alias && $0.path == path }
         let stuck = HostCLI.stuckRuns > 0
         if result.cancelled && added {
             showNote(
@@ -363,8 +442,17 @@ final class HostModel: ObservableObject {
             return
         }
         let explanation = HostText.explain(
-            result, during: .addingFolder(HostText.access(of: path)), earlierRunStuck: stuck
+            result, during: .addingFolder(HostText.access(of: path), alias: alias), earlierRunStuck: stuck
         )
+        if HostText.nameTaken(result) {
+            // Another verb took the alias after the host suggested it: ask again, with the
+            // sentence that says so above a name no folder has.
+            await nameAndAdd(
+                url, taken: Set(folders.map(\.alias)).union([alias]), place: place,
+                confirmedHome: confirmed, note: explanation.message
+            )
+            return
+        }
         showFailure(explanation, action: "add the folder")
     }
 
@@ -386,12 +474,13 @@ final class HostModel: ObservableObject {
         return result
     }
 
-    /// Ask for the name Lucille will see, starting from a suggestion. Nil when the user cancels.
+    /// Ask for the name Lucille will see, starting from a suggestion, with `first` above it when
+    /// the app asks again. Nil when the user cancels.
     private func askForAlias(
-        suggestion: String, folderName: String, taken: Set<String>, place: FolderPlace
+        suggestion: String, folderName: String, taken: Set<String>, place: FolderPlace, note first: String? = nil
     ) -> String? {
         var current = suggestion
-        var note: String?
+        var note = first
         while true {
             let alert = NSAlert()
             alert.messageText = "Name Lucille will see"

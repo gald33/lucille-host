@@ -52,10 +52,10 @@ developing the app. Its builds stay ad hoc signed, for the repository owner's ow
 - **The app drives the host only through its command line**, as
   `lucille-host-runtime -I -B -X utf8 -m lucille_host --profile mac-app <verb>`, with an argv and a fixed
   environment (`PATH=/var/empty`). It runs every verb on its own profile, `mac-app` (§9); builds before it
-  used `default`, and nothing moves from one to the other. It reads JSON (§8) from `status`, the pairing
-  verbs, `forget`, `kill`, `pause`, `resume`, `log`, `policy reset`, `run`'s events, and `ops list` for
-  Activity's words, and the text of `--version`, `ops list` and `roots list` for the menu. It reads and
-  writes none of the host's files, and opens no network connection.
+  used `default`, and nothing moves from one to the other. It reads JSON (§8) from every verb it runs:
+  `--version`, `ops` and `roots`, `status`, the pairing verbs, `forget`, `kill`, `pause`, `resume`, `log`,
+  `policy reset` and `run`'s events. It decides only on their fields, a refusal by its `code`, and shows
+  their words. It reads and writes none of the host's files, and opens no network connection.
 - **Pairing by paste, on 0001's gate** (§11.3). The maintainer decided on 2026-11-02 to build it now on
   [0001](0001-host-design.md)'s gate, not the typed one. The user pastes the code; the app passes it to
   `pair --code-stdin --json` on standard input, shows the SAS from `sas_pending`, and the user clicks
@@ -94,9 +94,12 @@ developing the app. Its builds stay ad hoc signed, for the repository owner's ow
   to Update is the app's own Quit with no question: `run` drains, then the app quits. There is no
   **Download** button (the maintainer's decision of 2026-11-07).
 - **The menu** shows the version and a status line read from `status --json` and `run`'s events, with a line
-  for what needs attention, and offers Pause and Resume, the abilities (the operations, switched with
-  `ops enable` and `ops disable`), Add a Folder…, the folders with Remove, Activity…, the pairing items
-  (Connect to Lucille…, Finish Connecting…, Stop Connecting…, Disconnect from Lucille…), and Quit Capsule;
+  for what needs attention, and offers Pause and Resume, the abilities (the operations, in the core's
+  words, switched with `ops enable` and `ops disable` and set from the host's answer; one whose replies
+  can carry a file's contents is turned on only after a question, though no operation in this release
+  sends file contents), Add a Folder… (its name dialog starting from the alias the host suggests), the
+  folders with Remove, Activity…, the pairing items (Connect to Lucille…, Finish Connecting…, Stop
+  Connecting…, Disconnect from Lucille…), and Quit Capsule;
   while a request's process runs, Stop What's Running; and, while Lucille needs a newer release, the
   update notice's line and Prepare to Update…. A copy that is not at `/Applications/Capsule.app` shows only
   the line that says why, and Quit Capsule.
@@ -111,8 +114,8 @@ developing the app. Its builds stay ad hoc signed, for the repository owner's ow
   run. The disk image is uploaded only by a manual run whose every check passed, and kept 3 days.
 
 Not built yet: the typed gate and the Connect flow (§11.2, §11.4; proposed), opening at login, the restore
-list after a new pairing (§11.6, `policy previous`), the menu's use of the JSON contract for `ops`
-and `roots` (§8), the Welcome and main windows, updates, **Remove Capsule…** (section 17), Copy
+list after a new pairing (§11.6, `policy previous`), the check after a folder is added (`roots check`,
+§12), the Welcome and main windows, updates, **Remove Capsule…** (section 17), Copy
 Diagnostics (§15), Developer ID signing and notarization, ripgrep (`Helpers/rg`; the pins hold an empty
 ripgrep commit until then, and `Resources/licenses/` has no ripgrep licence), and the release jobs. The
 first build also departs from this record in these ways, among others; `macos/README.md`, under "Choices
@@ -122,8 +125,11 @@ made for the first build", says why for most of them:
 - a copy that is not at `/Applications/Capsule.app` offers only **Quit**, not **Show Applications Folder**
   (§3.3): opening the Finder needs `NSWorkspace`, which the Mac lint and the build's checks keep out of the
   app (§20), as for the clock below;
-- the words for each ability and the suggested folder names are in the Swift app, not in the core (§8, §12,
-  §13);
+- operations meant for testing are not listed at all, where §13 hides them behind "Show diagnostic
+  operations"; `host.describe` is not listed either: while it is on, the menu says what it shares in the
+  app's own words, where §13 shows it with its switch; and when the core suggests no alias the app can
+  use, the app suggests its own, written in Latin letters where macOS can, where §12 has only the core's
+  (§12, §13);
 - the `Info.plist`'s six folder usage keys hold the sentences on what Capsule is for, not the sentence §12
   plans (§12; whether macOS shows either is not yet tested on a Mac);
 - the app refuses outright, besides `/` and the Data volume, the two folders between them, `/System` and
@@ -160,8 +166,8 @@ made for the first build", says why for most of them:
   request's `started` to its `finished` (§14);
 - Reset Settings… is a button in the notes behind the menu's lines that say the settings file can't be
   read, not an item of a Settings submenu (§14), which comes with Open at Login. The menu's own line, from
-  `ops list`'s refusal, offers it whenever the file can't be read; while `run` runs, its Needs attention
-  line offers it too.
+  `ops list`'s refusal `policy_invalid`, offers it whenever the file can't be read; while `run` runs, its
+  Needs attention line offers it too.
 
 Where this record says what the app does, it describes the planned app.
 
@@ -652,9 +658,9 @@ ripgrep.
   `spec/CLI.md`; the schemas and golden fixtures ship in the wheel, beside the protocol's. Readers ignore an
   unknown `type`, so the contract can grow.
 - **The app never parses human text and never writes the host's files.** Every change goes through a verb.
-  The first build is the exception for now: until it uses the JSON contract, which the host's command line
-  now has ([spec/CLI.md](../spec/CLI.md)), it reads the verbs' human output ("What is built today";
-  `macos/README.md`, "Choices made for the first build").
+  The app reads every verb it runs through the JSON contract ([spec/CLI.md](../spec/CLI.md)), and shows
+  the lines on standard error only as details: those of a usage error, and of a run that wrote no `error`
+  object.
 - **Secrets never go on a command line.** A pairing code goes to `pair --code-stdin` on standard input. With the typed gate
   (§11.2, proposed, pending the maintainer's decision), the typed number goes to `pair confirm` on standard
   input.

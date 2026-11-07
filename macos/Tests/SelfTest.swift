@@ -98,34 +98,74 @@ struct SelfTest {
     }
 
     static func checkText(_ report: Report) {
-        report.expect(HostText.version(fromVersionOutput: "lucille-host 0.1.0.dev0\n") == "0.1.0.dev0",
-                      "the version line parses")
-        report.expect(HostText.version(fromVersionOutput: "something else 1.0\n") == nil,
-                      "another program's line does not")
-        let ops = HostText.abilities(fromList: """
-            files.search  disabled; not on this computer: /usr/bin/rg is missing
-            files.sha256  enabled
-            host.describe  disabled: an upgrade changed it; `lucille-host ops enable host.describe` accepts it
-            old.op  in the policy, but not in this release's catalog
-            """)
-        report.expect(ops.map(\.name) == ["files.search", "files.sha256", "host.describe", "old.op"],
-                      "ops list lines parse", "\(ops)")
-        report.expect(ops.map(\.isOn) == [false, true, false, true], "on and off read right")
-        report.expect(ops.map(\.canChange) == [false, true, true, true], "which can change")
-        report.expect(ops[1].note == nil && ops[0].note != nil, "notes only for unusual states")
-        report.expect(ops.map(\.isShown) == [true, true, false, false],
-                      "host.describe and names not in this release are not listed")
-        report.expect(ops[1].title == "Check a file's fingerprint" && ops[0].title == "files.search",
-                      "a listed ability has plain words, or its name when the app has none")
-        report.expect(Ability(name: "host.sleep", state: "disabled").isShown == false, "host.sleep is not listed")
-        report.expect(HostText.abilityTitles.keys.allSatisfy { !HostText.unlistedAbilities.contains($0) },
-                      "no ability is both titled and unlisted")
-        let roots = HostText.folders(fromList: "docs  /Volumes/Data/My  Documents\nwork  /Volumes/Data/work\n")
-        report.expect(roots == [Folder(alias: "docs", path: "/Volumes/Data/My  Documents"),
-                                Folder(alias: "work", path: "/Volumes/Data/work")],
-                      "roots list lines parse, with two spaces inside a path", "\(roots)")
+        // An ability as `ops list --json` writes it (spec/CLI.md §6, `op`): the switch's position is
+        // the host's `enabled`, its words are the core's `summary` and `sends`, and the menu leaves
+        // out operations meant for testing (`diagnostic`), host.describe, and names this release
+        // does not have.
+        func op(_ rest: String) -> Ability? {
+            if case .object(.op(let found)) = line(#"{"v":1,"type":"op","# + rest + "}") {
+                return found
+            }
+            return nil
+        }
+        let fingerprintWords = #""summary":"Check a file's fingerprint","sends":"Lucille gets a code that identifies the file's exact contents, not the contents.","sends_file_content":false,"diagnostic":false"#
+        let missing = #","missing_executable":"/usr/bin/shasum""#
+        let abilities = [
+            op(#""name":"files.sha256","state":"disabled","enabled":false,"# + fingerprintWords),
+            op(#""name":"files.sha256","state":"enabled","enabled":true,"# + fingerprintWords),
+            op(#""name":"files.sha256","state":"disabled_by_upgrade","enabled":false,"# + fingerprintWords),
+            op(#""name":"files.sha256","state":"unavailable","enabled":true,"# + fingerprintWords + missing),
+            op(#""name":"files.sha256","state":"unavailable","enabled":false,"# + fingerprintWords + missing),
+            op(#""name":"old.op","state":"not_in_catalog","enabled":false"#),
+            op(#""name":"host.sleep","state":"disabled","enabled":false,"summary":"Wait up to 4 minutes, for testing","sends":"Lucille gets how long the wait took and how it ended.","sends_file_content":false,"diagnostic":true"#),
+            op(#""name":"host.describe","state":"enabled","enabled":true,"summary":"Describe this computer's host","sends":"Lucille gets the host's version.","sends_file_content":false,"diagnostic":false"#),
+        ].compactMap { $0 }
+        report.expect(abilities.count == 8, "every state of ops list --json reads as an ability", "\(abilities)")
+        if abilities.count == 8 {
+            report.expect(abilities.map(\.isOn) == [false, true, false, true, false, false, false, true],
+                          "a switch is on exactly when the host says enabled", "\(abilities.map(\.isOn))")
+            report.expect(abilities.map(\.canChange) == [true, true, true, true, false, false, true, true],
+                          "which can change: not one this Mac can't run while it is off, nor a name this release lacks")
+            report.expect(abilities.map(\.isShown) == [true, true, true, true, true, false, false, false],
+                          "diagnostic operations, host.describe and names not in this release are not listed")
+            report.expect(abilities.map(\.note) == [
+                nil, nil, "An update changed this ability, so it was turned off.",
+                "On, but this Mac lacks a program it needs.", "This Mac lacks a program it needs.",
+                "Not in this version of \(HostText.appName).", nil, nil,
+            ], "notes only for the states that are more than on or off", "\(abilities.map(\.note))")
+            report.expect(abilities[0].title == "Check a file's fingerprint"
+                              && abilities[0].detail == "Lucille gets a code that identifies the file's exact contents, not the contents."
+                              && abilities[5].title == "old.op" && abilities[5].detail == nil,
+                          "an ability's words are the core's summary and sends, or its name when the core has none")
+            report.expect(abilities[3].state == .unavailable(missingExecutable: "/usr/bin/shasum")
+                              && abilities.allSatisfy { !$0.sendsFileContent },
+                          "an ability this Mac can't run says which program is missing")
+            report.expect(abilities.allSatisfy { !$0.asksFirst(turningOn: true) && !$0.asksFirst(turningOn: false) },
+                          "an ability that sends no file contents is switched with no question")
+            // Turning on an ability that sends file contents asks first, in the core's words.
+            let question = HostText.turnOnQuestion(abilities[0])
+            report.expect(question.title == "Turn on \u{201C}Check a file's fingerprint\u{201D}?"
+                              && question.text == abilities[0].detail && HostText.turnOnButton == "I Understand, Turn On",
+                          "the question names the ability and says what Lucille gets, in the core's words", "\(question)")
+        }
+        report.expect(HostText.unlistedAbilities == ["host.describe"], "host.describe is described in the menu, not listed")
+        // One whose replies can carry a file's contents asks first, decided on that field alone,
+        // and only when it is turned on.
+        let sendsContent = op(#""name":"files.search","state":"disabled","enabled":false,"summary":"s","sends":"t","sends_file_content":true,"diagnostic":false"#)
+        report.expect(sendsContent?.asksFirst(turningOn: true) == true && sendsContent?.asksFirst(turningOn: false) == false,
+                      "an ability that sends file contents asks before it is turned on, and not before it is turned off",
+                      "\(String(describing: sendsContent))")
+
+        // A refusal as the host writes it with --json (spec/CLI.md §5): its error object on
+        // standard output, and the same sentence on standard error. The app reads its code.
+        func refused(_ code: String, _ message: String, kind: String? = nil, stderr: String? = nil) -> CLIResult {
+            let extra = kind.map { ",\"kind\":\"\($0)\"" } ?? ""
+            let object = "{\"v\":1,\"type\":\"error\",\"code\":\"\(code)\",\"message\":\"\(message)\"\(extra)}"
+            return CLIResult(status: 1, stdout: object + "\n", stderr: stderr ?? "lucille-host: \(message)\n", timedOut: false)
+        }
         let usage = CLIResult(
-            status: 2, stdout: "",
+            status: 2,
+            stdout: #"{"v":1,"type":"error","code":"usage","message":"the command line could not be parsed; standard error says why"}"# + "\n",
             stderr: """
                 usage: lucille-host roots add [-h] [--allow-home-or-root] alias path
                        more usage
@@ -136,65 +176,132 @@ struct SelfTest {
         report.expect(HostText.explain(usage) == Explanation(
                           message: "Something went wrong in \(HostText.appName)'s helper program.",
                           detail: "the following arguments are required: path"),
-                      "a usage error is a plain sentence, with the host's words as the detail", "\(HostText.explain(usage))")
-        func refusal(_ text: String) -> CLIResult {
-            CLIResult(status: 1, stdout: "", stderr: "lucille-host: \(text)\n", timedOut: false)
-        }
-        let plain = [
-            ("no folder alias 'x'", "That folder was already removed."),
-            ("taxes is already a folder alias; remove it first",
-             "You already have a folder named taxes. Choose another name."),
-            ("the policy holds at most 64 folder aliases",
+                      "a usage error is a plain sentence, with the parser's words as the detail", "\(HostText.explain(usage))")
+        let plain: [(String, String, String)] = [
+            ("no_such_alias", "no folder alias 'x'", "That folder was already removed."),
+            ("too_many_roots", "the policy holds at most 64 folder aliases",
              "\(HostText.appName) can use at most 64 folders. Remove one before you add another."),
-            ("/Users/a/Library/Application Support/lucille-host is where lucille-host keeps its own files",
+            ("own_folder", "/Users/a/Library/Application Support/lucille-host is where lucille-host keeps its own files",
              "That folder holds \(HostText.appName)'s own settings, so it can't be added."),
-            ("the policy file /x/policy.json is invalid: ops.files.sha256.definition must be 64 lowercase hex digits",
+            ("policy_invalid", "the policy file /x/policy.json is invalid: ops.files.sha256.definition must be 64 lowercase hex digits",
              "\(HostText.appName)'s settings file can't be read."),
-            ("cannot lock /x/.policy.lock (Operation not supported), so the policy was not changed",
+            ("policy_lock_failed", "cannot lock /x/.policy.lock (Operation not supported), so the policy was not changed",
              "\(HostText.appName) couldn't lock its settings file, so nothing was changed. Try again."),
-            ("files.sha256 is not enabled", "That ability was already off."),
-            ("/gone is not a folder", "That folder is no longer there."),
-            ("something new", "Something went wrong in \(HostText.appName)'s helper program."),
+            ("not_enabled", "files.sha256 is not enabled", "That ability was already off."),
+            ("not_a_folder", "/gone is not a folder", "That folder is no longer there."),
+            ("not_in_catalog", "host.nothing is not in this release's catalog",
+             "This version of \(HostText.appName) doesn't have that ability."),
+            ("unavailable", "files.sha256 cannot run here: /usr/bin/shasum is missing", "This Mac lacks a program that ability needs."),
+            ("bad_alias", "an alias is lowercase letters, digits, '-' and '_', starting with a letter, at most 32",
+             "That name can't be used."),
+            ("broad_folder", "/Users/a is your home folder, holds it, or is /; add --allow-home-or-root to mean it",
+             "That folder is your home folder, holds it, or is your whole disk."),
+            ("on_proc", "/proc/x is on /proc", "That folder can't be used."),
+            ("unstorable_path", "a path with an unpaired surrogate cannot be stored",
+             "That folder's location can't be stored in \(HostText.appName)'s settings."),
+            ("os_error", "No space left on device (/x/policy.toml)", "Something went wrong in \(HostText.appName)'s helper program."),
+            ("internal", "Traceback", "Something went wrong in \(HostText.appName)'s helper program."),
+            ("brand_new", "something new", "Something went wrong in \(HostText.appName)'s helper program."),
         ]
-        for (text, message) in plain {
-            let got = HostText.explain(refusal(text))
-            report.expect(got.message == message && got.detail == text,
-                          "the refusal \(text.debugDescription) reads as \(message.debugDescription)", "\(got)")
+        for (code, message, sentence) in plain {
+            let got = HostText.explain(refused(code, message))
+            report.expect(got.message == sentence && got.detail == message && got.offersReset == (code == "policy_invalid"),
+                          "the refusal \(code) reads as \(sentence.debugDescription), with the host's words as the detail", "\(got)")
         }
+        report.expect(HostText.maxFolders == 64, "the most folders is the host's 64")
+        // A refusal that says things are already as the user asked shows no note: by its code,
+        // and only for the change it answers.
+        report.expect(HostText.alreadyOff == ["not_enabled"] && HostText.alreadyRemoved == ["no_such_alias"],
+                      "an ability already off and a folder already gone are the refusals that mean done")
+        report.expect(HostText.alreadyDone(refused("not_enabled", "files.sha256 is not enabled"), codes: HostText.alreadyOff)
+                          && HostText.alreadyDone(refused("no_such_alias", "no folder alias 'x'"), codes: HostText.alreadyRemoved),
+                      "turning off an ability that is off, and removing a folder that is gone, are done")
+        let wordsOfDone = CLIResult(status: 1, stdout: "", stderr: "lucille-host: files.sha256 is not enabled\n", timedOut: false)
+        report.expect(!HostText.alreadyDone(refused("not_enabled", "files.sha256 is not enabled"), codes: HostText.alreadyRemoved)
+                          && !HostText.alreadyDone(refused("no_such_alias", "no folder alias 'x'"), codes: HostText.alreadyOff)
+                          && !HostText.alreadyDone(refused("not_enabled", "files.sha256 is not enabled"), codes: [])
+                          && !HostText.alreadyDone(refused("policy_lock_failed", "cannot lock /x/.policy.lock"),
+                                                   codes: HostText.alreadyOff.union(HostText.alreadyRemoved))
+                          && !HostText.alreadyDone(wordsOfDone, codes: HostText.alreadyOff)
+                          && !HostText.alreadyDone(CLIResult(status: 0, stdout: "", stderr: "", timedOut: false), codes: HostText.alreadyOff),
+                      "no other refusal is, nor one for another change, nor words on standard error, nor a run that succeeded")
+        // The code decides, never the words (spec/CLI.md §2): a refusal reads as its code says
+        // whatever its message, and words on standard error with no error object are no refusal.
+        let notEnabledInOtherWords = HostText.explain(refused("not_enabled", "the policy file /x/policy.toml is invalid: y"))
+        report.expect(notEnabledInOtherWords.message == "That ability was already off." && !notEnabledInOtherWords.offersReset,
+                      "a refusal reads as its code, whatever its words", "\(notEnabledInOtherWords)")
+        let invalidInOtherWords = HostText.explain(refused("policy_invalid", "something else"))
+        report.expect(invalidInOtherWords.offersReset && invalidInOtherWords.message == "\(HostText.appName)'s settings file can't be read.",
+                      "policy_invalid offers Reset Settings, whatever its words", "\(invalidInOtherWords)")
+        let wordsOnly = CLIResult(status: 1, stdout: "", stderr: "lucille-host: the policy file /x/policy.toml is invalid: y\n", timedOut: false)
+        report.expect(!HostText.explain(wordsOnly).offersReset
+                          && HostText.explain(wordsOnly).message == "Something went wrong in \(HostText.appName)'s helper program."
+                          && HostText.explain(wordsOnly).detail == "the policy file /x/policy.toml is invalid: y",
+                      "words on standard error with no error object are shown, never read", "\(HostText.explain(wordsOnly))")
+        report.expect(HostText.explain(refused("too_many_roots", "the policy holds at most 7 folder aliases")).message
+                          == "\(HostText.appName) can use at most 64 folders. Remove one before you add another.",
+                      "the most folders is never read from the host's words")
+        let warned = refused("not_enabled", "files.sha256 is not enabled",
+                             stderr: "lucille-host: warning: something else\nlucille-host: files.sha256 is not enabled\n")
+        report.expect(HostText.explain(warned).detail == "files.sha256 is not enabled",
+                      "the detail is the error object's message, not every line of standard error", "\(HostText.explain(warned))")
         // Reset Settings… is offered for a settings file that can't be read, and for nothing else
         // (decisions/0002 §14).
-        let unreadable = HostText.explain(refusal("the policy file /x/policy.toml is invalid: /x/policy.toml is not valid TOML"))
-        report.expect(unreadable.offersReset && unreadable.message == "\(HostText.appName)'s settings file can't be read.",
-                      "a settings file that can't be read offers Reset Settings", "\(unreadable)")
-        for (text, _) in plain {
-            report.expect(HostText.explain(refusal(text)).offersReset == text.hasPrefix("the policy file "),
-                          "the refusal \(text.debugDescription) offers Reset Settings only if it is the settings file's")
-        }
         report.expect(!HostText.explain(usage).offersReset
-                          && !HostText.explain(refusal("the earlier policy /x/policy.previous.toml is invalid: x")).offersReset
+                          && !HostText.explain(refused("previous_invalid", "the earlier policy /x/policy.previous.toml is invalid: x")).offersReset
                           && !HostText.explain(CLIResult(status: 15, stdout: "", stderr: "", timedOut: true)).offersReset,
                       "nor does a usage error, the policy a pairing set aside, or a run that took too long")
         let late = CLIResult(status: 15, stdout: "", stderr: "", timedOut: true)
-        let adding = HostText.Activity.addingFolder(.visible)
+        let adding = HostText.Activity.addingFolder(.visible, alias: "taxes")
         report.expect(HostText.explain(late, during: adding).message.hasPrefix("Checking this folder took too long")
                           && HostText.explain(late, during: adding).message.contains("If macOS asked")
                           && HostText.explain(late).message != HostText.explain(late, during: adding).message
                           && !HostText.needsHomeConfirmation(late),
                       "a timeout has its own words, and says more while adding a folder")
+        // A home folder is asked about when the host refuses broad_folder, a code.
+        report.expect(HostText.needsHomeConfirmation(refused("broad_folder", "/Users/a is your home folder, holds it, or is /; add --allow-home-or-root to mean it", kind: "home")),
+                      "broad_folder asks about the home folder")
+        report.expect(!HostText.needsHomeConfirmation(refused("not_a_folder", "/x mentions --allow-home-or-root"))
+                          && !HostText.needsHomeConfirmation(CLIResult(
+                              status: 1, stdout: "",
+                              stderr: "lucille-host: /Users/a is your home folder, holds it, or is /; add --allow-home-or-root to mean it\n",
+                              timedOut: false)),
+                      "no other refusal does, whatever its words, nor words on standard error alone")
+        // Which question it is: the host's kind says whether it is the home folder itself, whatever
+        // path it was chosen by; any other is a folder that holds it.
+        let broadKinds: [BroadFolder] = [
+            HostText.refusedBroadFolder(refused("broad_folder", "/System/Volumes/Data/Users/a is your home folder, holds it, or is /; add --allow-home-or-root to mean it", kind: "home")),
+            HostText.refusedBroadFolder(refused("broad_folder", "/Users is your home folder, holds it, or is /; add --allow-home-or-root to mean it", kind: "holds_home")),
+            HostText.refusedBroadFolder(refused("broad_folder", "/Users is your home folder, holds it, or is /")),
+            HostText.refusedBroadFolder(refused("not_a_folder", "/x is not a folder", kind: "home")),
+        ]
+        report.expect(broadKinds == [.home, .holdsHome, .holdsHome, .holdsHome],
+                      "the question after broad_folder is the home folder's only when the host's kind is home", "\(broadKinds)")
+        // The alias a refusal names is the one the app asked for, never read from the host's words.
+        let taken = refused("alias_taken", "receipts is already a folder alias; remove it first")
+        report.expect(HostText.explain(taken, during: adding).message == "You already have a folder named taxes. Choose another name."
+                          && HostText.explain(taken, during: adding).detail == "receipts is already a folder alias; remove it first",
+                      "a name in use is refused in plain words, with the alias the app asked for", "\(HostText.explain(taken, during: adding))")
+        let takenInWords = CLIResult(status: 1, stdout: "", stderr: "lucille-host: receipts is already a folder alias; remove it first\n", timedOut: false)
+        report.expect(HostText.nameTaken(taken) && !HostText.nameTaken(refused("bad_alias", "x is not an alias"))
+                          && !HostText.nameTaken(takenInWords) && !HostText.nameTaken(late),
+                      "a name in use asks for another name, by its code alone")
 
         // macOS's privacy protection: the host sees no folder, or gets EPERM, where the app sees one.
-        let notAFolder = refusal("/Users/a/Documents/Taxes is not a folder")
-        report.expect(HostText.explain(notAFolder, during: .addingFolder(.visible)).message == HostText.blockedByMacOS
-                          && HostText.explain(notAFolder, during: .addingFolder(.blocked)).message == HostText.blockedByMacOS,
+        let notAFolder = refused("not_a_folder", "/Users/a/Documents/Taxes is not a folder")
+        report.expect(HostText.explain(notAFolder, during: .addingFolder(.visible, alias: "taxes")).message == HostText.blockedByMacOS
+                          && HostText.explain(notAFolder, during: .addingFolder(.blocked, alias: "taxes")).message == HostText.blockedByMacOS,
                       "a folder the app can see, or is refused too, is blocked by macOS")
-        report.expect(HostText.explain(notAFolder, during: .addingFolder(.missing)).message == "That folder is no longer there."
+        report.expect(HostText.explain(notAFolder, during: .addingFolder(.missing, alias: "taxes")).message == "That folder is no longer there."
                           && HostText.explain(notAFolder).message == "That folder is no longer there.",
                       "a folder nobody can see is gone")
-        let eperm = refusal("Operation not permitted (/Users/a/Documents)")
-        report.expect(HostText.explain(eperm, during: .addingFolder(.visible)).message == HostText.blockedByMacOS
-                          && HostText.explain(eperm, during: .addingFolder(.visible)).detail == "Operation not permitted (/Users/a/Documents)"
-                          && HostText.explain(eperm).message != HostText.blockedByMacOS,
-                      "EPERM while adding a folder is blocked by macOS, with the host's words as the detail")
+        // A file error the host names is not read as macOS's: its code does not say which file it
+        // was. It is the helper program's, with the host's words as the detail.
+        let eperm = refused("os_error", "Operation not permitted (/Users/a/Documents)")
+        report.expect(HostText.explain(eperm, during: .addingFolder(.visible, alias: "taxes")).message == ConnectionText.appBug
+                          && HostText.explain(eperm, during: .addingFolder(.visible, alias: "taxes")).detail == "Operation not permitted (/Users/a/Documents)"
+                          && HostText.explain(eperm).message == ConnectionText.appBug,
+                      "a file error while adding a folder reads as the helper program's, with the host's words as the detail")
         report.expect(HostText.blockedByMacOS.contains("Privacy & Security") && HostText.blockedByMacOS.contains("Files & Folders"),
                       "it says where to allow it", HostText.blockedByMacOS)
 
@@ -208,7 +315,7 @@ struct SelfTest {
                           && HostText.explain(late, during: adding, earlierRunStuck: true).message == HostText.stuckRun
                           && HostText.explain(blockedLater, earlierRunStuck: true).message == HostText.stuckRun,
                       "a later run that times out or is cancelled names the stuck one, not its own folder")
-        report.expect(HostText.explain(refusal("files.sha256 is not enabled"), earlierRunStuck: true).message
+        report.expect(HostText.explain(refused("not_enabled", "files.sha256 is not enabled"), earlierRunStuck: true).message
                           == "That ability was already off.",
                       "a refusal is still its own, whatever else is stuck")
 
@@ -250,9 +357,6 @@ struct SelfTest {
         report.expect(HostText.welcomeText.hasPrefix(HostText.appPurpose + "\n\n")
                           && HostText.appPurpose.hasPrefix("\(HostText.appName) lets Lucille use only the folders you choose"),
                       "the welcome first says what the app is for", HostText.welcomeText)
-        let detailed = Ability(name: "files.sha256", state: "disabled")
-        report.expect(detailed.detail == HostText.abilityDetails["files.sha256"] && detailed.detail?.contains("not the contents") == true,
-                      "an ability says what Lucille gets")
         let broken = CLIResult(status: CLIResult.notStarted, stdout: "", stderr: "no such file", timedOut: false)
         report.expect(HostText.explain(broken) == Explanation(message: "\(HostText.appName) is damaged. Download it again.",
                                                               detail: "no such file"),
@@ -272,12 +376,45 @@ struct SelfTest {
             report.expect(question.text.contains("Documents, Desktop and Downloads") && question.text.contains("Library"),
                           "the question for \(kind) says what is inside")
         }
+        // roots add with --json first, and -- before the alias and the path, so that neither is
+        // read as an option (spec/CLI.md §3 and §7).
         let confirmedHome = HostText.addFolderArguments(alias: "home", path: "/Users/a", confirmedHome: true)
-        report.expect(confirmedHome == ["roots", "add", "home", "/Users/a", "--allow-home-or-root"],
-                      "a confirmed home folder gets --allow-home-or-root", "\(confirmedHome)")
+        report.expect(confirmedHome == ["--json", "roots", "add", "--allow-home-or-root", "--", "home", "/Users/a"],
+                      "a confirmed home folder gets --allow-home-or-root, before --", "\(confirmedHome)")
         let unconfirmedHome = HostText.addFolderArguments(alias: "home", path: "/Users/a", confirmedHome: false)
-        report.expect(unconfirmedHome == ["roots", "add", "home", "/Users/a"],
+        report.expect(unconfirmedHome == ["--json", "roots", "add", "--", "home", "/Users/a"],
                       "an unconfirmed one does not", "\(unconfirmedHome)")
+        let dashed = HostText.addFolderArguments(alias: "docs", path: "-notes", confirmedHome: false)
+        report.expect(dashed == ["--json", "roots", "add", "--", "docs", "-notes"],
+                      "a path that starts with - comes after --, so it is never read as an option", "\(dashed)")
+
+        // The name dialog starts from the host's suggestion (spec/CLI.md §9.1). A path that starts
+        // with - is written --suggest-alias=<path> (§7). When the host's answer can't be used, the
+        // dialog starts from the app's own suggestion instead, and says nothing about it.
+        let cafe = "Caf\u{E9} Notes"
+        report.expect(HostText.suggestAliasArguments(path: "/Users/a/" + cafe)
+                          == ["--json", "roots", "add", "--suggest-alias", "/Users/a/" + cafe],
+                      "the app asks the host for a folder's alias", "\(HostText.suggestAliasArguments(path: "/Users/a/" + cafe))")
+        report.expect(HostText.suggestAliasArguments(path: "-notes") == ["--json", "roots", "add", "--suggest-alias=-notes"]
+                          && HostText.suggestAliasArguments(path: "--json") == ["--json", "roots", "add", "--suggest-alias=--json"],
+                      "a path that starts with - is written --suggest-alias=<path>", "\(HostText.suggestAliasArguments(path: "-notes"))")
+        let hostSaid = VerbOutcome.done([.aliasSuggestion("cafe-notes-2")])
+        report.expect(HostText.suggestion(hostSaid, folderName: cafe, taken: ["cafe-notes"]) == "cafe-notes-2",
+                      "the name dialog starts from the host's suggestion")
+        let otherScript = "\u{65E5}\u{672C}\u{8A9E}"
+        report.expect(HostText.suggestion(.done([.aliasSuggestion("folder")]), folderName: otherScript, taken: []) == "folder",
+                      "the host's suggestion, even where the app's own would differ")
+        let own = Alias.suggest(forFolderName: cafe, taken: ["cafe-notes"])
+        report.expect(own == "cafe-notes-2", "the app's own suggestion skips an alias in use", own)
+        let unusable: [VerbOutcome] = [
+            .done([]), .signaled, .timedOut, .cancelled, .notStarted, .notFinished, .otherExit(3),
+            .refused(HostError(code: "policy_invalid", message: "m", kind: nil)),
+            .done([.aliasSuggestion("Cafe Notes")]), .done([.aliasSuggestion("cafe-notes")]),
+        ]
+        for outcome in unusable {
+            report.expect(HostText.suggestion(outcome, folderName: cafe, taken: ["cafe-notes"]) == own,
+                          "with no answer it can use, the dialog starts from the app's own suggestion", "\(outcome)")
+        }
 
         // The whole disk is refused outright: never asked about, and never given the flag.
         let wholeDisk = ["/", "/System", "/System/Volumes", "/System/Volumes/Data",
@@ -287,7 +424,7 @@ struct SelfTest {
             report.expect(HostText.broadFolder(path: disk, home: "/Users/a") == nil,
                           "\(disk) is not asked about, as the home folder is")
             report.expect(HostText.addFolderArguments(alias: "disk", path: disk, confirmedHome: true)
-                              == ["roots", "add", "disk", disk],
+                              == ["--json", "roots", "add", "--", "disk", disk],
                           "\(disk) never gets --allow-home-or-root, even confirmed")
         }
         for folder in ["/Users", "/Users/a", "/System/Volumes/Data/Users", "/System/Library",
@@ -317,23 +454,26 @@ struct SelfTest {
                       "the interpreter runs isolated, in UTF-8 mode, without writing bytecode, on the app's own profile")
         report.expect(env["PATH"] == "/var/empty", "PATH names an empty folder", "\(env["PATH"] ?? "none")")
 
-        let shown = cli.run(["--version"])
-        report.expect(shown.succeeded && HostText.version(fromVersionOutput: shown.stdout) == version,
-                      "--version gives \(version)", "\(shown)")
+        // The menu's own verbs, as it runs them: with --json first (spec/CLI.md §3 and §7).
+        let shown = VerbOutcome(cli.run(["--json", "--version"]))
+        report.expect(shown.hostVersion == version, "--json --version gives \(version)", "\(shown)")
 
-        let ops = cli.run(["ops", "list"])
-        let abilities = HostText.abilities(fromList: ops.stdout)
-        report.expect(ops.succeeded && !abilities.isEmpty, "ops list gives \(abilities.count) abilities",
-                      "\(ops)")
-        if let off = abilities.first(where: { $0.state == "disabled" }) {
-            let on = cli.run(["ops", "enable", off.name])
-            let after = HostText.abilities(fromList: cli.run(["ops", "list"]).stdout)
-            report.expect(on.succeeded && after.first(where: { $0.name == off.name })?.isOn == true,
-                          "turning \(off.name) on shows a checkmark", "\(on)")
-            let back = cli.run(["ops", "disable", off.name])
-            let again = HostText.abilities(fromList: cli.run(["ops", "list"]).stdout)
-            report.expect(back.succeeded && again.first(where: { $0.name == off.name })?.isOn == false,
-                          "turning it off again removes it", "\(back)")
+        let ops = VerbOutcome(cli.run(["--json", "ops", "list"]))
+        let abilities = ops.abilities
+        report.expect(!abilities.isEmpty && abilities.filter(\.isShown).map(\.title).contains("Check a file's fingerprint"),
+                      "ops list --json gives \(abilities.count) abilities, in the core's words", "\(ops)")
+        if let off = abilities.first(where: { $0.state == .disabled }) {
+            // The switch follows the host's answer: the op object each change writes.
+            let on = VerbOutcome(cli.run(["--json", "ops", "enable", off.name]))
+            let after = VerbOutcome(cli.run(["--json", "ops", "list"])).abilities
+            report.expect(on.ability?.name == off.name && on.ability?.isOn == true
+                              && after.first(where: { $0.name == off.name })?.isOn == true,
+                          "turning \(off.name) on answers with it on, and shows a checkmark", "\(on)")
+            let back = VerbOutcome(cli.run(["--json", "ops", "disable", off.name]))
+            let again = VerbOutcome(cli.run(["--json", "ops", "list"])).abilities
+            report.expect(back.ability?.name == off.name && back.ability?.isOn == false
+                              && again.first(where: { $0.name == off.name })?.isOn == false,
+                          "turning it off again answers with it off, and removes it", "\(back)")
         } else {
             print("note: no ability is plainly off here, so the switch round trip was skipped")
         }
@@ -351,39 +491,59 @@ struct SelfTest {
 
         let folder = URL(fileURLWithPath: home).appendingPathComponent("My Project Files")
         try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
-        let alias = Alias.suggest(forFolderName: folder.lastPathComponent)
-        report.expect(alias == "my-project-files", "the folder's suggested alias", alias)
-        let added = cli.run(["roots", "add", alias, folder.path])
-        report.expect(added.succeeded, "roots add \(alias)", "\(added)")
-        let listed = HostText.folders(fromList: cli.run(["roots", "list"]).stdout)
-        report.expect(listed == [Folder(alias: alias, path: folder.path)], "the folder is listed", "\(listed)")
-        let removed = cli.run(["roots", "remove", alias])
-        report.expect(removed.succeeded && HostText.folders(fromList: cli.run(["roots", "list"]).stdout).isEmpty,
+        // The name dialog's suggestion is the host's (spec/CLI.md §9.1).
+        let asked = VerbOutcome(cli.run(HostText.suggestAliasArguments(path: folder.path)))
+        let alias = HostText.suggestion(asked, folderName: folder.lastPathComponent, taken: [])
+        report.expect(asked.aliasSuggestion == "my-project-files" && alias == "my-project-files",
+                      "the host suggests the folder's alias, and the name dialog starts from it", "\(asked)")
+        let added = VerbOutcome(cli.run(HostText.addFolderArguments(alias: alias, path: folder.path, confirmedHome: false)))
+        report.expect(added.folder == Folder(alias: alias, path: folder.path, broad: false),
+                      "roots add -- \(alias) answers with the folder", "\(added)")
+        let listed = VerbOutcome(cli.run(["--json", "roots", "list"])).folders
+        report.expect(listed == [Folder(alias: alias, path: folder.path, broad: false)], "the folder is listed", "\(listed)")
+        let next = VerbOutcome(cli.run(HostText.suggestAliasArguments(path: folder.path)))
+        report.expect(next.aliasSuggestion == "my-project-files-2"
+                          && HostText.suggestion(next, folderName: folder.lastPathComponent, taken: [alias]) == "my-project-files-2",
+                      "with that alias taken, the host suggests the next one", "\(next)")
+        // A path that starts with -: the host reads --suggest-alias=<path> as the path, where the
+        // form with a space would be a usage error.
+        let dashed = VerbOutcome(cli.run(HostText.suggestAliasArguments(path: "-dash")))
+        let spaced = VerbOutcome(cli.run(["--json", "roots", "add", "--suggest-alias", "-dash"]))
+        report.expect(dashed.aliasSuggestion == "dash" && spaced.error?.code == "usage",
+                      "a path that starts with - is passed as --suggest-alias=<path>", "\(dashed) \(spaced)")
+        let removed = VerbOutcome(cli.run(["--json", "roots", "remove", alias]))
+        report.expect(removed.removedFolder == alias && VerbOutcome(cli.run(["--json", "roots", "list"])).folders.isEmpty,
                       "roots remove \(alias)", "\(removed)")
-        let missing = cli.run(["roots", "remove", alias])
-        report.expect(!missing.succeeded && HostText.explain(missing).message == "That folder was already removed.",
-                      "removing it twice is refused in plain words", "\(HostText.explain(missing))")
+        let missing = cli.run(["--json", "roots", "remove", alias])
+        report.expect(VerbOutcome(missing).error?.code == "no_such_alias"
+                          && HostText.alreadyDone(missing, codes: HostText.alreadyRemoved)
+                          && HostText.explain(missing).message == "That folder was already removed.",
+                      "removing it twice is refused no_such_alias, in plain words", "\(HostText.explain(missing))")
 
-        report.expect(cli.run(["roots", "add", alias, folder.path]).succeeded, "roots add \(alias) again")
-        let twice = cli.run(["roots", "add", alias, folder.path])
-        report.expect(!twice.succeeded
-                          && HostText.explain(twice).message == "You already have a folder named \(alias). Choose another name.",
-                      "a name in use is refused in plain words", "\(HostText.explain(twice))")
-        report.expect(cli.run(["roots", "remove", alias]).succeeded, "roots remove \(alias) again")
+        report.expect(VerbOutcome(cli.run(HostText.addFolderArguments(alias: alias, path: folder.path, confirmedHome: false))).folder != nil,
+                      "roots add \(alias) again")
+        let twice = cli.run(HostText.addFolderArguments(alias: alias, path: folder.path, confirmedHome: false))
+        let naming = HostText.Activity.addingFolder(HostText.access(of: folder.path), alias: alias)
+        report.expect(VerbOutcome(twice).error?.code == "alias_taken" && HostText.nameTaken(twice)
+                          && HostText.explain(twice, during: naming).message == "You already have a folder named \(alias). Choose another name.",
+                      "a name in use is refused alias_taken, in plain words", "\(HostText.explain(twice, during: naming))")
+        report.expect(VerbOutcome(cli.run(["--json", "roots", "remove", alias])).removedFolder == alias, "roots remove \(alias) again")
         let own = URL(fileURLWithPath: home).appendingPathComponent("Library/Application Support/lucille-host")
-        let ownFolder = cli.run(["roots", "add", "own", own.path])
-        report.expect(!ownFolder.succeeded
+        let ownFolder = cli.run(HostText.addFolderArguments(alias: "own", path: own.path, confirmedHome: false))
+        report.expect(VerbOutcome(ownFolder).error?.code == "own_folder"
                           && HostText.explain(ownFolder).message == "That folder holds \(HostText.appName)'s own settings, so it can't be added.",
-                      "the host's own folder is refused in plain words", "\(HostText.explain(ownFolder))")
-        let off = cli.run(["ops", "disable", "files.sha256"])
-        report.expect(!off.succeeded && HostText.explain(off).message == "That ability was already off.",
-                      "turning off an ability that is off is refused in plain words", "\(HostText.explain(off))")
+                      "the host's own folder is refused own_folder, in plain words", "\(HostText.explain(ownFolder))")
+        let off = cli.run(["--json", "ops", "disable", "files.sha256"])
+        report.expect(VerbOutcome(off).error?.code == "not_enabled" && HostText.alreadyDone(off, codes: HostText.alreadyOff)
+                          && HostText.explain(off).message == "That ability was already off.",
+                      "turning off an ability that is off is refused not_enabled, in plain words", "\(HostText.explain(off))")
 
         let broad = cli.run(HostText.addFolderArguments(alias: "home", path: home, confirmedHome: false))
-        report.expect(HostText.needsHomeConfirmation(broad), "the home folder needs confirmation", "\(broad)")
+        report.expect(HostText.needsHomeConfirmation(broad) && HostText.refusedBroadFolder(broad) == .home,
+                      "the home folder needs confirmation, asked as the home folder", "\(broad)")
         let confirmed = cli.run(HostText.addFolderArguments(alias: "home", path: home, confirmedHome: true))
         report.expect(confirmed.succeeded, "and is added once confirmed", "\(confirmed)")
-        report.expect(cli.run(["roots", "remove", "home"]).succeeded, "and removed again")
+        report.expect(VerbOutcome(cli.run(["--json", "roots", "remove", "home"])).removedFolder == "home", "and removed again")
 
         // The whole disk, and a link to it: the command line the app builds, even confirmed, is
         // refused by the host, so nothing is added.
@@ -396,26 +556,26 @@ struct SelfTest {
             for path in [target, link] {
                 let refused = cli.run(HostText.addFolderArguments(alias: "disk", path: path, confirmedHome: true))
                 report.expect(HostText.needsHomeConfirmation(refused)
-                                  && HostText.folders(fromList: cli.run(["roots", "list"]).stdout).isEmpty,
+                                  && VerbOutcome(cli.run(["--json", "roots", "list"])).folders.isEmpty,
                               "the host refuses \(path) as the app asks to add it, and nothing is added", "\(refused)")
             }
             try? FileManager.default.removeItem(atPath: link)
         }
 
-        let slow = HostCLI(python: cli.python, home: home, timeout: 0.001).run(["ops", "list"])
+        let slow = HostCLI(python: cli.python, home: home, timeout: 0.001).run(["--json", "ops", "list"])
         report.expect(slow.timedOut && !slow.succeeded, "a run past its time limit is stopped", "\(slow)")
-        let short = cli.run(["ops", "list"], timeout: 0.001)
+        let short = cli.run(["--json", "ops", "list"], timeout: 0.001)
         report.expect(short.timedOut && !short.succeeded, "one run can have its own time limit", "\(short)")
-        let long = HostCLI(python: cli.python, home: home, timeout: 0.001).run(["ops", "list"], timeout: 60)
+        let long = HostCLI(python: cli.python, home: home, timeout: 0.001).run(["--json", "ops", "list"], timeout: 60)
         report.expect(long.succeeded, "a longer one too", "\(long)")
         let token = CancelToken()
         token.cancel()
         let started = Date()
-        let cancelled = cli.run(["ops", "list"], cancel: token)
+        let cancelled = cli.run(["--json", "ops", "list"], cancel: token)
         report.expect(cancelled.cancelled && !cancelled.succeeded && !cancelled.timedOut
                           && Date().timeIntervalSince(started) < 5,
                       "a cancelled run is stopped at once", "\(cancelled)")
-        let absent = HostCLI(python: URL(fileURLWithPath: "/nonexistent/python3"), home: home).run(["--version"])
+        let absent = HostCLI(python: URL(fileURLWithPath: "/nonexistent/python3"), home: home).run(["--json", "--version"])
         report.expect(absent.status == CLIResult.notStarted && !absent.stderr.isEmpty,
                       "a missing interpreter is reported, not a crash", "\(absent)")
 
@@ -432,16 +592,23 @@ struct SelfTest {
         try? FileManager.default.createDirectory(at: profile, withIntermediateDirectories: true)
         report.expect(FileManager.default.createFile(atPath: settingsFile, contents: notToml),
                       "a settings file the host cannot read is written")
-        let unreadable = cli.run(["ops", "list"])
-        report.expect(!unreadable.succeeded && HostText.explain(unreadable).offersReset
+        let unreadable = cli.run(["--json", "ops", "list"])
+        report.expect(VerbOutcome(unreadable).error?.code == "policy_invalid" && HostText.explain(unreadable).offersReset
                           && HostText.explain(unreadable).message == "\(HostText.appName)'s settings file can't be read.",
-                      "ops list refuses it, in words that offer Reset Settings", "\(HostText.explain(unreadable))")
+                      "ops list refuses it policy_invalid, in words that offer Reset Settings", "\(HostText.explain(unreadable))")
+        // The host's suggestion reads the policy too: the name dialog then starts from the app's
+        // own suggestion, and says nothing about it.
+        let unsuggested = VerbOutcome(cli.run(HostText.suggestAliasArguments(path: folder.path)))
+        report.expect(unsuggested.error?.code == "policy_invalid"
+                          && HostText.suggestion(unsuggested, folderName: folder.lastPathComponent, taken: [])
+                          == Alias.suggest(forFolderName: folder.lastPathComponent),
+                      "when the host can't suggest an alias, the dialog starts from the app's own", "\(unsuggested)")
         let reset = ResetOutcome(VerbOutcome(cli.run(["--json", "policy", "reset"])))
         report.expect(reset == .reset && FileManager.default.contents(atPath: setAside) == notToml,
                       "policy reset --json sets the file aside as policy.invalid.toml", "\(reset)")
-        let afresh = HostText.abilities(fromList: cli.run(["ops", "list"]).stdout)
+        let afresh = VerbOutcome(cli.run(["--json", "ops", "list"])).abilities
         report.expect(afresh.filter(\.isOn).map(\.name) == ["host.describe"]
-                          && HostText.folders(fromList: cli.run(["roots", "list"]).stdout).isEmpty,
+                          && VerbOutcome(cli.run(["--json", "roots", "list"])).folders.isEmpty,
                       "the fresh policy has only host.describe on, and no folder", "\(afresh)")
         let again = ResetOutcome(VerbOutcome(cli.run(["--json", "policy", "reset"])))
         report.expect(again == .nothingToReset && FileManager.default.contents(atPath: setAside) == notToml,
@@ -968,8 +1135,78 @@ extension SelfTest {
             let text = #"{"v":1,"type":"pair","state":"sas_pending","name":"p","sas":""# + sas + #"","deadline":"2026-11-01T12:00:00Z"}"#
             report.expect(!isObject(line(text)), "a SAS of another shape (\(sas)) is never read")
         }
-        report.expect(line(#"{"v":1,"type":"version","host_version":"1","contract":"1.0"}"#) == .object(.unknown(type: "version")),
-                      "a type the app does not use is ignored")
+        report.expect(line(#"{"v":1,"type":"moon","phase":"full"}"#) == .object(.unknown(type: "moon")),
+                      "a type this release does not know is ignored")
+
+        // What the menu reads (spec/CLI.md §6 and §7): the version, the abilities and the folders,
+        // what each change answered, a folder's check, and the alias the host suggests. The
+        // switch's position and the question before an ability that sends file contents are
+        // fields, read as booleans: an operation of the catalog without one is not read at all,
+        // never read as off.
+        report.expect(HostObject.knownTypes.isSuperset(of: ["version", "op", "op_removed", "root", "root_removed",
+                                                            "root_check", "alias_suggestion"]),
+                      "the menu's types are among those the app reads", "\(HostObject.knownTypes.sorted())")
+        report.expect(line(#"{"v":1,"type":"version","host_version":"0.1.0","contract":"1.0"}"#)
+                          == .object(.version(hostVersion: "0.1.0", contract: "1.0"))
+                          && !isObject(line(#"{"v":1,"type":"version","host_version":"0.1.0"}"#)),
+                      "the version reads, and one with no contract is dropped")
+        let sha = #""name":"files.sha256","state":"disabled","enabled":false,"summary":"s","sends":"t","#
+        report.expect(isObject(line(#"{"v":1,"type":"op","# + sha + #""sends_file_content":true,"diagnostic":false}"#)),
+                      "an operation with every field reads")
+        let droppedOps: [(String, String)] = [
+            (sha + #""diagnostic":false"#, "no sends_file_content"),
+            (sha + #""sends_file_content":"no","diagnostic":false"#, "a sends_file_content that is not a boolean"),
+            (sha + #""sends_file_content":0,"diagnostic":false"#, "a sends_file_content that is a number"),
+            (sha + #""sends_file_content":false"#, "no diagnostic"),
+            (#""name":"files.sha256","state":"disabled","enabled":0,"summary":"s","sends":"t","sends_file_content":false,"diagnostic":false"#,
+             "an enabled that is a number"),
+            (#""name":"files.sha256","state":"disabled","summary":"s","sends":"t","sends_file_content":false,"diagnostic":false"#,
+             "no enabled"),
+            (#""name":"files.sha256","state":"moon","enabled":false,"summary":"s","sends":"t","sends_file_content":false,"diagnostic":false"#,
+             "a state this release does not know"),
+            (#""name":"files.sha256","state":"unavailable","enabled":true,"summary":"s","sends":"t","sends_file_content":false,"diagnostic":false"#,
+             "unavailable with no missing executable"),
+            (#""name":"files.sha256","state":"disabled","enabled":false,"sends_file_content":false,"diagnostic":false"#,
+             "no words"),
+            (#""name":"files.sha256","state":"disabled","enabled":false,"summary":"s","sends_file_content":false,"diagnostic":false"#,
+             "no sends"),
+            (#""name":"files.sha256","state":"disabled","enabled":false,"sends":"t","sends_file_content":false,"diagnostic":false"#,
+             "no summary"),
+        ]
+        for (fields, why) in droppedOps {
+            report.expect(!isObject(line(#"{"v":1,"type":"op","# + fields + "}")), "an operation with \(why) is dropped")
+        }
+        report.expect(line(#"{"v":1,"type":"op_removed","name":"host.nothing"}"#) == .object(.opRemoved(name: "host.nothing"))
+                          && !isObject(line(#"{"v":1,"type":"op_removed"}"#)),
+                      "an operation taken out of the policy reads by its name")
+        report.expect(line(#"{"v":1,"type":"root","alias":"docs","path":"/Users/a/Documents","broad":true}"#)
+                          == .object(.root(Folder(alias: "docs", path: "/Users/a/Documents", broad: true))),
+                      "a folder reads, with whether it is broad")
+        report.expect(!isObject(line(#"{"v":1,"type":"root","alias":"docs","path":"/Users/a/Documents"}"#))
+                          && !isObject(line(#"{"v":1,"type":"root","alias":"docs","path":"/Users/a/Documents","broad":"no"}"#))
+                          && !isObject(line(#"{"v":1,"type":"root","path":"/Users/a/Documents","broad":false}"#))
+                          && !isObject(line(#"{"v":1,"type":"root","alias":"docs","broad":false}"#)),
+                      "a folder with no broad, a broad that is not a boolean, no alias, or no path, is dropped")
+        report.expect(line(#"{"v":1,"type":"root_removed","alias":"docs"}"#) == .object(.rootRemoved(alias: "docs")),
+                      "a folder taken out reads by its alias")
+        report.expect(line(#"{"v":1,"type":"root_check","alias":"docs","path":"/x","state":"error","errno":"EIO"}"#)
+                          == .object(.rootCheck(FolderCheck(alias: "docs", path: "/x", state: .error(errno: "EIO"))))
+                          && line(#"{"v":1,"type":"root_check","alias":"docs","path":"/x","state":"denied_by_macos"}"#)
+                          == .object(.rootCheck(FolderCheck(alias: "docs", path: "/x", state: .deniedByMacOS)))
+                          && line(#"{"v":1,"type":"root_check","alias":"docs","path":"/x","state":"denied"}"#)
+                          == .object(.rootCheck(FolderCheck(alias: "docs", path: "/x", state: .denied))),
+                      "a folder's check reads, an error with its errno")
+        report.expect(!isObject(line(#"{"v":1,"type":"root_check","alias":"docs","path":"/x","state":"error"}"#))
+                          && !isObject(line(#"{"v":1,"type":"root_check","alias":"docs","path":"/x","state":"moon"}"#))
+                          && !isObject(line(#"{"v":1,"type":"root_check","alias":"docs","state":"ok"}"#))
+                          && !isObject(line(#"{"v":1,"type":"root_check","path":"/x","state":"ok"}"#)),
+                      "a check with no errno, a state this release does not know, no path, or no alias, is dropped")
+        report.expect(line(#"{"v":1,"type":"alias_suggestion","alias":"cafe-notes-2"}"#) == .object(.aliasSuggestion("cafe-notes-2")),
+                      "a suggested alias reads")
+        for bad in ["Cafe", "", "2026", "-x", "a b", String(repeating: "a", count: 33), "caf\u{E9}"] {
+            report.expect(!isObject(line(#"{"v":1,"type":"alias_suggestion","alias":""# + bad + #""}"#)),
+                          "a suggested alias the host would not take (\(bad.debugDescription)) is dropped")
+        }
 
         // Values a reader treats specially (spec/CLI.md §12).
         let frozen = line(#"{"v":1,"type":"state","pair":"p","confirmed":true,"paused":false,"policy":"frozen","last_hub_contact":null,"clock":{"state":"unknown"},"rooms":[],"offers_waiting":0,"last_left_because":null}"#)
@@ -1017,9 +1254,13 @@ extension SelfTest {
                           == .object(.logLine("a line, ? as the host wrote it")),
                       "a log line reads as the host wrote it")
         report.expect(!isObject(line(#"{"v":1,"type":"log_line"}"#)), "a log line with no text is dropped")
-        report.expect(line(#"{"v":1,"type":"op","name":"host.nothing","state":"not_in_catalog","enabled":false}"#)
-                          == .object(.op(name: "host.nothing", summary: nil)),
-                      "an operation this release does not have reads, with no summary")
+        if case .object(.op(let missing)) = line(#"{"v":1,"type":"op","name":"host.nothing","state":"not_in_catalog","enabled":false}"#) {
+            report.expect(missing.name == "host.nothing" && missing.state == .notInCatalog && missing.summary == nil
+                              && missing.sends == nil && !missing.enabled && !missing.sendsFileContent,
+                          "an operation this release does not have reads, with no summary", "\(missing)")
+        } else {
+            report.expect(false, "an operation this release does not have reads")
+        }
 
         // host_too_old's minimum is Lucille's, and the update notice shows it: it is read only in
         // the form the protocol gives it (spec/PROTOCOL.md §10), MAJOR.MINOR.PATCH, digits only,
@@ -1045,6 +1286,9 @@ extension SelfTest {
         let held = #"{"v":1,"type":"error","code":"held","message":"m"}"# + "\n"
         report.expect(VerbOutcome(result(1, held)) == .refused(HostError(code: "held", message: "m", kind: nil)),
                       "exit 1 with an error object last is a refusal")
+        report.expect(VerbOutcome(result(1, held)).error == HostError(code: "held", message: "m", kind: nil)
+                          && VerbOutcome(result(0, "")).error == nil && VerbOutcome(result(1, "")).error == nil,
+                      "a refusal's error object is read, and only a refusal's")
         report.expect(VerbOutcome(result(1, "")) == .signaled && VerbOutcome(result(2, ready + "\n")) == .signaled,
                       "exit 1 or 2 with no error object last was a signal")
         report.expect(VerbOutcome(result(1, held, signal: true)) == .signaled, "a signal is never read as an exit code")
@@ -1194,6 +1438,84 @@ extension SelfTest {
             RequestEvent(jobId: job(4), phase: .finished(.refused("host_too_old"))),
         ]
         report.expect(events == expected, "each request object reads with its job, its phase and that phase's fields", "\(events)")
+
+        // What the menu reads, from the host's own fixtures: the version, the abilities in the
+        // core's words, the folders, and what each change answered (spec/CLI.md §7).
+        for name in ["version", "version-json-after", "version-no-verb"] {
+            let objects = fixtures[name]?.objects ?? []
+            report.expect(objects == [.version(hostVersion: "0.1.0.dev0", contract: "1.0")]
+                              && VerbOutcome.done(objects).hostVersion == "0.1.0.dev0",
+                          "\(name) gives the host's version", "\(objects)")
+        }
+        let listed = VerbOutcome.done(fixtures["ops-list"]?.objects ?? []).abilities
+        report.expect(listed.map(\.name) == ["host.describe", "host.sleep", "files.sha256"]
+                          && listed.map(\.state) == [.enabled, .disabled, .disabled]
+                          && listed.map(\.isOn) == [true, false, false]
+                          && listed.map(\.diagnostic) == [false, true, false]
+                          && listed.allSatisfy({ !$0.sendsFileContent }),
+                      "ops list reads each operation in catalog order, its switch from enabled", "\(listed)")
+        let shown = listed.filter(\.isShown)
+        report.expect(shown.map(\.title) == ["Check a file's fingerprint"]
+                          && shown.map(\.detail) == ["Lucille gets a code that identifies the file's exact contents, not the contents."],
+                      "the menu lists files.sha256 alone, in the core's words", "\(shown)")
+        let every = VerbOutcome.done(fixtures["ops-list-every-state"]?.objects ?? []).abilities
+        report.expect(every.map(\.state) == [.disabled, .unavailable(missingExecutable: "/bin/sleep"), .disabledByUpgrade, .notInCatalog]
+                          && every.map(\.isOn) == [false, true, false, false]
+                          && every.map(\.canChange) == [true, true, true, false]
+                          && every.map(\.isShown) == [false, false, true, false],
+                      "every state reads: one this Mac can't run is on as the policy says, and can be turned off", "\(every)")
+        let content = VerbOutcome.done(fixtures["ops-list-sends-file-content"]?.objects ?? []).abilities
+        let questionOn: [Bool] = content.map { $0.asksFirst(turningOn: true) }
+        let questionOff: [Bool] = content.map { $0.asksFirst(turningOn: false) }
+        report.expect(questionOn == [false, false, true] && questionOff == [false, false, false],
+                      "only the operation that sends file contents asks first, and only before it is turned on",
+                      "\(questionOn) \(questionOff)")
+        report.expect(content.map(\.sendsFileContent) == [false, false, true]
+                          && content.last.map({ HostText.turnOnQuestion($0).text }) == content.last?.detail,
+                      "an operation that sends file contents says so in a field, which the question before it is turned on reads",
+                      "\(content)")
+        let enabled = VerbOutcome.done(fixtures["ops-enable"]?.objects ?? []).ability
+        let disabled = VerbOutcome.done(fixtures["ops-disable"]?.objects ?? []).ability
+        report.expect(enabled?.name == "host.sleep" && enabled?.isOn == true
+                          && disabled?.name == "host.describe" && disabled?.isOn == false,
+                      "ops enable and ops disable answer with the operation as it now is", "\(String(describing: enabled))")
+        let removedOp = VerbOutcome.done(fixtures["ops-disable-not-in-catalog"]?.objects ?? [])
+        report.expect(removedOp.removedOp == "host.nothing" && removedOp.ability == nil,
+                      "ops disable of a name this release does not have answers op_removed", "\(removedOp)")
+        if case .error(let error)? = fixtures["ops-enable-not-in-catalog"]?.objects.last {
+            report.expect(HostText.refusal(error) == "This version of \(HostText.appName) doesn't have that ability.",
+                          "ops enable of a name this release does not have reads as such", "\(error)")
+        } else {
+            report.expect(false, "ops-enable-not-in-catalog ends with an error")
+        }
+        report.expect(VerbOutcome.done(fixtures["roots-list"]?.objects ?? []).folders == [
+            Folder(alias: "docs", path: "/home/me/Documents", broad: false),
+            Folder(alias: "photos", path: "/home/me/Photos", broad: false),
+        ], "roots list reads each folder")
+        let addedFolder = fixtures["roots-add"].flatMap { VerbOutcome.done($0.objects).folder }
+        report.expect(addedFolder == Folder(alias: "docs", path: "/home/me/Documents", broad: false)
+                          && fixtures["roots-add"]?.argv
+                          == HostText.addFolderArguments(alias: "docs", path: "/home/me/Documents", confirmedHome: false),
+                      "roots add answers with the folder, and the host's fixture is the command line the app builds",
+                      "\(String(describing: addedFolder))")
+        if case .error(let error)? = fixtures["roots-add-broad-folder"]?.objects.last {
+            report.expect(error.code == "broad_folder" && error.kind == "home",
+                          "roots add of the home folder is refused broad_folder, with its kind", "\(error)")
+        } else {
+            report.expect(false, "roots-add-broad-folder ends with an error")
+        }
+        let broadOutput = (fixtures["roots-add-broad-folder"]?.lines ?? []).map { String(decoding: $0, as: UTF8.self) + "\n" }.joined()
+        let broadResult = CLIResult(status: 1, stdout: broadOutput, stderr: "", timedOut: false)
+        report.expect(HostText.needsHomeConfirmation(broadResult) && HostText.refusedBroadFolder(broadResult) == .home,
+                      "and the app asks about it from the code alone, as the home folder, from its kind", broadOutput)
+        report.expect(VerbOutcome.done(fixtures["roots-add-suggest-alias"]?.objects ?? []).aliasSuggestion == "cafe-notes-2",
+                      "roots add --suggest-alias gives the alias the host suggests")
+        report.expect(VerbOutcome.done(fixtures["roots-remove"]?.objects ?? []).removedFolder == "docs",
+                      "roots remove answers with the alias it took out")
+        report.expect(VerbOutcome.done(fixtures["roots-check"]?.objects ?? []).folderChecks == [
+            FolderCheck(alias: "docs", path: "/home/me/Documents", state: .ok),
+            FolderCheck(alias: "gone", path: "/home/me/Gone", state: .missing),
+        ], "roots check reads each folder's check")
     }
 
     // MARK: - checkRequestLog
