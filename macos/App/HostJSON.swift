@@ -1008,6 +1008,52 @@ enum VerbOutcome: Equatable, Sendable {
     }
 }
 
+/// What came of Reset Settings, read from `policy reset --json`. `not_invalid` means that the
+/// settings file can be read, or that there is none, so there was nothing to set aside, which a
+/// shell resetting takes as done (spec/CLI.md §7).
+enum ResetOutcome: Equatable, Sendable {
+    /// The invalid file was set aside as `policy.invalid.toml`, and the fresh policy put in its
+    /// place.
+    case reset
+    case nothingToReset
+    /// Anything else, as the verb ended.
+    case failed(VerbOutcome)
+
+    init(_ outcome: VerbOutcome) {
+        switch outcome {
+        case .done(let objects) where objects.contains(.policyReset):
+            self = .reset
+        case .refused(let error) where error.code == "not_invalid":
+            self = .nothingToReset
+        default:
+            self = .failed(outcome)
+        }
+    }
+
+    /// From the run itself. The host writes `policy_reset` only once the fresh policy is in place,
+    /// so a run that wrote it reset the settings however it then ended: `HostCLI.run` looks for a
+    /// Cancel before it looks for the exit, and a Cancel or the time limit can come just after the
+    /// reset. So its output is read first, and only then how it ended.
+    init(result: CLIResult) {
+        if HostJSON.objects(inOutput: result.stdout).contains(.policyReset) {
+            self = .reset
+        } else {
+            self = ResetOutcome(VerbOutcome(result))
+        }
+    }
+
+    /// Whether the note offers Try Again: only when the host refused `policy_lock_failed`, which
+    /// it does when the policy lock cannot be taken at all (the folder's file system refused it),
+    /// never while another verb holds it: the reset then waits, up to the time limit, which gets
+    /// no Try Again. Try Again runs the verb again, without asking again.
+    var offersTryAgain: Bool {
+        if case .failed(.refused(let error)) = self {
+            return error.code == "policy_lock_failed"
+        }
+        return false
+    }
+}
+
 enum HostJSON {
     /// A time as the host writes it; nil for anything else.
     static func time(_ text: String) -> Date? {

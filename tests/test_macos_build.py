@@ -2580,7 +2580,8 @@ def _spec_verb_codes() -> dict[str, set[str]]:
     """The error codes each verb the app runs can give: its row in spec/CLI.md section 7's table,
     and the codes every verb can give, from the sentence before it. A row is named by the first
     verb in it: ``pause`` is the row of ``pause``, ``resume`` and ``kill``, which Stop What's
-    Running runs, and ``log [--limit N]`` is the one Activity's log runs."""
+    Running runs, ``log [--limit N]`` is the one Activity's log runs, and ``policy reset`` is
+    Reset Settings'."""
     text = SPEC_CLI.read_text(encoding="utf-8")
     section = text.split("## 7. Verbs", 1)[1].split("\n## ", 1)[0]
     sentence = re.search(r"one of the codes every verb can give: (.*?)\.\n", section, re.DOTALL)
@@ -2605,6 +2606,7 @@ def _spec_verb_codes() -> dict[str, set[str]]:
         "run --json-events [--exit-on-stdin-eof] [--allow-downgrade]",
         "pause",
         "log [--limit N]",
+        "policy reset",
     }
     assert wanted <= set(rows), sorted(rows)
     return {verb: rows[verb] for verb in wanted}
@@ -2639,6 +2641,11 @@ def test_every_error_code_the_app_meets_has_words() -> None:
     # held covers a pair still being set up, not only a connected one.
     assert "or one being set up" in refusals["held"]
     assert refusals["busy"] == "An earlier attempt is still finishing. Try again in a minute."
+    # Reset Settings takes `not_invalid` as done (spec/CLI.md section 7): there was no invalid
+    # file to set aside, and its words say that nothing changed, not that something failed.
+    assert refusals["not_invalid"] == (
+        "\\(appName)'s settings can be read again, so nothing was changed."
+    )
 
 
 def test_every_stopped_reason_is_read() -> None:
@@ -2982,10 +2989,67 @@ def test_lucilles_text_is_shown_only_in_activity() -> None:
     assert "RequestText." in _swift("ActivityPanel.swift")
 
 
+def _quote_lookalikes() -> set[int]:
+    """Every character whose Unicode name holds QUOTATION MARK or APOSTROPHE, but the straight
+    quote and apostrophe (U+0022, U+0027), which cannot end the app's curly quotes; then the primes
+    U+2032 to U+2037 and U+2057, and the fullwidth quote and apostrophe, U+FF02 and U+FF07. This
+    is the generator RequestText.quoteLookalikes's comment records."""
+    import unicodedata
+
+    named = {
+        code
+        for code in range(0x110000)
+        if code not in (0x22, 0x27)
+        and any(
+            word in unicodedata.name(chr(code), "") for word in ("QUOTATION MARK", "APOSTROPHE")
+        )
+    }
+    return named | set(range(0x2032, 0x2038)) | {0x2057, 0xFF02, 0xFF07}
+
+
+def test_the_quote_lookalikes_are_every_quotation_mark_apostrophe_and_prime() -> None:
+    # The review of #14 (non-blocking note 1): refusing Unicode's opening and closing quotation
+    # marks (Pi, Pf) lets through quote look-alikes of other categories, such as U+201E (Ps),
+    # U+FF02, U+2033 and U+2036 (Po), so a path like `a.txt„ in documents. Finished on this Mac.`
+    # could imitate the app's own sentence inside its quotes. So `quoted` also refuses a fixed
+    # list, written out in the Swift source rather than read from the platform's Unicode tables,
+    # which this Python's unicodedata must give exactly (Unicode 14.0.0 and 15.1.0, Python 3.11
+    # and 3.13, give the same 44 characters). A later Unicode that names more fails here, and the
+    # list grows.
+    log = _swift("RequestLog.swift")
+    body = re.search(r"static let quoteLookalikes: Set<UInt32> = \[(.*?)\]", log, re.DOTALL)
+    assert body is not None
+    listed = [int(value, 16) for value in re.findall(r"\b0x([0-9A-F]{4,6})\b", body.group(1))]
+    assert re.sub(r"\b0x[0-9A-F]{4,6}\b|[\s,]", "", body.group(1)) == "", body.group(1)
+    wanted = _quote_lookalikes()
+    assert set(listed) == wanted, [f"U+{code:04X}" for code in sorted(set(listed) ^ wanted)]
+    assert listed == sorted(listed) and len(listed) == len(set(listed)) == 44
+    assert 0x22 not in listed and 0x27 not in listed
+    # The comment records where the list came from: the Python, its Unicode, and the generator.
+    assert "Python 3.13.14's unicodedata, Unicode 15.1.0" in log
+    assert '("QUOTATION MARK", "APOSTROPHE")' in log
+    # Both checks hold: the categories, kept, and the list.
+    quoted = _function_body(log, "    static func quoted(")
+    assert (
+        "case .control, .format, .lineSeparator, .paragraphSeparator, .initialPunctuation, "
+        ".finalPunctuation:\n                return nil\n"
+    ) in quoted
+    # The list is tried first, for every scalar, inside the loop that tries the categories.
+    assert (
+        "for scalar in text.unicodeScalars {\n"
+        "            if quoteLookalikes.contains(scalar.value) {\n"
+        "                return nil\n"
+        "            }\n"
+        "            switch scalar.properties.generalCategory {\n"
+    ) in quoted
+    # Nothing reads the platform's Unicode names for it.
+    assert "properties.name" not in log and "nameAlias" not in log
+
+
 def test_activity_text_cannot_be_selected_or_copied() -> None:
-    # The build lead's D15: selected text could be copied, a pasteboard write the app does not
-    # make yet (Copy Diagnostics, decisions/0002 §15, is later). So nothing in the Activity panel
-    # can be selected or edited, and it has no Copy button.
+    # Selected text could be copied, a pasteboard write the app does not make yet (Copy
+    # Diagnostics, decisions/0002 §15, is later). So nothing in the Activity panel can be
+    # selected or edited, and it has no Copy button.
     panel = _swift("ActivityPanel.swift")
     # AppKit makes a wrapping label and a text view selectable by default, so each view that holds
     # words says otherwise: the two labels, and the text view in each of the two boxes.
@@ -3025,6 +3089,129 @@ def test_no_window_is_restorable() -> None:
     assert "panel.hidesOnDeactivate = false" in _swift("ActivityPanel.swift")
 
 
+# --- Reset Settings (decisions/0002 §14) -------------------------------------------------------
+
+# `policy reset --json` as the app runs it: `--json` first, as every verb of the app has it.
+_RESET_VERB = '["--json", "policy", "reset"]'
+
+
+def test_reset_settings_is_offered_only_while_the_policy_is_invalid() -> None:
+    # Reset Settings… is shown only while the settings file is invalid: in the note behind the
+    # menu's problem line, when its explanation is the host's "the policy file … is invalid"
+    # refusal (`offersReset`, set in one place), and in the note behind run's Needs attention line
+    # for `policy` `invalid`. No menu item offers it, and no other note.
+    words = _swift("ConnectionText.swift")
+    text = _swift("HostText.swift")
+    model = _swift("HostModel.swift")
+    connection = _swift("Connection.swift")
+    assert 'static let resetSettingsItem = "Reset Settings…"' in words
+    for path in SWIFT_FILES:
+        source = path.read_text(encoding="utf-8")
+        if path.name not in ("ConnectionText.swift", "HostModel.swift", "Connection.swift"):
+            assert "resetSettingsItem" not in source, path.name
+            assert "resetSettingsChosen" not in source, path.name
+        if path.name != "ConnectionText.swift":
+            assert '"Reset Settings' not in source, path.name
+        if path.name != "HostText.swift":
+            assert "offersReset:" not in source, path.name
+    # The explanation offers it only when it says the settings file can't be read: false unless
+    # set, and set in one place, from the same test of the host's words as that sentence.
+    assert "    var offersReset = false\n" in text
+    assert re.findall(r"offersReset: ([^)]*\))", text) == ["settingsFileInvalid(reason)"]
+    assert (
+        "        if settingsFileInvalid(reason) {\n"
+        "            return \"\\(appName)'s settings file can't be read.\"\n"
+        "        }\n"
+    ) in text
+    invalid = _swift_function(
+        text, "    static func settingsFileInvalid(_ reason: String) -> Bool {"
+    )
+    assert 'reason.hasPrefix("the policy file ") && reason.contains(" is invalid: ")' in invalid
+    # The menu's problem line: the note has Reset Settings… only behind offersReset.
+    problem = _swift_function(model, "    func showProblem() {")
+    assert problem.count("ConnectionText.resetSettingsItem") == 1
+    gated = problem.split("if problem.offersReset {", 1)
+    assert len(gated) == 2 and "ConnectionText.resetSettingsItem" in gated[1]
+    assert "ConnectionText.resetSettingsItem" not in gated[0]
+    assert "self?.resetSettingsChosen()" in problem
+    # Its first button is Reset Settings… only behind the same flag: every other note's first
+    # button is OK, which must not ask to reset.
+    assert "if problem.offersReset && response == .alertFirstButtonReturn {\n" in problem
+    assert model.count("resetSettingsChosen()") == 2
+    # run's Needs attention line for an invalid file: its own branch, as pairUnusable has its
+    # Disconnect.
+    attention = _swift_function(connection, "    func showAttention() {")
+    branch = attention.split("        case .needsAttention(.policyInvalid):\n", 1)
+    assert len(branch) == 2
+    branch_body = branch[1].split("\n        case ", 1)[0].split("\n        default:", 1)[0]
+    assert "buttons = [ConnectionText.resetSettingsItem, ConnectionText.okButton]" in branch_body
+    assert "actions = [{ HostModel.shared.resetSettingsChosen() }, {}]" in branch_body
+    assert connection.count("resetSettingsItem") == 1
+    assert connection.count("resetSettingsChosen()") == 1
+    # Not a menu item (decisions/0002 puts it under Settings, which a later change adds, with
+    # Open at Login).
+    assert "reset" not in _swift("MenuBarApp.swift").lower()
+
+
+def test_reset_settings_asks_first_then_runs_policy_reset() -> None:
+    # The user's click starts it, and a question comes first, through Alerts (no modal loop of its
+    # own), with Cancel the default (the first button added); only its Reset Settings runs
+    # `policy reset --json`, with the progress window and its Cancel, on the queue of the other
+    # short verbs (HostModel.run). Then a note says what came of it, the menu reads the host's
+    # set-up again, and Connection reads `status` again. The verb takes the policy lock, so a run
+    # left behind still counts (HostCLI.stuckRuns), and it never touches the policy a pairing set
+    # aside (spec/CLI.md section 7), so no restore list follows.
+    model = _swift("HostModel.swift")
+    chosen = _swift_function(model, "    func resetSettingsChosen() {")
+    assert "Alerts.shared.show(" in chosen and "runModal" not in chosen
+    assert "ConnectionText.resetQuestionTitle" in chosen
+    assert "ConnectionText.resetQuestionText" in chosen
+    cancel = chosen.index("alert.addButton(withTitle: ConnectionText.cancelButton)")
+    assert cancel < chosen.index("alert.addButton(withTitle: ConnectionText.resetButton)")
+    assert "if response == .alertSecondButtonReturn {\n" in chosen
+    assert "self?.resetSettings()" in chosen
+    assert _RESET_VERB not in chosen
+    total = sum(path.read_text(encoding="utf-8").count(_RESET_VERB) for path in SWIFT_FILES)
+    assert total == 1 and model.count(_RESET_VERB) == 1
+    reset = _swift_function(model, "    private func resetSettings() {")
+    assert f"runWithProgress({_RESET_VERB}, message: ConnectionText.resetting)" in reset
+    # Read from the run itself, so that one cancelled or timed out after the host had set the
+    # file aside still says so.
+    assert "let outcome = ResetOutcome(result: result)\n" in reset
+    assert "VerbOutcome(" not in reset
+    assert "ConnectionText.reset(outcome, earlierRunStuck: stuck)" in reset
+    assert "let stuck = HostCLI.stuckRuns > 0" in reset
+    assert "await reload()" in reset
+    assert "Connection.shared.settingsReset()" in reset
+    # Try Again only where the host could not take the policy lock, and it runs the verb again
+    # without asking again: the user has already chosen Reset Settings.
+    assert "let retry = outcome.offersTryAgain\n" in reset
+    assert "ConnectionText.tryAgainButton" in reset
+    # Only Try Again runs it again: a note with no Try Again has OK as its first button.
+    assert "if retry && response == .alertFirstButtonReturn {\n" in reset
+    assert model.count("self?.resetSettings()") == 2
+    # Connection reads status again only while no child of the app runs, whose events say more.
+    settled = _swift_function(_swift("Connection.swift"), "    func settingsReset() {")
+    assert "runChild == nil, pairChild == nil" in settled and "refreshStatus()" in settled
+    # Nothing else of the app, and nothing on its own, runs it.
+    for path in SWIFT_FILES:
+        if path.name != "HostModel.swift":
+            assert '"policy", "reset"' not in path.read_text(encoding="utf-8"), path.name
+    # The ResetOutcome reader: a policy_reset object is a reset, not_invalid nothing to reset, and
+    # anything else a failure; only policy_lock_failed offers Try Again.
+    host_json = _swift("HostJSON.swift")
+    reader = _swift_function(host_json, "    init(_ outcome: VerbOutcome) {")
+    assert "case .done(let objects) where objects.contains(.policyReset):" in reader
+    assert 'case .refused(let error) where error.code == "not_invalid":' in reader
+    assert "self = .failed(outcome)" in reader
+    # A run that wrote policy_reset reset the settings, however it then ended: the host writes it
+    # only once the fresh policy is in place (src/lucille_host/cli.py, `_policy_reset`), and a
+    # Cancel or the time limit can come after that. So its output is read before how it ended.
+    ran = _swift_function(host_json, "    init(result: CLIResult) {")
+    read = ran.index("if HostJSON.objects(inOutput: result.stdout).contains(.policyReset) {")
+    assert read < ran.index("self = .reset") < ran.index("self = ResetOutcome(VerbOutcome(result))")
+
+
 # --- The macOS checks of pairing and run: check_app.py ui and pairing --------------------------
 
 
@@ -3053,7 +3240,8 @@ def test_the_checks_use_the_apps_own_profile() -> None:
     source = _CHECK_APP.read_text(encoding="utf-8")
     ui = _python_function(source, "check_ui")
     assert 'flag = _profile_folder() / "state" / "paused"' in ui
-    # The code window comes last: after the whole disk, before the app is stopped.
+    # The code window comes after the whole disk; Reset Settings comes after it, last, before the
+    # app is stopped (test_the_ui_check_resets_a_settings_file_the_host_cannot_read).
     assert ui.index("_drive_whole_disk(") < ui.index(
         "_drive_code_window(checker, python_in(app), screens, (out_log, err_log))"
     )
@@ -3064,6 +3252,7 @@ def test_the_checks_use_the_apps_own_profile() -> None:
         "_drive_folders",
         "_drive_whole_disk",
         "_drive_code_window",
+        "_drive_reset",
         "_pair_state",
     ):
         body = _python_function(source, name)
@@ -3209,6 +3398,115 @@ def test_the_checks_open_activity_and_stop_whats_running() -> None:
     reader = _python_function(source, "read_activity")
     for body in (activity, reader):
         assert body.count("_activity_holds()") == body.count(" else _activity_holds())") >= 1
+
+
+def test_the_ui_check_resets_a_settings_file_the_host_cannot_read(tmp_path: Path) -> None:
+    # The ui check's last step: it writes a settings file the host cannot read (the
+    # check may write the host's files; the app may not, spec/CLI.md section 2), sees the menu's
+    # problem line, opens its note, chooses Reset Settings… and then the question's Reset
+    # Settings, and finds the file set aside as policy.invalid.toml and only host.describe on.
+    # Whatever happens, it puts the settings back in `finally`: ui leaves the host as it found it.
+    source = _CHECK_APP.read_text(encoding="utf-8")
+    ui = _python_function(source, "check_ui")
+    assert "_drive_reset(" in ui
+    assert ui.index("_drive_code_window(") < ui.index("_drive_reset(")
+    assert ui.rindex("_drive_") == ui.index("_drive_reset(")
+    reset = _python_function(source, "_drive_reset")
+    for name in (
+        "SETTINGS_UNREADABLE",
+        "RESET_ITEM",
+        "RESET_QUESTION",
+        "RESET_BUTTON",
+        "RESET_TITLE",
+        "NOTHING_TO_RESET",
+        "UNREADABLE_POLICY",
+        "_profile_folder()",
+        '"policy.toml"',
+        '"policy.invalid.toml"',
+        '["--json", "ops", "list"]',
+        '"host.describe"',
+        "_screenshot(",
+    ):
+        assert name in reset, name
+    tidy = reset.split("    finally:\n", 1)
+    assert len(tidy) == 2
+    assert "write_bytes(" in tidy[1] and "unlink(missing_ok=True)" in tidy[1]
+    # The words it looks for are the app's own.
+    words = _swift("ConnectionText.swift")
+    for name, said in {
+        "resetSettingsItem": check_app.RESET_ITEM,
+        "resetQuestionTitle": check_app.RESET_QUESTION,
+        "resetButton": check_app.RESET_BUTTON,
+        "resetTitle": check_app.RESET_TITLE,
+        "nothingToResetTitle": check_app.NOTHING_TO_RESET,
+    }.items():
+        assert f'static let {name} = "{_named_in_swift(said)}"' in words, name
+    unreadable = _named_in_swift(check_app.SETTINGS_UNREADABLE)
+    assert f'            return "{unreadable}"\n' in _swift("HostText.swift")
+    assert check_app.RESET_ITEM not in check_app.MENU_ITEMS
+    for said in (
+        check_app.SETTINGS_UNREADABLE,
+        check_app.RESET_ITEM,
+        check_app.RESET_QUESTION,
+        check_app.RESET_BUTTON,
+        check_app.RESET_TITLE,
+        check_app.NOTHING_TO_RESET,
+    ):
+        assert check_app._quoted(said) == f'"{said}"'
+    # The note's OK only closes it. Had it run the verb again, the host would have found nothing
+    # to set aside, and the app would say so: the check looks for that once the fresh policy has
+    # been read.
+    done = reset.split("    finally:\n", 1)[0]
+    pressed = done.index('        _press("OK")\n')
+    assert pressed < done.index("NOTHING_TO_RESET") > done.index('["--json", "ops", "list"]')
+    # What it writes is a file the host refuses, as the host's own fixture for policy reset is.
+    written = tmp_path / "policy.toml"
+    written.write_bytes(check_app.UNREADABLE_POLICY)
+    with pytest.raises(policy.PolicyError):
+        policy.check_file(written)
+
+
+@pytest.mark.parametrize("held", [True, False])
+def test_the_reset_check_leaves_the_settings_as_it_found_them(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, held: bool
+) -> None:
+    # Whatever the app did or failed to do, the settings file, and a file an earlier reset set
+    # aside, are put back as they were, or taken away when there was none. Here System Events
+    # answers nothing, so every step after the write fails.
+    profile = tmp_path / "profile"
+    profile.mkdir()
+    settings = profile / "policy.toml"
+    aside = profile / "policy.invalid.toml"
+    if held:
+        settings.write_bytes(b"# the settings the check found\n")
+        aside.write_bytes(b"# what an earlier reset set aside\n")
+    hosted: list[list[str]] = []
+
+    def host(python: Path, args: list[str]) -> subprocess.CompletedProcess[str]:
+        hosted.append(args)
+        return subprocess.CompletedProcess(args, 1, "", "")
+
+    def menu_once(test: Callable[[list[str]], bool], seconds: float) -> tuple[bool, list[str]]:
+        worked, shown = check_app._open_menu_and_read()
+        return worked and test(shown), shown
+
+    monkeypatch.setattr(check_app, "_profile_folder", lambda: profile)
+    monkeypatch.setattr(check_app, "_system_events", lambda body, timeout=30: (False, "no"))
+    monkeypatch.setattr(check_app, "_screenshot", lambda path: None)
+    monkeypatch.setattr(check_app, "_app_host", host)
+    monkeypatch.setattr(check_app, "_wait_until", lambda test, seconds: test())
+    monkeypatch.setattr(check_app, "_menu_until", menu_once)
+    checker = check_app.Checker()
+    check_app._drive_reset(checker, tmp_path / "python", tmp_path)
+    assert checker.failures
+    if held:
+        assert settings.read_bytes() == b"# the settings the check found\n"
+        assert aside.read_bytes() == b"# what an earlier reset set aside\n"
+    else:
+        assert not settings.exists() and not aside.exists()
+    assert sorted(path.name for path in profile.iterdir()) == (
+        ["policy.invalid.toml", "policy.toml"] if held else []
+    )
 
 
 @pytest.mark.parametrize(

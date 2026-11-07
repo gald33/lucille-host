@@ -722,6 +722,11 @@ final class Connection: ObservableObject {
                 buttons = [ConnectionText.disconnectItem, ConnectionText.okButton]
                 actions = [{ [weak self] in self?.disconnectChosen() }, {}]
             }
+        case .needsAttention(.policyInvalid):
+            // `run` acts on nothing until the file can be read again, which `policy reset` makes so;
+            // `run` then goes on by itself (spec/CLI.md §13.5).
+            buttons = [ConnectionText.resetSettingsItem, ConnectionText.okButton]
+            actions = [{ HostModel.shared.resetSettingsChosen() }, {}]
         case .notConnected:
             title = ConnectionText.notConnected
         default:
@@ -1494,6 +1499,15 @@ final class Connection: ObservableObject {
                 self.refreshStatus()
             }
         }
+    }
+
+    /// Reset Settings has run: read `status` again, unless a child of the app runs, whose events
+    /// say more. `run` picks the fresh policy up itself, with no restart (spec/CLI.md §13.5).
+    func settingsReset() {
+        guard ladder == nil, !exiting, runChild == nil, pairChild == nil else {
+            return
+        }
+        refreshStatus()
     }
 
     /// The menu opened: show what is known, and read `status` again if it is old and no child of

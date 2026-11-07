@@ -132,11 +132,12 @@ enum ConnectionText {
     static let confirmUnknownText = "\(appName)'s menu shows where things are. If it offers Finish Connecting…, choose it to compare the numbers again."
     static let damaged = "\(appName) is damaged. Download it again."
 
-    /// The sentence for each error code the pairing verbs, `forget`, `status` and `run` can give
-    /// (spec/CLI.md §7 and §10), except the codes in `appBugCodes`, which all read as `appBug`,
-    /// and `waiting` and `sas_ready`, after which the app asks `pair status` and draws the SAS
-    /// (`Pairing.redrawCodes`). `expired` here is the code expiring before a SAS was shown; after
-    /// one was shown it is `expiredAfterSAS`. Any other code reads as the host's own sentence.
+    /// The sentence for each error code the pairing verbs, `forget`, `status`, `run` and
+    /// `policy reset` can give (spec/CLI.md §7 and §10), except the codes in `appBugCodes`, which
+    /// all read as `appBug`, and `waiting` and `sas_ready`, after which the app asks `pair status`
+    /// and draws the SAS (`Pairing.redrawCodes`). `expired` here is the code expiring before a SAS
+    /// was shown; after one was shown it is `expiredAfterSAS`. Any other code reads as the host's
+    /// own sentence.
     static let refusals: [String: String] = [
         "bad_code": "That isn't a code from Lucille. Copy it again from Lucille's page.",
         "wrong_hub": "This code isn't from Lucille. Nothing was connected.",
@@ -145,6 +146,8 @@ enum ConnectionText {
         "busy": "An earlier attempt is still finishing. Try again in a minute.",
         "lock_failed": "\(appName) couldn't lock its settings, so nothing was connected. Try again.",
         "policy_lock_failed": "\(appName) couldn't lock its settings, so nothing was connected. Try again.",
+        // Reset Settings takes it as done: there was no invalid file to set aside.
+        "not_invalid": "\(appName)'s settings can be read again, so nothing was changed.",
         "answer_failed": "\(appName) couldn't answer this code. Nothing was connected. Copy a new code from Lucille and try again.",
         "hub_error": "\(appName) couldn't reach Lucille. Check that this Mac is online, then try again. You can use the same code.",
         "leaked": "This code may have been used by someone else. Nothing was connected. In Lucille, remove this computer, add it again, and share the new code with nobody.",
@@ -263,6 +266,53 @@ enum ConnectionText {
             return ConnectionNote(title: couldNotDisconnect, text: text, detail: error.message == text ? nil : error.message)
         default:
             return ConnectionNote(title: couldNotDisconnect, text: disconnectUnknown, detail: nil)
+        }
+    }
+
+    // MARK: Reset Settings
+
+    /// Offered in the note behind the menu's line that says the settings file can't be read, and
+    /// in the one behind `run`'s Needs attention line for it (decisions/0002 §14).
+    static let resetSettingsItem = "Reset Settings…"
+    static let resetQuestionTitle = "Reset \(appName)'s settings?"
+    /// The fresh policy has only `host.describe` on, and no folder (spec/CLI.md §6, `policy_reset`).
+    static let resetQuestionText = "\(appName) will set its settings file aside and start afresh, with no folders and only the ability that tells Lucille about this Mac. Until you add your folders and abilities again, Lucille's requests that need them are turned away."
+    static let resetButton = "Reset Settings"
+    static let resetting = "Resetting \(appName)'s settings…"
+    static let resetTitle = "Settings reset"
+    static let resetText = "\(appName)'s settings start afresh. The old file was set aside and isn't used. Add your folders and abilities again from \(appName)'s menu."
+    static let nothingToResetTitle = "Nothing needed resetting"
+    static let couldNotReset = "\(appName) couldn't reset its settings."
+    /// `policy_lock_failed` from `policy reset`: the pairing verbs' sentence for it says that
+    /// nothing was connected, which is not what happened here.
+    static let resetLockFailed = "\(appName) couldn't lock its settings file, so nothing was changed. Try again."
+    static let resetUnknown = "\(appName) couldn't tell whether its settings were reset. If its menu still says that its settings file can't be read, choose that line to try again."
+
+    /// What the app says once `policy reset --json` has run. `earlierRunStuck` is whether a run
+    /// the app stopped waiting for has still not ended (`HostCLI.stuckRuns`), which may hold the
+    /// policy lock.
+    static func reset(_ outcome: ResetOutcome, earlierRunStuck: Bool = false) -> ConnectionNote {
+        switch outcome {
+        case .reset:
+            return ConnectionNote(title: resetTitle, text: resetText, detail: nil)
+        case .nothingToReset:
+            return ConnectionNote(title: nothingToResetTitle, text: refusals["not_invalid"] ?? appBug, detail: nil)
+        case .failed(let verb):
+            switch verb {
+            case .refused(let error) where error.code == "policy_lock_failed":
+                return ConnectionNote(title: couldNotReset, text: resetLockFailed, detail: error.message)
+            case .refused(let error):
+                let text = refusal(code: error.code, message: error.message, afterSAS: false)
+                return ConnectionNote(title: couldNotReset, text: text, detail: error.message == text ? nil : error.message)
+            case .notStarted:
+                return ConnectionNote(title: couldNotReset, text: damaged, detail: nil)
+            case .notFinished:
+                return ConnectionNote(title: couldNotReset, text: HostText.stuckRun, detail: nil)
+            case .timedOut, .cancelled:
+                return ConnectionNote(title: couldNotReset, text: earlierRunStuck ? HostText.stuckRun : resetUnknown, detail: nil)
+            case .done, .signaled, .otherExit:
+                return ConnectionNote(title: couldNotReset, text: resetUnknown, detail: nil)
+            }
         }
     }
 

@@ -157,6 +157,36 @@ enum RequestText {
     static let otherRefusal = "Turned away by this Mac."
     static let otherFailure = "It didn't finish on this Mac."
 
+    /// Characters `quoted` refuses whatever their category, because they can look like a
+    /// quotation mark that ends the app's own quotes (the review of #14): every character whose
+    /// Unicode name holds QUOTATION MARK or APOSTROPHE, but the straight quote and apostrophe
+    /// (U+0022, U+0027), which cannot end the app's curly quotes; then the primes, U+2032 to
+    /// U+2037 and U+2057; and the fullwidth quote and apostrophe, U+FF02 and U+FF07, which their
+    /// names already give. It holds letters too (U+0149, and U+02BC, the apostrophe some languages
+    /// write words with), so a path that holds one is not shown, and two TAG characters (U+E0022,
+    /// U+E0027), which are invisible and which their category refuses as well. It is chosen by
+    /// name, so it is not every look-alike: a modifier letter double prime (U+02BA), a ditto mark
+    /// (U+3003), a Hebrew gershayim (U+05F4) and the corner brackets (U+300C to U+300F) are still
+    /// shown. It is written out here, never read from the platform's Unicode tables, so that it is
+    /// the same on every macOS.
+    /// Made with Python 3.13.14's unicodedata, Unicode 15.1.0 (Python 3.11.15's, Unicode 14.0.0,
+    /// gives the same 44), by:
+    ///
+    ///     named = {code for code in range(0x110000) if code not in (0x22, 0x27)
+    ///              and any(word in unicodedata.name(chr(code), "")
+    ///                      for word in ("QUOTATION MARK", "APOSTROPHE"))}
+    ///     sorted(named | set(range(0x2032, 0x2038)) | {0x2057, 0xFF02, 0xFF07})
+    ///
+    /// tests/test_macos_build.py makes it again the same way and compares.
+    static let quoteLookalikes: Set<UInt32> = [
+        0x00AB, 0x00BB, 0x0149, 0x02BC, 0x02EE, 0x055A, 0x07F4, 0x07F5,
+        0x2018, 0x2019, 0x201A, 0x201B, 0x201C, 0x201D, 0x201E, 0x201F,
+        0x2032, 0x2033, 0x2034, 0x2035, 0x2036, 0x2037, 0x2039, 0x203A,
+        0x2057, 0x275B, 0x275C, 0x275D, 0x275E, 0x275F, 0x2760, 0x276E,
+        0x276F, 0x2E42, 0x301D, 0x301E, 0x301F, 0xFF02, 0xFF07, 0x1F676,
+        0x1F677, 0x1F678, 0xE0022, 0xE0027,
+    ]
+
     /// Each of the protocol's refusal codes (spec/PROTOCOL.md §11), as a fact. A refusal for an
     /// ability that is off never suggests turning it on: a compromised Lucille must not be able to
     /// nudge the user through the app (decisions/0002 §13).
@@ -226,17 +256,21 @@ enum RequestText {
 
     /// Lucille's text in quotes, cut in the middle to `longestPath` characters; nil when it holds
     /// a character that could make it read as something else: a control, format (a reordering
-    /// mark or a zero-width one), line or paragraph separator character, or a quotation mark that
-    /// opens or closes (a curly quote or apostrophe, a guillemet), which could end the app's own
-    /// quotes and go on in its words. The host writes as null a path that holds a control,
-    /// reordering or separator character (spec/CLI.md §6), and passes the other format
-    /// characters, such as a zero-width space, and every quotation mark as they are: for those,
-    /// this check is the only one.
+    /// mark or a zero-width one), line or paragraph separator character, a quotation mark that
+    /// opens or closes (a curly quote or apostrophe, a guillemet), or any other quotation mark,
+    /// apostrophe or prime in `quoteLookalikes` (a low-9 quote, a fullwidth one, a double prime),
+    /// which could end the app's own quotes and go on in its words. The host writes as null a path
+    /// that holds a control, reordering or separator character (spec/CLI.md §6), and passes the
+    /// other format characters, such as a zero-width space, and every quotation mark as they are:
+    /// for those, this check is the only one.
     static func quoted(_ text: String) -> String? {
         if text.isEmpty {
             return nil
         }
         for scalar in text.unicodeScalars {
+            if quoteLookalikes.contains(scalar.value) {
+                return nil
+            }
             switch scalar.properties.generalCategory {
             case .control, .format, .lineSeparator, .paragraphSeparator, .initialPunctuation, .finalPunctuation:
                 return nil
