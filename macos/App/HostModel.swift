@@ -100,18 +100,84 @@ final class HostModel: ObservableObject {
         )
     }
 
-    /// Show the problem the menu reports, with the host's own words.
+    /// Show the problem the menu reports, with the host's own words; and Reset Settings… first,
+    /// when the problem is a settings file the host can't read.
     func showProblem() {
         guard let problem else {
             return
         }
-        Alerts.shared.show {
+        Alerts.shared.show({
             let alert = NSAlert()
             alert.alertStyle = .warning
             alert.messageText = problem.message
             alert.informativeText = problem.detail.map { "Details: \($0)" } ?? ""
+            if problem.offersReset {
+                alert.addButton(withTitle: ConnectionText.resetSettingsItem)
+            }
             alert.addButton(withTitle: "OK")
             return alert
+        }, done: { [weak self] response in
+            if problem.offersReset && response == .alertFirstButtonReturn {
+                self?.resetSettingsChosen()
+            }
+        })
+    }
+
+    /// Reset Settings…: ask first, with Cancel the default, since a reset turns every folder and
+    /// ability away until the user adds them again.
+    func resetSettingsChosen() {
+        Alerts.shared.show({
+            let alert = NSAlert()
+            alert.alertStyle = .warning
+            alert.messageText = ConnectionText.resetQuestionTitle
+            alert.informativeText = ConnectionText.resetQuestionText
+            alert.addButton(withTitle: ConnectionText.cancelButton)
+            alert.addButton(withTitle: ConnectionText.resetButton)
+            return alert
+        }, done: { [weak self] response in
+            if response == .alertSecondButtonReturn {
+                self?.resetSettings()
+            }
+        })
+    }
+
+    /// `policy reset --json`, with the window that has a Cancel button if it takes more than a
+    /// moment, then a note that says what came of it. The menu then reads the host's set-up again,
+    /// and `Connection` reads `status` again; `run`, if it runs, picks the fresh policy up itself
+    /// (spec/CLI.md §13.5). A run the user cancels gets no note, unless the host had already
+    /// reset the settings, or one the app gave up on still holds things up.
+    private func resetSettings() {
+        Task {
+            let result = await runWithProgress(["--json", "policy", "reset"], message: ConnectionText.resetting)
+            let stuck = HostCLI.stuckRuns > 0
+            let outcome = ResetOutcome(result: result)
+            await reload()
+            Connection.shared.settingsReset()
+            if case .failed(.cancelled) = outcome, !stuck {
+                return
+            }
+            let note = ConnectionText.reset(outcome, earlierRunStuck: stuck)
+            let retry = outcome.offersTryAgain
+            Alerts.shared.show({
+                let alert = NSAlert()
+                switch outcome {
+                case .reset, .nothingToReset:
+                    alert.alertStyle = .informational
+                case .failed:
+                    alert.alertStyle = .warning
+                }
+                alert.messageText = note.title
+                alert.informativeText = note.text + (note.detail.map { "\n\nDetails: \($0)" } ?? "")
+                if retry {
+                    alert.addButton(withTitle: ConnectionText.tryAgainButton)
+                }
+                alert.addButton(withTitle: ConnectionText.okButton)
+                return alert
+            }, done: { [weak self] response in
+                if retry && response == .alertFirstButtonReturn {
+                    self?.resetSettings()
+                }
+            })
         }
     }
 

@@ -57,6 +57,9 @@ struct Folder: Equatable, Identifiable, Sendable {
 struct Explanation: Equatable, Sendable {
     let message: String
     let detail: String?
+    /// Whether the note that shows it offers Reset Settings…: only when it says that the settings
+    /// file can't be read (`HostText.settingsFileInvalid`, decisions/0002 §14).
+    var offersReset = false
 }
 
 /// A folder the app adds only once the user confirms, because the host adds it only with
@@ -91,9 +94,9 @@ struct FolderPlace: Equatable, Sendable {
 /// `--version`, `ops list` and `roots list`, and the failure lines on standard error of those and
 /// of `ops`, `roots`, `pause` and `resume`, which stay text with `--json` too. This follows that
 /// text exactly (`src/lucille_host/cli.py`); the self-test checks it against the real command line
-/// on every build. Pairing, `status`, `forget`, `kill`, `run`, and the pause state `pause` and
-/// `resume` report, are read as JSON (`HostJSON`); moving these verbs onto `--json` as well is a
-/// later change.
+/// on every build. Pairing, `status`, `forget`, `kill`, `policy reset`, `run`, and the pause state
+/// `pause` and `resume` report, are read as JSON (`HostJSON`); moving these verbs onto `--json` as
+/// well is a later change.
 enum HostText {
     private static let program = "lucille-host"
 
@@ -374,7 +377,18 @@ enum HostText {
                 detail: "It stopped with exit status \(result.status)."
             )
         }
-        return Explanation(message: plain(reason, during: activity), detail: reason)
+        return Explanation(
+            message: plain(reason, during: activity),
+            detail: reason,
+            offersReset: settingsFileInvalid(reason)
+        )
+    }
+
+    /// Whether the host refused because its policy file is invalid: the one refusal `policy reset`
+    /// answers. The policy a pairing set aside is another file, which it never touches
+    /// (spec/CLI.md §7).
+    static func settingsFileInvalid(_ reason: String) -> Bool {
+        reason.hasPrefix("the policy file ") && reason.contains(" is invalid: ")
     }
 
     /// The host's reason for a refusal, from its stderr: the lines that are not a usage summary,
@@ -426,7 +440,7 @@ enum HostText {
         if adding && reason.hasPrefix("Operation not permitted") {
             return blockedByMacOS
         }
-        if reason.hasPrefix("the policy file ") && reason.contains(" is invalid: ") {
+        if settingsFileInvalid(reason) {
             return "\(appName)'s settings file can't be read."
         }
         if reason.hasPrefix("cannot lock ") {

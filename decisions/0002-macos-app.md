@@ -52,9 +52,9 @@ developing the app. Its builds stay ad hoc signed, for the repository owner's ow
   `lucille-host-runtime -I -B -X utf8 -m lucille_host --profile mac-app <verb>`, with an argv and a fixed
   environment (`PATH=/var/empty`). It runs every verb on its own profile, `mac-app` (§9); builds before it
   used `default`, and nothing moves from one to the other. It reads JSON (§8) from `status`, the pairing
-  verbs, `forget`, `kill`, `pause`, `resume`, `log`, `run`'s events, and `ops list` for Activity's words, and
-  the text of `--version`, `ops list` and `roots list` for the menu. It reads and writes none of the host's
-  files, and opens no network connection.
+  verbs, `forget`, `kill`, `pause`, `resume`, `log`, `policy reset`, `run`'s events, and `ops list` for
+  Activity's words, and the text of `--version`, `ops list` and `roots list` for the menu. It reads and
+  writes none of the host's files, and opens no network connection.
 - **Pairing by paste, on 0001's gate** (§11.3). The maintainer decided on 2026-11-02 to build it now on
   [0001](0001-host-design.md)'s gate, not the typed one. The user pastes the code; the app passes it to
   `pair --code-stdin --json` on standard input, shows the SAS from `sas_pending`, and the user clicks
@@ -70,6 +70,11 @@ developing the app. Its builds stay ad hoc signed, for the repository owner's ow
 - **Activity…** (§15): a window with what Lucille asked this Mac to do since the app opened, from `run`'s
   `request` events, in words, newest first, kept in memory only and at most 500; and, behind **Show the
   Host's Log**, the last 200 lines of `log --json --limit 200`, as the host wrote them.
+- **Reset Settings…** (§10, §14), offered only while the host cannot read the settings file: in the note
+  behind the menu's line that says so, and in the one behind `run`'s Needs attention line for `policy`
+  `invalid`. It asks first, with Cancel the default, then runs `policy reset --json`, which sets the file
+  aside as `policy.invalid.toml` and writes the fresh policy, and takes `not_invalid` as done; Try Again is
+  offered only for `policy_lock_failed`.
 - **The menu** shows the version and a status line read from `status --json` and `run`'s events, with a line
   for what needs attention, and offers Pause and Resume, the abilities (the operations, switched with
   `ops enable` and `ops disable`), Add a Folder…, the folders with Remove, Activity…, the pairing items
@@ -86,7 +91,7 @@ developing the app. Its builds stay ad hoc signed, for the repository owner's ow
   run. The disk image is uploaded only by a manual run whose every check passed, and kept 3 days.
 
 Not built yet: the typed gate and the Connect flow (§11.2, §11.4; proposed), opening at login, the restore
-list after a new pairing (§11.6, `policy previous`), Reset Settings (`policy reset`, §10), Download and Prepare to Update (§16), the menu's use of the JSON contract for `ops`
+list after a new pairing (§11.6, `policy previous`), Download and Prepare to Update (§16), the menu's use of the JSON contract for `ops`
 and `roots` (§8), the Welcome and main windows, updates, **Remove Capsule…** (section 17), Copy
 Diagnostics (§15), Developer ID signing and notarization, ripgrep (`Helpers/rg`; the pins hold an empty
 ripgrep commit until then, and `Resources/licenses/` has no ripgrep licence), and the release jobs. The
@@ -129,7 +134,11 @@ made for the first build", says why for most of them:
   (§15), and the pairing field's Command-C and Command-X are AppKit's, for the user's own text;
 - Stop What's Running is not offered while `run` drains for a quit or a Disconnect, whose own ladder stops
   the operation: Stop now during a quit, `kill` after 330 s during a Disconnect. The menu offers it from a
-  request's `started` to its `finished` (§14).
+  request's `started` to its `finished` (§14);
+- Reset Settings… is a button in the notes behind the menu's lines that say the settings file can't be
+  read, not an item of a Settings submenu (§14), which comes with Open at Login. The menu's own line, from
+  `ops list`'s refusal, offers it whenever the file can't be read; while `run` runs, its Needs attention
+  line offers it too.
 
 Where this record says what the app does, it describes the planned app.
 
@@ -986,7 +995,7 @@ a policy aside, the previous folders and operations come back as unchecked boxes
 | Stop What's Running | `kill` | Shown only while an operation runs: from its request's `started` to its `finished`. Afterwards: "Stopped, and paused. Resume when you're ready." Nothing resumes but the user's Resume. |
 | Quit Capsule | close the pipe (drain); **Stop now** runs `kill`, which also pauses | §9 |
 | Disconnect from Lucille… (Settings) | `forget` | "Disconnected. Lucille was told." or "Lucille wasn't reachable. In Lucille, open Computers and remove this Mac." |
-| Reset Settings… (Settings) | `policy reset` | Shown when the settings file is invalid (§10) |
+| Reset Settings… (Settings) | `policy reset` | Shown when the settings file is invalid (§10). It asks first, with Cancel the default: "Reset Capsule's settings?" Afterwards: "Settings reset", the old file set aside as `policy.invalid.toml`; or, for `not_invalid`, "Nothing needed resetting" |
 | Remove Capsule… (Settings) | section 17 | |
 
 Nothing Lucille sends can unpause the host. The app offers no remote control of any kind.
@@ -1011,9 +1020,13 @@ Nothing Lucille sends can unpause the host. The app offers no remote control of 
   event arrived, since events carry no time. It is kept in memory only, at most 500 requests, the least
   recently seen dropped first and a running one last. What a request asked for is Lucille's text: its path
   is shown in quotes, cut in the middle past 60 characters, or as "a path that can't be shown" when it
-  holds a control, format, line or paragraph separator character, or a quotation mark that opens or
-  closes (a curly quote or apostrophe, a guillemet: one could end the app's own quotes); its folder only
-  by a valid alias. A request that ended is never written again, so a `received` for a job id the host
+  holds a control, format, line or paragraph separator character, a quotation mark that opens or closes
+  (a curly quote or apostrophe, a guillemet), or another quotation mark, apostrophe or prime from a fixed
+  list (a low-9 quote, a fullwidth one, a double prime): one could end the app's own quotes; its folder
+  only by a valid alias. The list is chosen by name (every character whose Unicode 15.1 name holds
+  QUOTATION MARK or APOSTROPHE, and the primes), so it is not every look-alike: a modifier letter double
+  prime (U+02BA), a ditto mark (U+3003), a Hebrew gershayim (U+05F4) and the corner brackets (U+300C to
+  U+300F) are still shown. A request that ended is never written again, so a `received` for a job id the host
   has forgotten (15 minutes after the request's deadline) starts an entry of its own. An entry has no
   button: a refusal for an ability that is off is a fact (§13). Many `host_too_old` events make one
   notice, with the highest `min_host_version` seen, cleared when the app is updated (§16).
@@ -1258,7 +1271,8 @@ check from `tools/macos/check_app.py`:
 - M6: nothing in the environment changes what the runtime loads, each vector with a control that shows it
   would have loaded without `-I`;
 - the app's Swift code against the real command line, also from a copy in another folder;
-- the menu driven through System Events, with screenshots kept as a CI artifact;
+- the menu driven through System Events, with screenshots kept as a CI artifact, last of all Reset
+  Settings… on a settings file the check makes unreadable and then puts back;
 - a snapshot of `~/Library` before the app runs and after, diffed against an allowlist (M12; §22 says what
   it cannot see);
 - the start-up time with no `.pyc` (§6), and the unsigned app built twice and compared (§18), both recorded
@@ -1472,7 +1486,7 @@ These join 0001's "Host invariants and their tests".
 | M16 | A policy change applies to the next decision | remove a folder while `run` runs; the next request for it is refused `path_outside_root` |
 | M17 | Every new pair starts from the fresh policy | pair, enable, forget, pair again: only `host.describe`, no folders |
 | M18 | The app never offers to widen access in answer to Lucille | review, and a UI snapshot of a `not_enabled` entry with no button: the pairing check's `p-activity-not-enabled.png`, where Activity's only button is its disclosure |
-| M19 | Text from Lucille is shown only in Activity, its path and operation in quotes and its folder only as a valid alias, and reaches no argument, menu line, button or note | `tests/test_macos_build.py`: only `HostJSON.swift`, which decodes a request's op, folder and path, and `RequestLog.swift`, which keeps them `fileprivate`, read them, and only the Activity panel shows `RequestText`'s words; the self-test: a path with a control, format, line or paragraph separator character, or a quotation mark that opens or closes, is not shown, and a long one is cut |
+| M19 | Text from Lucille is shown only in Activity, its path and operation in quotes and its folder only as a valid alias, and reaches no argument, menu line, button or note | `tests/test_macos_build.py`: only `HostJSON.swift`, which decodes a request's op, folder and path, and `RequestLog.swift`, which keeps them `fileprivate`, read them, and only the Activity panel shows `RequestText`'s words; the self-test: a path with a control, format, line or paragraph separator character, a quotation mark that opens or closes, or a quotation mark, apostrophe or prime of the fixed list `RequestText.quoteLookalikes` (which `tests/test_macos_build.py` makes again from Python's `unicodedata`), is not shown, and a long one is cut. The list is chosen by name, not by looks: a modifier letter double prime (U+02BA), a ditto mark (U+3003), a Hebrew gershayim (U+05F4) and the corner brackets are still shown |
 
 **What M12's check cannot see.** It is weaker than the invariant. It walks `~/Library` before the app is
 launched and after the menu has been driven, and fails only on a new, changed or removed path whose name

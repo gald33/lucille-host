@@ -157,6 +157,19 @@ struct SelfTest {
             report.expect(got.message == message && got.detail == text,
                           "the refusal \(text.debugDescription) reads as \(message.debugDescription)", "\(got)")
         }
+        // Reset Settings… is offered for a settings file that can't be read, and for nothing else
+        // (decisions/0002 §14).
+        let unreadable = HostText.explain(refusal("the policy file /x/policy.toml is invalid: /x/policy.toml is not valid TOML"))
+        report.expect(unreadable.offersReset && unreadable.message == "\(HostText.appName)'s settings file can't be read.",
+                      "a settings file that can't be read offers Reset Settings", "\(unreadable)")
+        for (text, _) in plain {
+            report.expect(HostText.explain(refusal(text)).offersReset == text.hasPrefix("the policy file "),
+                          "the refusal \(text.debugDescription) offers Reset Settings only if it is the settings file's")
+        }
+        report.expect(!HostText.explain(usage).offersReset
+                          && !HostText.explain(refusal("the earlier policy /x/policy.previous.toml is invalid: x")).offersReset
+                          && !HostText.explain(CLIResult(status: 15, stdout: "", stderr: "", timedOut: true)).offersReset,
+                      "nor does a usage error, the policy a pairing set aside, or a run that took too long")
         let late = CLIResult(status: 15, stdout: "", stderr: "", timedOut: true)
         let adding = HostText.Activity.addingFolder(.visible)
         report.expect(HostText.explain(late, during: adding).message.hasPrefix("Checking this folder took too long")
@@ -401,6 +414,34 @@ struct SelfTest {
         let absent = HostCLI(python: URL(fileURLWithPath: "/nonexistent/python3"), home: home).run(["--version"])
         report.expect(absent.status == CLIResult.notStarted && !absent.stderr.isEmpty,
                       "a missing interpreter is reported, not a crash", "\(absent)")
+
+        // Reset Settings, against the real host: a settings file it cannot read is refused in
+        // words that offer Reset Settings…; policy reset sets it aside as policy.invalid.toml and
+        // puts the fresh policy in its place; a second reset finds nothing to set aside. The
+        // self-test writes the host's file here, under its temporary HOME, as the ui check does;
+        // the app never does.
+        let profile = URL(fileURLWithPath: home)
+            .appendingPathComponent("Library/Application Support/lucille-host/\(HostCLI.appProfile)")
+        let settingsFile = profile.appendingPathComponent("policy.toml").path
+        let setAside = profile.appendingPathComponent("policy.invalid.toml").path
+        let notToml = Data("this is not toml\n".utf8)
+        try? FileManager.default.createDirectory(at: profile, withIntermediateDirectories: true)
+        report.expect(FileManager.default.createFile(atPath: settingsFile, contents: notToml),
+                      "a settings file the host cannot read is written")
+        let unreadable = cli.run(["ops", "list"])
+        report.expect(!unreadable.succeeded && HostText.explain(unreadable).offersReset
+                          && HostText.explain(unreadable).message == "\(HostText.appName)'s settings file can't be read.",
+                      "ops list refuses it, in words that offer Reset Settings", "\(HostText.explain(unreadable))")
+        let reset = ResetOutcome(VerbOutcome(cli.run(["--json", "policy", "reset"])))
+        report.expect(reset == .reset && FileManager.default.contents(atPath: setAside) == notToml,
+                      "policy reset --json sets the file aside as policy.invalid.toml", "\(reset)")
+        let afresh = HostText.abilities(fromList: cli.run(["ops", "list"]).stdout)
+        report.expect(afresh.filter(\.isOn).map(\.name) == ["host.describe"]
+                          && HostText.folders(fromList: cli.run(["roots", "list"]).stdout).isEmpty,
+                      "the fresh policy has only host.describe on, and no folder", "\(afresh)")
+        let again = ResetOutcome(VerbOutcome(cli.run(["--json", "policy", "reset"])))
+        report.expect(again == .nothingToReset && FileManager.default.contents(atPath: setAside) == notToml,
+                      "a second reset finds nothing to set aside, which is done, and changes nothing", "\(again)")
         checkPairingVerbs(python: cli.python, home: home, report)
         report.expect(HostCLI.stuckRuns == 0, "every run ended, so none is counted as stuck")
     }
@@ -637,6 +678,63 @@ extension SelfTest {
                           && ConnectionText.disconnected(.done([.forget(.forgotten(name: pairName, lucilleTold: false))])).text
                           == ConnectionText.disconnectedNotTold,
                       "Disconnect takes no pair as done, and says when Lucille was not told")
+
+        // Reset Settings (decisions/0002 §14): the question, then what the app says once
+        // `policy reset --json` has run. The app never says the old file was deleted: the reset
+        // sets it aside.
+        report.expect(ConnectionText.resetQuestionTitle == "Reset \(HostText.appName)'s settings?"
+                          && ConnectionText.resetQuestionText.contains("set its settings file aside")
+                          && ConnectionText.resetQuestionText.contains("turned away"),
+                      "the question says the file is set aside, and that Lucille is turned away until folders and abilities are added again",
+                      ConnectionText.resetQuestionText)
+        let resetDone = ConnectionText.reset(.reset)
+        report.expect(resetDone.title == ConnectionText.resetTitle && resetDone.title == "Settings reset"
+                          && resetDone.text.contains("set aside") && !resetDone.text.lowercased().contains("delet")
+                          && resetDone.detail == nil,
+                      "a reset says the old file was set aside, not deleted", "\(resetDone)")
+        let resetNothing = ConnectionText.reset(.nothingToReset)
+        report.expect(resetNothing.title == ConnectionText.nothingToResetTitle && resetNothing.text == refusals["not_invalid"]
+                          && resetNothing.detail == nil,
+                      "a reset with nothing to set aside is done, and says nothing was changed", "\(resetNothing)")
+        let lockMessage = "cannot lock /x/.policy.lock (Operation not supported), so the policy was not changed"
+        let resetLocked = ConnectionText.reset(.failed(.refused(HostError(code: "policy_lock_failed", message: lockMessage, kind: nil))))
+        report.expect(resetLocked.title == ConnectionText.couldNotReset && resetLocked.text.contains("Try again")
+                          && !resetLocked.text.contains("connected") && resetLocked.detail == lockMessage,
+                      "a lock that could not be taken says to try again, not that nothing was connected", "\(resetLocked)")
+        let resetLate = ConnectionText.reset(.failed(.timedOut))
+        report.expect(resetLate.title == ConnectionText.couldNotReset && resetLate.text != resetLocked.text
+                          && ConnectionText.reset(.failed(.timedOut), earlierRunStuck: true).text == HostText.stuckRun
+                          && ConnectionText.reset(.failed(.notFinished)).text == HostText.stuckRun,
+                      "a reset that did not finish says so, and names a run that is stuck", "\(resetLate)")
+        report.expect(ConnectionText.reset(.failed(.notStarted)).text == ConnectionText.damaged,
+                      "a helper program that cannot start says to download the app again")
+        report.expect(resetLate.text == ConnectionText.resetUnknown
+                          && ConnectionText.resetUnknown.contains("couldn't tell whether its settings were reset"),
+                      "a reset that timed out says the app can't tell whether it worked", "\(resetLate)")
+        let unknown: [VerbOutcome] = [.done([]), .signaled, .otherExit(3), .cancelled]
+        for verb in unknown {
+            let note = ConnectionText.reset(.failed(verb))
+            report.expect(note.title == ConnectionText.couldNotReset && note.text == ConnectionText.resetUnknown
+                              && note.detail == nil,
+                          "a reset that ended with no policy_reset and no refusal says the app can't tell", "\(verb) \(note)")
+        }
+        let otherRefusal = ConnectionText.reset(.failed(.refused(HostError(code: "bad_profile", message: "m", kind: nil))))
+        report.expect(otherRefusal.title == ConnectionText.couldNotReset && otherRefusal.text == ConnectionText.appBug
+                          && otherRefusal.detail == "m",
+                      "another refusal reads as the helper program's fault, with the host's words", "\(otherRefusal)")
+        let failures: [VerbOutcome] = [
+            .done([]), .signaled, .otherExit(3), .cancelled, .timedOut, .notStarted, .notFinished,
+            .refused(HostError(code: "bad_profile", message: "m", kind: nil)),
+            .refused(HostError(code: "policy_lock_failed", message: lockMessage, kind: nil)),
+        ]
+        for verb in failures {
+            for stuck in [false, true] {
+                let note = ConnectionText.reset(.failed(verb), earlierRunStuck: stuck)
+                report.expect(note.title == ConnectionText.couldNotReset && note.text != ConnectionText.resetText
+                                  && note.text != refusals["not_invalid"],
+                              "a reset that failed never says the settings were reset", "\(verb) \(stuck) \(note)")
+            }
+        }
     }
 
     // MARK: - checkJSON
@@ -844,6 +942,43 @@ extension SelfTest {
                           && fixtures["resume"]?.objects == [.controls(paused: false)]
                           && fixtures["kill"]?.objects == [.controls(paused: true)],
                       "forget, pause, resume and kill read")
+        // Reset Settings: policy reset sets an invalid file aside; with nothing to set aside it
+        // refuses not_invalid, which a shell resetting takes as done (spec/CLI.md §7).
+        let reset = fixtures["policy-reset"]?.objects ?? []
+        report.expect(reset == [.policyReset] && ResetOutcome(.done(reset)) == .reset,
+                      "policy reset reads as the policy set aside", "\(reset)")
+        let notInvalid = fixtures["policy-reset-not-invalid"]?.objects ?? []
+        if case .error(let error)? = notInvalid.last, notInvalid.count == 1 {
+            report.expect(error.code == "not_invalid" && ResetOutcome(.refused(error)) == .nothingToReset,
+                          "a reset with nothing to set aside is not_invalid, which is done", "\(error)")
+        } else {
+            report.expect(false, "policy-reset-not-invalid is one error", "\(notInvalid)")
+        }
+        let locked = ResetOutcome(.refused(HostError(code: "policy_lock_failed", message: "m", kind: nil)))
+        report.expect(ResetOutcome(.done([])) == .failed(.done([])) && ResetOutcome(.timedOut) == .failed(.timedOut)
+                          && locked == .failed(.refused(HostError(code: "policy_lock_failed", message: "m", kind: nil))),
+                      "an exit 0 with no policy_reset, a timeout and any other refusal are failures", "\(locked)")
+        report.expect(locked.offersTryAgain && !ResetOutcome(.timedOut).offersTryAgain
+                          && !ResetOutcome(.done([])).offersTryAgain && !ResetOutcome(.done(reset)).offersTryAgain,
+                      "only a lock that could not be taken offers Try Again")
+        // The host writes policy_reset only once the fresh policy is in place, so a run that wrote
+        // it reset the settings, even when a Cancel or the time limit came after: HostCLI.run looks
+        // for a Cancel before it looks for the exit.
+        let resetOutput = (fixtures["policy-reset"]?.lines ?? []).map { String(decoding: $0, as: UTF8.self) + "\n" }.joined()
+        let notInvalidOutput = (fixtures["policy-reset-not-invalid"]?.lines ?? []).map { String(decoding: $0, as: UTF8.self) + "\n" }.joined()
+        let resetThenCancelled = CLIResult(status: 0, stdout: resetOutput, stderr: "", timedOut: false, cancelled: true)
+        let resetThenLate = CLIResult(status: 15, stdout: resetOutput, stderr: "", timedOut: true)
+        report.expect(ResetOutcome(result: CLIResult(status: 0, stdout: resetOutput, stderr: "", timedOut: false)) == .reset
+                          && ResetOutcome(result: resetThenCancelled) == .reset && ResetOutcome(result: resetThenLate) == .reset,
+                      "a run that wrote policy_reset is a reset, even when it was then cancelled or timed out", resetOutput)
+        let cancelledFirst = CLIResult(status: 15, stdout: "", stderr: "", timedOut: false, cancelled: true)
+        let lateFirst = CLIResult(status: 15, stdout: "", stderr: "", timedOut: true)
+        let leftBehindReset = CLIResult(status: CLIResult.notFinished, stdout: "", stderr: "", timedOut: false, cancelled: true)
+        report.expect(ResetOutcome(result: cancelledFirst) == .failed(.cancelled) && ResetOutcome(result: lateFirst) == .failed(.timedOut),
+                      "a run cancelled or timed out before it wrote policy_reset reads as it ended")
+        let notInvalidRun = CLIResult(status: 1, stdout: notInvalidOutput, stderr: "", timedOut: false)
+        report.expect(ResetOutcome(result: leftBehindReset) == .failed(.notFinished) && ResetOutcome(result: notInvalidRun) == .nothingToReset,
+                      "a run the app gave up on, and not_invalid, read as they ended", notInvalidOutput)
         let requests = fixtures["run-events-requests"]?.objects ?? []
         var hasRoom = false
         if requests.count > 1, case .state(let state) = requests[1] {
@@ -1090,6 +1225,29 @@ extension SelfTest {
         for (what, text) in hidden {
             report.expect(RequestText.quoted(text) == nil, "a path with \(what) is not shown")
         }
+        // A quotation mark of another category, which can still look like the end of the app's
+        // quotes, is refused by the list written out in RequestText (the review of #14): the
+        // path behind each of these would otherwise read as the app's own sentence.
+        let lookalikes: [(String, UInt32)] = [("U+201E", 0x201E), ("U+FF02", 0xFF02), ("U+2033", 0x2033), ("U+2036", 0x2036)]
+        for (name, value) in lookalikes {
+            let mark = Unicode.Scalar(value).map { String(Character($0)) } ?? ""
+            report.expect(!mark.isEmpty && RequestText.quoted("a.txt" + mark + " in documents. Finished on this Mac.") == nil,
+                          "a path that imitates the app's own words behind \(name) is not shown")
+            report.expect(RequestText.quoteLookalikes.contains(value), "\(name) is one of the quote look-alikes")
+        }
+        report.expect(RequestText.quoted("a.txt\" in documents. Finished on this Mac.") == "\u{201C}a.txt\" in documents. Finished on this Mac.\u{201D}"
+                          && RequestText.quoted("it's.txt") == "\u{201C}it's.txt\u{201D}",
+                      "a straight quote or apostrophe, which cannot end the app's quotes, is still shown")
+        let shownAnyway = RequestText.quoteLookalikes.sorted().filter { value in
+            guard let scalar = Unicode.Scalar(value) else {
+                return true
+            }
+            return RequestText.quoted("a" + String(Character(scalar)) + "b") != nil
+        }
+        report.expect(RequestText.quoteLookalikes.count > 40 && shownAnyway.isEmpty
+                          && !RequestText.quoteLookalikes.contains(0x22) && !RequestText.quoteLookalikes.contains(0x27),
+                      "every quote look-alike is refused, and the straight quote and apostrophe are not among them",
+                      "\(shownAnyway)")
         let long = "start-" + String(repeating: "x", count: 1010) + "-end.txt"
         let cut = RequestText.quoted(long) ?? ""
         report.expect(long.count == 1024 && cut.count == 62 && cut.hasPrefix("\u{201C}start-") && cut.hasSuffix("-end.txt\u{201D}")

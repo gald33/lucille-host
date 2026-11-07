@@ -2481,6 +2481,18 @@ RESUME_BUTTON: Final = "Resume"
 DISCONNECT_TITLE: Final = "Disconnect this Mac from Lucille?"
 DISCONNECT_BUTTON: Final = "Disconnect"
 DISCONNECTED_TOLD: Final = "Disconnected. Lucille was told."
+# Reset Settings, as in App/HostText.swift and App/ConnectionText.swift (tests/test_macos_build.py
+# checks that they agree): the menu's line while the host cannot read its settings file, the
+# button its note offers, the question that button asks, the question's button, the note's title
+# once the host has set the file aside, and the one a second reset would get. Then what the ui
+# check writes as that file, which is not TOML, as in the host's own fixture for ``policy reset``.
+SETTINGS_UNREADABLE: Final = f"{APP_NAME}'s settings file can't be read."
+RESET_ITEM: Final = "Reset Settings…"
+RESET_QUESTION: Final = f"Reset {APP_NAME}'s settings?"
+RESET_BUTTON: Final = "Reset Settings"
+RESET_TITLE: Final = "Settings reset"
+NOTHING_TO_RESET: Final = "Nothing needed resetting"
+UNREADABLE_POLICY: Final = b"this is not toml\n"
 # The line the app writes on standard error when ``run`` exits after a drain its standard input's
 # end began (``RunSupervisor.describe``), and the start of the one for a ``run`` a signal ended.
 DRAINED_LINE: Final = "run exited 0 (drained, stdin_end)"
@@ -3539,6 +3551,111 @@ def _drive_activity(checker: Checker, python: Path, screens: Path) -> None:
             )
 
 
+def _drive_reset(checker: Checker, python: Path, screens: Path) -> None:
+    """Write a settings file the host cannot read (the check may write the host's files; the app
+    never does): the menu says so in a line of its own, whose note offers Reset Settings…; that
+    asks first, and the question's Reset Settings runs ``policy reset --json``, which sets the file
+    aside as ``policy.invalid.toml`` and puts the fresh policy in its place, with only
+    ``host.describe`` on and no folder, and the app says so; the note's OK runs nothing more. That
+    Cancel is the question's default is checked in its source by the build tests. Whatever
+    happens, the settings file, and a file an earlier reset set aside, are put back as they were,
+    or taken away where there was none."""
+    profile = _profile_folder()
+    settings = profile / "policy.toml"
+    aside = profile / "policy.invalid.toml"
+    saved = {path: path.read_bytes() if path.is_file() else None for path in (settings, aside)}
+    try:
+        profile.mkdir(parents=True, exist_ok=True)
+        aside.unlink(missing_ok=True)
+        settings.write_bytes(UNREADABLE_POLICY)
+        worked, shown = _menu_until(lambda shown: SETTINGS_UNREADABLE in shown, 30)
+        _menu_shot(screens / "21-settings-unreadable.png")
+        if not checker.expect(
+            worked,
+            f"with a settings file the host cannot read, the menu says {SETTINGS_UNREADABLE!r}",
+            f"{shown}",
+        ):
+            return
+        worked, said = _choose(SETTINGS_UNREADABLE)
+
+        def buttons() -> list[str]:
+            return _window_list("name of every button")[1]
+
+        offered = worked and _wait_until(lambda: {RESET_ITEM, "OK"} <= set(buttons()), 15)
+        _screenshot(screens / "22-reset-offered.png")
+        if not checker.expect(
+            offered,
+            f"choosing it shows a note with {RESET_ITEM!r} and OK",
+            f"{said} {buttons()} {_texts()}",
+        ):
+            return
+        # The button by the start of its name, which spares the script its ellipsis, as _choose
+        # does for a menu item.
+        start = _quoted(RESET_ITEM.removesuffix("…"))
+        worked, said = _system_events(
+            f"click (first button of window 1 whose name starts with {start})\ndelay 2"
+        )
+        asked = worked and _wait_until(lambda: _says(RESET_QUESTION), 15)
+        _screenshot(screens / "23-reset-question.png")
+        shown = buttons()
+        if not checker.expect(
+            asked and {"Cancel", RESET_BUTTON} <= set(shown) and RESET_ITEM not in shown,
+            f"{RESET_ITEM} asks first, {RESET_QUESTION!r}, with Cancel and {RESET_BUTTON}",
+            f"{said} {shown} {_texts()}",
+        ):
+            return
+        worked, said = _press(RESET_BUTTON)
+        reset = worked and _wait_until(lambda: _says(RESET_TITLE), 40)
+        _screenshot(screens / "24-reset-done.png")
+        checker.expect(
+            reset,
+            f"{RESET_BUTTON} resets the settings, and the app says {RESET_TITLE!r}",
+            f"{said} {_texts()}",
+        )
+        _press("OK")
+        set_aside = aside.read_bytes() if aside.is_file() else None
+        checker.expect(
+            set_aside == UNREADABLE_POLICY,
+            "the file the host could not read is set aside as policy.invalid.toml",
+            f"{set_aside!r}",
+        )
+        listed = _json_lines(_app_host(python, ["--json", "ops", "list"]).stdout)
+        enabled = [
+            found.get("name")
+            for found in listed
+            if isinstance(found, dict)
+            and found.get("type") == "op"
+            and found.get("enabled") is True
+        ]
+        folders = _roots(python)
+        checker.expect(
+            enabled == ["host.describe"] and not folders,
+            "the fresh policy has only host.describe on, and no folder",
+            f"{enabled} {folders}",
+        )
+        worked, shown = _menu_until(lambda shown: SETTINGS_UNREADABLE not in shown, 30)
+        checker.expect(
+            worked, "the menu no longer says the settings file can't be read", f"{shown}"
+        )
+        # The note's OK only closed it. Had it run the verb again, the host would have found
+        # nothing to set aside, and by now the app would say so.
+        texts = _texts()
+        checker.expect(
+            not any(NOTHING_TO_RESET in text for text in texts),
+            "the note's OK closes it, and runs nothing more",
+            f"{texts}",
+        )
+    finally:
+        # Close whatever the app still shows: the question with its Cancel, a note with its OK.
+        for button in ("Cancel", "OK"):
+            _press(button)
+        for path, held in saved.items():
+            if held is None:
+                path.unlink(missing_ok=True)
+            else:
+                path.write_bytes(held)
+
+
 def check_ui(app: Path, checker: Checker, work: Path, require_driven: bool = False) -> None:
     """Open the app and drive it the way a user would, through System Events: read the note that
     says what it is for and where its menu is, when it opens and when it is opened again; read the
@@ -3547,8 +3664,9 @@ def check_ui(app: Path, checker: Checker, work: Path, require_driven: bool = Fal
     the Folders submenu; add the home folder, which the app asks about first; choose the Data
     volume, and ``/`` through a link to it, which the app refuses; open Activity, and the host's
     log in it (:func:`_drive_activity`); open the code window and paste into it
-    (:func:`_drive_code_window`). Each step is checked against the host's own state, on the
-    app's own profile. It uses the real HOME, and leaves the host as it found it. Where macOS
+    (:func:`_drive_code_window`); and, last, reset a settings file the host cannot read
+    (:func:`_drive_reset`). Each step is checked against the host's own state, on the app's own
+    profile. It uses the real HOME, and leaves the host as it found it. Where macOS
     does not let System Events drive other apps (no accessibility permission), it says so and
     drives nothing; with ``require_driven`` that is a failure. Screenshots go to
     ``<out>/check/screens``."""
@@ -3583,6 +3701,7 @@ def check_ui(app: Path, checker: Checker, work: Path, require_driven: bool = Fal
             _drive_whole_disk(checker, python_in(app), screens)
             _drive_activity(checker, python_in(app), screens)
             _drive_code_window(checker, python_in(app), screens, (out_log, err_log))
+            _drive_reset(checker, python_in(app), screens)
         elif require_driven:
             checker.expect(False, "System Events drove the menu, as --require-driven asks")
     finally:
