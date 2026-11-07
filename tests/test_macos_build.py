@@ -4364,6 +4364,8 @@ class _SetUpOnAMac:
         done_closes: bool = True,
         disable_works: bool = True,
         switch_moves: bool = True,
+        offered: bool = False,
+        stderr: str = "",
     ) -> None:
         self.page: str | None = "folders" if opens else None
         self.switch = drawn_on
@@ -4375,9 +4377,24 @@ class _SetUpOnAMac:
         self.switch_moves = switch_moves
         self.disabled_by_cli = 0
         self.closed_by_button = 0
+        # The menu's items, which offer Set Up again when ``offered``; and the app's standard
+        # error so far.
+        self.menu = [check_app.CONNECTED, *([check_app.SETUP_ITEM] if offered else [])]
+        self.stderr = stderr
 
     def window_names(self) -> list[str]:
         return [check_app.SETUP_TITLE] if self.page is not None else []
+
+    def system_events(self, body: str, timeout: float = 30) -> tuple[bool, str]:
+        """What the step reads through System Events beyond the names it reads above: the menu,
+        and every window, which only a failure's detail reads."""
+        if "name of every menu item of" in body:
+            return True, "\n".join(self.menu)
+        if body == check_app.CLOSE_MENU:
+            return True, "closed"
+        if check_app.WINDOWS_HOLD in body:
+            return True, "frontmost true, 0 window(s):"
+        return False, f"not on a Mac: {body!r}"
 
     def texts(self) -> list[str]:
         return {
@@ -4446,6 +4463,7 @@ def _set_up_step_on(
         ("_toggle", mac.toggle),
         ("_checked", mac.checked),
         ("_close_window", mac.close_window),
+        ("_system_events", mac.system_events),
     ):
         monkeypatch.setattr(check_app, name, fake)
     monkeypatch.setattr(check_app, "_screenshot", lambda path: None)
@@ -4453,6 +4471,9 @@ def _set_up_step_on(
     check = object.__new__(check_app._PairingCheck)
     check.checker = check_app.Checker()
     check.screens = tmp_path
+    stderr = tmp_path / "pairing-pairing-stderr.txt"
+    stderr.write_text(mac.stderr, encoding="utf-8")
+    check.logs = [stderr]
     check.op_enabled = mac.op_enabled  # type: ignore[method-assign]
     check.host = mac.host  # type: ignore[method-assign]
     check.set_up_after_connected()
@@ -4519,6 +4540,265 @@ def test_the_set_up_step_reads_the_switch_as_system_events_says_it(
     assert check_app._checked("Check a file's fingerprint") == seen
     assert 'checkbox "Check a file\'s fingerprint" of theWindow' in bodies[0]
     assert bodies[0].endswith("return ((value of theTarget) as text)")
+
+
+@pytest.mark.parametrize("offered", [True, False])
+def test_a_missing_set_up_window_is_described(
+    offered: bool,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # CI run 42395410137 failed here with the detail "[]", which could not tell a window that never
+    # opened from one that opened and was then closed, nor from a listing that failed. The detail
+    # now says whether the menu offers Set Up again (only once the window opened and was closed as
+    # a user closes it), every window of the app, the pair and run, and what the app has written on
+    # standard error, where it says when Set Up was shown and closed.
+    said = "Set Up shows Folders\nSet Up's window was closed, not by the app\n"
+    mac = _SetUpOnAMac(opens=False, offered=offered, stderr=said)
+    checker = _set_up_step_on(mac, monkeypatch, tmp_path)
+    title = check_app.SETUP_TITLE
+    assert checker.failures[0] == f"once connected, the app opens {title!r} by itself"
+    detail = capsys.readouterr().out.split(f"FAIL: {checker.failures[0]}\n", 1)[1]
+    offers = "offers" if offered else "does not offer"
+    assert f"the menu {offers} {check_app.SETUP_ITEM!r}: {mac.menu}" in detail
+    assert "the app's windows: frontmost true, 0 window(s):" in detail
+    assert "pair None, run None" in detail
+    assert f"the app's standard error so far: {said!r}" in detail
+
+
+class _MenuOnAMac:
+    """The status menu and Set Up's window as System Events drives them, as far as CI run
+    42395410137 (macos-15) shows, for running the pairing check's menu read once Connected here.
+
+    - A click on the status item opens its menu, or closes it while it is open. A click that comes
+      right after an Escape closed the menu, with no wait between, opens nothing: every screenshot
+      that run took so shows no menu.
+    - An Escape while the menu is open closes it; with ``escape_closes_menu`` false it does
+      nothing, the other reading of those screenshots. With no menu open it goes to the app's key
+      window, Set Up's, and closes it, as that run's p05 screenshot and the empty window lists
+      after it show. (That AppKit's NSPanel closes on Escape is believed, not checked on a Mac.)
+    - With ``opens_on_menu``, Set Up's window opens only once the menu first opens, and taking the
+      focus ends the menu: the order the check must survive if the app is slow to say Connected.
+    """
+
+    def __init__(self, *, escape_closes_menu: bool = True, opens_on_menu: bool = False) -> None:
+        self.escape_closes_menu = escape_closes_menu
+        self.opens_on_menu = opens_on_menu
+        self.menu_open = False
+        self.set_up_open = not opens_on_menu
+        self.set_up_shown = self.set_up_open
+        self.just_closed = False
+        # Each Escape that went with no menu open, and what it met.
+        self.stray: list[str] = []
+        # Each screenshot: whether the menu, and Set Up's window, were open.
+        self.shots: dict[str, tuple[bool, bool]] = {}
+
+    def click(self, right_after_escape: bool) -> None:
+        if self.menu_open:
+            self.menu_open = False
+        elif not right_after_escape:
+            self.menu_open = True
+            if not self.set_up_shown:
+                self.set_up_shown = self.set_up_open = True
+                self.menu_open = False
+
+    def escape(self) -> None:
+        if not self.menu_open:
+            self.stray.append("Set Up's window, which it closed" if self.set_up_open else "none")
+            self.set_up_open = False
+        elif self.escape_closes_menu:
+            self.menu_open = False
+            self.just_closed = True
+
+    def system_events(self, body: str, timeout: float = 30) -> tuple[bool, str]:
+        right_after_escape, self.just_closed = self.just_closed, False
+        lines = body.splitlines()
+        if lines[0] == f"click {check_app.STATUS_ITEM}":
+            self.click(right_after_escape)
+            if not any("name of every menu item of" in line for line in lines):
+                return True, ""
+            if not self.menu_open:
+                return False, "execution error: System Events got an error: Can't get menu 1."
+            return True, f"{check_app.APP_NAME} 0.1.0\n{check_app.CONNECTED}"
+        if "key code 53" in lines:
+            guarded = f"exists {check_app.MENU}" in lines[0]
+            if guarded and not self.menu_open:
+                return True, "no menu was open, so no Escape was sent"
+            self.escape()
+            if any(line.startswith("delay") for line in lines[lines.index("key code 53") :]):
+                self.just_closed = False
+            if not guarded:
+                return True, ""
+            return True, "the menu was still there after Escape" if self.menu_open else "closed"
+        if body == f"{check_app.LINES}return (name of every window) as text":
+            return True, check_app.SETUP_TITLE if self.set_up_open else ""
+        if check_app.WINDOWS_HOLD in body:
+            return True, f"frontmost true, {int(self.set_up_open)} window(s):"
+        raise AssertionError(f"not modelled: {body!r}")
+
+    def screenshot(self, path: Path) -> None:
+        self.shots[path.name] = (self.menu_open, self.set_up_open)
+
+    def wait(self, seconds: float) -> None:
+        self.just_closed = False
+
+
+@pytest.mark.parametrize(
+    "mac",
+    [
+        _MenuOnAMac(),
+        _MenuOnAMac(escape_closes_menu=False),
+        _MenuOnAMac(opens_on_menu=True),
+    ],
+    ids=["escape-closes-the-menu", "escape-leaves-the-menu", "set-up-opens-with-the-menu"],
+)
+def test_the_menu_read_once_connected_leaves_set_up_open(
+    mac: _MenuOnAMac, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # CI run 42395410137 (macos-15): Set Up's window was up on Folders in the screenshot the check
+    # took to show the menu saying Connected, which showed no menu, and it was gone at every look
+    # for it in the next 60 seconds; between the two the check sent only the Escape after that
+    # screenshot. Here run_reads_the_room runs against a Mac that does what that run's screenshots
+    # show, with either reading of why the click showed no menu, and with Set Up opening only as
+    # the menu opens. Afterwards Set Up's window is still open, no Escape went with no menu open,
+    # and the screenshot shows the menu open over the window.
+    import time
+
+    clock = time.monotonic
+    check = object.__new__(check_app._PairingCheck)
+    check.checker = check_app.Checker()
+    check.screens = tmp_path
+    check.host_env = {}
+    check.lucille = types.SimpleNamespace(offer=lambda room: None)
+    check.run_pid = lambda: 4242  # type: ignore[method-assign]
+    check.app_pid = lambda: 4241  # type: ignore[method-assign]
+    check.reading = lambda: True  # type: ignore[method-assign]
+    check.host_argv = lambda *args: list(args)  # type: ignore[method-assign]
+    refused = [{"v": 1, "type": "stopped", "reason": "already_running"}]
+    check.start = lambda argv, *, env, piped: types.SimpleNamespace(  # type: ignore[method-assign]
+        wait=lambda: 21, objects=lambda: refused, describe=lambda: ""
+    )
+    command = (
+        f"python -m lucille_host --profile {check_app.APP_PROFILE} run --json-events "
+        "--exit-on-stdin-eof"
+    )
+
+    def lsof(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        held = "p4242\nf0\ntPIPE\n" if "-d" in argv else ""
+        return subprocess.CompletedProcess(argv, 0, held, "")
+
+    for name, fake in (
+        ("_system_events", mac.system_events),
+        ("_screenshot", mac.screenshot),
+        ("_value_within", lambda get, seconds: get()),
+        ("_wait_until", lambda test, seconds: test()),
+        ("_parent", lambda pid: 4241),
+        ("_ps", lambda pid, field: command),
+        ("_alive", lambda pid: True),
+        ("subprocess", types.SimpleNamespace(run=lsof)),
+        ("time", types.SimpleNamespace(monotonic=clock, sleep=mac.wait)),
+    ):
+        monkeypatch.setattr(check_app, name, fake)
+    check.run_reads_the_room()
+    assert check.checker.failures == []
+    assert mac.stray == []
+    assert check_app._window_names() == [check_app.SETUP_TITLE]
+    assert mac.shots == {"p05-connected.png": (True, True)}
+
+
+@pytest.mark.parametrize(
+    "read",
+    [
+        (True, f"{check_app.APP_NAME} 0.1.0\n{check_app.CONNECTED}"),
+        (False, "execution error: no menu"),
+    ],
+)
+def test_the_menu_is_closed_only_after_a_read_that_found_it(
+    read: tuple[bool, str], monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # An Escape the check sends with no menu open goes to the app's key window and closes a panel:
+    # that is how CI run 42395410137 lost Set Up's window, to the Escape after a menu screenshot
+    # whose click had opened no menu. The screenshot is now taken in the read, with the menu open;
+    # Escape follows only a read that worked, and only while System Events still finds the menu,
+    # and then a second passes before anything clicks the status item again.
+    sent: list[str] = []
+
+    def system_events(body: str, timeout: float = 30) -> tuple[bool, str]:
+        sent.append(body)
+        return read if body.startswith(f"click {check_app.STATUS_ITEM}\n") else (True, "closed")
+
+    monkeypatch.setattr(check_app, "_system_events", system_events)
+    monkeypatch.setattr(check_app, "_screenshot", lambda path: sent.append(f"shot {path.name}"))
+    found = check_app._menu_until(lambda items: True, 0, shot=tmp_path / "menu.png")
+    worked, said = read
+    assert found == (worked, said.splitlines() if worked else [said])
+    opened = (
+        f"click {check_app.STATUS_ITEM}\ndelay 1\n{check_app.LINES}"
+        f"return (name of every menu item of {check_app.MENU}) as text"
+    )
+    assert sent == [opened, "shot menu.png", *([check_app.CLOSE_MENU] if worked else [])]
+    close = check_app.CLOSE_MENU.splitlines()
+    escape = close.index("key code 53")
+    assert close[:escape] == [
+        f'if not (exists {check_app.MENU}) then return "no menu was open, so no Escape was sent"'
+    ]
+    assert close[escape + 1] == "delay 1"
+    # No other Escape is sent to close a menu: there is no screenshot that clicks the status item
+    # by itself any more, and the pairing check sends no Escape of its own.
+    assert not hasattr(check_app, "_menu_shot")
+    source = _CHECK_APP.read_text(encoding="utf-8")
+    assert "key code 53" not in _python_function(source, "_menu_until")
+    import ast
+
+    pairing = next(
+        node
+        for node in ast.walk(ast.parse(source))
+        if isinstance(node, ast.ClassDef) and node.name == "_PairingCheck"
+    )
+    assert "key code 53" not in (ast.get_source_segment(source, pairing) or "")
+
+
+def test_the_app_says_on_standard_error_when_set_up_shows_and_closes() -> None:
+    # So that a run that misses Set Up's window can tell, in the app's own words, whether it was
+    # shown, closed by the app (Done, or the pair ended) or closed otherwise (its close button, or
+    # Escape): the pairing check prints the app's standard error with that failure, and at its end.
+    # Each line names a page at most, never what the page lists.
+    connection = _swift("Connection.swift")
+    effect = _swift_function(connection, "    private func setUpEffect(")
+    assert (
+        "        case .readPrevious:\n"
+        '            Connection.log("Set Up reads the policy set aside before it shows a page")\n'
+    ) in effect
+    assert (
+        "        case .show(let page):\n"
+        '            Connection.log("Set Up shows \\(Connection.setUpPageName(page))")\n'
+        "            setupPanel.show(page, with: setUpShown())\n"
+    ) in effect
+    assert (
+        "        case .close:\n"
+        '            Connection.log("Set Up closed by the app")\n'
+        "            setupPanel.close()\n"
+    ) in effect
+    assert (
+        "        setupPanel.onClosed = { [weak self] in\n"
+        '            Connection.log("Set Up\'s window was closed, not by the app")\n'
+        "            self?.feedSetUp(.windowClosed)\n"
+        "        }\n"
+    ) in connection
+    named = _swift_function(connection, "    private static func setUpPageName(")
+    assert re.findall(r'return "([^"\\]*)"\n', named) == [
+        "Add back",
+        "adding back",
+        "Folders",
+        "What Lucille may do",
+        "Ready",
+    ]
+    assert named.count("return") == 5 and "\\(" not in named
+    assert connection.count("Connection.setUpPageName(") == 1
+    # The check reads those lines with that failure: what the app has written so far.
+    missing = _python_function(_CHECK_APP.read_text(encoding="utf-8"), "set_up_missing")
+    assert "self.stderr_now()" in missing
 
 
 def test_the_set_up_check_looks_for_the_apps_own_words() -> None:
@@ -5399,7 +5679,9 @@ def test_the_reset_check_leaves_the_settings_as_it_found_them(
         hosted.append(args)
         return subprocess.CompletedProcess(args, 1, "", "")
 
-    def menu_once(test: Callable[[list[str]], bool], seconds: float) -> tuple[bool, list[str]]:
+    def menu_once(
+        test: Callable[[list[str]], bool], seconds: float, shot: Path | None = None
+    ) -> tuple[bool, list[str]]:
         worked, shown = check_app._open_menu_and_read()
         return worked and test(shown), shown
 

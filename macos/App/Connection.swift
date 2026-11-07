@@ -1506,6 +1506,7 @@ final class Connection: ObservableObject {
             self?.feedSetUp(.done)
         }
         setupPanel.onClosed = { [weak self] in
+            Connection.log("Set Up's window was closed, not by the app")
             self?.feedSetUp(.windowClosed)
         }
         // The Folders page's buttons and the switches are the menu's own: its Open panel, name
@@ -1580,6 +1581,7 @@ final class Connection: ObservableObject {
     private func setUpEffect(_ effect: SetupFlow.Effect) {
         switch effect {
         case .readPrevious:
+            Connection.log("Set Up reads the policy set aside before it shows a page")
             // The policy this pairing set aside, then the abilities and folders as they are now:
             // the offer leaves out what is already set up.
             Task { [weak self] in
@@ -1598,6 +1600,7 @@ final class Connection: ObservableObject {
                 self.feedSetUp(.previousRead(outcome, ops: VerbOutcome(ops).abilities, roots: VerbOutcome(roots).folders))
             }
         case .show(let page):
+            Connection.log("Set Up shows \(Connection.setUpPageName(page))")
             setupPanel.show(page, with: setUpShown())
             if page == .folders {
                 // Each time the Folders page comes, its folders are checked again.
@@ -1620,7 +1623,24 @@ final class Connection: ObservableObject {
                 warning: true
             )
         case .close:
+            Connection.log("Set Up closed by the app")
             setupPanel.close()
+        }
+    }
+
+    /// A Set Up page's name, for a line on standard error: never what the page lists.
+    private static func setUpPageName(_ page: SetupFlow.Page) -> String {
+        switch page {
+        case .addBack:
+            return "Add back"
+        case .addingBack:
+            return "adding back"
+        case .folders:
+            return "Folders"
+        case .abilities:
+            return "What Lucille may do"
+        case .ready:
+            return "Ready"
         }
     }
 
