@@ -1608,10 +1608,17 @@ def test_compare_reports_same_different_and_failed(
     assert "**FAILED**" in capsys.readouterr().out
 
 
-# The pairing screen and run supervision: the Foundation-only files they are built from, and the
-# rules those keep. The self-test (macos/Tests/SelfTest.swift) checks their behaviour on a Mac.
+# The pairing screen, run supervision and Activity: the Foundation-only files they are built from,
+# and the rules those keep. The self-test (macos/Tests/SelfTest.swift) checks their behaviour on a
+# Mac.
 SPEC_CLI = build_app.REPO_ROOT / "spec" / "CLI.md"
-NEW_LOGIC = ("HostJSON.swift", "Pairing.swift", "Supervisor.swift", "ConnectionText.swift")
+NEW_LOGIC = (
+    "HostJSON.swift",
+    "Pairing.swift",
+    "Supervisor.swift",
+    "ConnectionText.swift",
+    "RequestLog.swift",
+)
 
 
 def _swift(name: str) -> str:
@@ -1809,7 +1816,9 @@ def test_every_word_the_app_says_makes_no_claim_privacy_forbids() -> None:
 
 def _spec_verb_codes() -> dict[str, set[str]]:
     """The error codes each verb the app runs can give: its row in spec/CLI.md section 7's table,
-    and the codes every verb can give, from the sentence before it."""
+    and the codes every verb can give, from the sentence before it. A row is named by the first
+    verb in it: ``pause`` is the row of ``pause``, ``resume`` and ``kill``, which Stop What's
+    Running runs, and ``log [--limit N]`` is the one Activity's log runs."""
     text = SPEC_CLI.read_text(encoding="utf-8")
     section = text.split("## 7. Verbs", 1)[1].split("\n## ", 1)[0]
     sentence = re.search(r"one of the codes every verb can give: (.*?)\.\n", section, re.DOTALL)
@@ -1832,6 +1841,8 @@ def _spec_verb_codes() -> dict[str, set[str]]:
         "pair confirm",
         "pair reject",
         "run --json-events [--exit-on-stdin-eof] [--allow-downgrade]",
+        "pause",
+        "log [--limit N]",
     }
     assert wanted <= set(rows), sorted(rows)
     return {verb: rows[verb] for verb in wanted}
@@ -1887,6 +1898,75 @@ def test_every_stopped_reason_is_read() -> None:
         assert f'case "{reason}":' in reader, reason
     by_code = re.findall(r"case (\.[^:]+):\n\s+return (\d+)", exit_codes)
     assert {int(code) for _, code in by_code} == set(reasons.values())
+
+
+def test_every_request_phase_is_read() -> None:
+    # Every phase a request object can be in, and every decision and status it carries
+    # (spec/CLI.md section 6, `request`), is a case the app reads. A phase it does not know is
+    # kept as other, which Activity ignores; the decision and the status are closed (section 12).
+    text = SPEC_CLI.read_text(encoding="utf-8")
+    table = text.split("### `request`: one request, at each step", 1)[1].split("\n### ", 1)[0]
+    phases: set[str] = set()
+    values: dict[str, set[str]] = {"decision": set(), "status": set()}
+    for line in table.splitlines():
+        cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
+        phase = re.fullmatch(r"`([a-z_]+)`", cells[0])
+        # The table's header names its first column `phase` too.
+        if not line.startswith("| `") or phase is None or cells[1] == "Other fields":
+            continue
+        phases.add(phase.group(1))
+        named = re.match(r"`(decision|status)` `([a-z_]+)`", cells[1])
+        if named:
+            values[named.group(1)].add(named.group(2))
+    assert phases == {"received", "decided", "started", "finished"}
+    assert values == {
+        "decision": {"run", "refused"},
+        "status": {"done", "refused", "failed", "abandoned"},
+    }
+    host_json = _swift("HostJSON.swift")
+    reader = _function_body(host_json, "    private static func readRequest(")
+    for word in phases | values["decision"] | values["status"]:
+        assert f'case "{word}":' in reader, word
+    assert "return .other(phase)" in reader
+    # The types Activity reads: the events, the log's lines and the operations' summaries.
+    assert {"request", "log_line", "op"} <= _swift_string_set(host_json, "knownTypes")
+    # The decoder keeps what a request asked for as the host wrote it, a null as nil.
+    assert (
+        '.received(op: fields.string("op"), root: fields.string("root"), '
+        'path: fields.string("path"))'
+    ) in reader
+
+
+def test_every_request_outcome_has_words() -> None:
+    # Activity says each way a request ends in words: one sentence for each of the protocol's
+    # refusal codes and one for each code of a request that failed, both closed sets
+    # (request.schema.json). No sentence says that anything was received: `finished` says the
+    # request finished on this Mac, not that Lucille got the reply (spec/CLI.md section 13.2).
+    schema = json.loads(
+        (check_app.CLI_FIXTURES.parent / "request.schema.json").read_text(encoding="utf-8")
+    )
+    words = _swift("RequestLog.swift")
+    refused = _swift_string_table(words, "refused")
+    failed = _swift_string_table(words, "failed")
+    assert set(refused) == set(schema["$defs"]["refused_code"]["enum"])
+    assert set(failed) == set(schema["$defs"]["failed_code"]["enum"])
+    assert len(set(refused.values())) == len(refused)
+    assert len(set(failed.values())) == len(failed)
+    for sentence in [*refused.values(), *failed.values()]:
+        assert sentence.endswith(".") and "received" not in sentence.lower(), sentence
+    # A refusal for an ability that is off is a fact, with no suggestion to turn it on
+    # (decisions/0002 §13, M18).
+    assert refused["not_enabled"] == "Turned away: that ability is off on this Mac."
+    for sentence in refused.values():
+        assert sentence.startswith("Turned away"), sentence
+        assert not re.search(r"\bturn\b.*\bon\b|\benable", sentence, re.IGNORECASE), sentence
+    for name, said in (
+        ("running", "Running…"),
+        ("finished", "Finished on this Mac."),
+        ("abandoned", "Dropped: the connection changed."),
+        ("stoppedWithRun", "Stopped when \\(appName)'s helper program stopped."),
+    ):
+        assert f'static let {name} = "{said}"' in words, name
 
 
 def test_the_app_stops_run_with_the_ladder_the_design_gives() -> None:
@@ -1994,6 +2074,195 @@ def test_modal_loops_never_start_inside_a_main_queue_callout() -> None:
     assert 'private static let queue = DispatchQueue(label: "signals"' in connection
 
 
+# --- Activity, and Stop What's Running (decisions/0002 §14 and §15) ---------------------------
+
+
+def test_stop_whats_running_runs_kill_only_for_the_user() -> None:
+    # Stop What's Running is the user's act. The supervisor asks for it only on the menu item's
+    # input, and only while run runs, as an effect of its own, so the glue never takes it for a
+    # Disconnect's kill. Its path runs kill, which pauses the host, and nothing on it resumes:
+    # only the user's Resume does (spec/PROTOCOL.md section 16, "Kill and timeout").
+    supervisor = _swift("Supervisor.swift")
+    connection = _swift("Connection.swift")
+    menu = _swift("MenuBarApp.swift")
+    assert "        case userStop\n" in supervisor
+    assert "        case stopWhatsRunning\n" in supervisor
+    assert supervisor.count(".stopWhatsRunning") == 1
+    assert (
+        "        case .userStop:\n"
+        "            guard case .running = phase else {\n"
+        "                return []\n"
+        "            }\n"
+        "            return [.stopWhatsRunning]\n"
+    ) in supervisor
+    # The menu's item is the only thing that feeds that input.
+    for path in SWIFT_FILES:
+        if path.name not in ("Supervisor.swift", "Connection.swift"):
+            assert ".userStop" not in path.read_text(encoding="utf-8"), path.name
+    assert connection.count(".userStop") == 1
+    chosen = _swift_function(connection, "    func stopWhatsRunningChosen() {")
+    assert "feedRun(.userStop)" in chosen
+    assert menu.count("connection.stopWhatsRunningChosen()") == 1
+    assert (
+        "Button(ConnectionText.stopWhatsRunningItem) { connection.stopWhatsRunningChosen() }"
+    ) in menu
+    # The effect runs kill on the queue of the other short verbs, then shows what the host says.
+    assert "        case .stopWhatsRunning:\n            stopWhatsRunning()\n" in connection
+    stop = _swift_function(connection, "    private func stopWhatsRunning() {")
+    assert '["--json", "kill"], on: VerbQueue.other' in stop
+    assert "self.controlsChanged(paused: paused)" in stop
+    assert "ConnectionText.stoppedAndPausedTitle" in stop
+    assert "ConnectionText.couldNotStopWhatsRunning" in stop
+    for body in (chosen, stop):
+        for resumes in ("setPaused(", ".userResume", ".runResume", '"resume"', "disconnectKilled"):
+            assert resumes not in body, resumes
+    # A Disconnect's kill is still the only one its note reports as a pause.
+    kill = connection.split("        case .runKill:\n", 1)[1].split("\n        case .", 1)[0]
+    assert "disconnectKilled = true" in kill
+    assert connection.count("disconnectKilled = true") == 1
+
+
+def test_the_menu_offers_stop_whats_running_only_while_an_operation_runs() -> None:
+    # Shown only while an operation's process runs (decisions/0002 §14): from a request's
+    # `started` to its `finished`, while run lives; above Pause and Resume. Activity… follows the
+    # folders, and is always there.
+    menu = _swift("MenuBarApp.swift")
+    connection = _swift("Connection.swift")
+    shown = (
+        "        if connection.operationRunning {\n"
+        "            Button(ConnectionText.stopWhatsRunningItem) {"
+        " connection.stopWhatsRunningChosen() }\n"
+        "        }\n"
+    )
+    assert shown in menu
+    assert menu.index(shown) < menu.index('Button("Resume Lucille")')
+    assert menu.index(shown) < menu.index('Button("Pause Lucille")')
+    activity = menu.index("Button(ConnectionText.activityItem) { connection.activityChosen() }")
+    assert menu.index('Menu("Folders")') < activity < menu.index("if connection.items.connect {")
+    assert "@Published private(set) var operationRunning = false" in connection
+    assert "operationRunning = supervisor.runAlive && requests.operationRunning" in connection
+    # What the menu goes by is fed from run's own events: each request event goes to the request
+    # log, and run's end closes every request still open, so a run that crashed in the middle of a
+    # request leaves nothing that reads as running.
+    start = _swift_function(connection, "    private func startRun() {")
+    on_object = start.split("        child.onObject = ", 1)[1].split("\n        }\n", 1)[0]
+    on_exit = start.split("        child.onExit = ", 1)[1].split("\n        }\n", 1)[0]
+    assert (
+        "                if case .request(let event) = object {\n"
+        "                    self.requests.note(event, at: Date())\n"
+        "                    self.activityPanel.update(self.requests.entries)\n"
+        "                }\n"
+    ) in on_object
+    assert (
+        "                self.requests.runEnded(at: Date())\n"
+        "                self.activityPanel.update(self.requests.entries)\n"
+    ) in on_exit
+    noted = on_object.index("self.requests.note(")
+    assert noted < on_object.index("self.feedRun(.object(object))")
+    ended = on_exit.index("self.requests.runEnded(")
+    assert ended < on_exit.index("self.feedRun(.exited(childExit))")
+    assert connection.count("self.requests.note(") == 1
+    assert connection.count("self.requests.runEnded(") == 1
+
+
+# What the files that keep and show Activity must not do: write a file, a log line or the
+# pasteboard, or keep a setting.
+_WRITES_OR_LOGS = (
+    "write(to",
+    "FileManager",
+    "FileHandle",
+    "fputs",
+    "print(",
+    "NSLog",
+    "os_log",
+    "Logger(",
+    "Connection.log(",
+    "NSPasteboard",
+    "UserDefaults",
+)
+
+
+def test_activity_is_kept_in_memory() -> None:
+    # What Lucille asked is kept in the app's memory only, while it is open (decisions/0002 §15),
+    # at most 500 requests; neither file that holds or shows it writes anything anywhere.
+    for name in ("RequestLog.swift", "ActivityPanel.swift"):
+        text = _swift(name)
+        for banned in _WRITES_OR_LOGS:
+            assert banned not in text, (name, banned)
+    assert "static let capacity = 500" in _swift("RequestLog.swift")
+    # No diagnostic line the app writes names what a request asked for: none interpolates an
+    # object, an event or an entry.
+    for path in SWIFT_FILES:
+        for line in path.read_text(encoding="utf-8").splitlines():
+            if re.search(r"\blog\(|\bprint\(", line):
+                assert not re.search(r"\\\((?:object|event|entry|requests)\b", line), (
+                    path.name,
+                    line,
+                )
+
+
+def test_lucilles_text_is_shown_only_in_activity() -> None:
+    # What a request asked for (its op, folder alias and path) is Lucille's text. Only
+    # RequestLog.swift reads it, where RequestEntry keeps it fileprivate, and only the Activity
+    # panel shows RequestText's words, so it reaches no argument, menu line, button or note
+    # (decisions/0002 §13).
+    log = _swift("RequestLog.swift")
+    stored = re.findall(r"^ {4}((?:\w+ )*)(?:let|var) (op|root|path)\b", log, re.MULTILINE)
+    assert sorted(name for _, name in stored) == ["op", "path", "root"]
+    for modifiers, name in stored:
+        assert "fileprivate" in modifiers.split(), name
+    for path in SWIFT_FILES:
+        text = path.read_text(encoding="utf-8")
+        if path.name not in ("HostJSON.swift", "RequestLog.swift"):
+            assert ".received" not in text, path.name
+        if path.name not in ("RequestLog.swift", "ActivityPanel.swift"):
+            assert "RequestText" not in text, path.name
+    assert "RequestText." in _swift("ActivityPanel.swift")
+
+
+def test_activity_text_cannot_be_selected_or_copied() -> None:
+    # The build lead's D15: selected text could be copied, a pasteboard write the app does not
+    # make yet (Copy Diagnostics, decisions/0002 §15, is later). So nothing in the Activity panel
+    # can be selected or edited, and it has no Copy button.
+    panel = _swift("ActivityPanel.swift")
+    # AppKit makes a wrapping label and a text view selectable by default, so each view that holds
+    # words says otherwise: the two labels, and the text view in each of the two boxes.
+    assert panel.count("NSTextField(wrappingLabelWithString:") == 2
+    assert panel.count("NSTextView.scrollableTextView()") == 2
+    labels = "        for label in [header, caption] {\n            label.isSelectable = false\n"
+    assert labels in panel
+    boxes = panel.split("        for box in [requestsBox, logBox] {\n", 1)[1]
+    boxes = boxes.split("\n        }\n", 1)[0]
+    assert "                text.isEditable = false\n" in boxes
+    assert "                text.isSelectable = false\n" in boxes
+    assert "isSelectable = true" not in panel and "isEditable = true" not in panel
+    assert not _matches(_READS_THE_PASTEBOARD, panel)
+    assert "copy(" not in panel
+    for words in _swift_strings(panel):
+        assert "Copy" not in words, words
+
+
+# How a Swift file makes a window: an initializer that takes a content rectangle.
+_MAKES_A_WINDOW = re.compile(r"\b[A-Z]\w*\(\s*contentRect:")
+
+
+def test_no_window_is_restorable() -> None:
+    # A window macOS may restore writes a Saved Application State folder named after the bundle
+    # identifier, which M12's check would find; an autosaved frame is a setting, and the app keeps
+    # none. So every window the app makes is not restorable, and none autosaves its frame.
+    made = 0
+    for path in SWIFT_FILES:
+        text = path.read_text(encoding="utf-8")
+        windows = len(_MAKES_A_WINDOW.findall(text))
+        made += windows
+        assert text.count(".isRestorable = false") >= windows, path.name
+        assert "isRestorable = true" not in text, path.name
+        assert "frameAutosaveName" not in text and "setFrameAutosaveName" not in text, path.name
+    # The pairing window, the progress panel and the Activity panel.
+    assert made == 3
+    assert "panel.hidesOnDeactivate = false" in _swift("ActivityPanel.swift")
+
+
 # --- The macOS checks of pairing and run: check_app.py ui and pairing --------------------------
 
 
@@ -2077,11 +2346,37 @@ def test_the_pairing_checks_look_for_the_apps_own_words() -> None:
         "disconnectQuestionTitle": check_app.DISCONNECT_TITLE,
         "disconnectButton": check_app.DISCONNECT_BUTTON,
         "disconnectedTold": check_app.DISCONNECTED_TOLD,
+        "activityItem": check_app.ACTIVITY_ITEM,
+        "activityTitle": check_app.ACTIVITY_TITLE,
+        "showLog": check_app.SHOW_LOG,
+        "stopWhatsRunningItem": check_app.STOP_WHATS_RUNNING,
+        "stoppedAndPausedTitle": check_app.STOPPED_AND_PAUSED,
+        "activityHeader": check_app.ACTIVITY_HEADER,
+        "logCaption": check_app.LOG_CAPTION,
+        "logEmpty": check_app.LOG_EMPTY,
     }
     for name, said in words.items():
         assert f'static let {name} = "{_named_in_swift(said)}"' in text, name
     assert f'"bad_code": "{check_app.BAD_CODE}",' in text
     assert check_app.CONNECT_ITEM in check_app.MENU_ITEMS
+    # Activity… is always in the menu; Stop What's Running only while an operation runs.
+    assert check_app.ACTIVITY_ITEM in check_app.MENU_ITEMS
+    assert check_app.STOP_WHATS_RUNNING not in check_app.MENU_ITEMS
+    assert check_app.STOPPED_AND_PAUSED == "Stopped, and paused. Resume when you're ready."
+    # Activity's words for the requests the pairing check sends (RequestLog.swift): a refusal of
+    # an ability that is off, and the fingerprint of a.txt in the check's folder, finished. The
+    # request's words start from the core's summary of the operation.
+    request = _swift("RequestLog.swift")
+    assert f'"not_enabled": "{check_app.NOT_ENABLED_ENTRY}",' in request
+    assert f'static let finished = "{check_app.FINISHED_ENTRY}"' in request
+    assert OPERATIONS["files.sha256"].about.summary == "Check a file's fingerprint"
+    assert check_app.FINGERPRINT_ENTRY == (
+        f"Lucille asked to check a file's fingerprint: “a.txt” in {check_app.PAIRING_ALIAS}."
+    )
+    assert '"Lucille asked to ' in request
+    # The ui check cuts the host's log lines as Activity does, to find them in it.
+    assert f"static let longestLogLine = {check_app.LONGEST_LOG_LINE}" in request
+    entries = (check_app.NOT_ENABLED_ENTRY, check_app.FINISHED_ENTRY, check_app.FINGERPRINT_ENTRY)
     # The lines the app writes on standard error as run exits (RunSupervisor.describe), which the
     # pairing check reads.
     supervisor = _swift("Supervisor.swift")
@@ -2095,7 +2390,7 @@ def test_the_pairing_checks_look_for_the_apps_own_words() -> None:
     assert f'static let quitApp = "{_named_in_swift(check_app.QUIT_ITEM)}"' in _swift(
         "HostText.swift"
     )
-    for said in [*words.values(), "OK", "Cancel", check_app.QUIT_ITEM]:
+    for said in [*words.values(), *entries, "OK", "Cancel", check_app.QUIT_ITEM]:
         assert check_app._quoted(said) == f'"{said}"'
     # The text the ui check pastes passes the app's own check on a code, and so would the one it
     # leaves on the pasteboard, which the app must never read by itself.
@@ -2108,6 +2403,83 @@ def test_the_pairing_checks_look_for_the_apps_own_words() -> None:
     for code in (check_app.PASTED_TEXT, check_app.PASTEBOARD_SENTINEL):
         assert re.fullmatch(r"swbp1_[A-Za-z0-9_-]{100,8186}", code), code
     assert check_app.PASTED_TEXT != check_app.PASTEBOARD_SENTINEL
+
+
+def test_the_checks_open_activity_and_stop_whats_running() -> None:
+    # The ui check opens Activity and its log on every job, so the panel is under M12's check; the
+    # pairing check sends a request for an ability that is off and reads Activity's entry (M18),
+    # then, between its two quits, stops a running request from the menu and sees the host stay
+    # paused until Resume.
+    source = _CHECK_APP.read_text(encoding="utf-8")
+    ui = _python_function(source, "check_ui")
+    assert (
+        ui.index("_drive_whole_disk(")
+        < ui.index("_drive_activity(")
+        < ui.index("_drive_code_window(")
+    )
+    activity = _python_function(source, "_drive_activity")
+    for name in ("ACTIVITY_ITEM", "ACTIVITY_TITLE", "SHOW_LOG", "_screenshot("):
+        assert name in activity, name
+    go = _python_function(source, "go")
+    assert (
+        go.index("self.quit_and_drain")
+        < go.index("self.stop_whats_running")
+        < go.index("self.stop_now")
+    )
+    stop = _python_function(source, "stop_whats_running")
+    for name in (
+        "STOP_WHATS_RUNNING",
+        "STOPPED_AND_PAUSED",
+        "STOP_DURING",
+        "_sleeping(",
+        '"killed_locally"',
+        "RESUME_ITEM",
+    ):
+        assert name in stop, name
+    fingerprint = _python_function(source, "fingerprint")
+    assert fingerprint.index("NOT_ENABLED_ENTRY") < fingerprint.index('"ops", "enable"')
+    assert "p-activity-not-enabled.png" in fingerprint
+    assert "FINGERPRINT_ENTRY" in fingerprint and "FINISHED_ENTRY" in fingerprint
+    assert check_app.RESUME_ITEM == "Resume Lucille"
+    assert 'Button("Resume Lucille")' in _swift("MenuBarApp.swift")
+    # A read of Activity's words that misses says what the window holds where its boxes were read,
+    # and only then.
+    reader = _python_function(source, "read_activity")
+    for body in (activity, reader):
+        assert body.count("_activity_holds()") == body.count(" else _activity_holds())") >= 1
+
+
+@pytest.mark.parametrize(
+    ("answer", "said"),
+    [
+        (
+            (True, " [a scroll area: AXTextArea, AXScrollBar; AXTextArea holds: ]"),
+            "; the window holds: [a scroll area: AXTextArea, AXScrollBar; AXTextArea holds: ]",
+        ),
+        ((False, "execution error: no window"), "; (System Events: execution error: no window)"),
+    ],
+)
+def test_a_missed_read_of_activity_says_what_holds_its_boxes(
+    monkeypatch: pytest.MonkeyPatch, answer: tuple[bool, str], said: str
+) -> None:
+    # That System Events reads the text of a text view that cannot be selected as its scroll
+    # area's `text area 1` is untried on a Mac; when it is not, the first failing run says what
+    # each scroll area of the Activity window holds, and what those hold.
+    scripts: list[str] = []
+
+    def fake(body: str, timeout: float = 30) -> tuple[bool, str]:
+        scripts.append(body)
+        return answer
+
+    monkeypatch.setattr(check_app, "_system_events", fake)
+    assert check_app._activity_holds() == said
+    [script] = scripts
+    window = f"window {check_app._quoted(check_app.ACTIVITY_TITLE)}"
+    assert f"repeat with theArea in scroll areas of {window}\n" in script
+    assert "(role of every UI element of theArea)" in script
+    assert "repeat with theElement in UI elements of theArea\n" in script
+    assert "(role of every UI element of theElement)" in script
+    assert script.endswith("return held")
 
 
 def test_the_applescript_the_checks_build_names_what_it_looks_for() -> None:

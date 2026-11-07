@@ -342,6 +342,39 @@ enum StopReason: Equatable, Sendable {
     }
 }
 
+/// How a request ended (spec/CLI.md §6, `request`, `finished`). The status is closed within
+/// version 1; the codes of `refused` and `failed` are the protocol's, closed too.
+enum RequestEnd: Equatable, Sendable {
+    /// It ran, and its reply is built.
+    case done
+    case refused(String)
+    /// It was decided to run and did not finish: `timeout`, `killed_locally` or `interrupted`.
+    case failed(String)
+    /// Its work room was given up while it was decided or ran: it gets no reply.
+    case abandoned
+}
+
+/// The step a request is at (spec/CLI.md §6, `request`). What it asked for is Lucille's text, as
+/// the host wrote it: only `RequestLog` keeps it, and only the Activity panel shows it.
+enum RequestPhase: Equatable, Sendable {
+    /// Written to the audit log, before it is decided. Each field is nil when the host wrote
+    /// null: an op that is not an operation's name, or a path it would not show.
+    case received(op: String?, root: String?, path: String?)
+    /// To run, or refused with the protocol's code.
+    case decided(run: Bool, code: String?)
+    /// The process it runs is about to start: only for an operation that starts one.
+    case started
+    case finished(RequestEnd)
+    /// A phase this release does not know, which a reader ignores (spec/CLI.md §12).
+    case other(String)
+}
+
+/// One `request` object of `run`'s events: Lucille's id for the job, and its step.
+struct RequestEvent: Equatable, Sendable {
+    let jobId: String
+    let phase: RequestPhase
+}
+
 /// What `forget` did (spec/CLI.md §6, `forget`).
 enum ForgetResult: Equatable, Sendable {
     case forgotten(name: String, lucilleTold: Bool)
@@ -364,15 +397,21 @@ enum HostObject: Equatable, Sendable {
     case controls(paused: Bool)
     case ready(pair: String, hostVersion: String)
     case state(RunState)
-    case request(jobId: String, phase: String)
+    case request(RequestEvent)
     case hostTooOld(jobId: String, minVersion: String, hostVersion: String)
     case stopped(StopReason)
+    /// One line of the audit log, as `log` prints it, which a shell shows as it is or not at all
+    /// (spec/CLI.md §6, `log_line`).
+    case logLine(String)
+    /// One operation of `ops list`: its name, and the core's few words for what it does (nil for a
+    /// policy entry this release's catalog does not have). Activity says each request with them.
+    case op(name: String, summary: String?)
     case unknown(type: String)
 
     /// The types this release reads. Every other type decodes as `unknown`.
     static let knownTypes: Set<String> = [
         "pair_code", "policy_reset", "pair", "error", "status", "forget", "controls", "ready",
-        "state", "request", "host_too_old", "stopped",
+        "state", "request", "host_too_old", "stopped", "log_line", "op",
     ]
 }
 
@@ -515,10 +554,10 @@ extension HostObject {
             }
             self = .state(state)
         case "request":
-            guard let job = fields.string("job_id"), let phase = fields.string("phase") else {
+            guard let job = fields.string("job_id"), let phase = HostObject.readRequest(fields) else {
                 return nil
             }
-            self = .request(jobId: job, phase: phase)
+            self = .request(RequestEvent(jobId: job, phase: phase))
         case "host_too_old":
             guard let job = fields.string("job_id"), let least = fields.string("min_host_version"),
                   let version = fields.string("host_version")
@@ -531,6 +570,16 @@ extension HostObject {
                 return nil
             }
             self = .stopped(reason)
+        case "log_line":
+            guard let text = fields.string("text") else {
+                return nil
+            }
+            self = .logLine(text)
+        case "op":
+            guard let name = fields.string("name") else {
+                return nil
+            }
+            self = .op(name: name, summary: fields.string("summary"))
         default:
             self = .unknown(type: type)
         }
@@ -773,6 +822,45 @@ extension HostObject {
         }
     }
 
+    /// A request's step. A phase this release does not know is `other`, which a reader ignores;
+    /// a decision or a status outside their closed sets, or a refusal or failure with no code, is
+    /// a request whose fields this release cannot read (spec/CLI.md §12).
+    private static func readRequest(_ fields: JSONFields) -> RequestPhase? {
+        guard let phase = fields.string("phase") else {
+            return nil
+        }
+        switch phase {
+        case "received":
+            return .received(op: fields.string("op"), root: fields.string("root"), path: fields.string("path"))
+        case "decided":
+            switch fields.string("decision") ?? "" {
+            case "run":
+                return .decided(run: true, code: nil)
+            case "refused":
+                return fields.string("code").map { RequestPhase.decided(run: false, code: $0) }
+            default:
+                return nil
+            }
+        case "started":
+            return .started
+        case "finished":
+            switch fields.string("status") ?? "" {
+            case "done":
+                return .finished(.done)
+            case "refused":
+                return fields.string("code").map { RequestPhase.finished(.refused($0)) }
+            case "failed":
+                return fields.string("code").map { RequestPhase.finished(.failed($0)) }
+            case "abandoned":
+                return .finished(.abandoned)
+            default:
+                return nil
+            }
+        default:
+            return .other(phase)
+        }
+    }
+
     private static func readForget(_ fields: JSONFields) -> ForgetResult? {
         guard let state = fields.string("state") else {
             return nil
@@ -887,6 +975,36 @@ enum VerbOutcome: Equatable, Sendable {
             }
         }
         return nil
+    }
+
+    /// The lines of `log --json`, oldest first, as the host wrote them; none when the log is
+    /// empty, or the verb did not work.
+    var logLines: [String] {
+        guard case .done(let objects) = self else {
+            return []
+        }
+        var lines: [String] = []
+        for object in objects {
+            if case .logLine(let text) = object {
+                lines.append(text)
+            }
+        }
+        return lines
+    }
+
+    /// Each operation's summary from `ops list --json`, by its name, in the core's words (spec/CLI.md
+    /// §8). A policy entry the catalog does not have has none.
+    var summaries: [String: String] {
+        guard case .done(let objects) = self else {
+            return [:]
+        }
+        var found: [String: String] = [:]
+        for object in objects {
+            if case .op(let name, let summary?) = object {
+                found[name] = summary
+            }
+        }
+        return found
     }
 }
 

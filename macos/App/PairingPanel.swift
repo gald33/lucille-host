@@ -70,6 +70,8 @@ final class PairingPanel: NSObject, NSWindowDelegate {
         panel.isReleasedWhenClosed = false
         panel.level = .floating
         panel.hidesOnDeactivate = false
+        // Not restorable: macOS would keep its state in a folder named after the app.
+        panel.isRestorable = false
         panel.title = ConnectionText.codeTitle
         panel.onCloseAsked = { [weak self] in
             self?.onClose?()

@@ -2,7 +2,8 @@ import AppKit
 import SwiftUI
 
 /// The menu bar app that runs the host. It has no window and no Dock icon (LSUIElement);
-/// everything it does is in this menu, the pairing window and the notes it shows.
+/// everything it does is in this menu, the pairing window, the Activity window and the notes it
+/// shows.
 @main
 struct MenuBarApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
@@ -97,6 +98,9 @@ struct HostMenu: View {
             Button(problem.message) { model.showProblem() }
         }
         Divider()
+        if connection.operationRunning {
+            Button(ConnectionText.stopWhatsRunningItem) { connection.stopWhatsRunningChosen() }
+        }
         if model.paused {
             Button("Resume Lucille") { model.setPaused(false) }
         } else {
@@ -148,6 +152,7 @@ struct HostMenu: View {
                 }
             }
         }
+        Button(ConnectionText.activityItem) { connection.activityChosen() }
         Divider()
         if connection.items.connect {
             Button(ConnectionText.connectItem) { connection.connectChosen() }

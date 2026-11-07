@@ -166,6 +166,8 @@ enum ConnectionText {
     static let appBugCodes: Set<String> = [
         "usage", "internal", "bad_profile", "unsupported_platform", "os_error", "code_in_argv",
         "bad_hub", "bad_options", "no_code", "startup_refused", "runtime_folder", "state_invalid",
+        // `log --limit` takes 1 or more, and the app always asks for 200.
+        "bad_limit",
     ]
 
     static let expiredAfterSAS = "The time to compare the numbers ran out. Nothing was connected. Start again in Lucille."
@@ -274,7 +276,7 @@ enum ConnectionText {
     static let stoppingNow = "Stopping…"
     static let finishingLogout = "If it isn't done in 20 seconds, \(appName) stops it, and will be paused when you next open it."
     static let pausedTitle = "\(appName) is paused"
-    static let pausedText = "Lucille's requests are turned away until you resume. You paused \(appName), or a task was stopped when \(appName) quit or you logged out."
+    static let pausedText = "Lucille's requests are turned away until you resume. You paused \(appName) or chose Stop What's Running, or a task was stopped when \(appName) quit or you logged out."
     static let resumeButton = "Resume"
     static let notNowButton = "Not Now"
     static let keepsStoppingTitle = "\(appName) keeps stopping"
@@ -283,6 +285,31 @@ enum ConnectionText {
     static let okButton = "OK"
     static let showDetails = "Show Details"
     static let hideDetails = "Hide Details"
+
+    // MARK: Stop What's Running
+
+    /// Shown above Pause and Resume while an operation's process runs (decisions/0002 §14).
+    static let stopWhatsRunningItem = "Stop What's Running"
+    static let stoppedAndPausedTitle = "Stopped, and paused. Resume when you're ready."
+    static let stoppedAndPausedText = "Lucille's requests are turned away until you choose Resume Lucille."
+    static let couldNotStopWhatsRunning = "\(appName) couldn't stop what's running."
+    static let stopWhatsRunningUnknown = "It may still be running. Choose Stop What's Running again, or quit \(appName) and choose Stop now."
+
+    // MARK: Activity
+
+    static let activityItem = "Activity…"
+    static let activityTitle = "Activity"
+    /// What the Activity window keeps, and for how long (decisions/0002 §15).
+    static let activityHeader = "What Lucille asked this Mac to do since \(appName) opened. \(appName) keeps this only while it is open."
+    static let activityEmpty = "Lucille hasn't asked this Mac to do anything since \(appName) opened."
+    static let showLog = "Show the Host's Log"
+    static let hideLog = "Hide the Host's Log"
+    /// Above the host's log, which is shown as the host wrote it: the log is the user's own file,
+    /// and proves nothing (spec/CLI.md §6, `log_line`).
+    static let logCaption = "As the host wrote it. Anything running as you can change this file."
+    static let readingLog = "Reading the host's log…"
+    static let logEmpty = "The host's log is empty."
+    static let couldNotReadLog = "\(appName) couldn't read the host's log."
 
     // MARK: Needs attention
 

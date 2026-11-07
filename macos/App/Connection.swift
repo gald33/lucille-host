@@ -431,11 +431,17 @@ final class Connection: ObservableObject {
     @Published private(set) var items = MenuItems()
     /// The pair is confirmed: Lucille's requests can reach this Mac.
     @Published private(set) var connected = false
+    /// An operation's process runs, and `run` runs: the menu offers Stop What's Running.
+    @Published private(set) var operationRunning = false
 
     private let cli: HostCLI
     private var flow = PairingFlow()
     private var supervisor = RunSupervisor()
     private let panel: PairingPanel
+    /// What Lucille asked since the app opened, from `run`'s `request` events, in memory only,
+    /// and the window that shows it.
+    private var requests = RequestLog()
+    private let activityPanel: ActivityPanel
     /// The latest `status --json` that worked, and the host's words when the latest one did not.
     private var status: HostStatus?
     private var statusDetail: String?
@@ -481,6 +487,7 @@ final class Connection: ObservableObject {
     private init() {
         cli = HostCLI(python: HostCLI.python(inApp: Bundle.main.bundleURL), home: HostCLI.userHome())
         panel = PairingPanel()
+        activityPanel = ActivityPanel()
         wake = MainTimer()
         poll = MainTimer()
         deadline = MainTimer()
@@ -634,6 +641,48 @@ final class Connection: ObservableObject {
         shown.show()
         disconnecting = shown
         feedRun(.disconnect)
+    }
+
+    /// Stop What's Running, chosen in the menu: the supervisor asks for `kill` only while `run`
+    /// runs.
+    func stopWhatsRunningChosen() {
+        feedRun(.userStop)
+    }
+
+    /// Activity…: what Lucille asked since the app opened. The words for each request start from
+    /// the core's summary of its operation, read again from `ops list --json` each time it opens.
+    func activityChosen() {
+        activityPanel.show(requests.entries)
+        Task { [weak self] in
+            guard let self else {
+                return
+            }
+            let result = await VerbQueue.run(self.cli, ["--json", "ops", "list"], on: VerbQueue.other)
+            let outcome = VerbOutcome(result)
+            if case .done = outcome {
+                self.activityPanel.setSummaries(outcome.summaries)
+            } else {
+                Connection.log("ops list did not answer for Activity: exit \(result.status)")
+            }
+        }
+    }
+
+    /// The Activity window's Show the Host's Log: its last 200 lines, which the window shows as
+    /// the host wrote them. `log` writes nothing when the log is empty (spec/CLI.md §7).
+    private func readLog() {
+        Task { [weak self] in
+            guard let self else {
+                return
+            }
+            let result = await VerbQueue.run(self.cli, ["--json", "log", "--limit", "200"], on: VerbQueue.other)
+            let outcome = VerbOutcome(result)
+            if case .done = outcome {
+                self.activityPanel.showLog(outcome.logLines)
+            } else {
+                Connection.log("log did not answer: exit \(result.status)")
+                self.activityPanel.showLogFailed()
+            }
+        }
     }
 
     /// The app's own Quit, from the menu or the note that says where the menu is. AppKit waits to
@@ -993,6 +1042,8 @@ final class Connection: ObservableObject {
             forget()
         case .runResume:
             HostModel.shared.setPaused(false)
+        case .stopWhatsRunning:
+            stopWhatsRunning()
         case .replyTerminate:
             if ladder != nil {
                 ladder?.runDone = true
@@ -1019,6 +1070,36 @@ final class Connection: ObservableObject {
         }
     }
 
+    /// Stop What's Running: `kill --json`, which stops the process group of the operation in
+    /// flight and pauses the host (spec/CLI.md §7, spec/PROTOCOL.md §16). The menu then says
+    /// paused, and a note says so. Nothing here resumes: only the user's Resume does.
+    private func stopWhatsRunning() {
+        Task { [weak self] in
+            guard let self else {
+                return
+            }
+            let result = await VerbQueue.run(self.cli, ["--json", "kill"], on: VerbQueue.other)
+            let outcome = VerbOutcome(result)
+            if let paused = outcome.paused {
+                self.controlsChanged(paused: paused)
+                Alerts.shared.note(
+                    ConnectionNote(title: ConnectionText.stoppedAndPausedTitle, text: ConnectionText.stoppedAndPausedText, detail: nil)
+                )
+                return
+            }
+            Connection.log("kill did not answer: exit \(result.status)")
+            var text = ConnectionText.stopWhatsRunningUnknown
+            var detail: String?
+            if case .refused(let error) = outcome {
+                text = ConnectionText.refusal(code: error.code, message: error.message, afterSAS: false)
+                detail = error.message == text ? nil : error.message
+            }
+            Alerts.shared.note(
+                ConnectionNote(title: ConnectionText.couldNotStopWhatsRunning, text: text, detail: detail), warning: true
+            )
+        }
+    }
+
     private func startRun() {
         let child = HostChild(cli: cli, verb: Connection.runVerb, input: .lifeline, deliverOn: .main)
         child.onObject = { [weak self, weak child] object in
@@ -1028,6 +1109,10 @@ final class Connection: ObservableObject {
                 }
                 if case .state(let state) = object, let hold = self.pausedHold, hold.value == state.paused {
                     self.pausedHold = nil
+                }
+                if case .request(let event) = object {
+                    self.requests.note(event, at: Date())
+                    self.activityPanel.update(self.requests.entries)
                 }
                 self.feedRun(.object(object))
             }
@@ -1043,6 +1128,8 @@ final class Connection: ObservableObject {
                 self.children.release(child)
                 self.runTail = child.stderrTail
                 self.runChild = nil
+                self.requests.runEnded(at: Date())
+                self.activityPanel.update(self.requests.entries)
                 self.guardTermination()
                 self.feedRun(.exited(childExit))
             }
@@ -1293,6 +1380,9 @@ final class Connection: ObservableObject {
     }
 
     private func wirePanel() {
+        activityPanel.onShowLog = { [weak self] in
+            self?.readLog()
+        }
         panel.onSubmit = { [weak self] text in
             self?.feedFlow(.submit(text))
         }
@@ -1449,6 +1539,15 @@ final class Connection: ObservableObject {
         let confirmed = isConfirmed()
         if connected != confirmed {
             connected = confirmed
+        }
+        // Not while `run` drains: the drain's own ladder stops the operation, and the supervisor
+        // asks for nothing then.
+        var draining = false
+        if case .draining = supervisor.phase {
+            draining = true
+        }
+        if operationRunning != (supervisor.runAlive && requests.operationRunning && !draining) {
+            operationRunning = supervisor.runAlive && requests.operationRunning && !draining
         }
         let shown = menuItems()
         if items != shown {

@@ -178,6 +178,7 @@ LOGIC_SOURCES: Final = (
     "Pairing.swift",
     "Supervisor.swift",
     "ConnectionText.swift",
+    "RequestLog.swift",
 )
 # The host's golden fixtures (spec/CLI.md section 11), which the self-test reads through the
 # app's JSON reader and its pairing and supervision state machines.
@@ -2405,11 +2406,32 @@ MENU: Final = f"menu 1 of {STATUS_ITEM}"
 LINES: Final = "set AppleScript's text item delimiters to linefeed\n"
 # The menu's item that opens the code window, while the app's profile holds no pair.
 CONNECT_ITEM: Final = "Connect to Lucille…"
+# Activity, as in App/ConnectionText.swift (tests/test_macos_build.py checks that they agree): the
+# menu's item, which is always there; its window's title, what the window says it keeps, and its
+# one button, the disclosure of the host's log, with the words above the log and those for a log
+# with no line. Then Stop What's Running, which the menu shows only while a request's process
+# runs, the title of the note after it, and the item that resumes.
+ACTIVITY_ITEM: Final = "Activity…"
+ACTIVITY_TITLE: Final = "Activity"
+ACTIVITY_HEADER: Final = (
+    f"What Lucille asked this Mac to do since {APP_NAME} opened. {APP_NAME} keeps this only "
+    "while it is open."
+)
+SHOW_LOG: Final = "Show the Host's Log"
+LOG_CAPTION: Final = "As the host wrote it. Anything running as you can change this file."
+LOG_EMPTY: Final = "The host's log is empty."
+# The longest line of the host's log Activity shows, in characters; a longer one is cut, with an
+# ellipsis last (App/RequestLog.swift, RequestText.longestLogLine).
+LONGEST_LOG_LINE: Final = 2000
+STOP_WHATS_RUNNING: Final = "Stop What's Running"
+STOPPED_AND_PAUSED: Final = "Stopped, and paused. Resume when you're ready."
+RESUME_ITEM: Final = "Resume Lucille"
 # The items the menu shows while the app's profile holds no pair, besides its first line.
 MENU_ITEMS: Final = (
     "Abilities",
     "Add a Folder…",
     "Folders",
+    ACTIVITY_ITEM,
     CONNECT_ITEM,
     f"Quit {APP_NAME}",
 )
@@ -3385,14 +3407,147 @@ def _drive_code_window(checker: Checker, python: Path, screens: Path, logs: Sequ
             )
 
 
+def _activity_texts() -> list[str]:
+    """Every line the Activity window shows: its own words, then the lines of each box in it that
+    scrolls (the requests, and the host's log while it shows). Empty when it is not open."""
+    window = f"window {_quoted(ACTIVITY_TITLE)}"
+    worked, said = _system_events(
+        "set found to {}\n"
+        f"try\nset found to found & (value of every static text of {window})\nend try\n"
+        "try\n"
+        f"repeat with theArea in scroll areas of {window}\n"
+        "try\nset end of found to ((value of text area 1 of theArea) as text)\nend try\n"
+        "end repeat\n"
+        "end try\n"
+        f"{LINES}return found as text"
+    )
+    return said.splitlines() if worked else []
+
+
+def _activity_holds() -> str:
+    """What the Activity window holds where :func:`_activity_texts` reads its boxes: the roles of
+    the UI elements in each of its scroll areas, and of those in each of them. For an error, so the
+    first run that cannot read a box says what macOS shows there instead (that a text view that
+    cannot be selected is the scroll area's ``text area 1`` is untried on a Mac)."""
+    worked, said = _system_events(
+        'set AppleScript\'s text item delimiters to ", "\n'
+        'set held to ""\n'
+        "try\n"
+        f"repeat with theArea in scroll areas of window {_quoted(ACTIVITY_TITLE)}\n"
+        'set held to held & " [a scroll area: " & ((role of every UI element of theArea) as text)\n'
+        "try\n"
+        "repeat with theElement in UI elements of theArea\n"
+        'set held to held & "; " & (role of theElement as text) & " holds: " '
+        "& ((role of every UI element of theElement) as text)\n"
+        "end repeat\n"
+        "end try\n"
+        'set held to held & "]"\n'
+        "end repeat\n"
+        "end try\n"
+        "return held"
+    )
+    return f"; the window holds:{said}" if worked else f"; (System Events: {said})"
+
+
+def _activity_buttons() -> list[str]:
+    """The names of the Activity window's buttons, those of its title bar left out."""
+    worked, said = _system_events(
+        "set found to {}\n"
+        f"repeat with theButton in buttons of window {_quoted(ACTIVITY_TITLE)}\n"
+        "set theRole to missing value\n"
+        "try\nset theRole to subrole of theButton\nend try\n"
+        'if theRole is not in {"AXCloseButton", "AXMinimizeButton", "AXZoomButton", '
+        '"AXFullScreenButton"} then\n'
+        "set end of found to ((name of theButton) as text)\n"
+        "end if\n"
+        "end repeat\n"
+        f"{LINES}return found as text"
+    )
+    return said.splitlines() if worked else [f"(System Events: {said})"]
+
+
+def _close_window(title: str) -> tuple[bool, str]:
+    """Click the close button of the app's window named ``title``."""
+    return _system_events(
+        f'click (first button of window {_quoted(title)} whose subrole is "AXCloseButton")'
+    )
+
+
+def _host_log(python: Path) -> list[str]:
+    """The host's log on the app's profile, oldest first, as ``log --json --limit 200`` gives the
+    app its lines; each cut as Activity cuts it (:data:`LONGEST_LOG_LINE`)."""
+    lines: list[str] = []
+    for line in _app_host(python, ["--json", "log", "--limit", "200"]).stdout.splitlines():
+        try:
+            found = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(found, dict) and isinstance(found.get("text"), str):
+            text = found["text"]
+            if len(text) > LONGEST_LOG_LINE:
+                text = text[: LONGEST_LOG_LINE - 1] + "…"
+            lines.append(text)
+    return lines
+
+
+def _drive_activity(checker: Checker, python: Path, screens: Path) -> None:
+    """Choose Activity…: its window says what it keeps, and for how long, and its one button is
+    the disclosure; Show the Host's Log shows the host's own lines as it wrote them, under the
+    words that say the log proves nothing. The window is then closed. That nothing in it can be
+    selected, and that no request in it has a button, is checked in its source by the build
+    tests; the pairing check reads its requests."""
+    worked, said = _choose(ACTIVITY_ITEM.removesuffix("…"))
+    opened = worked and _wait_until(lambda: ACTIVITY_TITLE in _window_names(), 15)
+    _screenshot(screens / "16b-activity.png")
+    if not checker.expect(
+        opened, f"choosing {ACTIVITY_ITEM!r} opens the window {ACTIVITY_TITLE!r}", said
+    ):
+        return
+    try:
+        headed = _wait_until(lambda: ACTIVITY_HEADER in _activity_texts(), 10)
+        checker.expect(
+            headed,
+            f"it says {ACTIVITY_HEADER!r}",
+            f"{_activity_texts()}" + ("" if headed else _activity_holds()),
+        )
+        buttons = _activity_buttons()
+        checker.expect(buttons == [SHOW_LOG], f"its one button is {SHOW_LOG!r}", f"{buttons}")
+        worked, said = _press(SHOW_LOG)
+        logged = _host_log(python)
+
+        def shown() -> bool:
+            texts = _activity_texts()
+            if LOG_CAPTION not in texts:
+                return False
+            return any(line in texts for line in logged) if logged else LOG_EMPTY in texts
+
+        found = worked and _wait_until(shown, 30)
+        _screenshot(screens / "16c-activity-log.png")
+        checker.expect(
+            found,
+            f"{SHOW_LOG} shows the host's log as it wrote it, under {LOG_CAPTION!r}",
+            f"{said} the host's log has {len(logged)} lines; Activity: {_activity_texts()[-20:]}"
+            + ("" if found else _activity_holds()),
+        )
+    finally:
+        if ACTIVITY_TITLE in _window_names():
+            worked, said = _close_window(ACTIVITY_TITLE)
+            checker.expect(
+                worked and _wait_until(lambda: ACTIVITY_TITLE not in _window_names(), 10),
+                "its close button closes Activity",
+                said,
+            )
+
+
 def check_ui(app: Path, checker: Checker, work: Path, require_driven: bool = False) -> None:
     """Open the app and drive it the way a user would, through System Events: read the note that
     says what it is for and where its menu is, when it opens and when it is opened again; read the
     menu; choose Pause Lucille and Resume Lucille, and watch the host's pause flag; switch an
     ability on and off; add a folder through the Open panel and the name dialog, and remove it from
     the Folders submenu; add the home folder, which the app asks about first; choose the Data
-    volume, and ``/`` through a link to it, which the app refuses; open the code window and paste
-    into it (:func:`_drive_code_window`). Each step is checked against the host's own state, on the
+    volume, and ``/`` through a link to it, which the app refuses; open Activity, and the host's
+    log in it (:func:`_drive_activity`); open the code window and paste into it
+    (:func:`_drive_code_window`). Each step is checked against the host's own state, on the
     app's own profile. It uses the real HOME, and leaves the host as it found it. Where macOS
     does not let System Events drive other apps (no accessibility permission), it says so and
     drives nothing; with ``require_driven`` that is a failure. Screenshots go to
@@ -3426,6 +3581,7 @@ def check_ui(app: Path, checker: Checker, work: Path, require_driven: bool = Fal
             _drive_abilities(checker, python_in(app), screens)
             _drive_folders(checker, python_in(app), screens)
             _drive_whole_disk(checker, python_in(app), screens)
+            _drive_activity(checker, python_in(app), screens)
             _drive_code_window(checker, python_in(app), screens, (out_log, err_log))
         elif require_driven:
             checker.expect(False, "System Events drove the menu, as --require-driven asks")
@@ -3445,6 +3601,14 @@ PAIRING_ALIAS: Final = "pairing-check"
 PAIRING_FILE: Final = b"the file the pairing check asks the fingerprint of\n"
 QUIT_DURING: Final = 20
 STOP_DURING: Final = 120
+# What Activity says of the check's files.sha256 request on a.txt in its folder, from the core's
+# summary of the operation (App/RequestLog.swift); then of it turned away while the ability is off,
+# and of it finished.
+FINGERPRINT_ENTRY: Final = (
+    f"Lucille asked to check a file's fingerprint: “a.txt” in {PAIRING_ALIAS}."
+)
+NOT_ENABLED_ENTRY: Final = "Turned away: that ability is off on this Mac."
+FINISHED_ENTRY: Final = "Finished on this Mac."
 # A SAS as the app shows it (spec/CLI.md section 6, ``pair``).
 SAS: Final = re.compile(r"\b[0-9]{4}-[0-9]{4}\b")
 
@@ -3697,6 +3861,34 @@ class _PairingCheck:
             raise _Stop("System Events cannot drive the app here")
         _welcome(self.checker, self.screens / f"p-{label}-welcome.png", f"when it opens ({label})")
 
+    def through_the_command_line(self, *args: str) -> None:
+        """Run ``args`` on the app's profile, as a user would in Terminal; it must work."""
+        done = self.host(*args)
+        self.need(
+            done.returncode == 0,
+            f"{' '.join(args[:2])} on the app's profile, through the command line",
+            _shown(done),
+        )
+
+    def read_activity(self, words: str, shot: str) -> None:
+        """Choose Activity… in the menu, and read ``words`` in it."""
+        worked, said = _choose(ACTIVITY_ITEM.removesuffix("…"))
+        found = worked and _wait_until(lambda: any(words in text for text in _activity_texts()), 30)
+        _screenshot(self.screens / shot)
+        self.checker.expect(
+            found,
+            f"Activity says {words!r}",
+            f"{said} {_activity_texts()}" + ("" if found else _activity_holds()),
+        )
+
+    def close_activity(self) -> None:
+        worked, said = _close_window(ACTIVITY_TITLE)
+        self.checker.expect(
+            worked and _wait_until(lambda: ACTIVITY_TITLE not in _window_names(), 10),
+            "its close button closes Activity",
+            said,
+        )
+
     def ask_to_quit(self, shot: str) -> None:
         worked, said = _choose(QUIT_ITEM)
         asked = worked and _wait_until(lambda: _says(QUIT_QUESTION), 15)
@@ -3903,22 +4095,34 @@ class _PairingCheck:
         )
 
     def fingerprint(self) -> None:
-        """A folder and files.sha256, added through the command line on the app's profile; one
-        request on that folder, answered."""
+        """A folder added through the command line on the app's profile, and a files.sha256
+        request on it while that ability is off: the host turns it away, and Activity says so as a
+        fact, offering nothing but its disclosure (M18). Then files.sha256 turned on through the
+        command line, and a request like it, answered with the file's fingerprint, which Activity
+        says finished."""
         files = self.folder / "Files"
         files.mkdir(parents=True, exist_ok=True)
         (files / "a.txt").write_bytes(PAIRING_FILE)
-        for args in (
-            ("roots", "add", "--", PAIRING_ALIAS, str(files)),
-            ("ops", "enable", "files.sha256"),
-        ):
-            done = self.host(*args)
-            self.need(
-                done.returncode == 0,
-                f"{' '.join(args[:2])} on the app's profile, through the command line",
-                _shown(done),
-            )
-        sent = self.h.body(op="files.sha256", args={"root": PAIRING_ALIAS, "path": "a.txt"})
+        self.through_the_command_line("roots", "add", "--", PAIRING_ALIAS, str(files))
+        asked = {"root": PAIRING_ALIAS, "path": "a.txt"}
+        refused = self.h.body(op="files.sha256", args=asked)
+        self.lucille.request(PAIRING_ROOM, refused)
+        answer = self.answer(refused["job_id"], 90)
+        self.checker.expect(
+            (answer.get("status"), answer.get("code")) == ("refused", "not_enabled"),
+            "while files.sha256 is off, the host turns a request for it away: not_enabled",
+            f"{answer}",
+        )
+        self.read_activity(f"{FINGERPRINT_ENTRY} {NOT_ENABLED_ENTRY}", "p-activity-not-enabled.png")
+        buttons = _activity_buttons()
+        self.checker.expect(
+            buttons == [SHOW_LOG],
+            f"Activity offers no button but {SHOW_LOG!r}: nothing in it turns the ability on",
+            f"{buttons}",
+        )
+        self.close_activity()
+        self.through_the_command_line("ops", "enable", "files.sha256")
+        sent = self.h.body(op="files.sha256", args=asked)
         self.lucille.request(PAIRING_ROOM, sent)
         answer = self.answer(sent["job_id"], 90)
         digest = hashlib.sha256(PAIRING_FILE).hexdigest()
@@ -3927,6 +4131,8 @@ class _PairingCheck:
             "a files.sha256 request on that folder is answered with the file's fingerprint",
             f"{answer}",
         )
+        self.read_activity(f"{FINGERPRINT_ENTRY} {FINISHED_ENTRY}", "p-activity-finished.png")
+        self.close_activity()
 
     def welcome_again(self, shot: str) -> None:
         """Open the running app again, as Finder does: it shows its note about the menu bar."""
@@ -4063,6 +4269,68 @@ class _PairingCheck:
             self.lifeline_ends("stdin_end") > ends,
             "the host's log says run's standard input ended",
         )
+
+    def stop_whats_running(self) -> None:
+        """Stop What's Running, from the menu, while a request runs that would outlast the check:
+        ``kill`` stops the request, Lucille is told it failed, killed_locally, and the host is
+        paused, while ``run`` goes on. The app resumes nothing on its own; Resume Lucille, from
+        the menu, resumes. While no request runs, the menu does not offer it. The app is then
+        quit, as the next step expects."""
+        self.launch("stop-whats-running")
+        run = _value_within(self.run_pid, 60)
+        self.need(run is not None, "opened again, the app starts run")
+        self.need(_wait_until(self.reading, 90), "run reads the room again")
+        found, shown = _menu_until(lambda items: CONNECTED in items, 60)
+        self.checker.expect(
+            found and STOP_WHATS_RUNNING not in shown,
+            f"while no request runs, the menu does not offer {STOP_WHATS_RUNNING!r}",
+            f"{shown}",
+        )
+        sent = self.h.body(op="host.sleep", args={"n": STOP_DURING})
+        self.lucille.request(PAIRING_ROOM, sent)
+        self.need(_wait_until(lambda: _sleeping(run), 60), "a host.sleep request starts")
+        found, shown = _menu_until(lambda items: STOP_WHATS_RUNNING in items, 30)
+        _menu_shot(self.screens / "p07b-stop-whats-running.png")
+        self.need(found, f"while it runs, the menu offers {STOP_WHATS_RUNNING!r}", f"{shown}")
+        worked, said = _choose(STOP_WHATS_RUNNING)
+        told = worked and _wait_until(lambda: _says(STOPPED_AND_PAUSED), 30)
+        _screenshot(self.screens / "p07c-stopped-and-paused.png")
+        self.checker.expect(told, f"then the app says {STOPPED_AND_PAUSED!r}", f"{said} {_texts()}")
+        answer = self.answer(sent["job_id"], 60)
+        self.checker.expect(
+            (answer.get("status"), answer.get("code")) == ("failed", "killed_locally"),
+            f"{STOP_WHATS_RUNNING} runs kill: Lucille is told the request failed, killed_locally",
+            f"{answer}",
+        )
+        self.checker.expect(self.status().get("paused") is True, "the host is then paused")
+        self.checker.expect(
+            self.run_pid() == run and _alive(run), "and run goes on: the same process", f"{run}"
+        )
+        _press("OK")
+        time.sleep(10)
+        self.checker.expect(
+            self.status().get("paused") is True,
+            "ten seconds later the host is still paused: the app resumes only when asked",
+        )
+        found, shown = _menu_until(
+            lambda items: RESUME_ITEM in items and STOP_WHATS_RUNNING not in items, 30
+        )
+        _menu_shot(self.screens / "p07d-paused-menu.png")
+        self.checker.expect(
+            found,
+            f"the menu offers {RESUME_ITEM!r}, and no longer {STOP_WHATS_RUNNING!r}",
+            f"{shown}",
+        )
+        worked, said = _choose(RESUME_ITEM)
+        self.need(
+            worked and _wait_until(lambda: self.status().get("paused") is False, 30),
+            f"{RESUME_ITEM} resumes the host",
+            said,
+        )
+        app = self.app_pid()
+        self.ask_to_quit("p07e-quit-question.png")
+        _press(QUIT_BUTTON)
+        self.need(_wait_until(lambda: not _alive(app), 120), "the app quits once run has drained")
 
     def stop_now(self) -> None:
         """Quit while a request runs that would outlast the check, then Stop now: ``kill``
@@ -4210,6 +4478,7 @@ class _PairingCheck:
             ("the app killed", self.app_killed),
             ("the app opened again", self.relaunch),
             ("Quit from the note about the menu bar, while a request runs", self.quit_and_drain),
+            ("Stop What's Running, while a request runs", self.stop_whats_running),
             ("Quit, then Stop now", self.stop_now),
             ("paused at launch", self.paused_at_launch),
             ("Disconnect", self.disconnect),
@@ -4230,9 +4499,10 @@ class _PairingCheck:
 
 def check_pairing(app: Path, checker: Checker, work: Path, require_driven: bool = False) -> None:
     """Pair the app's profile through the command line with a hub of the check's own and a fake
-    Lucille, then drive the app: confirm, ``run`` and its supervision, Quit, Stop now and
-    Disconnect (:class:`_PairingCheck`). It uses the real HOME, where the app keeps its profile,
-    and puts that profile back as it found it. Screenshots go to ``<out>/check/screens``."""
+    Lucille, then drive the app: confirm, ``run`` and its supervision, Activity, Quit, Stop What's
+    Running, Stop now and Disconnect (:class:`_PairingCheck`). It uses the real HOME, where the app
+    keeps its profile, and puts that profile back as it found it. Screenshots go to
+    ``<out>/check/screens``."""
     # Imported here, not at the top: every other check runs where neither Switchboard nor the test
     # harness is installed (``uv run --no-project``), and tests/test_macos_build.py imports this
     # module wherever the suite runs. CI runs this check with the interpreter of the copy of the

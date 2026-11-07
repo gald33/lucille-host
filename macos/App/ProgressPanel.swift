@@ -43,6 +43,8 @@ final class ProgressPanel: NSObject {
         panel.isReleasedWhenClosed = false
         panel.level = .floating
         panel.hidesOnDeactivate = false
+        // Not restorable: macOS would keep its state in a folder named after the app.
+        panel.isRestorable = false
         // Its button works while the app waits to quit, when AppKit runs the main loop as for a
         // modal panel, and while a note is up. What the button starts goes on too: every modal
         // loop starts in a `RunLoopTurn`, never inside a main-queue callout.

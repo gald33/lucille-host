@@ -227,6 +227,10 @@ struct RunSupervisor: Equatable, Sendable {
         case runForget
         /// Run `resume --json`. Only the user's Resume asks for it.
         case runResume
+        /// Stop What's Running: run `kill --json`, which stops the operation's process group and
+        /// pauses the host. Its own effect, not `runKill`, so the glue never takes it for a
+        /// Disconnect's kill.
+        case stopWhatsRunning
         /// The app may now quit: reply to applicationShouldTerminate.
         case replyTerminate
         /// Turn sudden and automatic termination off (true) while a child lives, on again (false).
@@ -261,6 +265,9 @@ struct RunSupervisor: Equatable, Sendable {
         case pairingStarted
         case tryAgain
         case userResume
+        /// The menu's Stop What's Running, shown while an operation's process runs. Only while
+        /// `run` runs does it ask for anything; it changes no phase, and resumes nothing.
+        case userStop
     }
 
     private(set) var phase: Phase = .idle
@@ -318,6 +325,11 @@ struct RunSupervisor: Equatable, Sendable {
             return tryAgain()
         case .userResume:
             return [.runResume]
+        case .userStop:
+            guard case .running = phase else {
+                return []
+            }
+            return [.stopWhatsRunning]
         }
     }
 
