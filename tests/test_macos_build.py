@@ -4381,6 +4381,9 @@ class _SetUpOnAMac:
         # error so far.
         self.menu = [check_app.CONNECTED, *([check_app.SETUP_ITEM] if offered else [])]
         self.stderr = stderr
+        # How often the menu was read, and each screenshot taken, by name.
+        self.menu_reads = 0
+        self.shots: list[str] = []
 
     def window_names(self) -> list[str]:
         return [check_app.SETUP_TITLE] if self.page is not None else []
@@ -4389,9 +4392,10 @@ class _SetUpOnAMac:
         """What the step reads through System Events beyond the names it reads above: the menu,
         and every window, which only a failure's detail reads."""
         if "name of every menu item of" in body:
+            self.menu_reads += 1
             return True, "\n".join(self.menu)
         if body == check_app.CLOSE_MENU:
-            return True, "closed"
+            return True, "Escape sent"
         if check_app.WINDOWS_HOLD in body:
             return True, "frontmost true, 0 window(s):"
         return False, f"not on a Mac: {body!r}"
@@ -4466,7 +4470,7 @@ def _set_up_step_on(
         ("_system_events", mac.system_events),
     ):
         monkeypatch.setattr(check_app, name, fake)
-    monkeypatch.setattr(check_app, "_screenshot", lambda path: None)
+    monkeypatch.setattr(check_app, "_screenshot", lambda path: mac.shots.append(path.name))
     monkeypatch.setattr(check_app, "_wait_until", lambda test, seconds: test())
     check = object.__new__(check_app._PairingCheck)
     check.checker = check_app.Checker()
@@ -4489,6 +4493,10 @@ def test_the_set_up_step_passes_on_an_app_that_works(
     checker = _set_up_step_on(mac, monkeypatch, tmp_path)
     assert checker.failures == []
     assert (mac.page, mac.op_on, mac.disabled_by_cli, mac.closed_by_button) == (None, False, 0, 0)
+    # The missing window's detail is made only when the window is missing. Made on every run, it
+    # took a missing window's screenshot and read the menu, Escape and all, while Set Up was open.
+    assert mac.shots == ["p-setup-folders.png", "p-setup-abilities.png", "p-setup-ready.png"]
+    assert mac.menu_reads == 0
 
 
 @pytest.mark.parametrize(
@@ -4565,6 +4573,7 @@ def test_a_missing_set_up_window_is_described(
     assert "the app's windows: frontmost true, 0 window(s):" in detail
     assert "pair None, run None" in detail
     assert f"the app's standard error so far: {said!r}" in detail
+    assert mac.shots == ["p-setup-missing.png"] and mac.menu_reads == 1
 
 
 class _MenuOnAMac:
@@ -4622,15 +4631,15 @@ class _MenuOnAMac:
                 return False, "execution error: System Events got an error: Can't get menu 1."
             return True, f"{check_app.APP_NAME} 0.1.0\n{check_app.CONNECTED}"
         if "key code 53" in lines:
+            # System Events still found the menu after every one of 11 Escapes in CI run
+            # 42402770764, while the next click opened it as usual, so its ``exists`` is taken to
+            # find the menu whether it is open or not: the script's guard never holds an Escape back
+            # here, and only when the check sends it keeps it from Set Up's window.
             guarded = f"exists {check_app.MENU}" in lines[0]
-            if guarded and not self.menu_open:
-                return True, "no menu was open, so no Escape was sent"
             self.escape()
             if any(line.startswith("delay") for line in lines[lines.index("key code 53") :]):
                 self.just_closed = False
-            if not guarded:
-                return True, ""
-            return True, "the menu was still there after Escape" if self.menu_open else "closed"
+            return True, "Escape sent" if guarded else ""
         if body == f"{check_app.LINES}return (name of every window) as text":
             return True, check_app.SETUP_TITLE if self.set_up_open else ""
         if check_app.WINDOWS_HOLD in body:
@@ -4726,7 +4735,9 @@ def test_the_menu_is_closed_only_after_a_read_that_found_it(
 
     def system_events(body: str, timeout: float = 30) -> tuple[bool, str]:
         sent.append(body)
-        return read if body.startswith(f"click {check_app.STATUS_ITEM}\n") else (True, "closed")
+        return (
+            read if body.startswith(f"click {check_app.STATUS_ITEM}\n") else (True, "Escape sent")
+        )
 
     monkeypatch.setattr(check_app, "_system_events", system_events)
     monkeypatch.setattr(check_app, "_screenshot", lambda path: sent.append(f"shot {path.name}"))
@@ -4743,7 +4754,10 @@ def test_the_menu_is_closed_only_after_a_read_that_found_it(
     assert close[:escape] == [
         f'if not (exists {check_app.MENU}) then return "no menu was open, so no Escape was sent"'
     ]
-    assert close[escape + 1] == "delay 1"
+    assert close[escape + 1 :] == ["delay 1", 'return "Escape sent"']
+    # Nothing after the Escape asks System Events whether the menu is still there: it found the
+    # menu after every Escape in CI run 42402770764, so the answer said nothing.
+    assert check_app.CLOSE_MENU.count("exists") == 1
     # No other Escape is sent to close a menu: there is no screenshot that clicks the status item
     # by itself any more, and the pairing check sends no Escape of its own.
     assert not hasattr(check_app, "_menu_shot")

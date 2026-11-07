@@ -3419,26 +3419,27 @@ def _choose(start: str) -> tuple[bool, str]:
     )
 
 
-# Close the status menu (:func:`_close_menu`): Escape only while System Events finds the menu,
-# then a second before anything clicks the status item again; and say how it went.
+# Close the status menu (:func:`_close_menu`): one Escape, then a second before anything clicks
+# the status item again. The first line sends nothing when System Events finds no menu at all.
 CLOSE_MENU: Final = (
     f'if not (exists {MENU}) then return "no menu was open, so no Escape was sent"\n'
     "key code 53\n"
     "delay 1\n"
-    f'if exists {MENU} then return "the menu was still there after Escape"\n'
-    'return "closed"'
+    'return "Escape sent"'
 )
 
 
 def _close_menu() -> None:
-    """Close the status menu, after a read that found it open. An Escape sent with no menu open
-    goes to the app's key window instead, and closes a panel: in CI run 42395410137 (macos-15) the
-    one a menu screenshot sent after a click that showed no menu closed Set Up's window. In every
-    screenshot taken that run by a click that came right after an Escape, no menu was open. So
-    Escape goes only while System Events still finds the menu, and a second passes before the next
-    click on the status item. Anything but a plain close is printed, as a note."""
+    """Close the status menu, right after a read that found it open: only then is it known to be
+    open. An Escape sent with no menu open goes to the app's key window instead, and closes a
+    panel: in CI run 42395410137 (macos-15) the one a menu screenshot sent after a click that
+    showed no menu closed Set Up's window. In every screenshot taken that run by a click that came
+    right after an Escape, no menu was open. So no Escape is sent but this one, and a second
+    passes before the next click on the status item. System Events cannot be asked instead: in
+    run 42402770764 it still found the menu after every one of 11 Escapes, while each next click
+    opened the menu and read it as usual. Anything but a sent Escape is printed, as a note."""
     worked, said = _system_events(CLOSE_MENU)
-    if not worked or said != "closed":
+    if not worked or said != "Escape sent":
         print(f"note: closing the menu: {said if worked else f'System Events: {said}'}", flush=True)
 
 
@@ -4829,10 +4830,11 @@ class _PairingCheck:
         the window. Each is expected; at the first one the next steps here need that fails, it
         returns."""
         opened = _wait_until(lambda: SETUP_TITLE in _window_names(), 60)
+        # The missing window's detail only when it is missing: it takes a screenshot and reads
+        # the menu, which a window that is open must not have done to it.
+        missing = "" if opened else f"{_window_names()}\n{self.set_up_missing()}"
         if not self.checker.expect(
-            opened,
-            f"once connected, the app opens {SETUP_TITLE!r} by itself",
-            f"{_window_names()}\n{self.set_up_missing()}",
+            opened, f"once connected, the app opens {SETUP_TITLE!r} by itself", missing
         ):
             return
         shown = _wait_until(lambda: _says(SETUP_FOLDERS), 15)
