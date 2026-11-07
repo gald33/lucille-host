@@ -131,6 +131,16 @@ struct HostCLI: Sendable {
 
     private static let leftBehind = LeftBehind()
 
+    /// Closed until `allowSpawns` opens it: until then `spawn` starts nothing, so a copy of the app
+    /// anywhere but /Applications/<name>.app runs no verb and no child (decisions/0002 §13).
+    private static let latch = SpawnLatch()
+
+    /// Let this copy of the app start the host. Only the copy at /Applications/<name>.app has a
+    /// `PlacedToken` to give (`Placement.judge`), and the app opens the latch once, as it starts.
+    static func allowSpawns(_ token: PlacedToken) {
+        latch.open()
+    }
+
     /// Run one verb and wait for it, up to the time limit (`timeout`, or this command line's) or
     /// until `cancel` is cancelled. `input`, if given, is the verb's whole standard input: it is
     /// written into the pipe before the verb starts, and the app's end is then closed, so a verb
@@ -229,6 +239,9 @@ struct HostCLI: Sendable {
     enum SpawnError: Error, Equatable {
         /// The input is longer than `maxInputBytes`, or did not fit the pipe.
         case inputTooLong
+        /// The latch is closed: this copy of the app is not the one at /Applications/<name>.app,
+        /// or has not yet said it is (`allowSpawns`).
+        case notPlaced
     }
 
     /// A child that started: its process, and the pipes the app keeps until the child has ended.
@@ -248,7 +261,9 @@ struct HostCLI: Sendable {
     /// Start `verb`. `stdout` and `stderr` get each stream's bytes as they arrive, on a thread of
     /// their own that reads with read(2), and then nil at its end; both threads start before the
     /// child does, and so does the handler that calls `ended`, which may be called before this
-    /// returns. Throws when the child could not start; the readers have then seen their end.
+    /// returns. Throws when the child could not start; the readers have then seen their end. While
+    /// the latch is closed it throws `SpawnError.notPlaced` before it makes anything, and nothing
+    /// is delivered.
     func spawn(
         _ verb: [String],
         stdin: Stdin,
@@ -258,6 +273,9 @@ struct HostCLI: Sendable {
     ) throws -> Spawned {
         HostCLI.spawnLock.lock()
         defer { HostCLI.spawnLock.unlock() }
+        guard HostCLI.latch.isOpen else {
+            throw SpawnError.notPlaced
+        }
         let process = Process()
         process.executableURL = python
         process.arguments = arguments(for: verb)
@@ -424,6 +442,25 @@ private final class LeftBehind: @unchecked Sendable {
         defer { lock.unlock() }
         processes.removeAll { !$0.isRunning }
         return processes.count
+    }
+}
+
+/// Whether this copy of the app may start anything: closed until `HostCLI.allowSpawns` opens it,
+/// and never closed again.
+private final class SpawnLatch: @unchecked Sendable {
+    private let lock = NSLock()
+    private var opened = false
+
+    var isOpen: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return opened
+    }
+
+    func open() {
+        lock.lock()
+        opened = true
+        lock.unlock()
     }
 }
 

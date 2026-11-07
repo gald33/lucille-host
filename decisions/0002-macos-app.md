@@ -76,11 +76,30 @@ developing the app. Its builds stay ad hoc signed, for the repository owner's ow
   `invalid`. It asks first, with Cancel the default, then runs `policy reset --json`, which sets the file
   aside as `policy.invalid.toml` and writes the fresh policy, and takes `not_invalid` as done; Try Again is
   offered only for `policy_lock_failed`.
+- **Only the copy at `/Applications/Capsule.app` acts** (§3.3, §13), with the name its `Info.plist` gives
+  and the case of each letter as there, reached through no link. Any other copy (on its disk image or
+  another disk, in a folder inside Applications, in the Applications folder in the home folder, anywhere
+  else, or in Applications under another name, such as the Finder's Keep Both gives a second copy, "Capsule
+  2") says why it can't run and how to fix that, offers only **Quit**, and starts no host verb and no child:
+  every child goes through one place, `HostCLI.spawn`, which starts nothing until the app opens its latch,
+  with a token that only the judgement of that one path makes. A renamed copy is told to go to the Trash
+  only while another copy of Capsule is at `/Applications/Capsule.app`, a folder whose `Info.plist` gives
+  the same bundle identifier; with none there, it is told to be renamed Capsule.
+- **The update notice** (§16). When `run` says that Lucille asked for a newer release (`host_too_old`), the
+  app says so once, however many requests say so, in one note under one key, which a later request does
+  not bring back once it is closed: "Lucille needs Capsule X or newer", X the highest version asked for
+  when the note is drawn, which the app reads only in the protocol's form. It says in words where to
+  get the newer release, and offers **Not Now**, the default, and **Prepare to Update**. While a notice is
+  held, in memory only, the menu shows its line, which shows it again, and **Prepare to Update…**. Prepare
+  to Update is the app's own Quit with no question: `run` drains, then the app quits. There is no
+  **Download** button (the maintainer's decision of 2026-11-07).
 - **The menu** shows the version and a status line read from `status --json` and `run`'s events, with a line
   for what needs attention, and offers Pause and Resume, the abilities (the operations, switched with
   `ops enable` and `ops disable`), Add a Folder…, the folders with Remove, Activity…, the pairing items
   (Connect to Lucille…, Finish Connecting…, Stop Connecting…, Disconnect from Lucille…), and Quit Capsule;
-  and, while a request's process runs, Stop What's Running.
+  while a request's process runs, Stop What's Running; and, while Lucille needs a newer release, the
+  update notice's line and Prepare to Update…. A copy that is not at `/Applications/Capsule.app` shows only
+  the line that says why, and Quit Capsule.
 - **It is signed ad hoc**, with the hardened runtime and no entitlements, each Mach-O file with its own
   identifier and the interpreter with `com.lucille-ai.capsule.runtime` (§7). It is not notarized, so macOS
   refuses to open it normally.
@@ -92,7 +111,7 @@ developing the app. Its builds stay ad hoc signed, for the repository owner's ow
   run. The disk image is uploaded only by a manual run whose every check passed, and kept 3 days.
 
 Not built yet: the typed gate and the Connect flow (§11.2, §11.4; proposed), opening at login, the restore
-list after a new pairing (§11.6, `policy previous`), Download and Prepare to Update (§16), the menu's use of the JSON contract for `ops`
+list after a new pairing (§11.6, `policy previous`), the menu's use of the JSON contract for `ops`
 and `roots` (§8), the Welcome and main windows, updates, **Remove Capsule…** (section 17), Copy
 Diagnostics (§15), Developer ID signing and notarization, ripgrep (`Helpers/rg`; the pins hold an empty
 ripgrep commit until then, and `Resources/licenses/` has no ripgrep licence), and the release jobs. The
@@ -100,7 +119,9 @@ first build also departs from this record in these ways, among others; `macos/RE
 made for the first build", says why for most of them:
 - the command line runs with `PATH=/var/empty`, but with `/` as its working directory, not the host's own
   state folder (§9);
-- the app opens from any folder, where the planned app runs only from `/Applications/Capsule.app` (§13);
+- a copy that is not at `/Applications/Capsule.app` offers only **Quit**, not **Show Applications Folder**
+  (§3.3): opening the Finder needs `NSWorkspace`, which the Mac lint and the build's checks keep out of the
+  app (§20), as for the clock below;
 - the words for each ability and the suggested folder names are in the Swift app, not in the core (§8, §12,
   §13);
 - the `Info.plist`'s six folder usage keys hold the sentences on what Capsule is for, not the sentence §12
@@ -118,8 +139,9 @@ made for the first build", says why for most of them:
 - a profile that holds more than one pair (`several_pairs`) gets no Disconnect: `forget` refuses it too.
   The app says it cannot end them, and `macos/README.md` gives the repair by hand (§9);
 - the app reads `pair status --json` only while its pairing window is open (§11.3);
-- the Quit question is asked only for the app's own Quit, and only while `run` lives and no Disconnect is
-  under way; a quit by Apple event, a logout included, never asks. A quit during a Disconnect finishes it:
+- the Quit question is asked only for the app's own Quit, and only while `run` lives, no Disconnect is
+  under way and the user did not choose Prepare to Update; a quit by Apple event, a logout included, never
+  asks. A quit during a Disconnect finishes it:
   `forget` runs once `run` has drained, before the app replies (§9);
 - when no `state` arrives for 120 s, the app only says so; it neither restarts `run` nor closes the
   lifeline (§9);
@@ -249,8 +271,8 @@ never published, because anyone can make a code that passes the host's code chec
 | The settings file became invalid | "Capsule's settings can't be read, so it is doing nothing" | **Reset Settings** (`policy reset`, §10): folders and operations start from the fresh policy |
 | The Keychain is locked or unusable (`run` exits 23) | "macOS's Keychain isn't available to Capsule" | **Try Again**; if it persists, restart the Mac, then **Copy Diagnostics** to ask for help. Not always undone in the app |
 | An update turned an operation off | "Search inside files was turned off because the update changed it" | **Review and Turn On** |
-| Lucille needs a newer host | "Lucille needs Capsule 0.3.0 or newer" (the minimum comes from Lucille's request; Lucille policy as of 2026-10-29; not proven by this repository) | **Download**, which opens the release page (§16) |
-| Chose **Keep Both** when dragging an update, making "Capsule 2" | "This copy is named Capsule 2, so it can't run" | Move Capsule 2 to the Trash, then drag the new app again and choose **Replace** |
+| Lucille needs a newer host | "Lucille needs Capsule 0.3.0 or newer" (the minimum comes from Lucille's request; Lucille policy as of 2026-10-29; not proven by this repository) | Get the newer Capsule from where this one came from, then **Prepare to Update** (§16). There is no **Download** button (the maintainer's decision of 2026-11-07) |
+| Chose **Keep Both** when dragging an update, making "Capsule 2" | "This copy is named Capsule 2, so it can't run" | With the other copy still in Applications: move Capsule 2 to the Trash, then drag the new app again and choose **Replace**. With none: rename Capsule 2 to Capsule. Never the Trash for a user's only copy |
 | A release turned out bad, and the older one refuses to start after it (§16) | "This Capsule is older than the one you used before" | None in the app: the only fix for a bad release is the next release |
 | Removed the computer on Lucille's page | "This Mac was disconnected in Lucille" | **Connect Again** |
 | Dragged the app to the Trash instead of Remove | Nothing on the Mac; Lucille's page explains (section 17) | Reinstall, then **Remove Capsule…** |
@@ -1073,8 +1095,10 @@ a policy aside, the previous folders and operations come back as unchecked boxes
   `Contents/Helpers/rg`. The catalog lists `/Applications/Capsule.app/Contents/Helpers/rg` among its macOS
   paths from the first release that has `files.search`, so shipping the binary later changes no definition hash
   and turns nothing off. This is why the app must live at exactly `/Applications/Capsule.app`: it refuses
-  to run anywhere else and asks to be moved there. That path holds the app's name, so after that release the
-  name cannot change without a catalog change (0001, "Upgrades": an enabled entry that changes turns off).
+  to run anywhere else and asks to be moved there. A copy anywhere else, or one renamed there, says why and
+  how to fix that, and offers Quit; it starts no host verb, makes no login-item call and opens nothing.
+  That path holds the app's name, so after that release the name cannot change without a catalog change
+  (0001, "Upgrades": an enabled entry that changes turns off).
 
 ## 14. Stop controls
 
@@ -1138,19 +1162,22 @@ Nothing Lucille sends can unpause the host. The app offers no remote control of 
 **What we chose: no auto-update, and no update check.** The app makes no network connection, so it never looks
 for updates.
 - **The host refuses with `host_too_old`.** `run` emits it as an event, and the app shows "Lucille needs
-  Capsule 0.3.0 or newer" with **Download**, which opens the releases page in the browser. Lucille's page can show
-  the same from the job's refusal (Lucille policy as of 2026-10-29; not proven by this repository).
+  Capsule 0.3.0 or newer", once however many requests say so, drawn with the highest version asked for by
+  then; the menu's line, which shows it again, follows the highest.
+  There is no **Download** button (the maintainer's decision of 2026-11-07): the notice says in words where
+  to get the newer release, "Get the newer Capsule from where you got this one.", and offers **Not Now**
+  and **Prepare to Update**. Lucille's page can show the same from the job's refusal (Lucille policy as of
+  2026-10-29; not proven by this repository).
 - **Updating, not yet tested on a Mac.** The Finder stops you deleting an app that is open (Rogue Amoeba,
   "The Finder Really Should Prevent Moving Running Applications", 2019), and users replacing a running app
   report "The operation can't be completed because the item … is in use" (Mozilla's support forum, for
   Firefox). The app runs from login, so a
   drag over it would usually be refused. And the new copy cannot quit the old one, because it refuses to run
   anywhere but `/Applications/Capsule.app` (§13), which the old copy still occupies. So the app does it:
-  **Download** opens the release page in the browser, and the app then shows "When the download has
-  finished, click **Prepare to Update**. Capsule will finish its current task and quit. Then open the
-  download, drag Capsule into Applications, and choose **Replace**." **Prepare to Update** drains, like
-  Quit, and quits. The hardware tests record what the Finder says when the new app is dragged over a
-  running old one (§19).
+  the notice says "When you have it, click **Prepare to Update**. Capsule will finish its current task and
+  quit. Then open the download, drag Capsule into Applications, and choose **Replace**." **Prepare to
+  Update** drains, like Quit, and quits, with no Quit question. The hardware tests record what the Finder
+  says when the new app is dragged over a running old one (§19).
 - **What an update keeps.** The same Team ID and identifiers. For macOS's privacy grants: Apple TN3127, "A
   privilege, like microphone access, acquired by an existing version of your app is still available to a
   new version", because the new version satisfies the original designated requirement, which checks the
@@ -1164,7 +1191,8 @@ for updates.
   turned off.
 - **Downgrades are refused.** `run` records the newest release that has started `run` on the profile in its
   state folder. A `run` older than that refuses to start (exit 25), and the app says "This Capsule is older than
-  the one you used before. Download the newest." `run --allow-downgrade` overrides it, from Terminal only, and
+  one that ran on this Mac before, so it won't start. Use the newer Capsule.", with no button: there is no
+  Download button. `run --allow-downgrade` overrides it, from Terminal only, and
   leaves the record as it is. An older signed release can be a vulnerable one. So a bad release cannot be undone
   by going back in the app: the only fix is the next release, a new PATCH (spec/CLI.md §13.6). The record is
   per profile, so the app's and a `pipx` install's do not interfere (§9). Only a release is recorded: an ad-hoc
@@ -1226,8 +1254,9 @@ to `main`, with no path filter; a new push to a pull request cancels that pull r
   test harness, it runs the end-to-end check of pairing and supervision (`check_app.py pairing`) against a
   hub of its own on a loopback port and a stand-in for Lucille. Then it builds the unsigned app a second
   time, in another folder, and compares the two (below). Each step that drives the app or runs long (the
-  self-test, the copy in another folder, the menu, the suite, pairing) has a time limit of its own, well
-  inside the job's, so a hang fails that step and the logs and snapshots are still uploaded.
+  self-test, the copy in another folder, the placement check, the menu, the suite, pairing) has a time limit
+  of its own, well inside the job's, so a hang fails that step and the logs and snapshots are still
+  uploaded.
 - **`macos-smoke`**, on `macos-26` and on `xcode-27`, runs the same disk image, and the Swift self-test that
   `macos-app` compiled, through the checks that need no build (§19). It builds nothing. It does not run the
   pairing check: it has no copy of the runtime with the test harness, and making one would mean installing
@@ -1372,6 +1401,14 @@ check from `tools/macos/check_app.py`:
 - M6: nothing in the environment changes what the runtime loads, each vector with a control that shows it
   would have loaded without `-I`;
 - the app's Swift code against the real command line, also from a copy in another folder;
+- a read-only copy of the bundle put at `/Applications/Capsule.app` and held to M8 there (`install`): the
+  copy the placement check, the launch, the menu and the end-to-end check open, each refusing to run unless
+  it is this build;
+- only that copy acts (§13; `placement`): first the control, that copy opened starts the host on the app's
+  profile and the check sees it; then the build's own copy, and a copy named `Capsule 2.app` in
+  `/Applications` with `/Applications/Capsule.app` there and then moved aside, each say why they can't run
+  and how to fix that, offer only Quit, start no host process of the app's profile for 10 s, change nothing
+  in its folder, and quit when Quit is pressed;
 - the menu driven through System Events, with screenshots kept as a CI artifact, last of all Reset
   Settings… on a settings file the check makes unreadable and then puts back;
 - a snapshot of `~/Library` before the app runs and after, diffed against an allowlist (M12; §22 says what
@@ -1386,13 +1423,17 @@ check from `tools/macos/check_app.py`:
   a `files.sha256` request while that ability is off, which Activity shows turned away with no button but
   its disclosure (M18), then `files.sha256` answered, `run` restarted after SIGKILL, `run` drained when
   the app is killed, Quit with its drain, Stop What's Running from the menu (`kill`, the host still paused
-  10 s later, then Resume from the menu), Stop now (`kill`, then paused at the next launch) and Disconnect
-  (`forget` after the drain);
+  10 s later, then Resume from the menu), a request that needs a newer release (`host_too_old`): one
+  update notice, which neither a second request while it is up nor a third once it is closed brings back,
+  the menu's line with the highest version, and Prepare to Update… from the menu, which asks no Quit
+  question and drains `run` before the app quits; then Stop now (`kill`, then paused at the next launch)
+  and Disconnect (`forget` after the drain);
 - a probe of the verbs the app uses, run as the app runs them, printed only.
 
 And by its `macos-smoke` jobs on `macos-26` and `xcode-27`, on the same disk image: the disk image, the
 bundle, bytecode and signature checks, the wrapper, the read-only runs, M6, the Swift self-test that
-`macos-app` compiled, the probe, the launch, the menu, and the `~/Library` diff; not the end-to-end check,
+`macos-app` compiled, the probe, the copy in `/Applications` and the placement check, the launch, the menu,
+and the `~/Library` diff; not the end-to-end check,
 which needs the suite's copy of the runtime (§18). There, a machine where System Events cannot
 drive the menu is recorded, not failed; `macos-app` fails it. Where it can, every driven step is checked
 as in `macos-app`, and one that fails fails the job. They skip the build and these checks, which
@@ -1424,7 +1465,9 @@ force-quit's included, through M14's test). So a person runs, on macOS 26 and 27
 real hardware: the first-launch dialog after a Safari and a Chrome download; a first launch with no network;
 adding Documents, an iCloud Drive folder and an external disk, and which name each prompt carries; the
 Keychain and Login Items prompts, if any; a lid close; dragging the next build over a **running** old app,
-recording the Finder's message, then the update flow of §16; hiding the menu-bar icon; the app beside a
+recording the Finder's message, then the update flow of §16; the Finder's real Keep Both, a copy opened from
+the disk image, and a copy opened from Downloads after a browser download (App Translocation), recording
+what each copy says and that it starts nothing; hiding the menu-bar icon; the app beside a
 `pipx` install; and deleting the app instead of Remove, recording what Login Items & Extensions lists
 afterwards. Stop now, Quit, Disconnect and Remove are run once by hand as well, to see the screens a user
 sees. A MacBook Neo is a target no test has run on yet. A virtual machine restored to a snapshot between
@@ -1588,7 +1631,7 @@ These join 0001's "Host invariants and their tests".
 | M16 | A policy change applies to the next decision | remove a folder while `run` runs; the next request for it is refused `path_outside_root` |
 | M17 | Every new pair starts from the fresh policy | pair, enable, forget, pair again: only `host.describe`, no folders |
 | M18 | The app never offers to widen access in answer to Lucille | review, and a UI snapshot of a `not_enabled` entry with no button: the pairing check's `p-activity-not-enabled.png`, where Activity's only button is its disclosure |
-| M19 | Text from Lucille is shown only in Activity, its path and operation in quotes and its folder only as a valid alias, and reaches no argument, menu line, button or note | `tests/test_macos_build.py`: only `HostJSON.swift`, which decodes a request's op, folder and path, and `RequestLog.swift`, which keeps them `fileprivate`, read them, and only the Activity panel shows `RequestText`'s words; the self-test: a path with a control, format, line or paragraph separator character, a quotation mark that opens or closes, or a quotation mark, apostrophe or prime of the fixed list `RequestText.quoteLookalikes` (which `tests/test_macos_build.py` makes again from Python's `unicodedata`), is not shown, and a long one is cut. The list is chosen by name, not by looks: a modifier letter double prime (U+02BA), a ditto mark (U+3003), a Hebrew gershayim (U+05F4) and the corner brackets are still shown |
+| M19 | Text from Lucille is shown only in Activity, its path and operation in quotes and its folder only as a valid alias, and reaches no argument, menu line, button or note. The one exception is `host_too_old`'s `min_host_version`, which the app reads only as MAJOR.MINOR.PATCH digits (`HostObject.isMinHostVersion`, spec/PROTOCOL.md §10) and shows only in the update notice's title and in the menu's line that shows the notice again (§16) | `tests/test_macos_build.py`: only `HostJSON.swift`, which decodes a request's op, folder and path, and `RequestLog.swift`, which keeps them `fileprivate`, read them, and only the Activity panel shows `RequestText`'s words; `HostJSON.swift` decodes `host_too_old` only when `isMinHostVersion` holds; the self-test: its list of minimums not in that form (`checkJSON`), each dropped, and a path with a control, format, line or paragraph separator character, a quotation mark that opens or closes, or a quotation mark, apostrophe or prime of the fixed list `RequestText.quoteLookalikes` (which `tests/test_macos_build.py` makes again from Python's `unicodedata`), is not shown, and a long one is cut. The list is chosen by name, not by looks: a modifier letter double prime (U+02BA), a ditto mark (U+3003), a Hebrew gershayim (U+05F4) and the corner brackets are still shown |
 
 **What M12's check cannot see.** It is weaker than the invariant. It walks `~/Library` before the app is
 launched and after the menu has been driven, and fails only on a new, changed or removed path whose name

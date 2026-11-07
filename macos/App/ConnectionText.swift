@@ -336,6 +336,58 @@ enum ConnectionText {
     static let showDetails = "Show Details"
     static let hideDetails = "Hide Details"
 
+    // MARK: A newer release
+
+    /// The update notice's title, and the menu's line while a notice is held (decisions/0002 §16):
+    /// the version Lucille asks for, which `HostObject` read only in the protocol's form.
+    static func hostTooOldTitle(minVersion: String) -> String {
+        "Lucille needs \(appName) \(minVersion) or newer"
+    }
+
+    /// Where to get the newer release, in words: there is no Download button. Prepare to Update
+    /// finishes the current task and quits, so the Finder can replace the app.
+    static func hostTooOldText(hostVersion: String) -> String {
+        "This Mac has \(appName) \(hostVersion). Get the newer \(appName) from where you got this one. When you have it, click Prepare to Update. \(appName) will finish its current task and quit. Then open the download, drag \(appName) into Applications, and choose Replace."
+    }
+
+    static let prepareToUpdateButton = "Prepare to Update"
+    /// In the menu while a notice is held, below its line.
+    static let prepareToUpdateItem = "Prepare to Update…"
+
+    // MARK: Where the app runs from
+
+    /// Said by a copy anywhere but /Applications/<name>.app, which runs nothing (decisions/0002
+    /// §3.3 and §13). Each place's sentence is followed by `movingSteps`.
+    static let notInApplicationsTitle = "\(appName) needs to be in your Applications folder"
+    static let onDiskImage = "This copy of \(appName) is on its disk image, or on another disk."
+    static let inFolderInApplications = "This copy of \(appName) is in a folder inside Applications."
+    static let inHomeApplications = "This copy of \(appName) is in the Applications folder in your home folder."
+    static let somewhereElse = "This copy of \(appName) can't run from where it is now."
+    static let movingSteps = "Quit \(appName), drag it into your Applications folder, then open it from there."
+
+    /// What a copy says about where it is, and how to fix that; nil for the copy at
+    /// /Applications/<name>.app. A renamed copy is told to go to the Trash only while another copy
+    /// is at the app's own name: never a user's only copy.
+    static func placement(_ placement: Placement) -> ConnectionNote? {
+        switch placement {
+        case .placed:
+            return nil
+        case .notInApplications(.diskImage):
+            return ConnectionNote(title: notInApplicationsTitle, text: onDiskImage + " " + movingSteps, detail: nil)
+        case .notInApplications(.insideApplications):
+            return ConnectionNote(title: notInApplicationsTitle, text: inFolderInApplications + " " + movingSteps, detail: nil)
+        case .notInApplications(.homeApplications):
+            return ConnectionNote(title: notInApplicationsTitle, text: inHomeApplications + " " + movingSteps, detail: nil)
+        case .notInApplications(.elsewhere):
+            return ConnectionNote(title: notInApplicationsTitle, text: somewhereElse + " " + movingSteps, detail: nil)
+        case .renamed(let copy, let originalPresent):
+            let text = originalPresent
+                ? "Quit \(appName), then move \(copy) to the Trash. Then drag the new \(appName) into your Applications folder again, and choose Replace."
+                : "Quit \(appName). In the Finder, rename \(copy) to \(appName), then open it again."
+            return ConnectionNote(title: "This copy is named \(copy), so it can't run", text: text, detail: nil)
+        }
+    }
+
     // MARK: Stop What's Running
 
     /// Shown above Pause and Resume while an operation's process runs (decisions/0002 §14).
@@ -399,10 +451,6 @@ enum ConnectionText {
 
     static func hubUnreachable(since: Date) -> String {
         "\(appName) hasn't reached Lucille since \(localTime(since)). Check that this Mac is online."
-    }
-
-    static func hostTooOld(minVersion: String, hostVersion: String) -> String {
-        "Lucille asked for something this \(appName) is too old to do. It needs \(appName) \(minVersion) or newer; this is \(hostVersion)."
     }
 
     static func problem(_ problem: Problem) -> String {

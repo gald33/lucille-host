@@ -1,10 +1,11 @@
 import Foundation
 
 /// Runs the app's code that draws nothing (`Alias`, `HostCLI`, `HostText`, `HostJSON`, `Pairing`,
-/// `Supervisor`, `ConnectionText`, `RequestLog`) without a screen: the host's golden fixtures
-/// through the JSON reader, Activity's request log and the two state machines, fake children
-/// through the child runner, and, against a built app, the calls the menu makes, through the same
-/// code, with a temporary HOME. CI compiles it with those files (`tools/macos/check_app.py
+/// `Supervisor`, `ConnectionText`, `RequestLog`, `Placement`) without a screen: where a copy of
+/// the app may run, the host's golden fixtures through the JSON reader, Activity's request log and
+/// the two state machines, the latch that keeps a misplaced copy from starting anything, fake
+/// children through the child runner, and, against a built app, the calls the menu makes, through
+/// the same code, with a temporary HOME. CI compiles it with those files (`tools/macos/check_app.py
 /// swift`). Exit status 1 on any failure.
 ///
 ///     selftest --vectors alias-vectors.json [--fixtures DIR] [--home DIR]
@@ -27,6 +28,7 @@ struct SelfTest {
         }
         checkText(report)
         checkCodeRules(report)
+        checkPlacement(home: options["home"], report)
         let fixtures = options["fixtures"].map { loadFixtures(at: $0, report) } ?? [:]
         if options["app"] != nil {
             report.expect(!fixtures.isEmpty, "the host's CLI fixtures are given with --fixtures")
@@ -36,6 +38,8 @@ struct SelfTest {
         checkPairing(fixtures, report)
         checkSupervisor(fixtures, report)
         if let home = options["home"] {
+            // First among the checks that start anything: until it opens the latch, nothing can.
+            checkSpawnLatch(home: home, report)
             checkChild(home: home, report)
         }
         if let app = options["app"], let home = options["home"], let version = options["version"] {
@@ -735,6 +739,159 @@ extension SelfTest {
                               "a reset that failed never says the settings were reset", "\(verb) \(stuck) \(note)")
             }
         }
+
+        // The update notice (decisions/0002 §16): the version Lucille asks for in its title; in its
+        // words, the version this Mac has, where to get the newer one, and Prepare to Update, which
+        // finishes the current task and quits. There is no Download button, and the words name none.
+        report.expect(ConnectionText.hostTooOldTitle(minVersion: "2.0.0") == "Lucille needs \(HostText.appName) 2.0.0 or newer",
+                      "the update notice names the version Lucille needs", ConnectionText.hostTooOldTitle(minVersion: "2.0.0"))
+        let update = ConnectionText.hostTooOldText(hostVersion: "1.0.0")
+        report.expect(update.hasPrefix("This Mac has \(HostText.appName) 1.0.0. ")
+                          && update.contains("Get the newer \(HostText.appName) from where you got this one.")
+                          && update.contains("click \(ConnectionText.prepareToUpdateButton).")
+                          && update.contains("choose Replace.") && !update.contains("Download"),
+                      "it says where to get the newer one, then to click Prepare to Update; it offers no Download", update)
+        report.expect(ConnectionText.prepareToUpdateItem == ConnectionText.prepareToUpdateButton + "\u{2026}"
+                          && ConnectionText.notNowButton == "Not Now",
+                      "the menu's item is the note's button, with an ellipsis; the note's other button is Not Now")
+    }
+
+    // MARK: - checkPlacement
+
+    /// Only the copy at exactly /Applications/<name>.app acts (decisions/0002 §3.3 and §13), here
+    /// with a made-up name. The case of each letter counts; a copy Finder's Keep Both named
+    /// "<name> 2" is renamed, with the original there or not; a disk image, a folder inside
+    /// Applications, the Applications folder in the home folder, Downloads and an App
+    /// Translocation folder are each refused with where they are; a link at the right path to a
+    /// copy elsewhere is refused for where that copy is; a bundle with no name is never placed.
+    /// Every refusal has words, and none tells a user with one copy to put it in the Trash. With a
+    /// HOME, whether the original is there is read from the disk: another copy of the app at that
+    /// name is one; the running copy itself is not, whether it is reached through a link or, on a
+    /// disk that ignores case, spelled in another case; nor is a folder with no Info.plist, another
+    /// app, or anything while the running copy's identifier is unknown.
+    static func checkPlacement(home: String?, _ report: Report) {
+        let user = "/Users/someone"
+        func judge(_ path: String, resolved: String? = nil, name: String? = "Example", original: Bool = false) -> Placement {
+            Placement.judge(bundlePath: path, resolvedPath: resolved ?? path, appName: name, home: user,
+                            originalPresent: original)
+        }
+        report.expect(judge("/Applications/Example.app").isPlaced, "/Applications/Example.app is placed")
+        report.expect(judge("/Applications/Example.app/").isPlaced && judge("/Applications/./Example.app").isPlaced,
+                      "however its path is spelled")
+        var refusals: [Placement] = []
+        for original in [false, true] {
+            for (path, copy) in [("/Applications/example.app", "example"), ("/Applications/Example 2.app", "Example 2"),
+                                 ("/Applications/EXAMPLE.app", "EXAMPLE")] {
+                let found = judge(path, original: original)
+                report.expect(found == .renamed(copy: copy, originalPresent: original),
+                              "\(path) is renamed, as \(copy), the original \(original ? "there" : "not there")", "\(found)")
+                refusals.append(found)
+            }
+        }
+        // The right path, reached through a link that leads to the same name in another case, is
+        // judged by where the link leads: a renamed copy.
+        let otherCase = judge("/Applications/Example.app", resolved: "/Applications/example.app")
+        report.expect(otherCase == .renamed(copy: "example", originalPresent: false),
+                      "/Applications/Example.app, which is /Applications/example.app, is renamed, as example", "\(otherCase)")
+        refusals.append(otherCase)
+        let homeCopy = user + "/Applications/Example.app"
+        let homeDeeper = user + "/Applications/Tools/Example.app"
+        let downloaded = user + "/Downloads/Example.app"
+        let onDesktop = user + "/Desktop/Example.app"
+        let places: [(String, String?, Placement.Where)] = [
+            ("/Applications/Utilities/Example.app", nil, .insideApplications),
+            ("/Applications/Example/Example.app", nil, .insideApplications),
+            (homeCopy, nil, .homeApplications),
+            (homeDeeper, nil, .homeApplications),
+            ("/Volumes/Example/Example.app", nil, .diskImage),
+            (downloaded, nil, .elsewhere),
+            (onDesktop, nil, .elsewhere),
+            ("/private/var/folders/xy/abc123/T/AppTranslocation/0A1B2C3D-4E5F/d/Example.app", nil, .elsewhere),
+            ("/Example.app", nil, .elsewhere),
+            ("/Applications/Example.app", downloaded, .elsewhere),
+            ("/Applications/Example.app", "/Volumes/Example/Example.app", .diskImage),
+            (downloaded, "/Applications/Example.app", .elsewhere),
+        ]
+        for (path, resolved, place) in places {
+            let found = judge(path, resolved: resolved)
+            report.expect(found == .notInApplications(place),
+                          "\(path), which is \(resolved ?? path), is refused as \(place)", "\(found)")
+            refusals.append(found)
+        }
+        for name in [nil, ""] as [String?] {
+            for path in ["/Applications/Example.app", "/Applications/.app"] {
+                let found = judge(path, name: name)
+                report.expect(!found.isPlaced, "with no name, \(path) is never placed", "\(found)")
+                refusals.append(found)
+            }
+        }
+        // The copy's name comes from its folder: cut to 40 characters, without characters that
+        // would turn the words around or hide part of them.
+        if case .renamed(let copy, _) = judge("/Applications/" + String(repeating: "x", count: 100) + ".app") {
+            report.expect(copy.count == 40, "a long name is cut to 40 characters", copy)
+        } else {
+            report.expect(false, "a long name in /Applications is a renamed copy")
+        }
+        if case .renamed(let copy, _) = judge("/Applications/Example\u{202E}2\u{200B}.app") {
+            report.expect(copy == "Example2", "a name's control and format characters are left out", copy.debugDescription)
+        } else {
+            report.expect(false, "a name with format characters in /Applications is a renamed copy")
+        }
+
+        // The words: none for the placed copy, a title and a text for every refusal.
+        report.expect(ConnectionText.placement(judge("/Applications/Example.app")) == nil, "the placed copy shows no note")
+        for refusal in refusals {
+            let note = ConnectionText.placement(refusal)
+            report.expect(note.map { !$0.title.isEmpty && !$0.text.isEmpty } == true, "\(refusal) has words", "\(String(describing: note))")
+        }
+        for place in [Placement.Where.diskImage, .insideApplications, .homeApplications, .elsewhere] {
+            let note = ConnectionText.placement(.notInApplications(place))
+            report.expect(note?.title == ConnectionText.notInApplicationsTitle
+                              && note?.text.hasSuffix(ConnectionText.movingSteps) == true,
+                          "\(place): the copy needs to be in Applications, and the note says how to get it there", "\(String(describing: note))")
+        }
+        let alone = ConnectionText.placement(.renamed(copy: "Example 2", originalPresent: false))
+        let both = ConnectionText.placement(.renamed(copy: "Example 2", originalPresent: true))
+        report.expect(alone?.title == "This copy is named Example 2, so it can't run" && alone?.title == both?.title,
+                      "a renamed copy says its name", "\(String(describing: alone))")
+        report.expect(alone?.text.contains("Trash") == false && alone?.text.contains("rename") == true
+                          && both?.text.contains("Example 2 to the Trash") == true,
+                      "a copy alone is renamed, never put in the Trash; with the original there, it is the one moved to the Trash",
+                      "\(String(describing: alone)) \(String(describing: both))")
+
+        // Whether the original is there, from the disk: a folder whose Info.plist gives this copy's
+        // bundle identifier.
+        guard let home else {
+            return
+        }
+        let folder = home + "/placement"
+        let files = FileManager.default
+        let identifier = "org.example.app"
+        for name in ["Example.app", "Example 2.app", "Empty.app", "Other.app"] {
+            try? files.createDirectory(atPath: folder + "/" + name + "/Contents", withIntermediateDirectories: true)
+        }
+        for (name, given) in [("Example.app", identifier), ("Example 2.app", identifier), ("Other.app", "org.example.other")] {
+            let plist = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<plist version=\"1.0\"><dict><key>CFBundleIdentifier</key><string>"
+                + given + "</string></dict></plist>\n"
+            _ = files.createFile(atPath: folder + "/" + name + "/Contents/Info.plist", contents: Data(plist.utf8))
+        }
+        try? files.createSymbolicLink(atPath: folder + "/Linked.app", withDestinationPath: folder + "/Example 2.app")
+        func present(_ name: String, identifier given: String?) -> Bool {
+            Placement.originalPresent(at: folder + "/" + name, runningAt: folder + "/Example 2.app", identifier: given)
+        }
+        report.expect(present("Example.app", identifier: identifier), "another copy of this app at the app's name is the original")
+        report.expect(!present("Example 2.app", identifier: identifier) && !present("Linked.app", identifier: identifier)
+                          && !present("Nothing.app", identifier: identifier),
+                      "the running copy is not, nor a link to it, nor nothing")
+        report.expect(!present("Empty.app", identifier: identifier) && !present("Other.app", identifier: identifier)
+                          && !present("Example.app", identifier: nil) && !present("Example.app", identifier: ""),
+                      "nor a folder with no Info.plist, nor another app, nor any copy while this one's identifier is unknown")
+        if files.fileExists(atPath: folder + "/EXAMPLE.app") {
+            report.expect(!Placement.originalPresent(at: folder + "/Example.app", runningAt: folder + "/example.app", identifier: identifier),
+                          "on a disk that ignores case, the running copy spelled in another case is not the original")
+        } else {
+            print("note: this disk tells case apart, so the running copy was not looked for in another case")
+        }
     }
 
     // MARK: - checkJSON
@@ -863,6 +1020,22 @@ extension SelfTest {
         report.expect(line(#"{"v":1,"type":"op","name":"host.nothing","state":"not_in_catalog","enabled":false}"#)
                           == .object(.op(name: "host.nothing", summary: nil)),
                       "an operation this release does not have reads, with no summary")
+
+        // host_too_old's minimum is Lucille's, and the update notice shows it: it is read only in
+        // the form the protocol gives it (spec/PROTOCOL.md §10), MAJOR.MINOR.PATCH, digits only,
+        // each part at most 9 digits with no leading zero.
+        func tooOld(_ least: String) -> JSONLines.Item {
+            line(#"{"v":1,"type":"host_too_old","job_id":"j","min_host_version":""# + least + #"","host_version":"0.1.0.dev0"}"#)
+        }
+        for good in ["0.0.0", "1.2.3", "999.0.0", "10.20.30", "999999999.999999999.999999999"] {
+            report.expect(tooOld(good) == .object(.hostTooOld(jobId: "j", minVersion: good, hostVersion: "0.1.0.dev0")),
+                          "a minimum of \(good) reads")
+        }
+        let badMinimums = ["", "1", "1.2", "1.2.3.4", "01.2.3", "1.02.3", "1.2.03", "1000000000.0.0", "1.2.3-beta",
+                           " 1.2.3", "1.2.3 ", "a.b.c", "1..3", "1.2.", ".1.2", "\u{0661}.\u{0662}.\u{0663}", "1.2.3\u{200B}"]
+        for bad in badMinimums {
+            report.expect(!isObject(tooOld(bad)), "a minimum of \(bad.debugDescription) is not read", "\(tooOld(bad))")
+        }
 
         // Short verbs: how they ended comes first (spec/CLI.md §4.3).
         func result(_ status: Int32, _ stdout: String, signal: Bool = false) -> CLIResult {
@@ -2068,6 +2241,18 @@ extension SelfTest {
             send(.object(.hostTooOld(jobId: "j", minVersion: least, hostVersion: "1.0.0"))).isEmpty != tells
         }
         report.expect(told, "Lucille asking for a newer release is said once for the highest version")
+        // A Lucille that raises its minimum on every request: the supervisor tells the glue once for
+        // each, and keeps the highest, which the one keyed notice reads when it is drawn. A lower
+        // minimum after them tells nothing.
+        spawned()
+        var tellings = 0
+        for number in 1...50 {
+            tellings += send(.object(.hostTooOld(jobId: "j\(number)", minVersion: "\(number).0.0", hostVersion: "0.1.0.dev0"))).count
+        }
+        let lower = send(.object(.hostTooOld(jobId: "late", minVersion: "49.9.9", hostVersion: "0.1.0.dev0")))
+        report.expect(tellings == 50 && lower.isEmpty && sup.highestMinVersion == "50.0.0",
+                      "fifty host_too_old objects of rising versions keep the highest, 50.0.0",
+                      "\(tellings) \(String(describing: sup.highestMinVersion)) \(lower)")
 
         // Stop What's Running (decisions/0002 §14): `kill`, which also pauses, only while run runs,
         // as an effect of its own; it changes nothing in the supervisor, and resumes nothing.
@@ -2301,6 +2486,60 @@ extension SelfTest {
                       violations.prefix(5).joined(separator: "; "))
         report.expect(spawns > 0, "the walk started run (\(spawns) times)")
         report.expect(stops > 0, "the walk stopped what's running (\(stops) times)")
+    }
+
+    // MARK: - checkSpawnLatch
+
+    /// A copy anywhere but /Applications/<name>.app starts nothing (decisions/0002 §13): every
+    /// child goes through `HostCLI.spawn`, which refuses until the latch is open, and only a token
+    /// `Placement.judge` gives a placed copy opens it. Before that, a short verb is not started and
+    /// a long-lived child refuses to start, and the fake interpreter, which leaves a file whenever
+    /// it runs, never ran. Then a synthetic placed copy's token opens the latch, and the same verb
+    /// runs: the control, and what every later check needs.
+    static func checkSpawnLatch(home: String, _ report: Report) {
+        let folder = home + "/latch"
+        try? FileManager.default.createDirectory(atPath: folder, withIntermediateDirectories: true)
+        let script = folder + "/fake-host"
+        let marker = folder + "/ran"
+        let text = """
+            #!/bin/sh
+            : > "$HOME/ran"
+            exit 0
+
+            """
+        guard FileManager.default.createFile(atPath: script, contents: Data(text.utf8),
+                                             attributes: [.posixPermissions: 0o755])
+        else {
+            report.expect(false, "write the fake interpreter at \(script)")
+            return
+        }
+        let fake = HostCLI(python: URL(fileURLWithPath: script), home: folder)
+        let shut = fake.run(["--json", "status"])
+        report.expect(shut.status == CLIResult.notStarted && !shut.succeeded
+                          && !FileManager.default.fileExists(atPath: marker),
+                      "before the latch is open, a short verb is not started, and nothing runs", "\(shut)")
+        let child = HostChild(cli: fake, verb: ["run", "--json-events", "--exit-on-stdin-eof"], input: .lifeline,
+                              deliverOn: DispatchQueue(label: "selftest.latch"))
+        var refusal: Error?
+        do {
+            try child.start()
+        } catch {
+            refusal = error
+        }
+        report.expect((refusal as? HostCLI.SpawnError) == .notPlaced && child.pid == 0
+                          && !FileManager.default.fileExists(atPath: marker),
+                      "nor does a long-lived child start", "\(String(describing: refusal))")
+        guard case .placed(let token) = Placement.judge(
+            bundlePath: "/Applications/Example.app", resolvedPath: "/Applications/Example.app",
+            appName: "Example", home: "/Users/someone", originalPresent: false
+        ) else {
+            report.expect(false, "a synthetic copy at /Applications/Example.app is placed, and gets a token")
+            return
+        }
+        HostCLI.allowSpawns(token)
+        let opened = fake.run(["--json", "status"])
+        report.expect(opened.succeeded && FileManager.default.fileExists(atPath: marker),
+                      "once a placed copy's token opens the latch, the same verb runs", "\(opened)")
     }
 
     // MARK: - checkChild

@@ -20,6 +20,7 @@ import sys
 import types
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -2475,9 +2476,9 @@ def test_compare_reports_same_different_and_failed(
     assert "**FAILED**" in capsys.readouterr().out
 
 
-# The pairing screen, run supervision and Activity: the Foundation-only files they are built from,
-# and the rules those keep. The self-test (macos/Tests/SelfTest.swift) checks their behaviour on a
-# Mac.
+# The pairing screen, run supervision, Activity and the placement rule: the Foundation-only files
+# they are built from, and the rules those keep. The self-test (macos/Tests/SelfTest.swift) checks
+# their behaviour on a Mac.
 SPEC_CLI = build_app.REPO_ROOT / "spec" / "CLI.md"
 NEW_LOGIC = (
     "HostJSON.swift",
@@ -2485,6 +2486,7 @@ NEW_LOGIC = (
     "Supervisor.swift",
     "ConnectionText.swift",
     "RequestLog.swift",
+    "Placement.swift",
 )
 
 
@@ -3317,6 +3319,285 @@ def test_reset_settings_asks_first_then_runs_policy_reset() -> None:
     assert read < ran.index("self = .reset") < ran.index("self = ResetOutcome(VerbOutcome(result))")
 
 
+# --- Only the copy at /Applications/<name>.app acts; one update notice (0002 §13 and §16) -------
+
+_SELF_TEST = build_app.MACOS_DIR / "Tests" / "SelfTest.swift"
+# A copy that is not placed returns here, before anything that would start the host.
+_NOT_PLACED_RETURNS = (
+    "        guard Placement.current.isPlaced else {\n            return\n        }\n"
+)
+
+
+def test_nothing_starts_before_the_placement_check() -> None:
+    # Every child starts through HostCLI.spawn, which starts nothing until allowSpawns has opened
+    # its latch. allowSpawns takes a PlacedToken, which only Placement.swift can make, and only
+    # Placement.judge does, for the copy at exactly /Applications/<name>.app; MenuBarApp.init is
+    # the one place that opens it. A copy anywhere else does not even reach the code that would
+    # start something: HostModel's first read and its menu observer, Connection.launch's signal
+    # handler and status read, and the welcome note that leads to them.
+    cli = _swift("HostCLI.swift")
+    placement = _swift("Placement.swift")
+    menu = _swift("MenuBarApp.swift")
+    model = _swift("HostModel.swift")
+    connection = _swift("Connection.swift")
+    assert "struct PlacedToken: Equatable, Sendable {\n    fileprivate init() {}\n}" in placement
+    assert placement.count("PlacedToken()") == 1
+    assert "    static func judge(\n" in placement
+    # The running copy is judged by the path it was opened from and the path that leads to once
+    # links are followed, and by the name its Info.plist gives; the original is looked for as
+    # another copy of this app, by its bundle identifier.
+    current = placement.split("    static let current: Placement = {\n", 1)[1].split(
+        "    }()\n", 1
+    )[0]
+    for line in (
+        "let bundle = Bundle.main.bundleURL",
+        "let resolved = bundle.resolvingSymlinksInPath().path",
+        'let name = Bundle.main.object(forInfoDictionaryKey: "CFBundleDisplayName") as? String',
+        "runningAt: resolved,",
+        "identifier: Bundle.main.bundleIdentifier",
+        "bundlePath: bundle.path, resolvedPath: resolved, appName: name,",
+        "originalPresent: original",
+    ):
+        assert line in current, line
+    present = _swift_function(
+        placement,
+        "    static func originalPresent(at expected: String, runningAt running: String,"
+        " identifier: String?) -> Bool {",
+    )
+    assert "guard let identifier, !identifier.isEmpty," in present
+    assert "return Bundle(path: expected)?.bundleIdentifier == identifier" in present
+    for path in [*SWIFT_FILES, _SELF_TEST]:
+        if path.name != "Placement.swift":
+            assert "PlacedToken()" not in path.read_text(encoding="utf-8"), path.name
+    # The latch: closed until allowSpawns, and read first in spawn, before anything is made.
+    assert "    static func allowSpawns(_ token: PlacedToken) {\n" in cli
+    assert "        case notPlaced\n" in cli
+    spawn = _function_body(cli, "    func spawn(\n")
+    lock = spawn.index("HostCLI.spawnLock.lock()")
+    latch = spawn.index(
+        "guard HostCLI.latch.isOpen else {\n            throw SpawnError.notPlaced\n"
+    )
+    assert lock < latch < spawn.index("let process = Process()")
+    # allowSpawns is called once in the app, from MenuBarApp.init, and only on a placed copy.
+    calls = {
+        path.name: path.read_text(encoding="utf-8").count("allowSpawns(") for path in SWIFT_FILES
+    }
+    assert {name: count for name, count in calls.items() if count} == {
+        "HostCLI.swift": 1,
+        "MenuBarApp.swift": 1,
+    }
+    init = _swift_function(menu, "    init() {")
+    assert (
+        "        if case .placed(let token) = Placement.current {\n"
+        "            HostCLI.allowSpawns(token)\n"
+        "        }\n"
+    ) in init
+    assert (
+        menu.index("struct MenuBarApp: App {")
+        < menu.index("    init() {")
+        < menu.index("final class AppDelegate")
+    )
+    # HostModel's first read and its menu observer, and Connection.launch, need a placed copy.
+    first = _swift_function(model, "    private init() {")
+    assert first.index(_NOT_PLACED_RETURNS) < first.index("menuObserver = ")
+    assert first.index(_NOT_PLACED_RETURNS) < first.index("refresh()")
+    launch = _swift_function(connection, "    func launch() {")
+    guard = (
+        "        guard !launched, Placement.current.isPlaced else {\n"
+        "            return\n        }\n"
+    )
+    assert launch.index(guard) < launch.index("SignalStop.install(children)")
+    assert launch.index(guard) < launch.index("feedRun(.start)")
+    # The app calls launch() once, and only once it knows the copy is placed; any other copy
+    # shows its placement note instead of the welcome note.
+    assert sum(path.read_text(encoding="utf-8").count(".launch()") for path in SWIFT_FILES) == 1
+    finished = _swift_function(menu, "    func applicationDidFinishLaunching(")
+    refused = finished.index("        guard Placement.current.isPlaced else {\n")
+    assert refused < finished.index("PlacementNote.show()") < finished.index("            return\n")
+    assert finished.index("            return\n") < finished.index("Connection.shared.launch()")
+    # The self-test checks the latch before anything it runs starts a child.
+    selftest = _SELF_TEST.read_text(encoding="utf-8")
+    main = _swift_function(selftest, "    static func main() {")
+    latch_checked = main.index("checkSpawnLatch(home: home, report)")
+    assert latch_checked < main.index("checkChild(home: home, report)")
+    assert latch_checked < main.index("checkCLI(app:")
+    assert 'checkPlacement(home: options["home"], report)' in main
+
+
+def test_a_copy_anywhere_else_says_how_to_fix_it_and_offers_only_quit() -> None:
+    # A copy that is not at /Applications/<name>.app says, when it opens, when it is opened again
+    # and from its menu's one line, why it can't run and how to fix that; Quit is its only way
+    # out, through the app's one terminate (quitChosen). Its menu holds that line and Quit.
+    menu = _swift("MenuBarApp.swift")
+    note = _swift_function(menu, "    static func show() {")
+    assert "@MainActor\nenum PlacementNote {\n" in menu
+    assert 'Alerts.shared.show(key: "placement", front: true, {' in note
+    assert "guard let note = ConnectionText.placement(Placement.current) else {" in note
+    assert re.findall(r"addButton\(withTitle: ([\w.]+)\)", note) == ["ConnectionText.quitButton"]
+    assert "Connection.shared.quitChosen()" in note
+    assert menu.count("PlacementNote.show()") == 3
+    reopen = _swift_function(menu, "    func applicationShouldHandleReopen(")
+    refused = reopen.index(
+        "        guard Placement.current.isPlaced else {\n            PlacementNote.show()\n"
+    )
+    assert refused < reopen.index("showWhereTheMenuIs()")
+    host_menu = menu.split("struct HostMenu: View {", 1)[1].split("\n}\n", 1)[0]
+    assert (
+        "        if Placement.current.isPlaced {\n"
+        "            HostItems(model: model, connection: connection)\n"
+        "        } else if let note = ConnectionText.placement(Placement.current) {\n"
+        "            Button(note.title) { PlacementNote.show() }\n"
+        "        }\n"
+        "        Divider()\n"
+        "        Button(HostText.quitApp) { connection.quitChosen() }\n"
+    ) in host_menu
+    # Everything else the menu holds is in HostItems, which a copy that is not placed never shows.
+    items = menu.split("struct HostItems: View {", 1)[1]
+    for item in (
+        'Button("Pause Lucille")',
+        'Menu("Abilities")',
+        "Button(ConnectionText.connectItem)",
+        "Button(ConnectionText.activityItem)",
+    ):
+        assert item in items and item not in host_menu, item
+    # The words, in ConnectionText: a note for every place but the right one, none for it.
+    words = _swift("ConnectionText.swift")
+    placement = _swift_function(
+        words, "    static func placement(_ placement: Placement) -> ConnectionNote? {"
+    )
+    assert "        case .placed:\n            return nil\n" in placement
+    for case in (".diskImage", ".insideApplications", ".homeApplications", ".elsewhere"):
+        assert f"case .notInApplications({case}):" in placement, case
+    assert "case .renamed(let copy, let originalPresent):" in placement
+
+
+def test_prepare_to_update_goes_through_quit_chosen() -> None:
+    # Prepare to Update drains like Quit, and quits (decisions/0002 §16), through the app's one
+    # terminate: quitChosen, so the drain is the app's own .quit. It asks no Quit question, which
+    # the app's own Quit keeps (D9); a quit by Apple event still never asks.
+    connection = _swift("Connection.swift")
+    chosen = _swift_function(connection, "    func prepareToUpdateChosen() {")
+    assert chosen.index("skipQuitQuestion = true") < chosen.index("quitChosen()")
+    assert "terminate(" not in chosen and "beginQuit(" not in chosen
+    assert "    private var skipQuitQuestion = false\n" in connection
+    should = _swift_function(
+        connection, "    func shouldTerminate() -> NSApplication.TerminateReply {"
+    )
+    taken = should.index(
+        "        let own = userAskedToQuit\n"
+        "        userAskedToQuit = false\n"
+        "        let skip = skipQuitQuestion\n"
+        "        skipQuitQuestion = false\n"
+    )
+    assert taken < should.index("if exiting {")
+    assert (
+        "let kind: RunSupervisor.DrainKind = own ? .quit : Connection.quitKindOfCurrentEvent()"
+    ) in should
+    assert "        if own && !skip && supervisor.runAlive && disconnecting == nil {\n" in should
+    assert should.count("askQuit()") == 1
+    # The update notice's button and the menu's item are the only ways in.
+    assert connection.count("prepareToUpdateChosen()") == 2
+    assert connection.count("skipQuitQuestion = true") == 1
+    menu = _swift("MenuBarApp.swift")
+    assert menu.count("connection.prepareToUpdateChosen()") == 1
+    assert (
+        sum(path.read_text(encoding="utf-8").count("terminate(nil)") for path in SWIFT_FILES) == 1
+    )
+
+
+def test_the_update_notice_is_keyed() -> None:
+    # host_too_old is said once (spec/CLI.md section 6, `host_too_old`). The supervisor tells the
+    # glue once for each higher version Lucille asks for; the glue shows the notice by itself only
+    # the first time, and after that only moves the menu's line to the highest version, so a
+    # Lucille that raises its minimum on every request, even after Not Now, does not bring it back.
+    # The one note, under one key, reads the highest version when it is drawn. Not Now is the
+    # default. There is no Download button: the note says in words where to get the update.
+    connection = _swift("Connection.swift")
+    effect = connection.split("        case .tellHostTooOld(", 1)[1].split("\n        case .", 1)[0]
+    assert "Alerts.shared.note(" not in effect
+    assert effect.count("showUpdateNotice()") == 1
+    first = effect.index("            let first = updateNotice == nil\n")
+    assert first < effect.index("            updateNotice = ConnectionText.hostTooOldTitle(")
+    assert (
+        "            if first {\n                showUpdateNotice()\n            }\n"
+        in effect + "\n"
+    )
+    # Besides the menu's line, which shows it on request, nothing else in the glue shows it.
+    assert connection.replace("    func showUpdateNotice() {", "").count("showUpdateNotice()") == 1
+    assert connection.count('key: "host-too-old"') == 1
+    shown = _swift_function(connection, "    func showUpdateNotice() {")
+    assert 'Alerts.shared.show(key: "host-too-old", {' in shown
+    built = shown.split('Alerts.shared.show(key: "host-too-old", {', 1)[1].split("}, done:", 1)[0]
+    assert "self.supervisor.highestMinVersion" in built
+    assert "ConnectionText.hostTooOldTitle(minVersion:" in built
+    assert "ConnectionText.hostTooOldText(hostVersion:" in built
+    assert re.findall(r"addButton\(withTitle: ([\w.]+)\)", built) == [
+        "ConnectionText.notNowButton",
+        "ConnectionText.prepareToUpdateButton",
+    ]
+    done = shown.split("}, done:", 1)[1]
+    assert "if response == .alertSecondButtonReturn {" in done
+    assert "self?.prepareToUpdateChosen()" in done
+    # While a notice is held, in memory only, the menu shows its line, which opens it again, and
+    # Prepare to Update….
+    assert "    @Published private(set) var updateNotice: String?\n" in connection
+    menu = _swift("MenuBarApp.swift")
+    assert (
+        "        if let notice = connection.updateNotice {\n"
+        "            Button(notice) { connection.showUpdateNotice() }\n"
+        "            Button(ConnectionText.prepareToUpdateItem)"
+        " { connection.prepareToUpdateChosen() }\n"
+        "        }\n"
+    ) in menu
+    words = _swift("ConnectionText.swift")
+    assert 'static let prepareToUpdateButton = "Prepare to Update"' in words
+    assert 'static let prepareToUpdateItem = "Prepare to Update…"' in words
+    assert "static func hostTooOld(minVersion: String, hostVersion: String)" not in words
+    # Nothing offers a Download.
+    for path in SWIFT_FILES:
+        text = path.read_text(encoding="utf-8")
+        assert not re.search(r'addButton\(withTitle: "Download', text), path.name
+        assert "downloadButton" not in text and "releasesPage" not in text, path.name
+    # The minimum is Lucille's: HostJSON reads it only in the form the protocol gives it
+    # (spec/PROTOCOL.md section 10), before anything shows it.
+    host_json = _swift("HostJSON.swift")
+    too_old = host_json.split('        case "host_too_old":\n', 1)[1].split('\n        case "', 1)[
+        0
+    ]
+    assert "HostObject.isMinHostVersion(least)" in too_old
+    assert "    static func isMinHostVersion(_ text: String) -> Bool {\n" in host_json
+
+
+# Ways Swift code could pass run's --allow-downgrade, which only a person in Terminal may
+# (decisions/0002 §16): the flag, and its name without its dashes.
+_PASSES_ALLOW_DOWNGRADE = (r"allow-downgrade", r"(?i)allow_?downgrade")
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        '["run", "--json-events", "--allow-downgrade"]',
+        'verb.append("--allow-downgrade")',
+        "let allowDowngrade = true",
+    ],
+)
+def test_the_allow_downgrade_scan_sees_each_way(line: str) -> None:
+    assert _matches(_PASSES_ALLOW_DOWNGRADE, line), line
+
+
+def test_the_app_never_passes_allow_downgrade() -> None:
+    # A run older than the newest that ran on the profile refuses to start (exit 25), and
+    # `run --allow-downgrade` gets past that, from Terminal only: an older release can be a
+    # vulnerable one. The app's run verb never has it, and no Swift file names it.
+    connection = _swift("Connection.swift")
+    assert 'private static let runVerb = ["run", "--json-events", "--exit-on-stdin-eof"]' in (
+        connection
+    )
+    for path in SWIFT_FILES:
+        text = path.read_text(encoding="utf-8")
+        assert not _matches(_PASSES_ALLOW_DOWNGRADE, text), path.name
+
+
 # --- The macOS checks of pairing and run: check_app.py ui and pairing --------------------------
 
 
@@ -3503,6 +3784,272 @@ def test_the_checks_open_activity_and_stop_whats_running() -> None:
     reader = _python_function(source, "read_activity")
     for body in (activity, reader):
         assert body.count("_activity_holds()") == body.count(" else _activity_holds())") >= 1
+
+
+def test_the_placement_and_update_checks_look_for_the_apps_own_words() -> None:
+    # What check_app.py placement and the pairing check's too_old_then_prepare read on the screen,
+    # as App/ConnectionText.swift spells it: the copy's name and the version Lucille asks for are
+    # interpolated there, as the app's name is.
+    text = _swift("ConnectionText.swift")
+    name = check_app.APP_NAME
+    copy = check_app.RENAMED_COPY
+    assert copy == f"{name} 2"
+
+    def spelled(said: str) -> str:
+        return _named_in_swift(said.replace(copy, "\\(copy)"))
+
+    for constant, said in (
+        ("notInApplicationsTitle", check_app.PLACEMENT_TITLE),
+        ("somewhereElse", check_app.PLACEMENT_ELSEWHERE),
+        ("movingSteps", check_app.MOVING_STEPS),
+        ("quitButton", check_app.QUIT_BUTTON),
+        ("prepareToUpdateButton", check_app.PREPARE_TO_UPDATE),
+        ("prepareToUpdateItem", check_app.PREPARE_TO_UPDATE_ITEM),
+        ("notNowButton", check_app.NOT_NOW),
+    ):
+        assert f'static let {constant} = "{spelled(said)}"' in text, constant
+    for said in (check_app.RENAMED_TITLE, check_app.RENAMED_WITH_ORIGINAL, check_app.RENAMED_ALONE):
+        assert f'"{spelled(said)}"' in text, said
+    assert check_app.PLACEMENT_TITLE == f"{name} needs to be in your Applications folder"
+    assert check_app.RENAMED_TITLE == f"This copy is named {copy}, so it can't run"
+    for steps in (check_app.PLACEMENT_ELSEWHERE, check_app.MOVING_STEPS):
+        assert steps.endswith(".") and '"' not in steps, steps
+    # The note for a renamed copy says to put a copy in the Trash only while the original is
+    # there too: never a user's only copy.
+    assert "Trash" in check_app.RENAMED_WITH_ORIGINAL
+    assert "Trash" not in check_app.RENAMED_ALONE and "rename" in check_app.RENAMED_ALONE
+    # The update notice's title names the version Lucille asks for, its text says in words where
+    # to get the update, and its versions are in the protocol's form, each higher than the last.
+    minimum, higher = check_app.UPDATE_MIN_VERSION, check_app.UPDATE_HIGHER_VERSION
+    highest = check_app.UPDATE_HIGHEST_VERSION
+    assert check_app.UPDATE_TITLE == f"Lucille needs {name} {minimum} or newer"
+    assert check_app.UPDATE_HIGHER_TITLE == f"Lucille needs {name} {higher} or newer"
+    assert check_app.UPDATE_HIGHEST_TITLE == f"Lucille needs {name} {highest} or newer"
+    title = check_app.UPDATE_TITLE.replace(minimum, "\\(minVersion)")
+    assert f'"{_named_in_swift(title)}"' in text
+    assert check_app.UPDATE_WHERE == f"Get the newer {name} from where you got this one."
+    assert _named_in_swift(check_app.UPDATE_WHERE) in text
+    triple = r"(0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8})"
+    for version in (minimum, higher, highest):
+        assert re.fullmatch(triple, version), version
+    assert tuple(map(int, higher.split("."))) > tuple(map(int, minimum.split(".")))
+    assert tuple(map(int, highest.split("."))) > tuple(map(int, higher.split(".")))
+    for said in (
+        check_app.PLACEMENT_TITLE,
+        check_app.RENAMED_TITLE,
+        check_app.UPDATE_TITLE,
+        check_app.UPDATE_HIGHER_TITLE,
+        check_app.UPDATE_HIGHEST_TITLE,
+        check_app.PREPARE_TO_UPDATE,
+        check_app.PREPARE_TO_UPDATE_ITEM,
+        check_app.NOT_NOW,
+    ):
+        assert check_app._quoted(said) == f'"{said}"'
+
+
+def test_the_pairing_check_asks_for_a_newer_release_then_prepares_to_update() -> None:
+    # Between Stop What's Running and Stop now, the pairing check sends host.describe with a
+    # minimum this build is older than (a development build is older than every minimum,
+    # spec/PROTOCOL.md section 10): the update notice says so; a second request with a higher
+    # minimum, sent while it is up, brings no second note; Not Now closes it, and a third, higher
+    # still, sent once it is closed, does not bring it back; the menu then holds its line, with
+    # the highest version, and Prepare to Update…, which asks no Quit question, drains run and
+    # quits. Stop now's step opens the app again.
+    source = _CHECK_APP.read_text(encoding="utf-8")
+    go = _python_function(source, "go")
+    assert (
+        go.index("self.stop_whats_running")
+        < go.index("self.too_old_then_prepare")
+        < go.index("self.stop_now")
+    )
+    step = _python_function(source, "too_old_then_prepare")
+    assert 'self.launch("too-old")' in step
+    first = step.index("min_host_version=UPDATE_MIN_VERSION")
+    second = step.index("min_host_version=UPDATE_HIGHER_VERSION")
+    shown = step.index("_says(UPDATE_TITLE)")
+    assert first < shown < second < step.index("_press(NOT_NOW)")
+    third = step.index("min_host_version=UPDATE_HIGHEST_VERSION")
+    assert step.index("_press(NOT_NOW)") < third < step.index("_choose(UPDATE_HIGHEST_TITLE)")
+    assert third < step.index("_says(UPDATE_HIGHEST_TITLE) or _says(UPDATE_TITLE)")
+    assert step.index("_choose(UPDATE_HIGHEST_TITLE)") < step.index(
+        "_choose(PREPARE_TO_UPDATE_ITEM"
+    )
+    for name in (
+        '"host_too_old"',
+        "UPDATE_HIGHER_TITLE",
+        "PREPARE_TO_UPDATE_ITEM",
+        "QUIT_QUESTION",
+        "DRAINED_LINE",
+        "_screenshot(",
+    ):
+        assert name in step, name
+    assert 'self.launch("stop-now")' in _python_function(source, "stop_now")
+
+
+def test_the_placement_check_sees_its_control_before_it_reads_a_refusal() -> None:
+    # check_app.py placement first opens the installed copy and sees the host start on the app's
+    # profile: without that, seeing no host process later would prove nothing. Then, with no copy
+    # running, the build copy, and a copy named "<name> 2" in /Applications with the original
+    # there and then set aside, each say why they can't run, offer only Quit, start no host
+    # process for ten seconds and change nothing in the profile, and quit when Quit is pressed.
+    # Whatever happens, the original goes back and the renamed copy is removed.
+    source = _CHECK_APP.read_text(encoding="utf-8")
+    check = _python_function(source, "check_placement")
+    assert check.index("_placement_control(") < check.index("_refusing_copy(app,")
+    assert check.count("_refusing_copy(") == 3
+    assert check.index("try:") < check.index("RENAMED_WITH_ORIGINAL") < check.index("RENAMED_ALONE")
+    assert check.index("RENAMED_ALONE") < check.index("finally:") < check.rindex("make_writable(")
+    assert '"ditto"' in check and "RENAMED_COPY" in check and "PLACEMENT_ELSEWHERE" in check
+    control = _python_function(source, "_placement_control")
+    assert "installed_app_path()" in control and "_profile_processes()" in control
+    refusing = _python_function(source, "_refusing_copy")
+    for name in (
+        "_profile_processes()",
+        "_profile_folder()",
+        "REFUSAL_WATCH",
+        "QUIT_BUTTON",
+        "_screenshot(",
+        "0-placement-",
+    ):
+        assert name in refusing, name
+    assert check_app.REFUSAL_WATCH == 10
+    assert {"install", "placement"} <= set(check_app.CHECKS)
+
+
+def _placement_world(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, starts: bool, writes: bool
+) -> tuple[Path, list[str]]:
+    """What the placement check sees of a copy it opens, made up: once ``open`` has run, a host
+    process of the app's profile runs (``starts``) and a file appears in the profile's folder
+    (``writes``), or not. The app runs once opened; nothing waits; a host process is looked for
+    for a fifth of a second at most. Returns the profile's folder and what was opened."""
+    profile = tmp_path / "profile"
+    profile.mkdir()
+    (profile / "state").mkdir()
+    opened: list[str] = []
+
+    def run(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        if argv[0] == "open":
+            opened.append(str(argv[1]))
+            if writes:
+                (profile / "state" / "written").write_text("x", encoding="utf-8")
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    looked = check_app._profile_processes_seen
+    monkeypatch.setattr("subprocess.run", run)
+    monkeypatch.setattr(check_app, "_profile_folder", lambda: profile)
+    monkeypatch.setattr(check_app, "_running", lambda name: [99] if opened else [])
+    monkeypatch.setattr(
+        check_app, "_profile_processes", lambda: [4242] if opened and starts else []
+    )
+    monkeypatch.setattr(
+        check_app,
+        "_profile_processes_seen",
+        lambda seconds, *, first: looked(min(seconds, 0.2), first=first),
+    )
+    monkeypatch.setattr(check_app, "_wait_until", lambda test, seconds: test())
+    monkeypatch.setattr(check_app, "_stop_the_app", lambda checker, what: None)
+    monkeypatch.setattr(check_app, "_stop_earlier_copies", lambda checker, name: True)
+    monkeypatch.setattr(check_app, "_screenshot", lambda path: None)
+    monkeypatch.setattr(check_app, "_can_drive", lambda: False)
+    monkeypatch.setattr(check_app.time, "sleep", lambda seconds: None)
+    return profile, opened
+
+
+@pytest.mark.parametrize(
+    ("starts", "writes"), [(False, False), (True, False), (False, True), (True, True)]
+)
+def test_a_refusing_copy_fails_the_check_if_it_starts_or_writes_anything(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, starts: bool, writes: bool
+) -> None:
+    # The placement check's two detectors, run: a copy that is not the one in /Applications
+    # passes only if, once opened, it starts no host process of the app's profile and nothing in
+    # the profile's folder changes.
+    _placement_world(tmp_path, monkeypatch, starts=starts, writes=writes)
+    monkeypatch.setattr(check_app, "REFUSAL_WATCH", 0.2)
+    checker = check_app.Checker()
+    copy = tmp_path / "out" / f"{check_app.APP_NAME}.app"
+    words = (check_app.PLACEMENT_TITLE, check_app.PLACEMENT_ELSEWHERE)
+    check_app._refusing_copy(copy, checker, tmp_path, "elsewhere", words, False)
+    failed = " ".join(checker.failures)
+    assert ("starts no host process" in failed) == starts, checker.failures
+    assert ("changed" in failed) == writes, checker.failures
+    assert len(checker.failures) == starts + writes
+
+
+@pytest.mark.parametrize("starts", [False, True])
+def test_the_placement_control_fails_unless_the_installed_copy_starts_the_host(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, starts: bool
+) -> None:
+    # Without the control seeing the copy in /Applications start the host, seeing no host process
+    # from a refusing copy later would prove nothing.
+    installed = tmp_path / "Applications" / f"{check_app.APP_NAME}.app"
+    monkeypatch.setattr(check_app, "installed_app_path", lambda: installed)
+    _, opened = _placement_world(tmp_path, monkeypatch, starts=starts, writes=False)
+    checker = check_app.Checker()
+    assert check_app._placement_control(checker, tmp_path, False) is False
+    assert opened == [str(installed)]
+    assert bool(checker.failures) != starts, checker.failures
+    if not starts:
+        assert any("the control: it starts the host" in what for what in checker.failures)
+
+
+@pytest.mark.parametrize("fails_at", [1, 2, 3, None])
+def test_the_placement_check_puts_the_copy_in_applications_back_however_it_ends(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fails_at: int | None
+) -> None:
+    # The copy in /Applications is moved aside while the renamed copy runs alone. Whether a
+    # refusing copy's check raises (System Events stops answering, say) before that, while the
+    # renamed copy runs beside it, while it runs alone, or nothing raises, the check ends with
+    # /Applications holding that copy, as it was, and nothing else.
+    app = tmp_path / "out" / f"{check_app.APP_NAME}.app"
+    (app / "Contents").mkdir(parents=True)
+    (app / "Contents" / "built").write_text("the build copy", encoding="utf-8")
+    applications = tmp_path / "Applications"
+    installed = applications / app.name
+    (installed / "Contents").mkdir(parents=True)
+    (installed / "Contents" / "installed").write_text("the installed copy", encoding="utf-8")
+    monkeypatch.setattr(check_app, "installed_app_path", lambda: installed)
+
+    def run(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        if argv[0] == "ditto":
+            shutil.copytree(argv[1], argv[2], symlinks=True)
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr("subprocess.run", run)
+    monkeypatch.setattr(check_app, "_stop_the_app", lambda checker, what: None)
+    monkeypatch.setattr(check_app, "_placement_control", lambda checker, screens, driven: True)
+    seen: list[tuple[str, list[str]]] = []
+
+    def refusing(
+        copy: Path, checker: object, screens: Path, label: str, words: object, driven: bool
+    ) -> None:
+        seen.append((label, sorted(path.name for path in applications.iterdir())))
+        if len(seen) == fails_at:
+            raise check_app.CheckError("System Events stopped answering")
+
+    monkeypatch.setattr(check_app, "_refusing_copy", refusing)
+    checker = check_app.Checker()
+    if fails_at is None:
+        check_app.check_placement(app, checker, tmp_path / "work")
+        assert not checker.failures, checker.failures
+    else:
+        with pytest.raises(check_app.CheckError):
+            check_app.check_placement(app, checker, tmp_path / "work")
+    renamed = f"{check_app.RENAMED_COPY}.app"
+    aside = f".{app.name}.set-aside-by-placement"
+    assert (
+        seen
+        == [
+            ("elsewhere", [app.name]),
+            ("renamed", sorted([app.name, renamed])),
+            ("renamed-alone", sorted([aside, renamed])),
+        ][: fails_at or 3]
+    )
+    assert [path.name for path in applications.iterdir()] == [app.name]
+    assert (installed / "Contents" / "installed").read_text(encoding="utf-8") == (
+        "the installed copy"
+    )
 
 
 def test_the_ui_check_resets_a_settings_file_the_host_cannot_read(tmp_path: Path) -> None:

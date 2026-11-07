@@ -29,6 +29,11 @@ final class HostModel: ObservableObject {
 
     private init() {
         cli = HostCLI(python: HostCLI.python(inApp: Bundle.main.bundleURL), home: HostCLI.userHome())
+        // A copy anywhere but /Applications/<name>.app reads nothing: its menu shows only why it
+        // can't run, and Quit (decisions/0002 §13).
+        guard Placement.current.isPlaced else {
+            return
+        }
         // Read the state again each time a menu opens, so a change made in Terminal shows too.
         menuObserver = NotificationCenter.default.addObserver(
             forName: NSMenu.didBeginTrackingNotification, object: nil, queue: .main

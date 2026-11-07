@@ -376,11 +376,13 @@ final class DetailsDisclosure: NSView {
 ///   the wall clock beside it.
 /// - While a child of the app lives, sudden and automatic termination are off, and an activity
 ///   keeps App Nap from slowing the app.
-/// - Quit: the app's own Quit asks first while `run` runs, unless a Disconnect is under way; a
-///   quit by Apple event (logout, restart, shutdown, another app) never asks. Either way the app
-///   answers `.terminateLater` and replies once `run` has drained (the supervisor's ladder), a
-///   Disconnect under way has run `forget`, and `pair` has stopped (SIGINT, then SIGTERM, then
-///   SIGKILL).
+/// - Only the copy at /Applications/<name>.app launches (`Placement`): any other starts nothing,
+///   and only says why.
+/// - Quit: the app's own Quit asks first while `run` runs, unless a Disconnect is under way or the
+///   user chose Prepare to Update; a quit by Apple event (logout, restart, shutdown, another app)
+///   never asks. Either way the app answers `.terminateLater` and replies once `run` has drained
+///   (the supervisor's ladder), a Disconnect under way has run `forget`, and `pair` has stopped
+///   (SIGINT, then SIGTERM, then SIGKILL).
 /// - SIGTERM is handled on a queue of its own (`SignalStop`): the lifeline is closed, `pair` gets
 ///   SIGINT, then SIGTERM and SIGKILL, and the app exits within a few seconds.
 @MainActor
@@ -433,6 +435,9 @@ final class Connection: ObservableObject {
     @Published private(set) var connected = false
     /// An operation's process runs, and `run` runs: the menu offers Stop What's Running.
     @Published private(set) var operationRunning = false
+    /// The update notice's line while one is held, in memory only (decisions/0002 §16): the menu
+    /// shows it as an item that shows the notice again, with Prepare to Update….
+    @Published private(set) var updateNotice: String?
 
     private let cli: HostCLI
     private var flow = PairingFlow()
@@ -477,6 +482,10 @@ final class Connection: ObservableObject {
     private var welcomeDone = false
     private var afterWelcomeDone = false
     private var userAskedToQuit = false
+    /// Prepare to Update was chosen: the quit it starts asks no question (decisions/0002 §16).
+    private var skipQuitQuestion = false
+    /// This Mac's release, as `run` gave it with Lucille's request for a newer one.
+    private var updateHave = ""
     private var ladder: Ladder?
     private var exiting = false
     private var guarded = false
@@ -512,9 +521,10 @@ final class Connection: ObservableObject {
     // MARK: Launch
 
     /// At launch: read `status`, and start `run` if the pair is confirmed, paused or not, since
-    /// `run` honours the pause flag itself.
+    /// `run` honours the pause flag itself. A copy anywhere but /Applications/<name>.app does
+    /// none of it (decisions/0002 §13).
     func launch() {
-        guard !launched else {
+        guard !launched, Placement.current.isPlaced else {
             return
         }
         launched = true
@@ -685,15 +695,49 @@ final class Connection: ObservableObject {
         }
     }
 
-    /// The app's own Quit, from the menu or the note that says where the menu is. AppKit waits to
-    /// quit in a modal loop, so `terminate` runs in a `RunLoopTurn` of its own: the note's Quit is
-    /// chosen inside a turn that shows a note, and the menu's may come inside a main-queue callout.
+    /// The app's own Quit, from the menu, the note that says where the menu is, the note of a copy
+    /// that is not in the Applications folder, or Prepare to Update: the one place the app quits.
+    /// AppKit waits to quit in a modal loop, so `terminate` runs in a `RunLoopTurn` of its own: a
+    /// note's Quit is chosen inside a turn that shows a note, and the menu's may come inside a
+    /// main-queue callout.
     func quitChosen() {
         RunLoopTurn.perform { [weak self] in
             self?.userAskedToQuit = true
             NSApplication.shared.terminate(nil)
             self?.userAskedToQuit = false
+            self?.skipQuitQuestion = false
         }
+    }
+
+    /// Prepare to Update, from the update notice or the menu (decisions/0002 §16): the app's own
+    /// Quit, which lets `run` finish its current task and drain, then quits, with no question
+    /// first, so that the Finder can replace the app.
+    func prepareToUpdateChosen() {
+        skipQuitQuestion = true
+        quitChosen()
+    }
+
+    /// The update notice: Lucille needs a newer release than this Mac's (decisions/0002 §16). It
+    /// shows itself once, when Lucille first asks, and after that only when the menu's line is
+    /// chosen: one note under one key, drawn with the highest version Lucille has asked for by
+    /// then. Not Now is the default; Prepare to Update quits as the app's own Quit does. There is
+    /// no Download button: the notice says in words where to get the newer release.
+    func showUpdateNotice() {
+        guard updateNotice != nil, ladder == nil, !exiting else {
+            return
+        }
+        Alerts.shared.show(key: "host-too-old", {
+            let alert = NSAlert()
+            alert.messageText = ConnectionText.hostTooOldTitle(minVersion: self.supervisor.highestMinVersion ?? "")
+            alert.informativeText = ConnectionText.hostTooOldText(hostVersion: self.updateHave)
+            alert.addButton(withTitle: ConnectionText.notNowButton)
+            alert.addButton(withTitle: ConnectionText.prepareToUpdateButton)
+            return alert
+        }, done: { [weak self] response in
+            if response == .alertSecondButtonReturn {
+                self?.prepareToUpdateChosen()
+            }
+        })
     }
 
     /// The line under Needs attention, or under Not connected, was chosen: say it in a note, with
@@ -803,6 +847,8 @@ final class Connection: ObservableObject {
     func shouldTerminate() -> NSApplication.TerminateReply {
         let own = userAskedToQuit
         userAskedToQuit = false
+        let skip = skipQuitQuestion
+        skipQuitQuestion = false
         if exiting {
             return .terminateNow
         }
@@ -819,7 +865,8 @@ final class Connection: ObservableObject {
             return .terminateNow
         }
         // While a Disconnect is under way, the Mac stops answering Lucille anyway: no question.
-        if own && supervisor.runAlive && disconnecting == nil {
+        // Nor after Prepare to Update, whose user chose to quit for the newer release.
+        if own && !skip && supervisor.runAlive && disconnecting == nil {
             guard askQuit() else {
                 return .terminateCancel
             }
@@ -1067,9 +1114,16 @@ final class Connection: ObservableObject {
             finishing?.close()
             finishing = nil
         case .tellHostTooOld(let least, let have):
-            Alerts.shared.note(
-                ConnectionNote(title: ConnectionText.hostTooOld(minVersion: least, hostVersion: have), text: "", detail: nil)
-            )
+            // The supervisor tells this once for each higher version, and the notice shows itself
+            // only the first time: the user is told once, however many requests say so (spec/CLI.md
+            // §6, `host_too_old`). Later tellings only move the menu's line to the highest version;
+            // the line shows the notice again, which reads that version when it is drawn.
+            let first = updateNotice == nil
+            updateNotice = ConnectionText.hostTooOldTitle(minVersion: supervisor.highestMinVersion ?? least)
+            updateHave = have
+            if first {
+                showUpdateNotice()
+            }
         case .log(let line):
             Connection.log(line)
         }
