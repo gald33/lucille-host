@@ -81,8 +81,8 @@ On the bundle made read-only (CI runs ``chmod -R a-w`` first):
 - ``swift``: compiles the app's Swift files that do not draw anything with a test driver
   (``macos/Tests/SelfTest.swift``), or takes the one ``--selftest`` names, and runs it against
   the app. It makes the calls the menu makes, through the same code; reads the host's golden
-  fixtures through the app's JSON reader and its pairing and supervision state machines; and
-  drives the child runner with fake children, a shell script in place of the interpreter.
+  fixtures through the app's JSON reader and its pairing, supervision and Set Up state machines;
+  and drives the child runner with fake children, a shell script in place of the interpreter.
 - ``relocate``: copies the app to another folder, whose path has a space in it, and runs ``host``
   and ``swift`` on the copy.
 - ``install [--replace | --restore]``: copies the read-only bundle to ``/Applications/<name>.app``
@@ -149,7 +149,10 @@ On the bundle made read-only (CI runs ``chmod -R a-w`` first):
   command line, as a test harness, with ``--hub`` and ``--store-file`` (which the app never
   passes), and leaves the SAS pending. Then it drives the app: the pairing window, opened from
   the menu, shows the number Lucille's side shows, Return does nothing there, and They Match
-  confirms; the app starts ``run``, which reads the room Lucille offers; a ``files.sha256``
+  confirms; the app starts ``run``, which reads the room Lucille offers; once the menu says
+  Connected, the Set Up window opens by itself, with no Add back page (the app saw no
+  ``policy_reset``, the harness having paired), on Folders, and its switch for ``files.sha256``
+  turns it on and off again, through ``ops``, before Done closes it; a ``files.sha256``
   request on a folder added through the command line is answered; ``run`` killed with SIGKILL is
   started again after the back-off; ``run`` drains when the app itself is killed; the app's own
   Quit asks first, shows the finishing panel, and waits for ``run`` to drain; Stop What's Running
@@ -222,9 +225,10 @@ LOGIC_SOURCES: Final = (
     "ConnectionText.swift",
     "RequestLog.swift",
     "Placement.swift",
+    "Setup.swift",
 )
 # The host's golden fixtures (spec/CLI.md section 11), which the self-test reads through the
-# app's JSON reader and its pairing and supervision state machines.
+# app's JSON reader and its pairing, supervision and Set Up state machines.
 CLI_FIXTURES: Final = build_app.REPO_ROOT.joinpath(
     "src", "lucille_host", "spec", "cli", "v1", "fixtures"
 )
@@ -2751,6 +2755,16 @@ COMPARE_TITLE: Final = "Compare the numbers"
 COMPARE_QUESTION: Final = "Does Lucille's page show this number?"
 THEY_MATCH: Final = "They Match"
 CONFIRMED_TITLE: Final = "Confirmed on this Mac"
+# Set Up's window and its pages, as App/Setup.swift spells them.
+SETUP_TITLE: Final = f"Set Up {APP_NAME}"
+SETUP_ADD_BACK: Final = "Add back what you had before?"
+SETUP_FOLDERS: Final = "Folders Lucille may use"
+SETUP_NO_FOLDERS: Final = "No folders yet"
+SETUP_ABILITIES: Final = "What Lucille may do"
+SETUP_READY: Final = f"{APP_NAME} is ready"
+SETUP_CONTINUE: Final = "Continue"
+SETUP_DONE: Final = "Done"
+SETUP_ITEM: Final = "Set Up Folders and Abilities…"
 # Quit while ``run`` runs: the question, its button, the finishing panel and its button, and the
 # panel's words once Stop now is chosen.
 QUIT_ITEM: Final = f"Quit {APP_NAME}"
@@ -3350,6 +3364,19 @@ def _says(words: str) -> bool:
 def _press(name: str) -> tuple[bool, str]:
     """Click the button named ``name``, in whichever window of the app holds it."""
     return _system_events(_target("button", name) + 'click theTarget\nreturn "pressed"')
+
+
+def _toggle(name: str) -> tuple[bool, str]:
+    """Click the checkbox named ``name``, in whichever window of the app holds it."""
+    return _system_events(_target("checkbox", name) + 'click theTarget\nreturn "clicked"')
+
+
+def _checked(name: str) -> str:
+    """Whether the checkbox named ``name`` is checked: ``1``, ``0``, or ``absent``."""
+    worked, said = _system_events(
+        _target("checkbox", name) + "return ((value of theTarget) as text)"
+    )
+    return said if worked else "absent"
 
 
 def _enabled(name: str) -> str:
@@ -4416,6 +4443,20 @@ class _PairingCheck:
     def pair_state(self) -> Any:
         return self.status().get("pair", {}).get("state")
 
+    def op_enabled(self, op: str) -> bool | None:
+        """Whether ``ops list --json`` on the app's profile says ``op`` is on; None when it does
+        not say."""
+        done = self.host("--json", "ops", "list")
+        for line in done.stdout.splitlines():
+            try:
+                found = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(found, dict) and found.get("name") == op:
+                enabled = found.get("enabled")
+                return enabled if isinstance(enabled, bool) else None
+        return None
+
     def run_pid(self) -> int | None:
         run = self.status().get("run", {})
         pid = run.get("pid")
@@ -4716,6 +4757,102 @@ class _PairingCheck:
             app is not None and not sockets.stdout.strip(),
             "the app itself holds no network connection",
             sockets.stdout,
+        )
+
+    def set_up_after_connected(self) -> None:
+        """Once the menu says Connected after They Match in the app, the Set Up window opens by
+        itself (decisions/0002 section 3.1, steps 8 to 10), and its pages are walked
+        (:meth:`set_up_pages`). A Set Up check that fails does not stop the pairing check: the
+        window is closed and files.sha256 turned off again, and only those two facts, which the
+        later steps need, are needed: the fingerprint step's request while files.sha256 is off
+        must still meet not_enabled (M18)."""
+        self.set_up_pages()
+        if SETUP_TITLE in _window_names():
+            _close_window(SETUP_TITLE)
+        if self.op_enabled("files.sha256") is not False:
+            self.host("--json", "ops", "disable", "files.sha256")
+        self.need(
+            self.op_enabled("files.sha256") is False and SETUP_TITLE not in _window_names(),
+            "after Set Up, files.sha256 is off and no Set Up window is open",
+            f"{_shown(self.host('--json', 'ops', 'list'))} {_window_names()}",
+        )
+
+    def set_up_pages(self) -> None:
+        """Set Up's pages as CI can reach them. It has no Add back page: the harness paired
+        through the command line, so the app saw no policy_reset. It opens on Folders, which lists
+        none. On What Lucille may do, files.sha256's switch shows it off; clicked, the host says it
+        is on, and the switch shows it on; clicked again, both say off. Then Ready, and Done closes
+        the window. Each is expected; at the first one the next steps here need that fails, it
+        returns."""
+        opened = _wait_until(lambda: SETUP_TITLE in _window_names(), 60)
+        if not self.checker.expect(
+            opened, f"once connected, the app opens {SETUP_TITLE!r} by itself", f"{_window_names()}"
+        ):
+            return
+        shown = _wait_until(lambda: _says(SETUP_FOLDERS), 15)
+        _screenshot(self.screens / "p-setup-folders.png")
+        if not self.checker.expect(shown, f"it opens on {SETUP_FOLDERS!r}", f"{_texts()}"):
+            return
+        self.checker.expect(
+            not _says(SETUP_ADD_BACK),
+            f"with no {SETUP_ADD_BACK!r} page: the app saw no policy_reset of its own",
+            f"{_texts()}",
+        )
+        self.checker.expect(
+            _says(SETUP_NO_FOLDERS), f"the Folders page says {SETUP_NO_FOLDERS!r}", f"{_texts()}"
+        )
+        worked, said = _press(SETUP_CONTINUE)
+        if not self.checker.expect(
+            worked and _wait_until(lambda: _says(SETUP_ABILITIES), 15),
+            f"Continue goes to {SETUP_ABILITIES!r}",
+            f"{said} {_texts()}",
+        ):
+            return
+        switch = ABILITY_TITLES["files.sha256"]
+        if not self.checker.expect(
+            self.op_enabled("files.sha256") is False and _checked(switch) == "0",
+            f"files.sha256 is off before its switch is used, and {switch!r} shows it off",
+            f"switch {_checked(switch)}; {_shown(self.host('--json', 'ops', 'list'))}",
+        ):
+            return
+        worked, said = _toggle(switch)
+        if not self.checker.expect(
+            worked and _wait_until(lambda: self.op_enabled("files.sha256") is True, 15),
+            f"the switch {switch!r} turns files.sha256 on: ops list says it is enabled",
+            f"{said} {_shown(self.host('--json', 'ops', 'list'))}",
+        ):
+            return
+        self.checker.expect(
+            _wait_until(lambda: _checked(switch) == "1", 15),
+            f"and {switch!r} shows it on",
+            _checked(switch),
+        )
+        _screenshot(self.screens / "p-setup-abilities.png")
+        worked, said = _toggle(switch)
+        if not self.checker.expect(
+            worked and _wait_until(lambda: self.op_enabled("files.sha256") is False, 15),
+            f"clicked again, {switch!r} turns it off",
+            f"{said} {_shown(self.host('--json', 'ops', 'list'))}",
+        ):
+            return
+        self.checker.expect(
+            _wait_until(lambda: _checked(switch) == "0", 15),
+            f"and {switch!r} shows it off",
+            _checked(switch),
+        )
+        worked, said = _press(SETUP_CONTINUE)
+        if not self.checker.expect(
+            worked and _wait_until(lambda: _says(SETUP_READY), 15),
+            f"Continue goes to {SETUP_READY!r}",
+            f"{said} {_texts()}",
+        ):
+            return
+        _screenshot(self.screens / "p-setup-ready.png")
+        worked, said = _press(SETUP_DONE)
+        self.checker.expect(
+            worked and _wait_until(lambda: SETUP_TITLE not in _window_names(), 10),
+            "Done closes the Set Up window",
+            f"{said} {_window_names()}",
         )
 
     def fingerprint(self) -> None:
@@ -5209,6 +5346,7 @@ class _PairingCheck:
             ),
             ("They Match, in the app", self.confirm_in_the_app),
             ("run reads the room Lucille offers", self.run_reads_the_room),
+            ("Set Up, once connected", self.set_up_after_connected),
             ("files.sha256 on a folder", self.fingerprint),
             ("run killed while a note is up, and started again", self.backoff),
             ("the app killed", self.app_killed),
@@ -5236,8 +5374,8 @@ class _PairingCheck:
 
 def check_pairing(app: Path, checker: Checker, work: Path, require_driven: bool = False) -> None:
     """Pair the app's profile through the command line with a hub of the check's own and a fake
-    Lucille, then drive the app: confirm, ``run`` and its supervision, Activity, Quit, Stop What's
-    Running, the update notice and Prepare to Update, Stop now and Disconnect
+    Lucille, then drive the app: confirm, ``run`` and its supervision, Set Up, Activity, Quit, Stop
+    What's Running, the update notice and Prepare to Update, Stop now and Disconnect
     (:class:`_PairingCheck`). ``app`` is the copy in /Applications. It uses the real HOME, where
     the app keeps its profile, and puts that profile back as it found it. Screenshots go to
     ``<out>/check/screens``."""

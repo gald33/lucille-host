@@ -217,8 +217,9 @@ enum HostText {
     /// What the app says when macOS's privacy protection kept the host from a folder.
     static let blockedByMacOS = "macOS is blocking \(appName) from this folder. To allow it, open System Settings, choose Privacy & Security, then Files & Folders, and turn on the switch for this folder's location under \(appName). Then add the folder again."
 
-    /// What the app says while a run it stopped waiting for has still not ended. It may hold the
-    /// host's policy lock, so every change to folders and abilities waits for it.
+    /// What the app says while a run it stopped waiting for, of a verb that takes the host's policy
+    /// lock, has still not ended (`HostCLI.stuckRuns`): it may hold that lock, so every change to
+    /// folders and abilities waits for it.
     static let stuckRun = "A folder check is still stuck, probably on a network or external drive that stopped answering. Until it ends, \(appName) can't change its folders or abilities. Reconnect the drive, or restart your Mac, then try again."
 
     /// The most folders the host's policy holds (spec/CLI.md §10, `too_many_roots`).
@@ -279,8 +280,9 @@ enum HostText {
         return wholeDisk.contains { fileIdentity($0) == identity }
     }
 
-    /// Whether `path` names one of `wholeDisk`, in any case, without reading the disk.
-    private static func namesWholeDisk(_ path: String) -> Bool {
+    /// Whether `path` names one of `wholeDisk`, in any case, without reading the disk: Set Up tests
+    /// every folder of a policy set aside by it, whatever that policy marked it.
+    static func namesWholeDisk(_ path: String) -> Bool {
         let spelling = standardized(path)
         return wholeDisk.contains { spelling.caseInsensitiveCompare($0) == .orderedSame }
     }
@@ -425,8 +427,8 @@ enum HostText {
         case other
     }
 
-    /// One plain sentence for each code `--version`, `ops` and `roots` can refuse with
-    /// (spec/CLI.md §7 and §10), but `alias_taken` and a `not_a_folder` the app can see, which say
+    /// One plain sentence for each code `--version`, `ops`, `roots` and `policy previous` can refuse
+    /// with (spec/CLI.md §7 and §10), but `alias_taken` and a `not_a_folder` the app can see, which say
     /// more while a folder is added (`refusal`), and the codes that can only be the app's own
     /// mistake (`ConnectionText.appBugCodes`), which read as `ConnectionText.appBug`.
     static let refusals: [String: String] = [
@@ -443,6 +445,7 @@ enum HostText {
         "broad_folder": "That folder is your home folder, holds it, or is your whole disk.",
         "unstorable_path": "That folder's location can't be stored in \(appName)'s settings.",
         "no_such_alias": "That folder was already removed.",
+        "previous_invalid": "\(appName) can't read the folders and abilities you had before, so it can't offer them back.",
     ]
 
     /// The sentence for a refusal, chosen by its code. While a folder is added, a name in use
@@ -490,7 +493,7 @@ enum HostText {
 
     /// What to tell the user when a run failed: a plain sentence for each refusal, by its code, and
     /// the host's own words as the detail. `earlierRunStuck` is whether a run the app stopped
-    /// waiting for has still not ended (`HostCLI.stuckRuns`).
+    /// waiting for, of a verb that takes the policy lock, has still not ended (`HostCLI.stuckRuns`).
     static func explain(
         _ result: CLIResult, during activity: Activity = .other, earlierRunStuck: Bool = false
     ) -> Explanation {

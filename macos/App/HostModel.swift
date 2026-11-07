@@ -18,8 +18,15 @@ final class HostModel: ObservableObject {
     @Published private(set) var abilitiesRead = true
     @Published private(set) var foldersRead = true
     @Published private(set) var problem: Explanation?
-    /// Whether a run the app stopped waiting for has still not ended (`HostCLI.stuckRuns`).
+    /// Whether a run the app stopped waiting for, of a verb that takes the policy lock, has still
+    /// not ended (`HostCLI.stuckRuns`).
     @Published private(set) var stuck = false
+    /// Whether the host can open each folder, from `roots check --json`, for Set Up's Folders page:
+    /// read while that page shows, and for a folder Set Up adds back.
+    @Published private(set) var folderChecks: [FolderCheck] = []
+    /// Called once the menu's set-up is read again, once folders are checked, and when the user
+    /// says no to turning an ability on: Set Up's window shows what the menu shows.
+    var onRead: (() -> Void)?
 
     private let cli: HostCLI
     private var menuObserver: NSObjectProtocol?
@@ -113,8 +120,59 @@ final class HostModel: ObservableObject {
         }, done: { [weak self] response in
             if response == .alertSecondButtonReturn {
                 self?.turn(ability, on: true)
+            } else {
+                // Nothing changed: a switch that was clicked shows what the host says again.
+                self?.onRead?()
             }
         })
+    }
+
+    /// Add back one row Set Up's Add back page had checked (decisions/0002 §11.6): an ordinary
+    /// `roots add` or `ops enable`, through the menu's own gates and nothing else. A folder whose
+    /// spelling is the whole disk is refused before any run, whatever the set-aside policy marked
+    /// it; one that is the home folder or holds it by its path is asked about first, as the menu
+    /// asks once the Open panel has given it the folder, and Choose a Smaller Folder opens the Open
+    /// panel instead. The folder then goes through `addRoot`, confirmed only by that answer: the
+    /// whole disk is refused again, the home folder is asked about once the host refuses it as
+    /// `broad_folder`, and the name dialog opens again after `alias_taken`. Then `roots check` on
+    /// the folder now held at that path, so that a question macOS asks about it comes now, not at a
+    /// request from Lucille. The host's policy holds only folders, so the folder's URL says so, and
+    /// nothing reads the disk on the main thread to find out. An ability goes through
+    /// `setAbility`, with its acknowledgement for one whose replies can carry a file's contents;
+    /// this returns once its switch is turned, as the menu's is, before the host answers.
+    func restore(_ item: RestoreItem) async {
+        switch item {
+        case .folder(let folder):
+            guard !HostText.namesWholeDisk(folder.path) else {
+                return
+            }
+            var confirmed = false
+            if let kind = HostText.broadFolder(path: folder.path, home: cli.home) {
+                guard await RunLoopTurn.ask({ self.confirmBroadFolder(kind) }) else {
+                    addFolder()
+                    return
+                }
+                confirmed = true
+            }
+            await addRoot(alias: folder.alias, url: URL(fileURLWithPath: folder.path, isDirectory: true),
+                          place: HostText.place(of: folder.path, home: cli.home), confirmedHome: confirmed)
+            guard let held = folders.first(where: { $0.path == folder.path }) else {
+                return
+            }
+            let result = await run(["--json", "roots", "check", held.alias], timeout: SetupFlow.checkLimit)
+            folderChecks = folderChecks.filter { $0.alias != held.alias } + VerbOutcome(result).folderChecks
+            onRead?()
+        case .ability(let ability):
+            setAbility(ability, on: true)
+        }
+    }
+
+    /// `roots check --json`: whether the host can open each folder, for Set Up's Folders page,
+    /// with the time adding a folder has, since macOS may first ask the user about a folder.
+    func checkFolders() async {
+        let result = await run(["--json", "roots", "check"], timeout: SetupFlow.checkLimit)
+        folderChecks = VerbOutcome(result).folderChecks
+        onRead?()
     }
 
     /// `ops enable` or `ops disable`, with the window that has a Cancel button if it takes more
@@ -327,6 +385,7 @@ final class HostModel: ObservableObject {
         problem = results.first(where: { !$0.succeeded }).map { HostText.explain($0) }
         stuck = HostCLI.stuckRuns > 0
         labelStatusItem()
+        onRead?()
     }
 
     /// The menu bar icon. Its accessibility description is the menu bar item's title, which

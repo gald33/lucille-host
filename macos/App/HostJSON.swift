@@ -418,13 +418,15 @@ enum HostObject: Equatable, Sendable {
     case rootCheck(FolderCheck)
     /// The alias the host suggests for a folder (`roots add --suggest-alias`).
     case aliasSuggestion(String)
+    /// The last policy a pairing set aside, or none (`policy previous`), which Set Up offers back.
+    case previousPolicy(PreviousPolicy)
     case unknown(type: String)
 
     /// The types this release reads. Every other type decodes as `unknown`.
     static let knownTypes: Set<String> = [
         "pair_code", "policy_reset", "pair", "error", "status", "forget", "controls", "ready",
         "state", "request", "host_too_old", "stopped", "log_line", "version", "op", "op_removed",
-        "root", "root_removed", "root_check", "alias_suggestion",
+        "root", "root_removed", "root_check", "alias_suggestion", "previous_policy",
     ]
 }
 
@@ -628,6 +630,11 @@ extension HostObject {
                 return nil
             }
             self = .aliasSuggestion(alias)
+        case "previous_policy":
+            guard let previous = HostObject.readPreviousPolicy(fields) else {
+                return nil
+            }
+            self = .previousPolicy(previous)
         default:
             self = .unknown(type: type)
         }
@@ -1010,6 +1017,43 @@ extension HostObject {
         return FolderCheck(alias: alias, path: path, state: read)
     }
 
+    /// The policy a pairing set aside (spec/CLI.md §6, `previous_policy`). Its state is closed
+    /// within version 1, as an operation's is: another state, or a field its state needs missing or
+    /// of another type, makes an object this release cannot read. Each folder is read whole, its
+    /// alias only in the form the host's aliases take, or the object is not read at all: Set Up
+    /// offers nothing back from a policy it cannot read.
+    private static func readPreviousPolicy(_ fields: JSONFields) -> PreviousPolicy? {
+        guard let state = fields.string("state") else {
+            return nil
+        }
+        switch state {
+        case "none":
+            return .nothingSetAside
+        case "found":
+            guard let setAside = fields.time("set_aside_at"), let ops = fields.strings("ops"),
+                  let items = fields.array("folders")
+            else {
+                return nil
+            }
+            var folders: [Folder] = []
+            for item in items {
+                guard case .object(let map) = item else {
+                    return nil
+                }
+                let folder = JSONFields(values: map)
+                guard let alias = folder.string("alias"), Alias.isValid(alias), let path = folder.string("path"),
+                      let broad = folder.bool("broad")
+                else {
+                    return nil
+                }
+                folders.append(Folder(alias: alias, path: path, broad: broad))
+            }
+            return .found(setAsideAt: setAside, ops: ops, folders: folders)
+        default:
+            return nil
+        }
+    }
+
     private static func readForget(_ fields: JSONFields) -> ForgetResult? {
         guard let state = fields.string("state") else {
             return nil
@@ -1270,6 +1314,19 @@ enum VerbOutcome: Equatable, Sendable {
         for object in objects {
             if case .aliasSuggestion(let alias) = object {
                 return alias
+            }
+        }
+        return nil
+    }
+
+    /// The policy `policy previous --json` found set aside, or that none was.
+    var previousPolicy: PreviousPolicy? {
+        guard case .done(let objects) = self else {
+            return nil
+        }
+        for object in objects {
+            if case .previousPolicy(let previous) = object {
+                return previous
             }
         }
         return nil

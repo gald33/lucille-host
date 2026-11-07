@@ -7,6 +7,7 @@ steps tests/test_ci_workflow.py reads.
 
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 import hashlib
 import json
@@ -673,6 +674,28 @@ def test_every_type_the_menu_reads_is_decoded() -> None:
     # host's aliases take.
     suggestion = decoder.split('case "alias_suggestion":', 1)[1].split("\n        case ", 1)[0]
     assert "Alias.isValid(" in suggestion
+    # Set Up reads the policy a pairing set aside (`policy previous`): its two states, closed as
+    # every state is (section 12), when it was set aside as a time, its operations as strings and
+    # each folder whole, or not at all.
+    assert "previous_policy" in known
+    assert 'case "previous_policy":' in decoder
+    previous = _function_body(host_json, "    private static func readPreviousPolicy(")
+    assert _op_states("previous_policy") == ["none", "found"]
+    for state in _op_states("previous_policy"):
+        assert f'case "{state}":' in previous, state
+    assert "default:\n            return nil" in previous
+    for field in (
+        'fields.time("set_aside_at")',
+        'fields.strings("ops")',
+        'fields.array("folders")',
+    ):
+        assert field in previous, field
+    # A folder's alias becomes an argument of `roots add`: read only in the form the host's aliases
+    # take, else nothing of the object is read.
+    assert (
+        'guard let alias = folder.string("alias"), Alias.isValid(alias),'
+        ' let path = folder.string("path"),' in previous
+    )
     # The accessors the menu reads.
     for accessor in (
         "    var hostVersion: String? {",
@@ -684,6 +707,7 @@ def test_every_type_the_menu_reads_is_decoded() -> None:
         "    var removedFolder: String? {",
         "    var folderChecks: [FolderCheck] {",
         "    var aliasSuggestion: String? {",
+        "    var previousPolicy: PreviousPolicy? {",
         "    var error: HostError? {",
     ):
         assert accessor in host_json, accessor
@@ -2939,6 +2963,7 @@ NEW_LOGIC = (
     "ConnectionText.swift",
     "RequestLog.swift",
     "Placement.swift",
+    "Setup.swift",
 )
 
 
@@ -3152,7 +3177,8 @@ CONNECTION_VERBS = frozenset(
     }
 )
 # The verbs the menu's own set-up runs, whose refusals HostText words: the version, the abilities
-# and the folders, with the folder's suggested alias.
+# and the folders, with the folder's suggested alias; and Set Up's own, the policy a pairing set
+# aside and the check of each folder.
 SETTINGS_VERBS = frozenset(
     {
         "--version",
@@ -3163,6 +3189,8 @@ SETTINGS_VERBS = frozenset(
         "roots add [--allow-home-or-root] [--] <alias> <path>",
         "roots add --suggest-alias <path>",
         "roots remove <alias>",
+        "roots check [<alias>]",
+        "policy previous",
     }
 )
 
@@ -3228,9 +3256,11 @@ def test_every_error_code_the_app_meets_has_words() -> None:
 
 def test_every_error_code_the_menus_own_verbs_give_has_words() -> None:
     # The menu reads its own verbs' refusals by `code` (spec/CLI.md section 10), never by their
-    # words: one sentence for each code `--version`, `ops` and `roots` can give, today's sentences,
+    # words: one sentence for each code `--version`, `ops`, `roots` and `policy previous` can give,
     # in HostText.refusals; two that say more while a folder is added, in `refusal`'s own cases;
-    # and the codes that can only be the app's mistake, which read as ConnectionText.appBug.
+    # and the codes that can only be the app's mistake, which read as ConnectionText.appBug. Set
+    # Up's `policy previous` is the one new code: a policy set aside that the host can't read,
+    # which Set Up says in a note and offers nothing back for.
     text = _swift("HostText.swift")
     refusals = _swift_string_table(text, "refusals")
     app_bugs = _swift_string_set(_swift("ConnectionText.swift"), "appBugCodes")
@@ -3255,8 +3285,7 @@ def test_every_error_code_the_menus_own_verbs_give_has_words() -> None:
     assert set(refusals) | own <= _spec_error_codes(), sorted(
         set(refusals) | own - _spec_error_codes()
     )
-    # Today's sentences, now keyed by the code: none is new but for two codes a Mac does not
-    # meet in practice (on_proc, unstorable_path), which read as the helper program's fault before.
+    # Today's sentences, keyed by the code, and previous_invalid's.
     assert refusals == {
         "policy_invalid": "\\(appName)'s settings file can't be read.",
         "policy_lock_failed": (
@@ -3275,6 +3304,10 @@ def test_every_error_code_the_menus_own_verbs_give_has_words() -> None:
         "broad_folder": "That folder is your home folder, holds it, or is your whole disk.",
         "unstorable_path": "That folder's location can't be stored in \\(appName)'s settings.",
         "no_such_alias": "That folder was already removed.",
+        "previous_invalid": (
+            "\\(appName) can't read the folders and abilities you had before, so it can't offer"
+            " them back."
+        ),
     }
     # The most folders is the host's (spec/CLI.md section 10, `too_many_roots`), not read from its
     # words.
@@ -3735,8 +3768,8 @@ def test_no_window_is_restorable() -> None:
         assert text.count(".isRestorable = false") >= windows, path.name
         assert "isRestorable = true" not in text, path.name
         assert "frameAutosaveName" not in text and "setFrameAutosaveName" not in text, path.name
-    # The pairing window, the progress panel and the Activity panel.
-    assert made == 3
+    # The pairing window, the progress panel, the Activity panel and the Set Up window.
+    assert made == 4
     assert "panel.hidesOnDeactivate = false" in _swift("ActivityPanel.swift")
 
 
@@ -3855,6 +3888,696 @@ def test_reset_settings_asks_first_then_runs_policy_reset() -> None:
     ran = _swift_function(host_json, "    init(result: CLIResult) {")
     read = ran.index("if HostJSON.objects(inOutput: result.stdout).contains(.policyReset) {")
     assert read < ran.index("self = .reset") < ran.index("self = ResetOutcome(VerbOutcome(result))")
+
+
+# --- Set Up: Add back, Folders, Abilities, Ready (decisions/0002 §3.1 steps 8 to 10, §11.6) -----
+
+
+def _code_of(text: str) -> str:
+    """``text`` without its comment lines, which may name what the code may not call."""
+    return "\n".join(line for line in text.splitlines() if not line.lstrip().startswith("//"))
+
+
+def test_set_up_is_a_flow_the_self_test_walks_and_a_panel_that_draws_it() -> None:
+    # Set Up's rules are SetupFlow and RestoreOffer, in a file that draws nothing, which the
+    # self-test compiles, runs over the host's fixtures (checkSetup) and walks through 40,000
+    # seeded steps (checkSetupWalk). SetupPanel only draws the page the flow gives it and hands
+    # back what the user did, as PairingPanel does for the pairing flow: it runs nothing.
+    assert "Setup.swift" in check_app.LOGIC_SOURCES
+    assert "SetupPanel.swift" not in check_app.LOGIC_SOURCES
+    flow = _swift("Setup.swift")
+    panel = _swift("SetupPanel.swift")
+    assert _swift_imports(flow) == {"Foundation"}
+    assert "AppKit" in _swift_imports(panel)
+    for declared in (
+        "enum PreviousPolicy: Equatable, Sendable {",
+        "enum RestoreItem: Equatable, Sendable {",
+        "struct RestoreRow: Equatable, Sendable {",
+        "struct RestoreOffer: Equatable, Sendable {",
+        "struct SetupFlow: Equatable, Sendable {",
+        "enum SetupText {",
+    ):
+        assert declared in flow, declared
+    for name in ("HostCLI", "VerbQueue", "cli.run", "HostChild", "runModal()", "HostModel"):
+        assert name not in _code_of(flow), name
+    for name in ("HostCLI", "VerbQueue", "cli.run", "HostChild", "runModal()"):
+        assert name not in _code_of(panel), name
+    # Every box is the user's own click: none starts checked, and nothing checks them all.
+    for text in (flow, panel):
+        assert "Select All" not in text and "selectAll" not in text
+    selftest = _SELF_TEST.read_text(encoding="utf-8")
+    main_body = _swift_function(selftest, "    static func main() {")
+    assert main_body.index("checkPairing(fixtures, report)") < main_body.index(
+        "checkSetup(fixtures, report)"
+    )
+    checks = _swift_function(selftest, "    static func checkSetup(")
+    assert "checkSetupWalk(report)" in checks
+    for fixture in ('"pair-code-stdin"', '"policy-previous"', '"policy-previous-none"'):
+        assert f"fixtures[{fixture}]" in checks, fixture
+    assert 'fixtures["ops-list-sends-file-content"]' in checks
+    walk = _swift_function(selftest, "    static func checkSetupWalk(_ report: Report) {")
+    assert "for step in 0..<40_000 {" in walk
+    # A box is clicked only in an open window. The flow drops a click while it is closed;
+    # checkSetup feeds one, then opens the window again and finds every box as it was; and the
+    # walk's oracle counts a click only where the window was open before it.
+    clicked = _swift_function(
+        flow, "    private mutating func checked(_ rows: Set<Int>) -> [Effect] {"
+    )
+    assert "guard windowOpen, case .addBack(let offer, _)? = page else {" in clicked
+    shut, after = checks.split("let clickedWhileClosed = flow.handle(.checked([2]))\n", 1)
+    assert shut.rstrip().endswith("_ = flow.handle(.windowClosed)")
+    assert after.index("let reopenedUnchecked = flow.handle(.reopen)") < after.index(
+        "let addedAfterReopen = flow.handle(.addChecked)"
+    )
+    assert (
+        "clickedWhileClosed.isEmpty && reopenedUnchecked == stillUnchecked"
+        " && addedAfterReopen.isEmpty" in after
+    )
+    assert walk.index("let wasOpen = flow.windowOpen") < walk.index(
+        "let effects = flow.handle(input)"
+    )
+    assert "if wasOpen, case .addBack? = before {" in walk
+    # policy previous, on the profile no pairing has used, says none was set aside.
+    cli = _swift_function(selftest, "    static func checkCLI(")
+    assert '["--json", "policy", "previous"], timeout: SetupFlow.previousLimit' in cli
+    assert "PreviousPolicy.nothingSetAside" in cli
+    assert cli.index('"policy", "previous"') < cli.index("checkPairingVerbs(")
+
+
+def test_the_restore_list_goes_through_the_same_gates() -> None:
+    # A row the user checks on the Add back page becomes an ordinary `roots add` or `ops enable`
+    # (decisions/0002 §11.6), through the menu's own gates and nothing else: a folder whose
+    # spelling is the whole disk is refused before any run, whatever the set-aside policy marked
+    # it; the home folder, or a folder that holds it by its path, is asked about first, as the
+    # menu's chooseAndAdd asks, and confirmed only by that answer; then HostModel.addRoot, with its
+    # whole-disk refusal, its home question after the host's broad_folder and its name dialog
+    # again after alias_taken, then `roots check` on it; an ability through setAbility, with its
+    # acknowledgement for one whose replies carry file contents. The folder's URL is made as a
+    # folder's: without `isDirectory`, Foundation reads the disk, on the main thread, to tell.
+    model = _swift("HostModel.swift")
+    restore = _swift_function(model, "    func restore(_ item: RestoreItem) async {")
+    folder = restore.split("case .folder(let folder):", 1)[1].split("case .ability(", 1)[0]
+    refused = folder.index(
+        "guard !HostText.namesWholeDisk(folder.path) else {\n                return\n"
+    )
+    asked = folder.index("if let kind = HostText.broadFolder(path: folder.path, home: cli.home) {")
+    question = folder.index(
+        "guard await RunLoopTurn.ask({ self.confirmBroadFolder(kind) }) else {\n"
+        "                    addFolder()\n                    return\n"
+    )
+    confirmed = folder.index("confirmed = true")
+    added = folder.index(
+        "await addRoot(alias: folder.alias,"
+        " url: URL(fileURLWithPath: folder.path, isDirectory: true),"
+    )
+    assert refused < asked < question < confirmed < added
+    assert "var confirmed = false" in folder[:asked]
+    assert folder.count("confirmed = true") == 1
+    assert "confirmedHome: confirmed)" in folder[added:]
+    assert '["--json", "roots", "check", ' in folder and "timeout: SetupFlow.checkLimit" in folder
+    # chooseAndAdd asks the same question, the same way, before its run.
+    chosen = _swift_function(model, "    private func chooseAndAdd() {")
+    assert "if let kind = HostText.broadFolder(path: path, home: cli.home) {" in chosen
+    assert "guard confirmBroadFolder(kind) else {" in chosen
+    ability = restore.split("case .ability(let ability):", 1)[1]
+    assert "setAbility(ability, on: true)" in ability
+    for gone in (
+        "addFolderArguments",
+        '"roots", "add"',
+        '"ops"',
+        _BROAD_FLAG,
+        "turn(",
+        "confirmedHome: true",
+        "folder.broad",
+        "runWithProgress(",
+    ):
+        assert gone not in restore, gone
+    # The command line that adds a folder still has addRoot's two call sites alone, and turn is
+    # still reached from setAbility alone.
+    assert model.count("HostText.addFolderArguments(") == 2
+    assert len(re.findall(r"\bturn\(", model)) == 3
+    # Set Up's own files add and turn on nothing: Connection hands each row the flow restores,
+    # one at a time, to HostModel.restore, and says when it is done.
+    for name in ("Setup.swift", "SetupPanel.swift"):
+        code = _code_of(_swift(name))
+        for gone in ('"roots"', '"ops"', "addFolderArguments", "addRoot(", "turn("):
+            assert gone not in code, (name, gone)
+    assert "HostModel.shared.restore(" not in _code_of(_swift("SetupPanel.swift"))
+    connection = _swift("Connection.swift")
+    effect = _swift_function(connection, "    private func setUpEffect(")
+    restoring = effect.split("case .restore(let row, let item):", 1)[1].split("\n        case ", 1)[
+        0
+    ]
+    assert "await HostModel.shared.restore(item)" in restoring
+    assert "self.feedSetUp(.itemDone(row: row))" in restoring
+    assert restoring.index("HostModel.shared.restore(") < restoring.index(".itemDone(")
+    assert connection.count("HostModel.shared.restore(") == 1
+    # The flow's only effect that adds anything is `restore`, and it restores only a row the
+    # user checked that has a box: checkSetup and checkSetupWalk hold it to that.
+    flow = _swift("Setup.swift")
+    # The whole disk gets no box by its spelling, whatever the set-aside policy marked it, and
+    # by the disk for a folder marked broad; an ordinary folder is not read.
+    offer = _swift_function(
+        flow, "    static func items(previous: PreviousPolicy, since start: Date,"
+    )
+    assert (
+        "if HostText.namesWholeDisk(folder.path)"
+        " || (folder.broad && HostText.isWholeDisk(path: folder.path)) {" in offer
+    )
+    assert offer.count("isWholeDisk(") == 1
+    effects = re.search(
+        r"    enum Effect: Equatable, Sendable \{\n(.*?)\n    \}\n", flow, re.DOTALL
+    )
+    assert effects is not None
+    cases = re.findall(r"^        case (\w+)", effects.group(1), re.MULTILINE)
+    assert cases == ["readPrevious", "show", "restore", "note", "close"]
+
+
+def test_set_up_opens_once_they_match_here_is_connected() -> None:
+    # decisions/0002 §3.1 steps 8 to 10 and §11.6: the first time in this app session that the
+    # status line says Connected (or Connected, waiting for Lucille) after They Match was clicked
+    # here, not after a relaunch, nor for a pair confirmed in Terminal. Connection feeds SetupFlow
+    # when this session's own pairing starts, with the pairing flow's epoch; a policy_reset from
+    # that pairing's child, before the pairing flow reads the object; They Match's confirmation,
+    # from the note that says so; Connected, from the status line; the end of the pair at
+    # Disconnect; and the menu's Set Up Folders and Abilities…, while it is owed. PairingFlow, the
+    # gate, is unchanged.
+    connection = _swift("Connection.swift")
+    assert "    private func feedSetUp(_ input: SetupFlow.Input) {" in connection
+    start = _swift_function(connection, "    private func startPair(code: String, epoch: Int) {")
+    assert start.index("feedSetUp(.pairStarted(at: Date(), epoch: epoch))") < start.index(
+        "try child.start()"
+    )
+    assert "if object == .policyReset {" in start
+    assert start.index("self.feedSetUp(.policySetAside(epoch: epoch))") < start.index(
+        "self.feedFlow(.childObject(object), epoch: epoch)"
+    )
+    effect = _swift_function(connection, "    private func flowEffect(")
+    said = effect.split("case .say(let note):", 1)[1].split("\n        case ", 1)[0]
+    assert "if note == .confirmed {" in said
+    assert "feedSetUp(.confirmedHere(epoch: epoch))" in said
+    publish = _swift_function(connection, "    private func publish() {")
+    assert "line == ConnectionText.connected || line == ConnectionText.connectedWaiting" in publish
+    assert "feedSetUp(.connected)" in publish
+    # The pair ended, whoever ended it: a confirmed pair seen, then `status` says there is none
+    # and `run` is not alive. Never during a pairing, when no pair was confirmed yet.
+    assert "if confirmed {\n            setUpSawPair = true\n" in publish
+    ended = publish.split("} else if setUpSawPair, ", 1)[1]
+    assert ended.startswith("case .noPair? = status?.pair, !supervisor.runAlive {")
+    assert ended.index("setUpSawPair = false") < ended.index("feedSetUp(.pairEnded)")
+    assert publish.count("feedSetUp(.pairEnded)") == 1
+    assert "self.feedSetUp(.pairEnded)" in _swift_function(
+        connection, "    private func forget() {"
+    )
+    assert "feedSetUp(.reopen)" in _swift_function(connection, "    func setUpChosen() {")
+    menu = _swift("MenuBarApp.swift")
+    assert "if connection.setUpOffered {" in menu
+    assert "Button(SetupText.menuItem) { connection.setUpChosen() }" in menu
+    pairing = _swift("Pairing.swift")
+    assert "SetupFlow" not in pairing and "feedSetUp" not in pairing
+
+
+def test_set_up_runs_policy_previous_and_roots_check_as_the_app_writes_them(
+    home: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Set Up's own verbs, with --json first: `policy previous`, with 30 s, since it loads the
+    # policy set aside, which can wait on a stalled mount; then `ops list` and `roots list`, which
+    # the offer is filtered against; and `roots check`, for every folder or for one, with 600 s,
+    # as adding a folder has, since macOS may first ask the user about a folder (spec/CLI.md
+    # section 2). Each is answered as the app reads it, through the host's own `main`.
+    connection = _swift("Connection.swift")
+    model = _swift("HostModel.swift")
+    flow = _swift("Setup.swift")
+    assert "    static let previousLimit: TimeInterval = 30\n" in flow
+    assert "    static let checkLimit: TimeInterval = 600\n" in flow
+    previous_verb = '["--json", "policy", "previous"]'
+    assert sum(path.read_text(encoding="utf-8").count(previous_verb) for path in SWIFT_FILES) == 1
+    effect = _swift_function(connection, "    private func setUpEffect(")
+    reading = effect.split("case .readPrevious:", 1)[1].split("\n        case ", 1)[0]
+    assert previous_verb in reading and "timeout: SetupFlow.previousLimit" in reading
+    for verb in ('["--json", "ops", "list"]', '["--json", "roots", "list"]', ".previousRead("):
+        assert verb in reading, verb
+    checks = _swift_function(model, "    func checkFolders() async {")
+    assert '["--json", "roots", "check"]' in checks and "timeout: SetupFlow.checkLimit" in checks
+
+    def run(*argv: str) -> tuple[int, list[dict[str, Any]]]:
+        capsys.readouterr()
+        try:
+            code = main(["--profile", "mac-app", *argv])
+        except SystemExit as exc:
+            code = exc.code if isinstance(exc.code, int) else 1
+        return code, [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+
+    assert run("--json", "policy", "previous") == (
+        0,
+        [{"v": 1, "type": "previous_policy", "state": "none"}],
+    )
+    folder = home / "Documents"
+    folder.mkdir()
+    assert run("--json", "roots", "add", "--", "docs", str(folder))[0] == 0
+    _, listed = run("--json", "roots", "list")
+    held = listed[0]["path"]
+    opened = {"v": 1, "type": "root_check", "alias": "docs", "path": held, "state": "ok"}
+    assert run("--json", "roots", "check") == (0, [opened])
+    assert run("--json", "roots", "check", "docs") == (0, [opened])
+
+
+def test_only_runs_that_take_the_policy_lock_count_as_stuck(
+    home: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # HostText.stuckRun says that until a run left behind ends, the app can't change its folders
+    # or abilities: such a run may hold the host's policy lock (src/lucille_host/cli.py,
+    # `_policy_lock`). Only a run that takes that lock can. One that only reads (the alias
+    # suggestion, `roots list`, `ops list`, `--version`, `policy previous`, `roots check`,
+    # `status`), left behind, holds nothing up, so it is not counted in HostCLI.stuckRuns, and the
+    # next change never says that an earlier run holds it up when none does.
+    source = _swift("HostCLI.swift")
+    rows = _swift_string_set(source, "policyLockVerbs")
+    assert rows == {"ops enable", "ops disable", "roots add", "roots remove", "policy reset"}
+    # Read on the words before `--`, without `--json`; the alias suggestion takes no lock, written
+    # with a space or with `=`.
+    classify = _swift_function(
+        source, "    static func takesPolicyLock(_ verb: [String]) -> Bool {"
+    )
+    assert 'prefix(while: { $0 != "--" })' in classify
+    assert '"--json"' in classify
+    assert 'hasPrefix("--suggest-alias")' in classify
+    assert "policyLockVerbs.contains(" in classify
+    # A run left behind is kept with whether it takes the lock, and only those count.
+    ran = _function_body(source, "    func run(\n")
+    assert "HostCLI.leftBehind.add(process, holdsPolicyLock: HostCLI.takesPolicyLock(verb))" in ran
+    assert "    static var stuckRuns: Int { leftBehind.holdingPolicyLock }\n" in source
+    left = source.split("private final class LeftBehind", 1)[1].split("\n}\n", 1)[0]
+    assert "func add(_ process: Process, holdsPolicyLock: Bool) {" in left
+    assert "var running: Int {" not in left
+    holding = _function_body(source, "    var holdingPolicyLock: Int {")
+    assert holding.index("processes.removeAll { !$0.process.isRunning }") < holding.index(
+        "return HostCLI.lockHolders(runs)"
+    )
+    assert "(running: $0.process.isRunning, holdsPolicyLock: $0.holdsPolicyLock)" in holding
+    assert "processes.count" not in holding
+    # The count is a function of what was left behind, which the self-test runs.
+    holders = _swift_function(
+        source,
+        "    static func lockHolders(_ runs: [(running: Bool, holdsPolicyLock: Bool)]) -> Int {",
+    )
+    assert "runs.filter { $0.running && $0.holdsPolicyLock }.count" in holders
+    # Which verbs take the lock, measured on the host itself: each verb the app runs, through the
+    # host's own `main` on the app's profile, with the lock recording each time it is taken.
+    from lucille_host import cli as host_cli
+
+    taken: list[bool] = []
+    real = host_cli._policy_lock
+
+    @contextlib.contextmanager
+    def recording(dirs: Any) -> Any:
+        taken.append(True)
+        with real(dirs):
+            yield
+
+    monkeypatch.setattr(host_cli, "_policy_lock", recording)
+    folder = home / "Documents"
+    folder.mkdir()
+
+    def takes(*argv: str) -> bool:
+        taken.clear()
+        capsys.readouterr()
+        try:
+            main(["--profile", "mac-app", *argv])
+        except SystemExit:
+            pass
+        capsys.readouterr()
+        return bool(taken)
+
+    verbs = [
+        ("--json", "--version"),
+        ("--json", "ops", "list"),
+        ("--json", "ops", "enable", "files.sha256"),
+        ("--json", "ops", "--json", "disable", "files.sha256"),
+        ("--json", "roots", "list"),
+        ("--json", "roots", "add", "--suggest-alias", str(folder)),
+        ("--json", "roots", "add", "--suggest-alias=" + str(folder)),
+        ("--json", "roots", "add", "--", "docs", str(folder)),
+        ("--json", "roots", "check"),
+        ("--json", "roots", "check", "docs"),
+        ("--json", "roots", "remove", "docs"),
+        ("--json", "roots", "add", "--", "docs", "--suggest-alias"),
+        ("--json", "policy", "previous"),
+        ("--json", "policy", "reset"),
+        ("--json", "status"),
+        ("--json", "pause"),
+        ("--json", "resume"),
+        ("--json", "kill"),
+        ("--json", "log", "--limit", "200"),
+        ("--json", "pair", "status"),
+        ("--json", "pair", "confirm"),
+        ("--json", "pair", "reject"),
+        ("--json", "forget"),
+    ]
+    measured = {argv: takes(*argv) for argv in verbs}
+    locking = {argv for argv, took in measured.items() if took}
+    assert locking == {
+        ("--json", "ops", "enable", "files.sha256"),
+        ("--json", "ops", "--json", "disable", "files.sha256"),
+        ("--json", "roots", "add", "--", "docs", str(folder)),
+        ("--json", "roots", "remove", "docs"),
+        ("--json", "roots", "add", "--", "docs", "--suggest-alias"),
+        ("--json", "policy", "reset"),
+    }
+    # The rule the Swift states, read as written: the verb and its action among the words before
+    # `--`, but `--json`, and no alias suggestion among them. It agrees with the host on each.
+    for argv, took in measured.items():
+        before = argv[: argv.index("--")] if "--" in argv else argv
+        words = [word for word in before if word != "--json"]
+        says = " ".join(words[:2]) in rows and not any(
+            word.startswith("--suggest-alias") for word in words
+        )
+        assert says == took, argv
+    # The self-test holds the Swift function itself to the same verbs.
+    selftest = _SELF_TEST.read_text(encoding="utf-8")
+    assert "HostCLI.takesPolicyLock($0)" in selftest
+    assert "let holding = HostCLI.lockHolders(leftRuns)" in selftest
+    assert '["--json", "roots", "add", "--", "docs", "--suggest-alias"],' in selftest
+
+
+def test_the_pairing_check_sets_up_after_connected() -> None:
+    # On macos-15, after run reads the room and the menu says Connected, the Set Up window opens
+    # by itself, within 60 s: with no Add back page, since the harness paired through the
+    # command line, so the app saw no policy_reset; on Folders, which lists none; then on What
+    # Lucille may do, files.sha256's switch shows it off, is turned on (`ops list --json` then says
+    # it is enabled, and the switch shows it on), and off again; then Ready, and Done closes it.
+    # A Set Up check that fails does not stop the pairing check: it closes the window and turns
+    # files.sha256 off, and needs only those two facts, so that the fingerprint step's request
+    # while it is off still meets not_enabled (M18), and the later steps still run.
+    source = _CHECK_APP.read_text(encoding="utf-8")
+    go = _python_function(source, "go")
+    assert (
+        go.index("self.run_reads_the_room")
+        < go.index("self.set_up_after_connected")
+        < go.index("self.fingerprint")
+    )
+    outer = _python_function(source, "set_up_after_connected")
+    walked = outer.index("self.set_up_pages()")
+    closed = outer.index("_close_window(SETUP_TITLE)")
+    disabled = outer.index('self.host("--json", "ops", "disable", "files.sha256")')
+    needed = outer.index("self.need(")
+    assert walked < closed < disabled < needed
+    assert outer.count("self.need(") == 1
+    assert (
+        'self.op_enabled("files.sha256") is False and SETUP_TITLE not in _window_names()'
+        in outer[needed:]
+    )
+    step = _python_function(source, "set_up_pages")
+    # Each Set Up fact is expected, and the walk returns at the first one the rest needs: none
+    # stops the pairing check.
+    assert "self.need(" not in step and "_Stop" not in step
+    opened = step.index("_wait_until(lambda: SETUP_TITLE in _window_names(), 60)")
+    folders = step.index("_says(SETUP_FOLDERS)")
+    assert opened < folders < step.index("not _says(SETUP_ADD_BACK)")
+    assert folders < step.index("_says(SETUP_NO_FOLDERS)")
+    first = step.index("_press(SETUP_CONTINUE)")
+    assert folders < first < step.index("_says(SETUP_ABILITIES)")
+    switch = 'ABILITY_TITLES["files.sha256"]'
+    assert switch in step and step.count("_toggle(") == 2
+    off = step.index('self.op_enabled("files.sha256") is False and _checked(switch) == "0"')
+    on = step.index('self.op_enabled("files.sha256") is True')
+    shown_on = step.index('_checked(switch) == "1"')
+    back = step.rindex('self.op_enabled("files.sha256") is False')
+    shown_off = step.rindex('_checked(switch) == "0"')
+    assert off < step.index("_toggle(") < on < shown_on < step.rindex("_toggle(") < back < shown_off
+    assert shown_off < step.rindex("_press(SETUP_CONTINUE)") < step.index("_says(SETUP_READY)")
+    assert step.index("_says(SETUP_READY)") < step.index("_press(SETUP_DONE)")
+    assert step.rindex("SETUP_TITLE not in _window_names()") > step.index("_press(SETUP_DONE)")
+    for shot in ("p-setup-folders.png", "p-setup-abilities.png", "p-setup-ready.png"):
+        assert shot in step, shot
+    enabled = _python_function(source, "op_enabled")
+    assert 'self.host("--json", "ops", "list")' in enabled
+    assert '"enabled"' in enabled
+    toggle = _python_function(source, "_toggle")
+    assert '_target("checkbox", name)' in toggle and "click theTarget" in toggle
+    checked = _python_function(source, "_checked")
+    assert '_target("checkbox", name)' in checked and "value of theTarget" in checked
+
+
+def test_the_pairing_check_reads_an_operation_as_the_host_writes_it(
+    home: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # The Set Up step decides on _PairingCheck.op_enabled, which reads `ops list --json` on the
+    # app's profile. Run here on the host's own answers, before and after `ops enable`, with a
+    # stand-in for the check whose `host` is the host's own `main`.
+    def host(*argv: str) -> subprocess.CompletedProcess[str]:
+        capsys.readouterr()
+        try:
+            code = main(["--profile", "mac-app", *argv])
+        except SystemExit as exc:
+            code = exc.code if isinstance(exc.code, int) else 1
+        return subprocess.CompletedProcess(list(argv), code, capsys.readouterr().out, "")
+
+    check = types.SimpleNamespace(host=host)
+    assert check_app._PairingCheck.op_enabled(check, "files.sha256") is False
+    assert check_app._PairingCheck.op_enabled(check, "host.describe") is True
+    assert check_app._PairingCheck.op_enabled(check, "no.such") is None
+    assert host("--json", "ops", "enable", "files.sha256").returncode == 0
+    assert check_app._PairingCheck.op_enabled(check, "files.sha256") is True
+    assert check_app._PairingCheck.op_enabled(check, "host.describe") is True
+
+    # A line that is not JSON, or an `enabled` that is not a boolean, says nothing.
+    def garbled(*argv: str) -> subprocess.CompletedProcess[str]:
+        said = 'not json\n{"v":1,"type":"op","name":"files.sha256","enabled":"yes"}\n'
+        return subprocess.CompletedProcess(list(argv), 0, said, "")
+
+    stand_in = types.SimpleNamespace(host=garbled)
+    assert check_app._PairingCheck.op_enabled(stand_in, "files.sha256") is None
+
+
+class _SetUpOnAMac:
+    """The Set Up window as System Events would see it, and the host's files.sha256, for running
+    the pairing check's Set Up step here. Each flag makes one thing go wrong."""
+
+    def __init__(
+        self,
+        *,
+        opens: bool = True,
+        drawn_on: bool = False,
+        host_turns_on: bool = True,
+        host_turns_off: bool = True,
+        done_closes: bool = True,
+        disable_works: bool = True,
+        switch_moves: bool = True,
+    ) -> None:
+        self.page: str | None = "folders" if opens else None
+        self.switch = drawn_on
+        self.op_on = False
+        self.host_turns_on = host_turns_on
+        self.host_turns_off = host_turns_off
+        self.done_closes = done_closes
+        self.disable_works = disable_works
+        self.switch_moves = switch_moves
+        self.disabled_by_cli = 0
+        self.closed_by_button = 0
+
+    def window_names(self) -> list[str]:
+        return [check_app.SETUP_TITLE] if self.page is not None else []
+
+    def texts(self) -> list[str]:
+        return {
+            "folders": [check_app.SETUP_FOLDERS, check_app.SETUP_NO_FOLDERS],
+            "abilities": [check_app.SETUP_ABILITIES],
+            "ready": [check_app.SETUP_READY],
+            None: [],
+        }[self.page]
+
+    def says(self, words: str) -> bool:
+        return any(words in text for text in self.texts())
+
+    def press(self, name: str) -> tuple[bool, str]:
+        if name == check_app.SETUP_CONTINUE and self.page in ("folders", "abilities"):
+            self.page = {"folders": "abilities", "abilities": "ready"}[self.page]
+            return True, "pressed"
+        if name == check_app.SETUP_DONE and self.page == "ready":
+            if self.done_closes:
+                self.page = None
+            return True, "pressed"
+        return False, f"no button named {name}"
+
+    def toggle(self, name: str) -> tuple[bool, str]:
+        if self.page != "abilities" or name != check_app.ABILITY_TITLES["files.sha256"]:
+            return False, "no checkbox"
+        asked = not (self.switch if self.switch_moves else self.op_on)
+        if self.switch_moves:
+            self.switch = asked
+        if asked and self.host_turns_on:
+            self.op_on = True
+        if not asked and self.host_turns_off:
+            self.op_on = False
+        return True, "clicked"
+
+    def checked(self, name: str) -> str:
+        if self.page != "abilities" or name != check_app.ABILITY_TITLES["files.sha256"]:
+            return "absent"
+        return "1" if self.switch else "0"
+
+    def close_window(self, title: str) -> tuple[bool, str]:
+        if title == check_app.SETUP_TITLE and self.page is not None:
+            self.page = None
+            self.closed_by_button += 1
+            return True, ""
+        return False, "no such window"
+
+    def op_enabled(self, op: str) -> bool | None:
+        return self.op_on if op == "files.sha256" else None
+
+    def host(self, *args: str) -> subprocess.CompletedProcess[str]:
+        if args == ("--json", "ops", "disable", "files.sha256"):
+            self.disabled_by_cli += 1
+            if self.disable_works:
+                self.op_on = False
+        return subprocess.CompletedProcess(list(args), 0, "", "")
+
+
+def _set_up_step_on(
+    mac: _SetUpOnAMac, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> check_app.Checker:
+    for name, fake in (
+        ("_window_names", mac.window_names),
+        ("_texts", mac.texts),
+        ("_says", mac.says),
+        ("_press", mac.press),
+        ("_toggle", mac.toggle),
+        ("_checked", mac.checked),
+        ("_close_window", mac.close_window),
+    ):
+        monkeypatch.setattr(check_app, name, fake)
+    monkeypatch.setattr(check_app, "_screenshot", lambda path: None)
+    monkeypatch.setattr(check_app, "_wait_until", lambda test, seconds: test())
+    check = object.__new__(check_app._PairingCheck)
+    check.checker = check_app.Checker()
+    check.screens = tmp_path
+    check.op_enabled = mac.op_enabled  # type: ignore[method-assign]
+    check.host = mac.host  # type: ignore[method-assign]
+    check.set_up_after_connected()
+    return check.checker
+
+
+def test_the_set_up_step_passes_on_an_app_that_works(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # The pairing check's Set Up step, run against a stand-in for the app and the host: on one
+    # that does what Set Up should, nothing fails, and the cleanup has nothing to put right.
+    mac = _SetUpOnAMac()
+    checker = _set_up_step_on(mac, monkeypatch, tmp_path)
+    assert checker.failures == []
+    assert (mac.page, mac.op_on, mac.disabled_by_cli, mac.closed_by_button) == (None, False, 0, 0)
+
+
+@pytest.mark.parametrize(
+    ("mac", "first_failure"),
+    [
+        (_SetUpOnAMac(opens=False), "once connected"),
+        (_SetUpOnAMac(drawn_on=True), "is off before its switch is used"),
+        (_SetUpOnAMac(host_turns_on=False), "turns files.sha256 on"),
+        (_SetUpOnAMac(host_turns_off=False), "clicked again"),
+        (_SetUpOnAMac(done_closes=False), "Done closes the Set Up window"),
+        (_SetUpOnAMac(switch_moves=False), "shows it on"),
+    ],
+)
+def test_a_set_up_step_that_fails_is_counted_and_put_right(
+    mac: _SetUpOnAMac, first_failure: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # Each way Set Up can go wrong is the step's first failure, and the step goes on to close the
+    # window and turn files.sha256 off, the two facts the later steps need, so the pairing check
+    # still runs them.
+    checker = _set_up_step_on(mac, monkeypatch, tmp_path)
+    assert checker.failures and first_failure in checker.failures[0], checker.failures
+    assert mac.page is None and mac.op_on is False
+    assert checker.failures[-1] != "after Set Up, files.sha256 is off and no Set Up window is open"
+
+
+def test_a_set_up_step_whose_cleanup_fails_stops_the_pairing_check(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # When files.sha256 cannot be turned off again, the later steps cannot run as written: the
+    # cleanup's one need stops the check.
+    mac = _SetUpOnAMac(host_turns_off=False, disable_works=False)
+    with pytest.raises(check_app._Stop):
+        _set_up_step_on(mac, monkeypatch, tmp_path)
+
+
+@pytest.mark.parametrize(
+    ("worked", "said", "seen"), [(True, "1", "1"), (True, "0", "0"), (False, "err", "absent")]
+)
+def test_the_set_up_step_reads_the_switch_as_system_events_says_it(
+    worked: bool, said: str, seen: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bodies: list[str] = []
+
+    def system_events(body: str, timeout: float = 30) -> tuple[bool, str]:
+        bodies.append(body)
+        return worked, said
+
+    monkeypatch.setattr(check_app, "_system_events", system_events)
+    assert check_app._checked("Check a file's fingerprint") == seen
+    assert 'checkbox "Check a file\'s fingerprint" of theWindow' in bodies[0]
+    assert bodies[0].endswith("return ((value of theTarget) as text)")
+
+
+def test_the_set_up_check_looks_for_the_apps_own_words() -> None:
+    # What the pairing check reads of Set Up, as App/Setup.swift spells it, and the words of each
+    # page there.
+    text = _swift("Setup.swift")
+    name = check_app.APP_NAME
+    words = {
+        "windowTitle": check_app.SETUP_TITLE,
+        "addBackTitle": check_app.SETUP_ADD_BACK,
+        "foldersTitle": check_app.SETUP_FOLDERS,
+        "noFolders": check_app.SETUP_NO_FOLDERS,
+        "abilitiesTitle": check_app.SETUP_ABILITIES,
+        "readyTitle": check_app.SETUP_READY,
+        "continueButton": check_app.SETUP_CONTINUE,
+        "doneButton": check_app.SETUP_DONE,
+        "menuItem": check_app.SETUP_ITEM,
+    }
+    for constant, said in words.items():
+        assert f'static let {constant} = "{_named_in_swift(said)}"' in text, constant
+        assert check_app._quoted(said) == f'"{said}"'
+    assert check_app.SETUP_TITLE == f"Set Up {name}"
+    assert check_app.SETUP_ADD_BACK == "Add back what you had before?"
+    assert check_app.SETUP_FOLDERS == "Folders Lucille may use"
+    assert check_app.SETUP_NO_FOLDERS == "No folders yet"
+    assert check_app.SETUP_ABILITIES == "What Lucille may do"
+    assert check_app.SETUP_READY == f"{name} is ready"
+    assert check_app.SETUP_ITEM == "Set Up Folders and Abilities…"
+    pages = {
+        "addBackText": (
+            "Connecting started \\(appName)'s settings afresh. These are the folders and abilities"
+            " you had before. Check the ones to add back. Nothing is added unless you check it."
+        ),
+        "addCheckedButton": "Add Checked",
+        "skipButton": "Skip",
+        "someNotOffered": (
+            "Some of what you had before isn't shown: it is already set up, or \\(appName) doesn't"
+            " offer it here."
+        ),
+        "wholeDiskNotOffered": "\\(appName) doesn't add your whole disk back, so it isn't offered.",
+        "previousUnreadableTitle": "Couldn't read what you had before",
+        "addFolderButton": "Add a Folder…",
+        "removeButton": "Remove",
+        "folderBlocked": "macOS is blocking \\(appName) from this folder.",
+        "folderDenied": "This folder's permissions don't let \\(appName) open it.",
+        "folderMissing": "This folder isn't there any more.",
+        "folderUnopened": "\\(appName) couldn't open this folder.",
+        "readyText": (
+            "Lucille can now ask this Mac to do what is turned on, in the folders you added."
+        ),
+    }
+    for constant, said in pages.items():
+        assert f'static let {constant} = "{said}"' in text, constant
+    assert "    private static let appName = HostText.appName\n" in text
+    # The note for a set-aside policy the host can't read is HostText's refusal of
+    # previous_invalid, which test_every_error_code_the_menus_own_verbs_give_has_words pins.
+    assert "HostText.refusal(error)" in _swift_function(
+        _swift("Connection.swift"), "    private func setUpEffect("
+    )
 
 
 # --- Only the copy at /Applications/<name>.app acts; one update notice (0002 §13 and §16) -------
