@@ -349,6 +349,7 @@ def test_ci_macos_jobs() -> None:
         "selftest",
         "handoff",
         "bundle",
+        "bytecode",
         "record",
         "version",
         "links",
@@ -379,6 +380,7 @@ def test_ci_macos_jobs() -> None:
         "unpack-dmg",
         "dmg",
         "bundle",
+        "bytecode",
         "signature",
         "wrapper",
         "host",
@@ -403,6 +405,9 @@ def test_ci_macos_jobs() -> None:
         wrapper = next(i for i, run in enumerate(order) if "check_app.py wrapper" in run)
         assert wrapper < made_readonly
         assert checks[-1] == "signature", job
+        # The bytecode check runs the bundled interpreter right after the bundle check, before
+        # anything else runs it (0002 §6).
+        assert checks.index("bytecode") == checks.index("bundle") + 1, job
         assert checks.index("library-snapshot") < checks.index("launch") < checks.index("ui")
         assert checks.index("ui") < checks.index("library-diff")
         assert not any("build_app.py" in run for run in runs if job == "macos-smoke")
@@ -713,7 +718,7 @@ def test_each_mach_o_file_has_the_identifier_the_build_gave_it(tmp_path: Path) -
     assert identifier.startswith(PINS.bundle_id + ".")
 
 
-def test_the_checks_run_the_host_with_the_apps_flags() -> None:
+def test_the_checks_run_the_host_with_the_apps_flags(tmp_path: Path) -> None:
     python = Path("/x/lucille-host-runtime")
     assert check_app.host_argv(python, ["status", "--json"]) == [
         str(python),
@@ -728,6 +733,32 @@ def test_the_checks_run_the_host_with_the_apps_flags() -> None:
     ]
     for flag in ("isolated", "dont_write_bytecode", "utf8_mode"):
         assert f"assert sys.flags.{flag} == 1" in check_app.NATIVE_PROBE
+    # The app's flags leave --check-hash-based-pycs at default, so the interpreter checks each
+    # checked-hash .pyc's source hash against its .py when it imports it, and leave no pycache
+    # prefix, so it reads .pyc files only beside their sources (0002 §6). The host and
+    # environment checks run the probe with the bundled interpreter; here its lines run with this
+    # one, with PYTHONPYCACHEPREFIX set, which -I ignores.
+    lines = [
+        line
+        for line in check_app.NATIVE_PROBE.splitlines()
+        if "_imp" in line or "pycache_prefix" in line or line == "import sys"
+    ]
+    assert "import _imp" in lines
+    assert any(line.startswith('assert _imp.check_hash_based_pycs == "default"') for line in lines)
+    assert any(line.startswith("assert sys.pycache_prefix is None") for line in lines)
+    env = {"PATH": "/usr/bin:/bin", "PYTHONPYCACHEPREFIX": str(tmp_path / "elsewhere")}
+    for flags, returncode in ((build_app.RUNTIME_FLAGS, 0), (("-B", "-X", "utf8"), 1)):
+        done = subprocess.run(
+            [sys.executable, *flags, "-c", "\n".join(lines)],
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=60,
+            check=False,
+        )
+        assert done.returncode == returncode, (flags, done.stderr)
+    # The control above, without -I, fails on the prefix, not on another line.
+    assert "AssertionError: " + str(tmp_path / "elsewhere") in done.stderr
 
 
 # ---------------------------------------------------------------------------------------------
@@ -1500,6 +1531,30 @@ def test_a_control_that_cannot_fire_fails_the_environment_check(
     assert len(checker.failures) == 1 and "the user site" in checker.failures[0]
 
 
+def test_the_environment_check_sees_a_pycache_prefix(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # PYTHONPYCACHEPREFIX would make the importer read .pyc files from another tree than the
+    # bundle's. Run as the app runs it, the interpreter ignores it; this check sees the difference,
+    # and it is set in the host runs, where the native probe asserts there is no prefix.
+    python = _base_python()
+    probe = ("the prefix", ("-c", "import sys; assert sys.pycache_prefix is None"))
+    checker = check_app.Checker()
+    check_app.environment_check(python, _stdlib(python), tmp_path / "a", checker, [probe])
+    assert checker.failures == []
+    # Without -I, and with no other vector, the check fails on the prefix, and so does the host
+    # run that asserts there is none; the control still sees the variable in force.
+    monkeypatch.setattr(build_app, "RUNTIME_FLAGS", ("-B", "-X", "utf8"))
+    monkeypatch.setattr(check_app, "environment_vectors", lambda scratch, **where: [])
+    checker = check_app.Checker()
+    check_app.environment_check(python, _stdlib(python), tmp_path / "b", checker, [probe])
+    assert checker.failures == [
+        "PYTHONPYCACHEPREFIX: with -B -X utf8, the interpreter reads no .pyc file from it",
+        "the prefix: with -B -X utf8, every variable set and the planted folder as the working "
+        "folder, it runs and loads nothing planted",
+    ]
+
+
 # ---------------------------------------------------------------------------------------------
 # The suite on a copy of the bundled runtime, start-up times, and the command line
 
@@ -1553,6 +1608,42 @@ def test_suite_install_argv(tmp_path: Path) -> None:
     assert second[-2:] == ["-r", str(tmp_path / "again.txt")]
 
 
+def _check_app_function(name: str) -> str:
+    """The source of the function ``name`` in tools/macos/check_app.py."""
+    import ast
+
+    source = (build_app.TOOLS_DIR / "check_app.py").read_text(encoding="utf-8")
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.FunctionDef) and node.name == name:
+            found = ast.get_source_segment(source, node)
+            assert found is not None, name
+            return found
+    raise AssertionError(f"no function {name}")
+
+
+def test_the_startup_check_times_the_bundle_and_a_copy_without_pyc() -> None:
+    # The bundle as shipped, with the .pyc files the build wrote, then a writable copy with every
+    # .pyc removed. Nothing is compiled on the runner (0002 §6).
+    check = _check_app_function("check_startup")
+    shipped = check.find('"checked-hash (as shipped)"')
+    removed = check.find('"none (a copy with every .pyc removed)"')
+    assert -1 < shipped < removed, check
+    assert "rmtree" in check and "compileall" not in check
+
+
+def test_the_record_check_admits_the_bytecode_the_build_writes() -> None:
+    import ast
+
+    calls = [
+        node
+        for node in ast.walk(ast.parse(_check_app_function("check_record")))
+        if isinstance(node, ast.Call) and ast.unparse(node.func) == "payload.record_problems"
+    ]
+    assert len(calls) == 1
+    keywords = {keyword.arg: ast.unparse(keyword.value) for keyword in calls[0].keywords}
+    assert keywords == {"bytecode_tag": "build_app.BYTECODE_TAG"}
+
+
 def test_startup_timing() -> None:
     assert check_app.timing([0.3, 0.1, 0.2]) == (200.0, 100.0)
     assert check_app.timing([0.4, 0.1, 0.2, 0.3]) == (250.0, 100.0)
@@ -1565,6 +1656,7 @@ def test_startup_timing() -> None:
 def test_every_new_check_is_a_choice() -> None:
     assert set(check_app.CHECKS) >= {
         "bundle",
+        "bytecode",
         "record",
         "version",
         "wrapper",
@@ -1579,6 +1671,8 @@ def test_every_new_check_is_a_choice() -> None:
         "handoff",
         "handoff-check",
     }
+    # The bytecode check needs the app and no option: a person can run it as it is, on a copy.
+    assert "bytecode" not in check_app.NEEDS_NO_APP and "bytecode" not in check_app.REQUIRED
 
 
 def _as_mac(monkeypatch: pytest.MonkeyPatch) -> None:

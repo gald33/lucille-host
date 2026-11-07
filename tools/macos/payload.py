@@ -26,6 +26,8 @@ ships:
    the file of the same name in its wheel, apart from the installer's own ``INSTALLER``,
    ``REQUESTED`` (and ``direct_url.json`` where written) and the rewritten ``RECORD``, which must
    hold the wheel's own lines; and there is no ``.pyc``, no ``__pycache__`` and no symbolic link.
+   The build writes the ``.pyc`` files later, and checks this again with them admitted
+   (``bytecode_tag``).
 
 A pin with no wheel for this platform fails step 2: nothing is ever built from source. A marker
 this module cannot read fails step 1.
@@ -649,7 +651,9 @@ def _wheel_record(wheel: Path) -> tuple[str, str]:
         return records[0].split("/")[0], archive.read(records[0]).decode("utf-8")
 
 
-def record_problems(site: Path, wheels: Sequence[Path]) -> list[str]:
+def record_problems(
+    site: Path, wheels: Sequence[Path], *, bytecode_tag: str | None = None
+) -> list[str]:
     """Each way ``site`` differs from what installing exactly ``wheels`` writes, after
     :func:`clean_installer_output`:
 
@@ -663,14 +667,20 @@ def record_problems(site: Path, wheels: Sequence[Path]) -> list[str]:
       the file of the same name in its wheel;
     - any ``.pyc``, ``.pyo`` or ``__pycache__``, any symbolic link, and any empty folder.
 
+    With ``bytecode_tag``, a ``D/__pycache__/S.<tag>.pyc`` whose ``D/S.py`` a ``RECORD`` lists is
+    admitted by its name, with its folder; what it holds is the build's bytecode check's to judge.
+
     An empty list means every check passed; with no wheels and an empty ``site`` it is empty."""
     with ExitStack() as stack:
         archives = {wheel: stack.enter_context(zipfile.ZipFile(wheel)) for wheel in set(wheels)}
-        return _record_problems(site, wheels, archives)
+        return _record_problems(site, wheels, archives, bytecode_tag)
 
 
 def _record_problems(
-    site: Path, wheels: Sequence[Path], archives: Mapping[Path, zipfile.ZipFile]
+    site: Path,
+    wheels: Sequence[Path],
+    archives: Mapping[Path, zipfile.ZipFile],
+    bytecode_tag: str | None,
 ) -> list[str]:
     problems: list[str] = []
     by_info: dict[str, Path] = {}
@@ -711,13 +721,16 @@ def _record_problems(
                 problems.append(f"{path} is in the RECORD of both {owner[path][0]} and {info}")
             owner[path] = (info, row)
 
+    # The files the RECORD files list, before the walk below takes each one off ``owner``: a .pyc
+    # is admitted by the .py beside it, which the walk may already have passed.
+    listed = set(owner)
     for folder, dirs, files in os.walk(site):
         here = Path(folder)
         for name in sorted(dirs):
             path = here / name
             if path.is_symlink():
                 problems.append(f"symbolic link: {path.relative_to(site)}")
-            elif name == "__pycache__":
+            elif name == "__pycache__" and bytecode_tag is None:
                 problems.append(f"bytecode folder: {path.relative_to(site)}")
             elif not any(path.iterdir()):
                 problems.append(f"empty folder: {path.relative_to(site)}")
@@ -728,6 +741,16 @@ def _record_problems(
             if path.is_symlink():
                 problems.append(f"symbolic link: {rel}")
                 continue
+            suffix = f".{bytecode_tag}.pyc"
+            if (
+                bytecode_tag is not None
+                and here.name == "__pycache__"
+                and name.endswith(suffix)
+                and rel not in owner
+            ):
+                source = here.parent / (name.removesuffix(suffix) + ".py")
+                if source.relative_to(site).as_posix() in listed:
+                    continue
             if path.suffix in (".pyc", ".pyo"):
                 problems.append(f"bytecode: {rel}")
             if rel not in owner:

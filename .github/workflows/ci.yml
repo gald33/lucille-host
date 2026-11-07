@@ -167,6 +167,9 @@ jobs:
       - name: "Check: no symbolic link, the expected Mach-O files, each signed ad hoc by this build"
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         run: uv run --no-project python tools/macos/check_app.py bundle
+      - name: "Check: each .pyc is checked-hash and byte for byte what the bundled interpreter compiles from its .py"
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: uv run --no-project python tools/macos/check_app.py bytecode
       - name: "Check: the wheels are uv.lock's, and every site-packages file is a file of its wheel (M10)"
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         env:
@@ -183,7 +186,7 @@ jobs:
       - name: "Check: the signature"
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         run: uv run --no-project python tools/macos/check_app.py signature
-      - name: "Check: the wrapper and the app's flags write no bytecode into a writable copy"
+      - name: "Check: the wrapper and the app's flags write nothing into a writable copy"
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         run: uv run --no-project python tools/macos/check_app.py wrapper
       - name: Make the bundle read-only (M8)
@@ -228,7 +231,7 @@ jobs:
       - name: "Check: the disk image"
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         run: uv run --no-project python tools/macos/check_app.py dmg
-      - name: Measure start-up time with no .pyc (decisions/0002 §6)
+      - name: Measure start-up time, as shipped and with every .pyc removed (decisions/0002 §6)
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         run: uv run --no-project python tools/macos/check_app.py startup --summary "$GITHUB_STEP_SUMMARY"
       - name: "Check: the host's whole test suite on a copy of the bundled runtime"
@@ -345,10 +348,13 @@ jobs:
       - name: "Check: no symbolic link, the expected Mach-O files, each signed ad hoc by the build"
         if: ${{ !cancelled() && steps.unpacked.outcome == 'success' }}
         run: uv run --no-project python tools/macos/check_app.py bundle
+      - name: "Check: each .pyc is checked-hash and byte for byte what the bundled interpreter compiles from its .py"
+        if: ${{ !cancelled() && steps.unpacked.outcome == 'success' }}
+        run: uv run --no-project python tools/macos/check_app.py bytecode
       - name: "Check: the signature"
         if: ${{ !cancelled() && steps.unpacked.outcome == 'success' }}
         run: uv run --no-project python tools/macos/check_app.py signature
-      - name: "Check: the wrapper and the app's flags write no bytecode into a writable copy"
+      - name: "Check: the wrapper and the app's flags write nothing into a writable copy"
         if: ${{ !cancelled() && steps.unpacked.outcome == 'success' }}
         run: uv run --no-project python tools/macos/check_app.py wrapper
       - name: Make the bundle read-only (M8)

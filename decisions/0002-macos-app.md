@@ -45,8 +45,9 @@ developing the app. Its builds stay ad hoc signed, for the repository owner's ow
   `tools/macos/pins.toml` by URL and sha256, with its own pip uninstalled, pruned by the reviewed list
   `tools/macos/prune.txt`, and its interpreter renamed `lucille-host-runtime` (§6). Into it, `uv` installs the
   exact wheels `uv.lock` pins for macOS, downloaded from the lock's URLs and checked against its sha256, and
-  then the host's wheel, built from the checkout, all by hash. Nothing is precompiled: the app holds no
-  `.pyc`. Beside the runtime are the wrapper `Resources/bin/lucille-host` for Terminal users, the licence
+  then the host's wheel, built from the checkout, all by hash. Then the bundled interpreter writes a
+  `checked-hash` `.pyc` beside every `.py` of the runtime, and a second run of it checks each one byte for
+  byte (§6). Beside the runtime are the wrapper `Resources/bin/lucille-host` for Terminal users, the licence
   texts in `Resources/licenses/`, and `Resources/MANIFEST.json` (§6).
 - **The app drives the host only through its command line**, as
   `lucille-host-runtime -I -B -X utf8 -m lucille_host --profile mac-app <verb>`, with an argv and a fixed
@@ -347,10 +348,11 @@ ripgrep.
   leaves three things that no wheel holds, and the build deletes each, with its row in `RECORD` where it has
   one: its lock file `.lock` at the top of `site-packages`, the console scripts it writes into
   `site-packages/bin/` (they start with the build machine's interpreter path), and a `uv_cache.json` in a
-  `*.dist-info` folder it installed from a folder of wheels (measured with uv 0.11.32). No `.pyc` is shipped
-  (below). So every file under `site-packages` is byte for byte a file of a wheel's `RECORD`, except the
-  installer-written files of each `*.dist-info` folder: `INSTALLER`, `REQUESTED` and `direct_url.json` where
-  written, and `RECORD` itself, which the installer rewrites. Those are named, and each rewritten `RECORD` is
+  `*.dist-info` folder it installed from a folder of wheels (measured with uv 0.11.32). The `.pyc` files are
+  the one other exception (below). So every file under `site-packages` is byte for byte a file of a wheel's
+  `RECORD`, except the installer-written files of each `*.dist-info` folder (`INSTALLER`, `REQUESTED` and
+  `direct_url.json` where written, and `RECORD` itself, which the installer rewrites), and the `.pyc` files
+  the build writes, one per `.py` a `RECORD` lists. Those are named, and each rewritten `RECORD` is
   compared line by line with the wheel's own. The build checks all of this, and that the installed
   distributions are exactly the expected ones, before it signs anything, and refuses on any difference.
 - **No wheel's `*.dist-info` folder is removed**: keyring finds its macOS backend through an entry point. The
@@ -364,46 +366,86 @@ ripgrep.
   pages, the shared library, Tcl/Tk and its packages, pkg-config files, and, from the standard library, the
   build configuration, `ensurepip`, `idlelib`, `tkinter`, `_tkinter`, `turtle` and `turtledemo`. The list is
   the reviewed file `tools/macos/prune.txt`, one literal path per line; the build refuses a pattern, an entry
-  the pinned runtime does not hold, and anything in `site-packages` but its `README.txt`. What the list
-  misses is refused, not deleted: afterwards the runtime must be exactly `bin/lucille-host-runtime` and
-  `lib/python3.13/`, with an empty `site-packages`, no symbolic link and no `.pyc`. CI runs the host's whole
-  test suite on a copy of the pruned runtime, so a wrong cut fails a pull request.
+  the pinned runtime does not hold, and anything in `site-packages` but its `README.txt`. What the list misses
+  is refused, not deleted: afterwards the runtime must be exactly `bin/lucille-host-runtime` and
+  `lib/python3.13/`, with an empty `site-packages`, no symbolic link and no `.pyc` until the build writes its
+  own (below). CI runs the host's whole test suite on a copy of the pruned runtime, so a wrong cut fails a
+  pull request.
 - **No symbolic link** is left inside the bundle, unless the fallback below is needed. A link in the runtime
   to a file inside it is replaced by a copy of that file; any other link stops the build. The pinned
   runtime's nine links are all in paths `prune.txt` removes. The build refuses an app that holds a link, and
   `check_app.py bundle` checks again.
 - **The interpreter runs as** `lucille-host-runtime -I -B -X utf8 -m lucille_host`. `-I` ignores every
   `PYTHON*` variable and the user's site folder. `-B` stops `.pyc` writes, which would break the bundle's
-  seal. `-X utf8` makes text UTF-8 whatever the locale. The app (`macos/App/HostCLI.swift`), the wrapper and
-  every check in `tools/macos/check_app.py` run it with these flags.
+  seal. It does not stop reads: the interpreter still loads the `.pyc` files the build wrote (read:
+  `SourceLoader.get_code` in the pinned 3.13.18 checks `sys.dont_write_bytecode` only before it writes).
+  `-X utf8` makes text UTF-8 whatever the locale. The app (`macos/App/HostCLI.swift`), the wrapper and
+  every check in `tools/macos/check_app.py` run it with these flags, except the bytecode program (below),
+  which adds `-S` and `-W ignore`.
 - **The wrapper**, `Resources/bin/lucille-host`, is three lines of `sh`. It finds its own real path with
   `/bin/realpath`, so a link to it from a folder on `PATH` still runs this bundle's interpreter and never one
   beside the link, and runs the interpreter with the same flags and on the app's profile,
   `--profile mac-app` (§9); a `--profile` given to it comes later and replaces that one. A Linux test pins
   its text. On macOS, `check_app.py wrapper` runs it through a link, on a writable copy of the app, and
-  checks that it pauses the app's profile, not `default`, and writes no bytecode.
-- **No `.pyc` anywhere in the app.** A precompiled file is in no wheel's `RECORD`, and an
-  `unchecked-hash` one is loaded without being checked against its source, so the bytes the interpreter
-  ran would be the bytes nothing verified. Without them every module is compiled in memory at each start.
-  `prune.txt` also removes the three `.pyc` files the archive ships in `encodings/__pycache__` (their
-  recorded source times do not match the sources', so the interpreter ignored them), so the app holds none;
-  `check_app.py bundle` and `readonly` check that none appears.
-  The cost is start-up time. `ci.yml`'s `macos-app` job measures it on every run, into the job summary
-  (`check_app.py startup`): the median and the fastest of ten runs each of `--version` and `status --json`,
-  from the bundle as shipped, then from a writable copy with `checked-hash` files for the standard library
-  only, then for everything. **Seen in CI** (`macos-15`, run 41407347108, 2026-11-02), in milliseconds:
+  checks that it pauses the app's profile, not `default`, and writes nothing into the copy. Every `.pyc` the
+  build wrote is valid, so the interpreter would write none of them again even without `-B`. So the check
+  first removes the copy's `.pyc` of `lucille_host/__init__.py`, which every run then compiles from
+  source. Its control, the same run without `-B`, writes a new one there, so the check can see a write.
+- **A `checked-hash` `.pyc` beside every module.** Once `site-packages` is filled and checked, the bundled
+  interpreter runs one program, `BYTECODE_PROGRAM` in `tools/macos/build_app.py`, as
+  `lucille-host-runtime -I -B -S -W ignore -X utf8 -c PROGRAM write RUNTIME lib/python3.13`, from `/`, with
+  only `PATH` in its environment. It compiles every `.py` under `lib/python3.13` in memory, and writes each
+  one as `__pycache__/<name>.cpython-313.pyc` beside it. Then a second, fresh run of the same program, with
+  `check`, compiles each again and compares it with the file, byte for byte. Any difference stops the
+  build, before anything is signed. So does a check run that does not end as the program ends: Python
+  exits 1 on an exception too, with nothing printed, so exit 1 counts as findings only when the lines it
+  printed add up to its count. `check_app.py bytecode` runs the same check on the signed bundle in
+  `macos-app` and in both smoke jobs. It writes nothing, so a person can run it on a copy they downloaded
+  (`macos/README.md`, "The disk image from CI"); that is not yet tried on a Mac.
+  - **What `checked-hash` means.** The header holds the source's hash, and the interpreter checks it
+    against the `.py` at each import. If they differ, it ignores the file and compiles the source in
+    memory; with `-B` it writes nothing (run on Linux, CPython 3.13.14). The app's flags leave
+    `--check-hash-based-pycs` at `default`, which checks every `checked-hash` file (read:
+    `SourceLoader.get_code` in the pinned 3.13.18; run on Linux). The option has no environment variable,
+    and `check_app.py host` asserts `default` in the bundled interpreter, with the app's flags.
+  - **Only the files beside the sources.** `PYTHONPYCACHEPREFIX` would make the importer read `.pyc` files
+    from another tree, and a planted one with the right header would run (run on Linux, CPython 3.13.14,
+    without `-I`). `-I` ignores it. `check_app.py environment` shows that (without `-I` the interpreter
+    names the prefix; with the app's flags, none), and the native probe in `host` and `environment` asserts
+    `sys.pycache_prefix is None`.
+  - **The header binds the source only.** A file with the right header and another file's code is loaded,
+    and that code runs (run on Linux). So the check compares whole files, not headers.
+  - **Why bytes, and why one program.** The bytes `marshal` writes for a source depend on the state of the
+    process that compiles it. Measured on Linux on 2026-11-07, with CPython 3.13.14, over the pinned runtime's
+    pruned standard library and the app's `site-packages` (860 `.py` files): the same program run again, with
+    another hash seed, with garbage collection forced or turned off, or with the start-up modules read from
+    source, gave the same bytes for every file. The files in reverse order changed 1 file; seven standard
+    modules imported first changed 7; leaving out `-S` changed 1; keeping every code object alive changed 2;
+    `compileall`'s own imports changed 1 (`functools.py`) when they were loaded from `.pyc` files, and none
+    when loaded from source. So the program compiles in one fresh process, in sorted order, drops
+    each code object before the next, imports only built-in or frozen modules, and stops if compiling loads a
+    module (a source in another encoding loads its codec). `-W ignore` is there because a warning while
+    compiling loaded 23 modules (run). Comparing unmarshalled code objects instead would be weaker: their `==`
+    ignores `co_filename` and `co_qualname` (run on Linux, with CPython 3.13.14 and 3.11.15). Each `.pyc`
+    names its source by its path from the runtime (`lib/python3.13/json/__init__.py`). The importer replaces
+    that with the real path when it loads the file, so no `.pyc` holds the build folder. Whether the bundled
+    3.13.18 writes the same bytes twice is what the build's own check shows, on macOS; not yet seen in CI.
+  - **Start-up.** `ci.yml`'s `macos-app` job measures it on every run, into the job summary
+    (`check_app.py startup`): the median and the fastest of ten runs each of `--version` and
+    `status --json`, from the bundle as shipped, then from a writable copy with every `.pyc` removed. In
+    milliseconds, on `macos-15`:
 
-  | bytecode | `--version` median | fastest | `status --json` median | fastest |
-  |---|---|---|---|---|
-  | none (as shipped) | 696 | 645 | 722 | 626 |
-  | `checked-hash`, standard library | 386 | 330 | 398 | 334 |
-  | `checked-hash`, everything | 161 | 136 | 226 | 176 |
+    | bytecode | `--version` median | fastest | `status --json` median | fastest |
+    |---|---|---|---|---|
+    | none, as shipped (main at 915529e, run 42284964912) | 670 | 601 | 643 | 620 |
+    | `checked-hash`, as shipped | not yet seen in CI | | | |
+    | none, a copy with every `.pyc` removed | not yet seen in CI | | | |
 
-  So on that runner, shipping no `.pyc` cost about half a second on each start of the host against
-  `checked-hash` files for everything, and about 0.3 s against them for the standard library only. The app
-  pays it on every verb it runs. If that is too slow, the fallback is `checked-hash` files that
-  `verify_app.py` recompiles with the bundled interpreter and compares. **Not decided yet**: the maintainer
-  judges what is too slow.
+    The first row is the app before these files. Runs 41407347108 and 42284964912 also timed a copy with
+    `checked-hash` files that `compileall` wrote; for everything, the second gave 183 and 204 ms. Those
+    copies also held some timestamp files that `compileall` left (inferred), so those rows only suggest
+    the median falls to under a third. The maintainer ruled on 2026-11-07 that about 0.7 s per command was
+    too slow (gald33/lucille-host#13, comment 6699819761), so the app ships these files.
 - **It is renamed** so that Activity Monitor and any macOS prompt name it, not `python3.13`, and it has its own
   signing identifier (`com.lucille-ai.capsule.runtime`, from the pins; §7).
 - **`MANIFEST.json`**, as built, holds: the app's name, identifiers, deployment target and two version
@@ -419,16 +461,18 @@ ripgrep.
 - **M10 and the signature.** `codesign` writes each Mach-O file's signature into the file, so after signing
   the two extension files no longer equal their wheels' bytes (seen in CI, run 41407347108, 2026-11-02:
   `record` found the two signed files differ from their wheels'). So M10 (§22) holds byte for byte before
-  signing: the build checks it, and writes the unsigned tarball (§18), before it signs anything. On the signed
-  bundle, `check_app.py record` first holds `MANIFEST.json` to what it cannot have written itself: each wheel
-  it names must be one `uv.lock` pins, by name, version, file, URL and sha256, and the host wheel's sha256
-  must be the one the wheel step output. Then it checks every other file byte for byte, and compares each
-  Mach-O file with its wheel's after `codesign --remove-signature` on both copies; that comparison is reported
-  in the job summary, and does not fail the check. A copy codesign cannot strip is named, with what codesign
-  said, and not compared. Seen in CI (run 41407347108): both files read DIFFERENT. That run's check did not
-  yet look at whether codesign succeeded, so it does not show the signatures were removed. Either way, a
-  DIFFERENT here cannot show the signed files hold their wheels' code; the byte-for-byte check before signing
-  is what shows M10. Why they differ has not been looked into.
+  signing: the build checks it, and writes the unsigned tarball (§18), before it signs anything. The build
+  checks it twice: before it writes the `.pyc` files, and after, with each `.pyc` admitted by its name when
+  a `RECORD` lists the `.py` beside it. What a `.pyc` holds is the bytecode check's to judge, not M10's.
+  On the signed bundle, `check_app.py record` first holds `MANIFEST.json` to what it cannot have written
+  itself: each wheel it names must be one `uv.lock` pins, by name, version, file, URL and sha256, and the host
+  wheel's sha256 must be the one the wheel step output. Then it checks every other file byte for byte, and
+  compares each Mach-O file with its wheel's after `codesign --remove-signature` on both copies; that
+  comparison is reported in the job summary, and does not fail the check. A copy codesign cannot strip is
+  named, with what codesign said, and not compared. Seen in CI (run 41407347108): both files read DIFFERENT.
+  That run's check did not yet look at whether codesign succeeded, so it does not show the signatures were
+  removed. Either way, a DIFFERENT here cannot show the signed files hold their wheels' code; the
+  byte-for-byte check before signing is what shows M10. Why they differ has not been looked into.
 - **Mach-O files under `Contents/Resources`.** Apple's placement table ("Placing Content in a Bundle") puts
   libraries in `Contents/Frameworks` and a helper tool in `Contents/MacOS` or `Contents/Helpers`, and warns
   that incorrectly placed code "might cause problems during notarization". The interpreter is a helper tool,
@@ -440,10 +484,24 @@ ripgrep.
   links. The first signed build also tests the fallback, so it is known to work before it is needed. **Not
   decided yet** until that build.
 - **Size**: the dependencies are 18 MB (measured). The first build's disk image was 37.9 MB (seen in CI),
-  with hash-checked `.pyc` files, which the build no longer ships; the size of the current disk image is not
-  recorded here yet.
+  with hash-checked `.pyc` files that `compileall` wrote. At 915529e, with no `.pyc`, it was 25.2 MB (seen
+  in CI, run 42284964912: 25,201,353 bytes). The `.pyc` files add about 16.5 MB to the app, and about 6.3 MB
+  compressed (measured on Linux with CPython 3.13.14: 16,515,088 bytes for 860 files; zlib level 9 of
+  their bodies, 6,285,541 bytes). The disk image with them is not yet seen in CI.
 
 **What we did not choose, and why.**
+- **`unchecked-hash` `.pyc` files.** The interpreter loads them without looking at the source, so a file
+  that no longer matched its `.py` would still run.
+- **Timestamp `.pyc` files.** They hold the source's time and size, which a copy of the app need not
+  keep.
+- **`compileall`.** Its own imports come from the tree it compiles, so its bytes depend on whether `.pyc`
+  files are there yet (measured on Linux, above). A check with it on the shipped bundle would not match a
+  build made with it.
+- **A check that compares unmarshalled code objects.** It would not see a changed `co_filename` or
+  `co_qualname` (above). It stays the fallback, should the bundled interpreter ever be shown not to write
+  the same bytes twice.
+- **Compiling at first launch, or into a cache outside the bundle.** That writes at run time (M8, M12),
+  and nothing would check those files.
 - **A small launcher embedding Python in place of the renamed interpreter.** It would make the Keychain
   identity (§7) usable only for running the host. Today any process running as the user can run the bundled
   interpreter with its own script and read the host's Keychain items without a prompt, exactly as with a
@@ -1158,8 +1216,10 @@ which can upload anything (`macos/README.md`, "The disk image from CI").
 the app's files and folders in sorted order, each with the commit's time, owner and group 0 with no names,
 and mode 0755 or 0644, in a gzip file with no name or time in its header. `macos-app` compares its two
 builds' tarballs by the sha256 of the gzip file and of the tar inside it, and writes SAME, DIFFERENT or
-FAILED to the job summary. That is recorded, not a gate, until `macos-payload-repro` below exists. Seen in
-CI (`macos-15`, run 41407347108, 2026-11-02): both builds printed the gzip file's sha256
+FAILED to the job summary. It holds the `.pyc` files, so `compare` covers them. That is recorded, not a
+gate, until `macos-payload-repro` below exists. With the `.pyc` files, a SAME is not yet seen in CI. Seen
+in CI before the build wrote them (`macos-15`, run 41407347108, 2026-11-02): both builds printed the gzip
+file's sha256
 `67729981ad8b616c6335b3bbf1bc6ae4b20157797b0cba3b355d4b4c698b456e` and the tar's
 `cdb1d07d7edc1c499bdafea0f3e5f0f5f5c94c081f8c5cfc9339a48938acb924`, which `compare` writes as SAME. (Its
 verdict goes to the job summary, which the API does not return; the two digests are in the job's log.) That
@@ -1248,12 +1308,13 @@ Built today, by `ci.yml`'s `macos-app` job on `macos-15` (§18; `macos/README.md
 check from `tools/macos/check_app.py`:
 - the Swift build, and a bundle assembled with the real pinned runtime, signed ad hoc with the hardened
   runtime (§7; library validation against a Team ID is exercised only on signed candidates);
-- the bundle: no symbolic link and no bytecode; exactly the expected Mach-O files, each signed ad hoc by
+- the bundle: no symbolic link; exactly the expected Mach-O files, each signed ad hoc by
   the build, not only by the linker, with its own identifier; the signature, again after every other check;
+- each `.pyc`: where the build writes one, `checked-hash`, and byte for byte the bundled interpreter's
+  compile of the `.py` beside it; and the host's modules loaded from them (§6);
 - M10 on the signed bundle (§6), and M11: the version rule and `MANIFEST.json`;
 - the libraries each Mach-O file loads, and what the app's executable imports;
-- the wrapper runs on the app's profile, and it and the app's flags, on a writable copy, write no
-  bytecode;
+- the wrapper runs on the app's profile, and it and the app's flags write nothing into a writable copy;
 - the bundle made read-only (`chmod -R a-w`) for the runs, then `codesign --verify --strict` again (M8);
 - M6: nothing in the environment changes what the runtime loads, each vector with a control that shows it
   would have loaded without `-I`;
@@ -1261,8 +1322,8 @@ check from `tools/macos/check_app.py`:
 - the menu driven through System Events, with screenshots kept as a CI artifact;
 - a snapshot of `~/Library` before the app runs and after, diffed against an allowlist (M12; §22 says what
   it cannot see);
-- the start-up time with no `.pyc` (§6), and the unsigned app built twice and compared (§18), both recorded
-  in the job summary, not gates;
+- the start-up time as shipped and with every `.pyc` removed (§6), and the unsigned app built twice and
+  compared (§18), both recorded in the job summary, not gates;
 - the host's whole test suite against a copy of the bundled runtime, with the test dependencies installed
   into the copy only;
 - end to end, with that copy's interpreter, a hub of the check's own on 127.0.0.1 and a stand-in for
@@ -1276,9 +1337,9 @@ check from `tools/macos/check_app.py`:
 - a probe of the verbs the app uses, run as the app runs them, printed only.
 
 And by its `macos-smoke` jobs on `macos-26` and `xcode-27`, on the same disk image: the disk image, the
-bundle and signature checks, the wrapper, the read-only runs, M6, the Swift self-test that `macos-app`
-compiled, the probe, the launch, the menu, and the `~/Library` diff; not the end-to-end check, which
-needs the suite's copy of the runtime (§18). There, a machine where System Events cannot
+bundle, bytecode and signature checks, the wrapper, the read-only runs, M6, the Swift self-test that
+`macos-app` compiled, the probe, the launch, the menu, and the `~/Library` diff; not the end-to-end check,
+which needs the suite's copy of the runtime (§18). There, a machine where System Events cannot
 drive the menu is recorded, not failed; `macos-app` fails it. Where it can, every driven step is checked
 as in `macos-app`, and one that fails fails the job. They skip the build and these checks, which
 `macos-app` ran on the same bytes: M10, M11, the libraries, the copy in another folder, the start-up time
@@ -1442,8 +1503,9 @@ in 10 minutes or less.
      from PyPI, checks their hashes against the release's lock, and compares every file under `site-packages`
      with the wheels' `RECORD`, listing any file that came from none. The installer-written files of each
      `*.dist-info` (`INSTALLER`, `REQUESTED`, `direct_url.json`, and the rewritten `RECORD`) are named, and
-     each `RECORD` is compared line by line with the wheel's own; any `.pyc` under `site-packages` is listed
-     as a file from no wheel. The release wheel carries its PEP 740 attestation, as today.
+     each `RECORD` is compared line by line with the wheel's own; a `.pyc` is admitted only by its name,
+     one per listed `.py`, and `check_app.py bytecode` judges what it holds. The release wheel carries its
+     PEP 740 attestation, as today.
   5. What this cannot establish: the Swift app, the runtime and ripgrep beyond review and their pins; what
      Apple's notarization looked for; whether the copy in Applications is still the one verified after a same-user
      process touched it (`codesign --verify --deep --strict` detects a changed sealed file).
@@ -1459,11 +1521,11 @@ These join 0001's "Host invariants and their tests".
 | M3 | Nothing from outside the keyboard changes policy: a link can only deliver a code to `pair`, only while a Connect is pending | a Swift unit test on the handler's type; crafted URLs leave the policy digest unchanged |
 | M4 | From the Connect release, the host redeems only a code answering its own pending request | core tests: no nonce, wrong, reused, expired; each refused before `pairing.accept`, with no store write and no spawn |
 | M5 | The host's gate opens only on Lucille's number, typed; it never shows its own before | core tests: wrong entry, three wrong entries forget, right entry opens; `pair status` carries no digits before the gate opens |
-| M6 | Nothing in the environment changes what the bundled runtime loads | `check_app.py environment`: with `PYTHONPATH`, `PYTHONHOME`, `PYTHONSTARTUP`, a user site, `PYTHONUSERBASE` and the working folder each set to load a planted module, the runtime run with the app's flags loads none; for each, a control run without `-I` must load it, or the check fails. `PYTHONSTARTUP` is read only by an interactive interpreter, so no run the app makes (`-m lucille_host`) could load it even without `-I`; its control runs `-i`. No `.pth` file ships beyond the installed `RECORD` files, which `check_app.py record` compares with the wheels'. On the ad-hoc bundle (which carries the hardened runtime, §7) on macOS 15, 26 and 27, and again on every signed build in `macos-verify` |
+| M6 | Nothing in the environment changes what the bundled runtime loads | `check_app.py environment`: with `PYTHONPATH`, `PYTHONHOME`, `PYTHONSTARTUP`, a user site, `PYTHONUSERBASE` and the working folder each set to load a planted module, the runtime run with the app's flags loads none; for each, a control run without `-I` must load it, or the check fails. `PYTHONSTARTUP` is read only by an interactive interpreter, so no run the app makes (`-m lucille_host`) could load it even without `-I`; its control runs `-i`. With `PYTHONPYCACHEPREFIX` set, the runtime run with the app's flags reads `.pyc` files from no other tree; its control, without `-I`, names the prefix. No `.pth` file ships beyond the installed `RECORD` files, which `check_app.py record` compares with the wheels'. On the ad-hoc bundle (which carries the hardened runtime, §7) on macOS 15, 26 and 27, and again on every signed build in `macos-verify` |
 | M7 | Developer ID builds: hardened runtime, no entitlements, every Mach-O signed by the team | signing-job checks, on signed builds only: an ad-hoc build carries the hardened runtime (§7) but has no Team ID, so library validation against a Team ID is checked only on signed builds |
-| M8 | The bundle is never written at run time | `check_app.py readonly`, after `chmod -R a-w`: the host runs, nothing in the bundle changes, no bytecode appears, and `codesign --verify --strict` passes after; the signature is checked again after every other check; the read-only end-to-end run once it exists. On the ad-hoc bundle on macOS 15, 26 and 27, and on every signed build |
+| M8 | The bundle is never written at run time | `check_app.py readonly`, after `chmod -R a-w`: the host runs, nothing in the bundle changes, no `.pyc` appears or changes, and `codesign --verify --strict` passes after; the signature is checked again after every other check; the read-only end-to-end run once it exists. On the ad-hoc bundle on macOS 15, 26 and 27, and on every signed build |
 | M9 | Nothing runs as root, at install or at run time | no `.pkg`, no daemon (`macos_lint`); uid 0 refused (0001) |
-| M10 | The wheel inside is PyPI's; every file under `site-packages` is a file of a wheel's `RECORD`, except the named installer-written files, and no `.pyc` is there | the build guard, byte for byte before signing (`payload.record_problems`, also run on Linux); `check_app.py record` on the signed bundle, which holds each wheel `MANIFEST.json` names to `uv.lock` and the host wheel to the sha256 the wheel step output, and where each Mach-O file is compared with its wheel's after both signatures are removed, and that comparison is reported, not failed (§6); post-release checks; `verify_app.py` |
+| M10 | The wheel inside is PyPI's; every file under `site-packages` is a file of a wheel's `RECORD`, except the named installer-written files, and the only `.pyc` there are the build's, one `checked-hash` file per `.py` a `RECORD` lists | the build guard, byte for byte before signing (`payload.record_problems`, also run on Linux); `check_app.py record` on the signed bundle, which holds each wheel `MANIFEST.json` names to `uv.lock` and the host wheel to the sha256 the wheel step output, and where each Mach-O file is compared with its wheel's after both signatures are removed, and that comparison is reported, not failed (§6); `check_app.py bytecode`, which compares each `.pyc` with what the bundled interpreter compiles; post-release checks; `verify_app.py` |
 | M11 | A build from a tag has one version number; any other build records its real version in `MANIFEST.json` | the build's version rule (`bundle_versions`, tested on Linux); `check_app.py version` on the built app |
 | M12 | The app writes nothing outside the host's own folders except what macOS writes for any app | the `~/Library` diff (`check_app.py library-diff`): a changed path that names the bundle identifier, the app's name or `lucille` must match `tools/macos/library-allowlist.txt`; every other change is printed, not gated; the state folder of the app's profile (`mac-app`) must be among the changes. What it cannot see is below the table |
 | M13 | Pairing and the read loop start no process | the audit-hook test, on Linux and macOS |
@@ -1542,8 +1604,6 @@ itself first (`pause`, then `resume`).
   contains it (§13).
 - Whether notarization accepts Mach-O files under `Contents/Resources`, or they move to `Contents/Frameworks`
   and the interpreter to `Contents/Helpers` (§6).
-- Whether shipping no `.pyc` makes start-up too slow, and so whether `checked-hash` files with a recompiling
-  `verify_app.py` replace it (§6). CI measures it on every run; the maintainer judges it.
 - Whether the bundle loads under library validation and the hardened runtime, which only a Developer
   ID-signed candidate exercises (§7).
 - Whether the interpreter needs `allow-unsigned-executable-memory` under the hardened runtime (§7).
