@@ -16,8 +16,10 @@ import plistlib
 import re
 import shlex
 import shutil
+import signal
 import subprocess
 import sys
+import time
 import types
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
@@ -1432,6 +1434,9 @@ def test_forbidden_imports() -> None:
         "_OBJC_CLASS_$_NSTask",
         "_OBJC_CLASS_$_NSPipe",
         "_$sSS17UnicodeScalarViewV6append10contentsOfyqd___tSTRd__7ElementQyd__AERtsF",
+        # The app's one opener (SystemPlaces.swift), which macos_lint keeps to one call of a closed
+        # list of places (decisions/0002 §20).
+        "_OBJC_CLASS_$_NSWorkspace",
     ]
     refused = [
         "_posix_spawn",
@@ -1440,12 +1445,33 @@ def test_forbidden_imports() -> None:
         "_connect",
         "_nw_connection_create",
         "_OBJC_CLASS_$_NSURLSession",
-        "_OBJC_CLASS_$_NSWorkspace",
+        # Launch Services' and the Apple Event Manager's C calls, which open, register or drive
+        # another application without the opener.
+        "_LSOpenCFURLRef",
+        "_LSOpenFromURLSpec",
+        "_LSSetDefaultHandlerForURLScheme",
+        "_LSSetDefaultRoleHandlerForContentType",
+        "_LSRegisterURL",
+        "_AESendMessage",
+        # ... and the classes that send an Apple event or hand what they share to another
+        # application, which the lint refuses by name too.
+        "_OBJC_CLASS_$_NSAppleEventDescriptor",
+        "_OBJC_CLASS_$_NSSharingService",
+        "_OBJC_CLASS_$_NSSharingServicePicker",
         "_$s10Foundation10URLSessionC6sharedACvgZ",
         "_$s10Foundation4DataV10contentsOf7optionsAcA3URLV_So20NSDataReadingOptionsVtKcfC",
         "_OBJC_CLASS_$_NSPasteboard",
     ]
     assert check_app.forbidden_imports(allowed + refused) == refused
+    assert "_OBJC_CLASS_$_NSWorkspace" not in check_app.FORBIDDEN_IMPORT_PREFIXES
+    assert {
+        "_LSOpen",
+        "_LSSetDefault",
+        "_LSRegister",
+        "_AESend",
+        "_OBJC_CLASS_$_NSAppleEventDescriptor",
+        "_OBJC_CLASS_$_NSSharingService",
+    } <= set(check_app.FORBIDDEN_IMPORT_PREFIXES)
 
 
 OTOOL_LOADS = """\
@@ -3005,6 +3031,7 @@ NEW_LOGIC = (
     "Placement.swift",
     "Setup.swift",
     "LoginRules.swift",
+    "PlaceRules.swift",
 )
 
 
@@ -6639,17 +6666,34 @@ def test_nothing_starts_before_the_placement_check() -> None:
     assert 'checkPlacement(home: options["home"], report)' in main
 
 
-def test_a_copy_anywhere_else_says_how_to_fix_it_and_offers_only_quit() -> None:
+def test_a_copy_anywhere_else_says_how_to_fix_it_and_offers_only_its_place_and_quit() -> None:
     # A copy that is not at /Applications/<name>.app says, when it opens, when it is opened again
-    # and from its menu's one line, why it can't run and how to fix that; Quit is its only way
-    # out, through the app's one terminate (quitChosen). Its menu holds that line and Quit.
+    # and from its menu's one line, why it can't run and how to fix that. A copy outside
+    # Applications offers Show Applications Folder, the place PlaceRules gives it, before Quit; a
+    # renamed copy, in Applications already, offers Quit alone. Show Applications Folder opens the
+    # Finder there and quits, and Quit quits, through the app's one terminate (quitChosen). When
+    # macOS could not open the folder, the note comes again with that said first, and Quit alone.
+    # Its menu holds that line and Quit.
     menu = _swift("MenuBarApp.swift")
-    note = _swift_function(menu, "    static func show() {")
+    note = _swift_function(menu, "    static func show(couldNotOpen failed: SystemPlace? = nil) {")
     assert "@MainActor\nenum PlacementNote {\n" in menu
     assert 'Alerts.shared.show(key: "placement", front: true, {' in note
     assert "guard let note = ConnectionText.placement(Placement.current) else {" in note
-    assert re.findall(r"addButton\(withTitle: ([\w.]+)\)", note) == ["ConnectionText.quitButton"]
-    assert "Connection.shared.quitChosen()" in note
+    assert "let place = failed == nil ? PlaceRules.place(for: Placement.current) : nil" in note
+    assert re.findall(r"addButton\(withTitle: ([\w.()]+)\)", note) == [
+        "PlaceText.button(place)",
+        "ConnectionText.quitButton",
+    ]
+    assert (
+        "if let place {\n                alert.addButton(withTitle: PlaceText.button(place))\n"
+        in note
+    )
+    assert "PlaceText.couldNotOpen(" in note
+    (done,) = _swift_blocks(note, r"done: \{")
+    opened = done.index("if SystemPlaces.open(place) {")
+    assert opened < done.index("Connection.shared.quitChosen()")
+    assert done.index("PlacementNote.show(couldNotOpen: place)") > opened
+    assert done.count("Connection.shared.quitChosen()") == 2
     assert menu.count("PlacementNote.show()") == 3
     reopen = _swift_function(menu, "    func applicationShouldHandleReopen(")
     refused = reopen.index(
@@ -7123,10 +7167,12 @@ def test_the_placement_check_sees_its_control_before_it_reads_a_refusal() -> Non
         "_profile_folder()",
         "REFUSAL_WATCH",
         "QUIT_BUTTON",
+        "SHOW_APPLICATIONS_FOLDER",
         "_screenshot(",
         "0-placement-",
     ):
         assert name in refusing, name
+    assert "shows_folder=True, require_driven=require_driven" in check
     assert check_app.REFUSAL_WATCH == 10
     assert {"install", "placement"} <= set(check_app.CHECKS)
 
@@ -7209,9 +7255,10 @@ def test_the_placement_control_fails_unless_the_installed_copy_starts_the_host(
         assert any("the control: it starts the host" in what for what in checker.failures)
 
 
+@pytest.mark.parametrize("require_driven", [False, True])
 @pytest.mark.parametrize("fails_at", [1, 2, 3, None])
 def test_the_placement_check_puts_the_copy_in_applications_back_however_it_ends(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fails_at: int | None
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fails_at: int | None, require_driven: bool
 ) -> None:
     # The copy in /Applications is moved aside while the renamed copy runs alone. Whether a
     # refusing copy's check raises (System Events stops answering, say) before that, while the
@@ -7235,22 +7282,30 @@ def test_the_placement_check_puts_the_copy_in_applications_back_however_it_ends(
     monkeypatch.setattr(check_app, "_stop_the_app", lambda checker, what: None)
     monkeypatch.setattr(check_app, "_placement_control", lambda checker, screens, driven: True)
     seen: list[tuple[str, list[str]]] = []
+    given: list[dict[str, bool]] = []
 
     def refusing(
-        copy: Path, checker: object, screens: Path, label: str, words: object, driven: bool
+        copy: Path,
+        checker: object,
+        screens: Path,
+        label: str,
+        words: object,
+        driven: bool,
+        **options: bool,
     ) -> None:
         seen.append((label, sorted(path.name for path in applications.iterdir())))
+        given.append(options)
         if len(seen) == fails_at:
             raise check_app.CheckError("System Events stopped answering")
 
     monkeypatch.setattr(check_app, "_refusing_copy", refusing)
     checker = check_app.Checker()
     if fails_at is None:
-        check_app.check_placement(app, checker, tmp_path / "work")
+        check_app.check_placement(app, checker, tmp_path / "work", require_driven)
         assert not checker.failures, checker.failures
     else:
         with pytest.raises(check_app.CheckError):
-            check_app.check_placement(app, checker, tmp_path / "work")
+            check_app.check_placement(app, checker, tmp_path / "work", require_driven)
     renamed = f"{check_app.RENAMED_COPY}.app"
     aside = f".{app.name}.set-aside-by-placement"
     assert (
@@ -7265,19 +7320,24 @@ def test_the_placement_check_puts_the_copy_in_applications_back_however_it_ends(
     assert (installed / "Contents" / "installed").read_text(encoding="utf-8") == (
         "the installed copy"
     )
+    # The build's copy, outside Applications, offers Show Applications Folder, whose Finder window
+    # gates only with --require-driven; the renamed copy, in Applications already, does not.
+    outside = {"shows_folder": True, "require_driven": require_driven}
+    assert given == [outside, {}, {}][: fails_at or 3]
 
 
 def test_the_ui_check_resets_a_settings_file_the_host_cannot_read(tmp_path: Path) -> None:
-    # The ui check's last step: it writes a settings file the host cannot read (the
+    # The ui check's last checked step: it writes a settings file the host cannot read (the
     # check may write the host's files; the app may not, spec/CLI.md section 2), sees the menu's
     # problem line, opens its note, chooses Reset Settings… and then the question's Reset
     # Settings, and finds the file set aside as policy.invalid.toml and only host.describe on.
     # Whatever happens, it puts the settings back in `finally`: ui leaves the host as it found it.
+    # Only the Documents step comes after it, which gates nothing.
     source = _CHECK_APP.read_text(encoding="utf-8")
     ui = _python_function(source, "check_ui")
     assert "_drive_reset(" in ui
     assert ui.index("_drive_code_window(") < ui.index("_drive_reset(")
-    assert ui.rindex("_drive_") == ui.index("_drive_reset(")
+    assert ui.rindex("_drive_") == ui.index("_drive_documents_prompt(") > ui.index("_drive_reset(")
     reset = _python_function(source, "_drive_reset")
     for name in (
         "SETTINGS_UNREADABLE",
@@ -7939,3 +7999,1733 @@ def test_the_panel_checks_read_every_window_sheet_and_group() -> None:
     # No check looks for the prompt in window 1 alone any more.
     assert 'button "{OPEN_PROMPT}" of window 1' not in source
     assert "_in_each_place(" in _python_function(source, "_panel_buttons")
+
+
+# --- The one opener: Open Date & Time Settings, Open Privacy Settings, Show Applications Folder
+# (decisions/0002 §20) --------------------------------------------------------------------------
+
+# Where the app's one opener is called, by file: the function, or the closure Set Up's window
+# calls, whose body holds that file's call. Each is a click's: a note's button, or a button of
+# Set Up's Folders page.
+_OPEN_CALLS: dict[str, tuple[str, ...]] = {
+    "Connection.swift": (r"    func showAttention\(\) \{", r"        setupPanel\.onOpenPlace = \{"),
+    "HostModel.swift": (
+        r"    private func showFailure\(_ explanation: Explanation, action: String\) \{",
+    ),
+    "MenuBarApp.swift": (r"    static func show\(couldNotOpen failed: SystemPlace\? = nil\) \{",),
+}
+# In each of those, the closure the call sits in: a note's button's action, or a note's done.
+_OPEN_CLOSURES: dict[str, str] = {
+    r"    func showAttention\(\) \{": r"actions = \[\{",
+    r"        setupPanel\.onOpenPlace = \{": r"onOpenPlace = \{",
+    r"    private func showFailure\(_ explanation: Explanation, action: String\) \{": r"done: \{",
+    r"    static func show\(couldNotOpen failed: SystemPlace\? = nil\) \{": r"done: \{",
+}
+_SYSTEM_PLACE_CASES = ("dateAndTime", "filesAndFolders", "applicationsFolder")
+
+
+def test_the_opener_opens_only_its_places() -> None:
+    # One file, SystemPlaces.swift, names the class that opens things, once, in one call; the
+    # URL it opens is made there, from a closed list of three places: the two System Settings
+    # pages macos_lint's OPENABLE holds, which the places check opens too, and the Applications
+    # folder. Every call of it is in a button's action (decisions/0002 §20, M20).
+    opener = _swift("SystemPlaces.swift")
+    assert opener.count("NSWorkspace") == 1
+    assert len(re.findall(r"\bfunc\b", _code_of(opener))) == 1
+    for path in [*SWIFT_FILES, _SELF_TEST]:
+        if path.name != "SystemPlaces.swift":
+            assert "NSWorkspace" not in path.read_text(encoding="utf-8"), path.name
+    assert _swift_imports(opener) == {"AppKit"}
+    assert "SystemPlaces.swift" not in check_app.LOGIC_SOURCES
+    assert "@MainActor\nenum SystemPlaces {\n" in opener
+    body = _swift_function(opener, "    static func open(_ place: SystemPlace) -> Bool {")
+    assert re.findall(r"^        case \.(\w+):$", body, re.MULTILINE) == list(_SYSTEM_PLACE_CASES)
+    assert "default:" not in body
+    # The one call is the function's last statement, after the one guard; and each place opens
+    # its own address: Open Date & Time Settings never opens Files & Folders.
+    assert body.endswith(
+        "        guard let url else {\n            return false\n        }\n"
+        "        return NSWorkspace.shared.open(url)\n    }\n"
+    ), body
+    for case, made in (
+        ("dateAndTime", f'URL(string: "{check_app.DATE_AND_TIME_PANE}")'),
+        ("filesAndFolders", f'URL(string: "{check_app.FILES_AND_FOLDERS_PANE}")'),
+        ("applicationsFolder", 'URL(fileURLWithPath: "/Applications", isDirectory: true)'),
+    ):
+        assert f"        case .{case}:\n            url = {made}\n" in body, case
+    assert check_app.SETTINGS_PANES[check_app.DATE_AND_TIME_PANE] == "Date & Time"
+    assert (check_app.DATE_AND_TIME_PANE, check_app.FILES_AND_FOLDERS_PANE) == (
+        macos_lint.DATE_AND_TIME_PAGE,
+        macos_lint.FILES_AND_FOLDERS_PAGE,
+    )
+    assert set(re.findall(r'URL\(string: "([^"]+)"\)', body)) == macos_lint.OPENABLE
+    assert body.count("URL(string:") == len(macos_lint.OPENABLE) == 2
+    assert body.count('URL(fileURLWithPath: "/Applications", isDirectory: true)') == 1
+    assert set(check_app.SETTINGS_PANES) == macos_lint.OPENABLE
+    assert len(check_app.SETTINGS_PANES) == len(macos_lint.OPENABLE)
+    # The places: closed, and carrying no value, so nothing read at run time, and nothing Lucille
+    # sends, chooses or makes where the opener goes (M19). Declared once, in a file that draws
+    # nothing, and given nothing more anywhere.
+    rules = _swift("PlaceRules.swift")
+    cases = rules.split("enum SystemPlace: Equatable, Sendable {\n", 1)[1].split("\n}\n", 1)[0]
+    assert [
+        line.strip()
+        for line in cases.splitlines()
+        if line.strip() and not line.strip().startswith("//")
+    ] == [f"case {place}" for place in _SYSTEM_PLACE_CASES]
+    for path in [*SWIFT_FILES, _SELF_TEST]:
+        text = path.read_text(encoding="utf-8")
+        declared = len(re.findall(r"\benum SystemPlace\b", text))
+        assert declared == (path.name == "PlaceRules.swift"), path.name
+        assert not re.search(r"\bextension SystemPlace\b", text), path.name
+    # Each call is in a button's action: a note's, by its done or its actions, or the closure Set
+    # Up's window calls from its own button; and nowhere else.
+    for path in SWIFT_FILES:
+        text = path.read_text(encoding="utf-8")
+        openers = _OPEN_CALLS.get(path.name, ())
+        assert text.count("SystemPlaces.open(") == len(openers), path.name
+        for start in openers:
+            (block,) = _swift_blocks(text, start)
+            assert block.count("SystemPlaces.open(") == 1, (path.name, start)
+            held = [found for found in _swift_blocks(block, _OPEN_CLOSURES[start])]
+            assert [found.count("SystemPlaces.open(") for found in held].count(1) == 1, start
+    panel = _swift("SetupPanel.swift")
+    assert "    var onOpenPlace: ((SystemPlace) -> Void)?\n" in panel
+    assert panel.count("onOpenPlace?(") == 1
+    pressed = _swift_function(
+        panel, "    @objc private func openPlacePressed(_ sender: NSButton) {"
+    )
+    assert "onOpenPlace?(" in pressed
+    # That closure is called only from that action, and set only once, in Connection; and that
+    # action is named only by the buttons that send it. Anything else that called either would
+    # open a place with no click, and no count of SystemPlaces.open( would see it.
+    for path in [*SWIFT_FILES, _SELF_TEST]:
+        code = macos_lint.swift_scan(path.read_text(encoding="utf-8")).code
+        held = {"SetupPanel.swift": 2, "Connection.swift": 1}.get(path.name, 0)
+        assert len(re.findall(r"\bonOpenPlace\b", code)) == held, path.name
+        sent = 2 if path.name == "SetupPanel.swift" else 0
+        assert len(re.findall(r"\bopenPlacePressed\b", code)) == sent, path.name
+    assert len(re.findall(r"\bonOpenPlace\b", pressed)) == 1
+    assert "action: #selector(openPlacePressed(_:))" in panel
+    assert _swift("Connection.swift").count("        setupPanel.onOpenPlace = {") == 1
+    # The place each call opens is the one PlaceRules gives, from the app's own state: the
+    # problem `run` reports, macOS's refusal of a folder, where this copy is.
+    connection = _swift("Connection.swift")
+    attention = _swift_function(connection, "    func showAttention() {")
+    assert "place = PlaceRules.place(for: problem)" in attention
+    assert "buttons = [PlaceText.button(place), ConnectionText.okButton]" in attention
+    failure = _swift_function(
+        _swift("HostModel.swift"),
+        "    private func showFailure(_ explanation: Explanation, action: String) {",
+    )
+    assert "let place = explanation.place" in failure
+    assert "alert.addButton(withTitle: PlaceText.button(place))" in failure
+    # Only the place's own button opens it, the note's first: OK opens nothing.
+    assert re.findall(r"^ *alert\.addButton\(withTitle: (.+)\)$", failure, re.MULTILINE) == [
+        "PlaceText.button(place)",
+        '"OK"',
+    ]
+    assert "if let place, response == .alertFirstButtonReturn, !SystemPlaces.open(place) {" in (
+        failure
+    )
+    placement = _swift_function(
+        _swift("MenuBarApp.swift"),
+        "    static func show(couldNotOpen failed: SystemPlace? = nil) {",
+    )
+    assert "PlaceRules.place(for: Placement.current)" in placement
+    assert re.findall(r"^ *alert\.addButton\(withTitle: (.+)\)$", placement, re.MULTILINE) == [
+        "PlaceText.button(place)",
+        "ConnectionText.quitButton",
+    ]
+    # Quit quits, and opens nothing; the place's own button, the first, opens it.
+    done = placement.split("}, done: { response in\n", 1)[1]
+    assert done.startswith(
+        "            if let place, response == .alertFirstButtonReturn {\n"
+        "                if SystemPlaces.open(place) {\n"
+    ), done
+    assert done.count("SystemPlaces.open(") == 1
+    row = _swift_function(
+        panel, "    private func folderRow(_ folder: Folder, tag: Int) -> NSView {"
+    )
+    assert "PlaceRules.place(for: check.state)" in row and "PlaceText.button(" in row
+    # When macOS could not open the place, the note says so first and keeps its words.
+    assert "    func notOpened(_ place: SystemPlace, title: String, text: String) {\n" in connection
+    said = _swift_function(
+        connection, "    func notOpened(_ place: SystemPlace, title: String, text: String) {"
+    )
+    assert "PlaceText.couldNotOpen(place)" in said
+
+
+def test_nothing_lucille_sends_reaches_the_opener() -> None:
+    # M18 and M19 (decisions/0002 §22): no request, no text of Lucille's, and no refusal of a
+    # request ever offers a place. The files that read or show what Lucille sends name none of the
+    # opener's types, and the waiting page's clock sentence stays words only (the gate window is
+    # left alone).
+    for name in (
+        "RequestLog.swift",
+        "ActivityPanel.swift",
+        "HostJSON.swift",
+        "Pairing.swift",
+        "PairingPanel.swift",
+        "Supervisor.swift",
+    ):
+        text = _swift(name)
+        for word in ("SystemPlace", "PlaceRules", "PlaceText"):
+            assert word not in text, (name, word)
+    assert "ConnectionText.waitingClockWrong" in _swift("PairingPanel.swift")
+    rules = _code_of(_swift("PlaceRules.swift"))
+    for word in ("Request", "NSWorkspace", "SystemPlaces.", "URL(", "x-apple", "NSAlert", "Alerts"):
+        assert word not in rules, word
+    # The words that said the app opens nothing are gone with it.
+    assert "Words only: the app opens no settings itself." not in _swift("ConnectionText.swift")
+    assert "Open Privacy Settings comes with the app's one opener" not in _swift("Setup.swift")
+
+
+def test_the_place_rules_draw_nothing_and_the_self_test_checks_them() -> None:
+    # PlaceRules.swift is Foundation only, compiled by the self-test (NEW_LOGIC), whose
+    # checkPlaces holds each rule: clock skew offers Date & Time, macOS's privacy protection
+    # Files & Folders, a copy outside Applications the Applications folder, and nothing else
+    # offers anything; no refusal of a request ever does.
+    assert "PlaceRules.swift" in check_app.LOGIC_SOURCES
+    rules = _swift("PlaceRules.swift")
+    for declared in (
+        "enum SystemPlace: Equatable, Sendable {",
+        "enum PlaceRules {",
+        "enum PlaceText {",
+        "    static func place(for problem: Problem) -> SystemPlace? {",
+        "    static func place(for state: FolderCheck.State) -> SystemPlace? {",
+        "    static func place(for placement: Placement) -> SystemPlace? {",
+        "    static func place(for error: HostError, during activity: HostText.Activity)"
+        " -> SystemPlace? {",
+        "    static func button(_ place: SystemPlace) -> String {",
+        "    static func couldNotOpen(_ place: SystemPlace) -> String {",
+    ):
+        assert declared in rules, declared
+    # Every case of what each rule reads is named, so a new one must be decided there.
+    for signature in (
+        "    static func place(for problem: Problem) -> SystemPlace? {",
+        "    static func place(for state: FolderCheck.State) -> SystemPlace? {",
+        "    static func place(for placement: Placement) -> SystemPlace? {",
+        "    static func button(_ place: SystemPlace) -> String {",
+        "    static func couldNotOpen(_ place: SystemPlace) -> String {",
+    ):
+        assert "default:" not in _swift_function(rules, signature), signature
+    # The explanation of a failed run carries its place, set in one place, from the refusal.
+    text = _swift("HostText.swift")
+    assert "    var place: SystemPlace? = nil\n" in text
+    # Before offersReset, so that HostText.explain names offersReset last, as
+    # test_reset_settings_is_offered_only_while_the_policy_is_invalid reads it.
+    assert text.index("    var place: SystemPlace? = nil\n") < text.index(
+        "    var offersReset = false\n"
+    )
+    assert re.findall(r"offersReset: ([^\n]*)", text) == ['error.code == "policy_invalid"']
+    assert text.count("place: PlaceRules.place(for: error, during: activity)") == 1
+    for path in SWIFT_FILES:
+        if path.name != "HostText.swift":
+            assert "place: PlaceRules." not in path.read_text(encoding="utf-8"), path.name
+    selftest = _SELF_TEST.read_text(encoding="utf-8")
+    main_body = _swift_function(selftest, "    static func main() {")
+    assert main_body.index('checkPlacement(home: options["home"], report)') < main_body.index(
+        "checkPlaces(report)"
+    )
+    checks = _swift_function(selftest, "    static func checkPlaces(_ report: Report) {")
+    for needed in (
+        "PlaceRules.place(for: Problem.clock(skew: ",
+        "== .dateAndTime",
+        ".deniedByMacOS",
+        "== .filesAndFolders",
+        ".notInApplications(",
+        "== .applicationsFolder",
+        ".renamed(",
+        # Nothing else: every other case of each, by name.
+        ".notResponding",
+        ".policyInvalid",
+        ".policyStuck",
+        ".hubUnreachable(",
+        ".readStuck",
+        ".leftConnection(",
+        ".halted(",
+        # No refusal of a request, and no other refusal of a folder, ever offers one.
+        "RequestText.refused.keys",
+        "RequestText.failed.keys",
+        "HostText.refusals.keys",
+        "HostText.explain(",
+        ".place == .filesAndFolders",
+        # The words.
+        'PlaceText.button(.dateAndTime) == "Open Date & Time Settings"',
+        'PlaceText.button(.filesAndFolders) == "Open Privacy Settings"',
+        'PlaceText.button(.applicationsFolder) == "Show Applications Folder"',
+        "PlaceText.couldNotOpen(",
+    ):
+        assert needed in checks, needed
+    # Every other state of a folder's check and every place a refused copy can be, each by its
+    # own name in the arrays the self-test walks (a name inside another, .denied inside
+    # .deniedByMacOS, would pin nothing).
+    assert "let states: [FolderCheck.State] = [.ok, .denied, .missing, .error(errno: " in checks
+    assert (
+        "let wheres: [Placement.Where] = [.diskImage, .insideApplications, .homeApplications, "
+        ".elsewhere]" in checks
+    )
+
+
+def test_the_place_checks_look_for_the_apps_own_words() -> None:
+    # What check_app.py presses and reads, as PlaceRules.swift and HostText.swift spell it.
+    rules = _swift("PlaceRules.swift")
+    assert check_app.SHOW_APPLICATIONS_FOLDER == "Show Applications Folder"
+    assert check_app.OPEN_PRIVACY_SETTINGS == "Open Privacy Settings"
+    for said in (
+        check_app.SHOW_APPLICATIONS_FOLDER,
+        check_app.OPEN_PRIVACY_SETTINGS,
+        "Open Date & Time Settings",
+    ):
+        assert f'"{said}"' in rules, said
+        assert check_app._quoted(said) == f'"{said}"'
+    name = check_app.APP_NAME
+    assert check_app.BLOCKED_BY_MACOS == f"macOS is blocking {name} from this folder."
+    assert f'static let blockedByMacOS = "{_named_in_swift(check_app.BLOCKED_BY_MACOS)} ' in _swift(
+        "HostText.swift"
+    )
+    for could in (
+        f"{name} couldn't open System Settings.",
+        f"{name} couldn't open your Applications folder.",
+    ):
+        assert f'"{_named_in_swift(could)}"' in rules, could
+    # The titles the places check expects, which only a Mac can show.
+    assert list(check_app.SETTINGS_PANES.values()) == ["Date & Time", "Files & Folders"]
+    assert check_app.SETTINGS_PANES[check_app.FILES_AND_FOLDERS_PANE] == "Files & Folders"
+    for title in check_app.SETTINGS_PANES.values():
+        assert check_app._quoted(title) == f'"{title}"'
+    assert check_app.SYSTEM_SETTINGS == "System Settings"
+    assert (check_app.FINDER, check_app.APPLICATIONS_WINDOW) == ("Finder", "Applications")
+
+
+def _no_system_events_for_the_app(body: str, timeout: float = 30) -> tuple[bool, str]:
+    raise AssertionError(f"this step sends nothing to the app through System Events: {body!r}")
+
+
+# --- check_app.py places, run here against a stand-in for System Settings ----------------------
+
+
+class _SettingsOnAMac:
+    """System Settings as the places check sees it, made up. ``/usr/bin/open`` with a URL starts
+    it, unless ``starts`` is false (open then exits 1), showing the window ``shows`` gives for
+    that URL (by default the title SETTINGS_PANES expects; none for a URL it lacks).
+    ``pkill -TERM -x "System Settings"`` quits it, unless ``quits`` is false; ``pkill -KILL``
+    always does. With ``raises``, System Events raises when asked for its windows; with
+    ``hangs``, open does not finish within its time limit; with ``running``, System Settings runs
+    from the start, someone's own window open; ``exits`` is what open exits with when it starts
+    it. Every argv run is kept in ``ran``, each one's time
+    limit in ``limits``, each screenshot's name in ``shots``. Its words are read only at run time:
+    an instance is made when this module is imported."""
+
+    def __init__(
+        self,
+        *,
+        shows: dict[str, str] | None = None,
+        starts: bool = True,
+        quits: bool = True,
+        raises: bool = False,
+        hangs: bool = False,
+        running: bool = False,
+        exits: int = 0,
+    ) -> None:
+        self.shows = shows
+        self.starts = starts
+        self.exits = exits
+        self.quits = quits
+        self.raises = raises
+        self.hangs = hangs
+        self.running = running
+        self.window: str | None = "Wi-Fi" if running else None
+        self.ran: list[list[str]] = []
+        self.limits: list[float | None] = []
+        self.shots: list[str] = []
+
+    def run(self, argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        argv = [str(arg) for arg in argv]
+        self.ran.append(argv)
+        self.limits.append(kwargs.get("timeout"))
+        status = 0
+        if argv[0] == "/usr/bin/open":
+            if self.hangs:
+                raise subprocess.TimeoutExpired(argv, kwargs.get("timeout") or 0)
+            if self.starts:
+                shows = dict(check_app.SETTINGS_PANES) if self.shows is None else self.shows
+                self.running = True
+                self.window = shows.get(argv[1])
+                status = self.exits
+            else:
+                status = 1
+        elif argv[:2] == ["pkill", "-KILL"] or (argv[:2] == ["pkill", "-TERM"] and self.quits):
+            if argv[-2:] == ["-x", check_app.SYSTEM_SETTINGS]:
+                self.running = False
+                self.window = None
+        return subprocess.CompletedProcess(argv, status, "", "")
+
+    def names(self, name: str) -> list[str]:
+        return ["777"] if name == check_app.SYSTEM_SETTINGS and self.running else []
+
+    def windows(self, process: str) -> tuple[bool, list[str]]:
+        if self.raises:
+            raise check_app.CheckError("System Events stopped answering")
+        if process != check_app.SYSTEM_SETTINGS or not self.running:
+            return True, []
+        return True, [self.window] if self.window else []
+
+
+def _places_on(
+    mac: _SettingsOnAMac,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    *,
+    record_only: bool = False,
+) -> check_app.Checker:
+    monkeypatch.setattr("subprocess.run", mac.run)
+    monkeypatch.setattr(check_app, "_running", mac.names)
+    monkeypatch.setattr(check_app, "_process_windows", mac.windows, raising=False)
+    monkeypatch.setattr(check_app, "_screenshot", lambda path: mac.shots.append(path.name))
+    monkeypatch.setattr(check_app, "_wait_until", lambda test, seconds: test())
+    monkeypatch.setattr(check_app.time, "sleep", lambda seconds: None)
+    monkeypatch.setattr(check_app, "_system_events", _no_system_events_for_the_app)
+    checker = check_app.Checker()
+    check_app.check_places(checker, tmp_path, record_only=record_only)
+    return checker
+
+
+@pytest.mark.parametrize("record_only", [False, True])
+def test_the_places_check_opens_each_page_itself_and_quits_system_settings_by_name(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    record_only: bool,
+) -> None:
+    # The check, not the app, opens each System Settings page the opener may show, with
+    # /usr/bin/open; reads its windows' names and prints them, so the first run on each macOS
+    # says what the page is called; takes a screenshot; and quits System Settings by its name,
+    # with no key sent: an Escape with no menu open closed a window in a check before.
+    mac = _SettingsOnAMac()
+    checker = _places_on(mac, monkeypatch, tmp_path, record_only=record_only)
+    assert checker.failures == []
+    assert mac.ran == [
+        argv
+        for url in check_app.SETTINGS_PANES
+        for argv in (["/usr/bin/open", url], ["pkill", "-TERM", "-x", check_app.SYSTEM_SETTINGS])
+    ]
+    assert not mac.running
+    assert len(mac.shots) == len(check_app.SETTINGS_PANES) == 2
+    said = capsys.readouterr().out
+    for url, title in check_app.SETTINGS_PANES.items():
+        assert f"{url}: System Settings windows: {[title]}" in said, said
+
+
+@pytest.mark.parametrize(
+    ("mac", "failing"),
+    [
+        # Each page shows a window under another name: both are counted, each by the title.
+        (_SettingsOnAMac(shows={}), ("Date & Time", "Files & Folders")),
+        # System Settings never starts.
+        (_SettingsOnAMac(starts=False), ("starts System Settings", "starts System Settings")),
+        # It does not quit when asked by name: it is stopped, and that is counted.
+        (_SettingsOnAMac(quits=False), ("quits", "quits")),
+    ],
+)
+def test_the_places_check_gates_on_what_system_settings_shows(
+    mac: _SettingsOnAMac,
+    failing: tuple[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    checker = _places_on(mac, monkeypatch, tmp_path)
+    assert len(checker.failures) == len(failing), checker.failures
+    for found, words in zip(checker.failures, failing, strict=True):
+        assert words in found, checker.failures
+    assert not mac.running
+
+
+@pytest.mark.parametrize(
+    "mac",
+    [
+        _SettingsOnAMac(shows={}),
+        _SettingsOnAMac(starts=False),
+        _SettingsOnAMac(quits=False),
+        _SettingsOnAMac(raises=True),
+    ],
+)
+def test_the_places_check_only_records_with_record_only(
+    mac: _SettingsOnAMac,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # On macOS 26 and 27 the check prints what it saw and fails nothing, whatever it saw, and
+    # whatever went wrong while it looked: those jobs record the pages, macos-15 gates them.
+    checker = _places_on(mac, monkeypatch, tmp_path, record_only=True)
+    assert checker.failures == []
+    assert "recorded, not a gate" in capsys.readouterr().out
+    assert not mac.running
+
+
+def test_the_places_check_quits_system_settings_whatever_stops_it(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    mac = _SettingsOnAMac(raises=True)
+    with pytest.raises(check_app.CheckError):
+        _places_on(mac, monkeypatch, tmp_path)
+    assert ["pkill", "-TERM", "-x", check_app.SYSTEM_SETTINGS] in mac.ran
+    assert not mac.running
+
+
+@pytest.mark.parametrize("record_only", [False, True])
+def test_the_places_check_quits_a_system_settings_that_started_though_open_failed(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, record_only: bool
+) -> None:
+    # open exits 1, and System Settings starts anyway: the page is reported as not started, and
+    # System Settings is still quit, by its name, before the next page and after the last.
+    mac = _SettingsOnAMac(exits=1)
+    checker = _places_on(mac, monkeypatch, tmp_path, record_only=record_only)
+    assert len(checker.failures) == (0 if record_only else 2), checker.failures
+    assert not mac.running
+    assert mac.ran.count(["pkill", "-TERM", "-x", check_app.SYSTEM_SETTINGS]) == 2
+
+
+def test_with_record_only_a_page_that_did_not_start_is_not_read(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Nothing started, so there is no window to read and nothing to take a screenshot of.
+    mac = _SettingsOnAMac(starts=False)
+    _places_on(mac, monkeypatch, tmp_path, record_only=True)
+    assert mac.shots == []
+    assert "System Settings windows" not in capsys.readouterr().out
+
+
+def test_with_record_only_a_passing_page_prints_no_detail(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # A failure's detail is built only when the step failed: on a pass, each recorded line stands
+    # alone, with no open's output and no list of windows under it.
+    _places_on(_SettingsOnAMac(), monkeypatch, tmp_path, record_only=True)
+    lines = capsys.readouterr().out.splitlines()
+    recorded = [line for line in lines if line.startswith("recorded, not a gate:")]
+    assert len(recorded) == 3 * len(check_app.SETTINGS_PANES), lines
+    assert all(line.startswith("recorded, not a gate: yes, ") for line in recorded), recorded
+    assert not any(line.startswith(("exit ", "stdout: ", "stderr: ")) for line in lines), lines
+    for title in check_app.SETTINGS_PANES.values():
+        assert f"{[title]}" not in lines, lines
+
+
+def test_a_places_page_is_given_what_its_waits_can_take() -> None:
+    # Quitting System Settings before the page and after it (SIGTERM, then 15 s, then SIGKILL,
+    # then 10 s); /usr/bin/open; 30 s for System Settings to start; 30 s for its window, then
+    # a System Events read of up to 30 s begun just before those end, and the one more read that
+    # _wait_until makes after its time is up; and a screenshot of up to 30 s.
+    quit_ = 15 + 10
+    window = 30 + 30 + 30
+    assert check_app.PLACES_PAGE_LIMIT == quit_ + check_app.OPEN_LIMIT + 30 + window + 30 + quit_
+    asked: list[int] = []
+    assert check_app._wait_until(lambda: bool(asked.append(1)), 0) is False
+    assert asked == [1]
+
+
+def test_the_places_check_needs_no_app_and_sends_no_key() -> None:
+    source = _CHECK_APP.read_text(encoding="utf-8")
+    check = _python_function(source, "check_places")
+    for sent in ("key code", "keystroke", "_system_events(", "_press(", "Escape"):
+        assert sent not in check, sent
+    assert '"/usr/bin/open"' in check and "_quit_by_name(SYSTEM_SETTINGS)" in check
+    assert "finally:" in check
+    quit_by_name = _python_function(source, "_quit_by_name")
+    assert '["pkill", "-TERM", "-x", name]' in quit_by_name
+    assert "places" in check_app.CHECKS and "places" in check_app.NEEDS_NO_APP
+    assert "places" not in check_app.OPENS_INSTALLED and "places" not in check_app.REQUIRED
+    args = check_app._parser().parse_args(["places", "--record-only"])
+    assert args.record_only is True
+    assert check_app._parser().parse_args(["places"]).record_only is False
+
+
+# --- check_app.py placement: Show Applications Folder, run here against a stand-in ------------
+
+
+class _PlacementNoteOnAMac:
+    """The note a copy that may not run shows, as System Events sees it, and the Finder's
+    windows. The note says ``words`` and offers ``buttons`` (by default Show Applications Folder
+    and Quit). Show Applications Folder opens a Finder window named ``opens_as`` (by default
+    Applications), unless ``opens`` is false, and quits the app, unless ``quits`` is false; Quit
+    quits it. ``before`` are the Finder's windows already open. Every press, window closed and
+    screenshot is kept. Its words are read only at run time."""
+
+    def __init__(
+        self,
+        *,
+        buttons: list[str] | None = None,
+        words: tuple[str, str] | None = None,
+        opens: bool = True,
+        opens_as: str | None = None,
+        quits: bool = True,
+        before: tuple[str, ...] = (),
+        failing_reads: tuple[int, ...] = (),
+    ) -> None:
+        self.buttons = buttons
+        self.words = words
+        self.opens = opens
+        self.opens_as = opens_as
+        self.quits = quits
+        self.finder = list(before)
+        self.failing_reads = failing_reads
+        self.finder_reads = 0
+        self.app_running = True
+        self.pressed: list[str] = []
+        self.closed: list[tuple[str, str]] = []
+        self.shots: list[str] = []
+        self.text_reads: list[int] = []
+
+    def offered(self) -> list[str]:
+        if self.buttons is not None:
+            return self.buttons
+        return [check_app.SHOW_APPLICATIONS_FOLDER, check_app.QUIT_BUTTON]
+
+    def texts(self) -> list[str]:
+        words = self.words or (check_app.PLACEMENT_TITLE, check_app.PLACEMENT_ELSEWHERE)
+        return list(words) if self.app_running else []
+
+    def read_texts(self) -> list[str]:
+        # The check's own read of the note's words, with how many presses came before it.
+        self.text_reads.append(len(self.pressed))
+        return self.texts()
+
+    def says(self, words: str) -> bool:
+        return any(words in text for text in self.texts())
+
+    def window_list(self, what: str) -> tuple[bool, list[str]]:
+        assert what == "name of every button", what
+        return True, self.offered() if self.app_running else []
+
+    def press(self, name: str) -> tuple[bool, str]:
+        self.pressed.append(name)
+        if not self.app_running or name not in self.offered():
+            return False, f"no button named {name}"
+        if name == check_app.QUIT_BUTTON:
+            self.app_running = False
+        else:
+            # Show Applications Folder, the one other button such a note may offer.
+            if self.opens:
+                self.finder.append(self.opens_as or check_app.APPLICATIONS_WINDOW)
+            self.app_running = not self.quits
+        return True, "pressed"
+
+    def windows(self, process: str) -> tuple[bool, list[str]]:
+        if process != check_app.FINDER:
+            return True, []
+        self.finder_reads += 1
+        if self.finder_reads - 1 in self.failing_reads:
+            return False, ["(System Events: not allowed assistive access)"]
+        return True, list(self.finder)
+
+    def close_window_of(self, process: str, title: str) -> tuple[bool, str]:
+        self.closed.append((process, title))
+        if process == check_app.FINDER and title in self.finder:
+            self.finder.remove(title)
+            return True, "closed"
+        return False, "no such window"
+
+
+def _refusing_copy_on(
+    mac: _PlacementNoteOnAMac,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    label: str = "elsewhere",
+    checker: check_app.Checker | None = None,
+    **options: bool,
+) -> check_app.Checker:
+    _, opened = _placement_world(tmp_path, monkeypatch, starts=False, writes=False)
+    monkeypatch.setattr(check_app, "REFUSAL_WATCH", 0.2)
+    monkeypatch.setattr(
+        check_app, "_running", lambda name: [99] if opened and mac.app_running else []
+    )
+    for name, fake in (
+        ("_texts", mac.read_texts),
+        ("_says", mac.says),
+        ("_window_list", mac.window_list),
+        ("_press", mac.press),
+        ("_process_windows", mac.windows),
+        ("_close_window_of", mac.close_window_of),
+    ):
+        monkeypatch.setattr(check_app, name, fake, raising=False)
+    monkeypatch.setattr(check_app, "_screenshot", lambda path: mac.shots.append(path.name))
+    monkeypatch.setattr(check_app, "_system_events", _no_system_events_for_the_app)
+    checker = checker or check_app.Checker()
+    copy = tmp_path / "out" / f"{check_app.APP_NAME}.app"
+    words = mac.words or (check_app.PLACEMENT_TITLE, check_app.PLACEMENT_ELSEWHERE)
+    check_app._refusing_copy(copy, checker, tmp_path, label, words, True, **options)
+    return checker
+
+
+@pytest.mark.parametrize("require_driven", [True, False])
+def test_a_copy_outside_applications_shows_the_applications_folder_then_quits(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    require_driven: bool,
+) -> None:
+    # Its note offers Show Applications Folder and Quit, and the check presses the first, a
+    # button it has just read: the app quits, and a Finder window named Applications opens, which
+    # the check prints, and closes, since it opened it.
+    mac = _PlacementNoteOnAMac()
+    checker = _refusing_copy_on(
+        mac, monkeypatch, tmp_path, shows_folder=True, require_driven=require_driven
+    )
+    assert checker.failures == []
+    assert mac.pressed == [check_app.SHOW_APPLICATIONS_FOLDER]
+    assert not mac.app_running
+    assert mac.closed == [(check_app.FINDER, check_app.APPLICATIONS_WINDOW)]
+    assert check_app.APPLICATIONS_WINDOW not in mac.finder
+    assert "0-placement-elsewhere-folder.png" in mac.shots
+    assert f"{[check_app.APPLICATIONS_WINDOW]}" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    ("mac", "require_driven", "failing"),
+    [
+        # A note that offers only Quit, as before: counted, and nothing is pressed.
+        (_PlacementNoteOnAMac(buttons=["Quit"]), True, ("its note offers",)),
+        # The app does not quit once it has shown the folder.
+        (_PlacementNoteOnAMac(quits=False), True, ("quits it",)),
+        # No Finder window named Applications: macos-15 counts it; elsewhere it is printed.
+        (_PlacementNoteOnAMac(opens=False), True, ("Finder window",)),
+        (_PlacementNoteOnAMac(opens=False), False, ()),
+    ],
+)
+def test_a_copy_outside_applications_that_does_not_show_the_folder_is_counted(
+    mac: _PlacementNoteOnAMac,
+    require_driven: bool,
+    failing: tuple[str, ...],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    checker = _refusing_copy_on(
+        mac, monkeypatch, tmp_path, shows_folder=True, require_driven=require_driven
+    )
+    assert len(checker.failures) == len(failing), checker.failures
+    for found, words in zip(checker.failures, failing, strict=True):
+        assert words in found, checker.failures
+    # Only a button the check read is pressed, and a Finder window it opened is closed again.
+    assert set(mac.pressed) <= {check_app.SHOW_APPLICATIONS_FOLDER}
+    assert check_app.APPLICATIONS_WINDOW not in mac.finder
+    if not failing:
+        assert "recorded, not a gate" in capsys.readouterr().out
+
+
+def test_the_notes_buttons_are_taken_in_either_order_and_printed_as_read(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # In which order System Events lists a note's two buttons is not yet seen on a Mac, and the
+    # Swift's order is the build test's to hold: the check takes them in either order, prints
+    # them as read so that the first runs record the order, and still counts a third button, or
+    # one of the two listed twice.
+    offered = [check_app.QUIT_BUTTON, check_app.SHOW_APPLICATIONS_FOLDER]
+    mac = _PlacementNoteOnAMac(buttons=offered)
+    checker = _refusing_copy_on(mac, monkeypatch, tmp_path, shows_folder=True, require_driven=True)
+    assert checker.failures == []
+    assert mac.pressed == [check_app.SHOW_APPLICATIONS_FOLDER]
+    said = capsys.readouterr().out
+    assert f"its note's buttons, as System Events lists them: {offered}" in said, said
+    for number, more in enumerate(("OK", check_app.QUIT_BUTTON)):
+        again = tmp_path / f"again-{number}"
+        again.mkdir()
+        mac = _PlacementNoteOnAMac(buttons=[*offered, more])
+        checker = _refusing_copy_on(mac, monkeypatch, again, shows_folder=True, require_driven=True)
+        assert any("its note offers" in failure for failure in checker.failures), checker.failures
+
+
+def test_where_the_finders_windows_before_cannot_be_read_none_is_closed(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Any window open then may be someone's, so none is closed, and the check says so.
+    mac = _PlacementNoteOnAMac(before=("Downloads",), failing_reads=(0,))
+    checker = _refusing_copy_on(mac, monkeypatch, tmp_path, shows_folder=True, require_driven=True)
+    assert checker.failures == []
+    assert mac.closed == [] and mac.finder == ["Downloads", check_app.APPLICATIONS_WINDOW]
+    assert "the Finder's windows could not be read, so none was closed" in (capsys.readouterr().out)
+
+
+def test_the_finders_windows_are_read_again_before_any_is_closed(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # The wait's last read may be System Events' error: what is closed is what a read after the
+    # wait gives, never the error's words.
+    mac = _PlacementNoteOnAMac(before=("Downloads",), failing_reads=(1,))
+    _refusing_copy_on(mac, monkeypatch, tmp_path, shows_folder=True, require_driven=False)
+    assert mac.closed == [(check_app.FINDER, check_app.APPLICATIONS_WINDOW)]
+    assert mac.finder == ["Downloads"]
+
+
+class _RecordingChecker(check_app.Checker):
+    """A checker that keeps each expectation it is given: (ok, what, detail)."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.seen: list[tuple[bool, str, str]] = []
+
+    def expect(self, ok: bool, what: str, detail: str = "") -> bool:
+        self.seen.append((ok, what, detail))
+        return super().expect(ok, what, detail)
+
+
+def test_a_passing_folder_step_builds_no_detail(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # A failure's detail is built only when the step failed: after the press that quits, the
+    # check reads none of the app's words, and the Finder's gate is given no detail.
+    mac = _PlacementNoteOnAMac()
+    checker = _RecordingChecker()
+    _refusing_copy_on(
+        mac, monkeypatch, tmp_path, checker=checker, shows_folder=True, require_driven=True
+    )
+    assert checker.failures == []
+    assert mac.pressed == [check_app.SHOW_APPLICATIONS_FOLDER]
+    assert all(presses == 0 for presses in mac.text_reads), mac.text_reads
+    folder = [
+        (ok, detail)
+        for ok, what, detail in checker.seen
+        if "Finder window named" in what or "quits it" in what
+    ]
+    assert folder == [(True, ""), (True, "")], checker.seen
+
+
+def test_a_finder_window_open_before_is_left_open(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    mac = _PlacementNoteOnAMac(before=("Applications",))
+    checker = _refusing_copy_on(mac, monkeypatch, tmp_path, shows_folder=True, require_driven=True)
+    assert checker.failures == []
+    assert mac.closed == [] and mac.finder.count(check_app.APPLICATIONS_WINDOW) >= 1
+
+
+def test_a_renamed_copy_still_offers_only_quit(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # A renamed copy is in Applications already: its note offers Quit alone, which quits it, and
+    # the Finder is not looked at.
+    words = (check_app.RENAMED_TITLE, check_app.RENAMED_ALONE)
+    mac = _PlacementNoteOnAMac(buttons=[check_app.QUIT_BUTTON], words=words)
+    checker = _refusing_copy_on(mac, monkeypatch, tmp_path, "renamed-alone")
+    assert checker.failures == []
+    assert mac.pressed == [check_app.QUIT_BUTTON] and mac.closed == []
+
+
+def test_the_places_check_quits_a_system_settings_it_finds_running_and_says_so(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # One someone had open is quit before the first page, so that the window read is the page's;
+    # the check says so first.
+    mac = _SettingsOnAMac(running=True)
+    checker = _places_on(mac, monkeypatch, tmp_path)
+    assert checker.failures == []
+    assert mac.ran[:2] == [
+        ["pkill", "-TERM", "-x", check_app.SYSTEM_SETTINGS],
+        ["/usr/bin/open", check_app.DATE_AND_TIME_PANE],
+    ]
+    said = capsys.readouterr().out
+    assert "was running before the places check, which quits it now" in said, said
+    assert said.index("was running before") < said.index("System Settings windows")
+
+
+@pytest.mark.parametrize("record_only", [False, True])
+def test_an_open_that_does_not_finish_is_the_places_checks_to_report(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    record_only: bool,
+) -> None:
+    # /usr/bin/open is given OPEN_LIMIT seconds: one that hangs is reported, on macos-15 as a
+    # failure, and the check goes on to the next page, rather than outliving its step.
+    mac = _SettingsOnAMac(hangs=True)
+    checker = _places_on(mac, monkeypatch, tmp_path, record_only=record_only)
+    opens = [
+        limit for argv, limit in zip(mac.ran, mac.limits, strict=True) if argv[0] == "/usr/bin/open"
+    ]
+    assert opens == [check_app.OPEN_LIMIT] * len(check_app.SETTINGS_PANES)
+    assert f"/usr/bin/open did not finish within {check_app.OPEN_LIMIT} s" in (
+        capsys.readouterr().out
+    )
+    if record_only:
+        assert checker.failures == []
+    else:
+        assert len(checker.failures) == 2, checker.failures
+        assert all("starts System Settings" in failure for failure in checker.failures)
+
+
+@pytest.mark.parametrize("require_driven", [True, False])
+def test_a_finder_window_under_another_name_is_closed_too(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    require_driven: bool,
+) -> None:
+    # The window's name is what this step is to find out: whatever the Finder calls it, the
+    # window the press opened is closed by the name just read, and the check says so, and a
+    # window open before is left; only on macos-15 does the name gate.
+    mac = _PlacementNoteOnAMac(opens_as="Programme", before=("Downloads",))
+    checker = _refusing_copy_on(
+        mac, monkeypatch, tmp_path, shows_folder=True, require_driven=require_driven
+    )
+    assert mac.closed == [(check_app.FINDER, "Programme")]
+    assert mac.finder == ["Downloads"]
+    assert any("Finder window" in failure for failure in checker.failures) is require_driven
+    assert "closing the Finder's window 'Programme', which the press opened" in (
+        capsys.readouterr().out
+    )
+
+
+def test_a_finder_window_open_before_proves_nothing_and_says_so(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    mac = _PlacementNoteOnAMac(before=("Applications",), opens=False)
+    _refusing_copy_on(mac, monkeypatch, tmp_path, shows_folder=True, require_driven=True)
+    assert "was open before the press, so its name proves nothing here" in (capsys.readouterr().out)
+    assert mac.closed == [] and mac.finder == ["Applications"]
+
+
+def test_when_show_applications_folder_does_not_quit_the_failure_shows_the_note(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # The app's own words say why: the note it shows again names what went wrong.
+    mac = _PlacementNoteOnAMac(quits=False)
+    checker = _refusing_copy_on(mac, monkeypatch, tmp_path, shows_folder=True, require_driven=True)
+    what = f"{check_app.SHOW_APPLICATIONS_FOLDER} quits it"
+    assert what in checker.failures
+    detail = capsys.readouterr().out.split(f"FAIL: {what}\n", 1)[1].splitlines()[0]
+    assert check_app.PLACEMENT_ELSEWHERE in detail, detail
+
+
+def test_a_renamed_copy_whose_note_lacks_quit_presses_nothing(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    words = (check_app.RENAMED_TITLE, check_app.RENAMED_ALONE)
+    mac = _PlacementNoteOnAMac(buttons=[], words=words)
+    checker = _refusing_copy_on(mac, monkeypatch, tmp_path, "renamed-alone")
+    assert mac.pressed == []
+    assert any("its note offers" in failure for failure in checker.failures), checker.failures
+
+
+def test_the_helpers_for_other_applications_send_no_key_and_click_only_what_they_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Run here, as the stand-ins above do not: each helper's AppleScript tells the process it
+    # names, never the app; the reads click nothing; the press clicks the button it names, last;
+    # the close clicks that window's close button; and none of them sends a key, which goes to
+    # whichever window has the focus.
+    sent: list[list[str]] = []
+
+    def run(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        sent.append([str(arg) for arg in argv])
+        return subprocess.CompletedProcess(argv, 0, "Date & Time\nWi-Fi\n", "")
+
+    monkeypatch.setattr("subprocess.run", run)
+    prompt = check_app.TCC_PROMPT_PROCESS
+    assert check_app._process_windows(check_app.SYSTEM_SETTINGS) == (
+        True,
+        ["Date & Time", "Wi-Fi"],
+    )
+    assert check_app._process_buttons(prompt) == (True, ["Date & Time", "Wi-Fi"])
+    assert check_app._process_texts(prompt) == (True, ["Date & Time", "Wi-Fi"])
+    assert check_app._windows_until(check_app.SYSTEM_SETTINGS, "Date & Time", 0) == (
+        True,
+        ["Date & Time", "Wi-Fi"],
+    )
+    check_app._press_in(prompt, "Don’t Allow")
+    check_app._close_window_of(check_app.FINDER, check_app.APPLICATIONS_WINDOW)
+    assert all(argv[:2] == ["osascript", "-e"] and len(argv) == 3 for argv in sent), sent
+    scripts = [argv[2] for argv in sent]
+    told = [check_app.SYSTEM_SETTINGS, prompt, prompt, check_app.SYSTEM_SETTINGS, prompt]
+    for process, script in zip([*told, check_app.FINDER], scripts, strict=True):
+        assert f'tell process "{process}"' in script, script
+        assert f'tell process "{check_app.APP_NAME}"' not in script, script
+    assert not _keys_sent(scripts), scripts
+    for script in scripts[:4]:
+        assert "click" not in script, script
+    press, close = scripts[4], scripts[5]
+    assert press.count("click") == 1 and 'button "Don’t Allow"' in press, press
+    assert press.endswith('click theTarget\nreturn "pressed"\nend tell\nend tell'), press
+    assert close.count("click") == 1, close
+    assert 'click (first button of window "Applications" whose subrole is "AXCloseButton")' in close
+    assert "value of every static text" in scripts[2] and "name of every button" in scripts[1]
+
+    # What System Events says when it cannot read is not taken for a window's name.
+    def fails(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(argv, 1, "", "not allowed assistive access")
+
+    monkeypatch.setattr("subprocess.run", fails)
+    assert check_app._process_windows(check_app.FINDER) == (
+        False,
+        ["(System Events: not allowed assistive access)"],
+    )
+    assert check_app._process_buttons(prompt) == (False, [])
+    assert check_app._windows_until(check_app.FINDER, "Applications", 0)[0] is False
+
+
+# --- check_app.py ui: macOS's prompt for a folder in Documents, best effort --------------------
+
+
+# The host's roots add on the app's profile, as the app starts it (App/HostCLI.swift and
+# HostText.addFolderArguments): what the stand-in below runs while the app checks a folder.
+_ADDING_A_FOLDER = f"lucille_host --profile {build_app.APP_PROFILE} --json roots add"
+
+
+class _DocumentsOnAMac:
+    """The ui check's last step as a Mac might answer it, made up. Choosing the folder in
+    Documents opens the name dialog; its Add Folder runs `roots add`. With ``prompt``, macOS asks
+    first, in a window of UserNotificationCenter, with ``prompt_buttons`` (by default Don’t Allow
+    and OK) and ``question`` (by default words that name the app), while `roots add` waits behind
+    the app's window that checks the folder, whose one button is Cancel. With ``answer_works``,
+    Don’t Allow makes the host refuse, and the app's note says macOS is blocking it, with
+    ``note_buttons`` (by default Open Privacy Settings and OK); without it, the press does nothing.
+    With ``cancel_works``, the app's Cancel ends `roots add`; without it, only a signal does. With
+    no prompt, the folder is added and the app's note says so, with OK. Open Privacy Settings
+    opens System Settings on ``settings_title``; with ``settings_before``, System Settings runs
+    from the start. The host has ``other_roots`` from the start too. With ``choose_raises``,
+    choosing the folder raises, and with ``roots_raises``, reading the host's folders does. Add a
+    Folder… opens the Open panel unless ``panel_opens`` is false. The question shows only from the
+    read after ``prompt_after`` reads of its buttons, in ``prompt_windows`` windows; with
+    ``term_ends`` false, only SIGKILL ends `roots add`. With ``blocks`` naming "ask" or "roots",
+    choosing Add a Folder… or reading the host's folders waits, up to 10 s, for the check to stop
+    it. Every press (in the app's front window, or wherever it is found), argv run (with its time
+    limit), read of the app's buttons and System Events body is kept. Its words are read only at
+    run time."""
+
+    DONT_ALLOW = "Don’t Allow"
+
+    def __init__(
+        self,
+        *,
+        prompt: bool = False,
+        prompt_buttons: list[str] | None = None,
+        question: list[str] | None = None,
+        answer_works: bool = True,
+        cancel_works: bool = True,
+        note_buttons: list[str] | None = None,
+        settings_title: str = "Files & Folders",
+        settings_before: bool = False,
+        other_roots: dict[str, str] | None = None,
+        choose_raises: bool = False,
+        roots_raises: bool = False,
+        panel_opens: bool = True,
+        prompt_after: int = 0,
+        prompt_windows: int = 1,
+        term_ends: bool = True,
+        blocks: str = "",
+    ) -> None:
+        self.prompt = prompt
+        self.panel_opens = panel_opens
+        self.prompt_after = prompt_after
+        self.prompt_windows = prompt_windows
+        self.term_ends = term_ends
+        self.blocks = blocks
+        self.panel = False
+        self.went = 0
+        self.blind = 0
+        self.prompt_reads = 0
+        self.button_reads = 0
+        self.front: list[str] = []
+        self.anywhere: list[str] = []
+        self.prompt_buttons = prompt_buttons or [self.DONT_ALLOW, "OK"]
+        self.question = question or [
+            f"“{check_app.APP_NAME}” would like to access files in your Documents folder."
+        ]
+        self.answer_works = answer_works
+        self.cancel_works = cancel_works
+        self.note_buttons = note_buttons
+        self.settings_title = settings_title
+        self.choose_raises = choose_raises
+        self.roots_raises = roots_raises
+        self.folder: Path | None = None
+        self.dialog = False
+        self.asking = False
+        self.adding = False
+        self.note: str | None = None
+        self.settings: str | None = "General" if settings_before else None
+        self.roots: dict[str, str] = dict(other_roots or {})
+        self.pressed: list[str] = []
+        self.prompt_pressed: list[str] = []
+        self.ran: list[list[str]] = []
+        self.limits: dict[str, float | None] = {}
+        self.removed: list[str] = []
+        self.sent: list[str] = []
+        self.shots: list[str] = []
+        self.chosen = 0
+
+    def alias(self) -> str:
+        assert self.folder is not None
+        return self.folder.name
+
+    def blocked_buttons(self) -> list[str]:
+        if self.note_buttons is not None:
+            return self.note_buttons
+        return [check_app.OPEN_PRIVACY_SETTINGS, "OK"]
+
+    @staticmethod
+    def _block() -> None:
+        # Busy, as a System Events read that does not answer is, until the check stops it.
+        end = time.monotonic() + 10
+        while time.monotonic() < end:
+            pass
+        raise AssertionError("the check did not stop a step that outlived its time")
+
+    def ask(self) -> tuple[bool, str]:
+        self.chosen += 1
+        if self.blocks == "ask":
+            self._block()
+        if self.choose_raises:
+            raise check_app.CheckError("System Events stopped answering")
+        self.panel = self.panel_opens
+        return True, ""
+
+    def choose_folder(self, folder: Path, screens: Path, shot: str) -> tuple[bool, str]:
+        # The folder steps' helper, which types the folder's path whether or not the Open panel
+        # came: kept, so that a step still using it shows here.
+        self.ask()
+        if not self.panel:
+            self.blind += 1
+            return False, "typed into no Open panel"
+        return self.go_to_folder(folder, screens, shot)
+
+    def panel_buttons(self) -> tuple[bool, list[str]]:
+        return True, [check_app.OPEN_PROMPT, "Cancel"] if self.panel else []
+
+    def go_to_folder(self, folder: Path, screens: Path, shot: str) -> tuple[bool, str]:
+        self.went += 1
+        assert self.panel, "keys sent to an Open panel the check had not read"
+        assert folder.is_dir(), folder
+        self.panel = False
+        self.folder = folder
+        self.dialog = True
+        return True, "clicked"
+
+    def name_dialog(self) -> tuple[bool, str]:
+        return (True, self.alias()) if self.dialog else (False, "no name dialog")
+
+    def texts(self) -> list[str]:
+        if self.note == "added":
+            return ["Folder added", "Once this Mac is connected to Lucille, Lucille can use it."]
+        if self.note == "blocked":
+            return [f"{check_app.APP_NAME} could not add the folder.", check_app.BLOCKED_BY_MACOS]
+        if self.adding:
+            return [f"Checking the folder “{self.alias()}”…"]
+        return []
+
+    def says(self, words: str) -> bool:
+        return any(words in text for text in self.texts())
+
+    def window_list(self, what: str) -> tuple[bool, list[str]]:
+        if what == "value of every static text":
+            return True, self.texts()
+        assert what == "name of every button", what
+        self.button_reads += 1
+        if self.dialog:
+            return True, ["Add Folder", "Cancel"]
+        if self.note == "blocked":
+            return True, self.blocked_buttons()
+        if self.note == "added":
+            return True, ["OK"]
+        return True, ["Cancel"] if self.adding else []
+
+    def press(self, name: str) -> tuple[bool, str]:
+        # Wherever the button is found: not necessarily the window whose buttons were read.
+        self.anywhere.append(name)
+        return self._press(name)
+
+    def press_front(self, name: str) -> tuple[bool, str]:
+        self.front.append(name)
+        return self._press(name)
+
+    def _press(self, name: str) -> tuple[bool, str]:
+        self.pressed.append(name)
+        if self.dialog and name == "Add Folder":
+            self.dialog = False
+            if self.prompt:
+                self.asking = True
+                self.adding = True
+            else:
+                self.roots[self.alias()] = str(self.folder)
+                self.note = "added"
+            return True, "pressed"
+        if self.adding and self.note is None and name == "Cancel":
+            self.adding = not self.cancel_works
+            return True, "pressed"
+        if self.note == "added" and name == "OK":
+            self.note = None
+            return True, "pressed"
+        if self.note == "blocked" and name in self.blocked_buttons():
+            self.note = None
+            if name == check_app.OPEN_PRIVACY_SETTINGS:
+                self.settings = self.settings_title
+            return True, "pressed"
+        return False, f"no button named {name}"
+
+    def process_buttons(self, process: str) -> tuple[bool, list[str]]:
+        if process == check_app.TCC_PROMPT_PROCESS and self.asking:
+            self.prompt_reads += 1
+            if self.prompt_reads > self.prompt_after:
+                return True, list(self.prompt_buttons)
+        return True, []
+
+    def window_count(self, process: str) -> int | None:
+        if process == check_app.TCC_PROMPT_PROCESS and self.asking:
+            self.prompt_reads += 1
+            return self.prompt_windows if self.prompt_reads > self.prompt_after else 0
+        return 0
+
+    def process_texts(self, process: str) -> tuple[bool, list[str]]:
+        if process == check_app.TCC_PROMPT_PROCESS and self.asking:
+            return True, list(self.question)
+        return True, []
+
+    def press_in(self, process: str, name: str) -> tuple[bool, str]:
+        self.prompt_pressed.append(name)
+        if process == check_app.TCC_PROMPT_PROCESS and self.asking and name == self.DONT_ALLOW:
+            if self.answer_works:
+                self.asking = False
+                self.adding = False
+                self.note = "blocked"
+            return True, "pressed"
+        return False, f"no button named {name}"
+
+    def windows(self, process: str) -> tuple[bool, list[str]]:
+        if process == check_app.SYSTEM_SETTINGS and self.settings:
+            return True, [self.settings]
+        if process == check_app.TCC_PROMPT_PROCESS and self.asking:
+            return True, [""]
+        return True, []
+
+    def names(self, name: str) -> list[str]:
+        return ["777"] if name == check_app.SYSTEM_SETTINGS and self.settings else []
+
+    def run(self, argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        argv = [str(arg) for arg in argv]
+        self.ran.append(argv)
+        self.limits[" ".join(argv[:2])] = kwargs.get("timeout")
+        out, code = "", 0
+        if argv[:2] == ["pkill", "-TERM"] and argv[-2:] == ["-x", check_app.SYSTEM_SETTINGS]:
+            self.settings = None
+        elif argv[0] == "/bin/test" and argv[1] == "-e":
+            code = 0 if Path(argv[2]).exists() else 1
+        elif argv[0] == "/bin/mkdir":
+            try:
+                Path(argv[-1]).mkdir(parents=True, exist_ok=True)
+            except OSError as exc:
+                return subprocess.CompletedProcess(argv, 1, "", str(exc))
+        elif argv[0] == "/bin/rm":
+            shutil.rmtree(argv[-1], ignore_errors=True)
+        elif argv == ["pgrep", "-f", _ADDING_A_FOLDER]:
+            out = "4242\n" if self.adding else ""
+            code = 0 if self.adding else 1
+        elif argv[0] == "pkill" and argv[-2:] == ["-f", _ADDING_A_FOLDER]:
+            self.adding = self.adding and argv[1] == "-TERM" and not self.term_ends
+        return subprocess.CompletedProcess(argv, code, out, "")
+
+    def roots_of(self, python: Path) -> dict[str, str]:
+        if self.blocks == "roots":
+            self._block()
+        if self.roots_raises:
+            raise check_app.CheckError("the host did not answer")
+        return dict(self.roots)
+
+    def app_host(self, python: Path, args: list[str]) -> subprocess.CompletedProcess[str]:
+        if args[:2] == ["roots", "remove"]:
+            self.roots.pop(args[2], None)
+            self.removed.append(args[2])
+        return subprocess.CompletedProcess(args, 0, "", "")
+
+    def system_events(self, body: str, timeout: float = 30) -> tuple[bool, str]:
+        self.sent.append(body)
+        return False, f"not on a Mac: {body!r}"
+
+
+def _documents_step_on(
+    mac: _DocumentsOnAMac,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    *,
+    tries: int = 1,
+    deadline: float | None = None,
+) -> Path:
+    """Run the ui check's Documents step against ``mac``, each wait reading ``tries`` times at
+    most, with ``deadline`` if one is given; return the folder it was to make."""
+    folder = tmp_path / "Documents" / "lucille-host-ui-check-documents"
+    monkeypatch.setattr(check_app, "_documents_check_folder", lambda: folder, raising=False)
+    for name, fake in (
+        ("_choose_folder", mac.choose_folder),
+        ("_ask_to_add_a_folder", mac.ask),
+        ("_panel_buttons", mac.panel_buttons),
+        ("_go_to_folder", mac.go_to_folder),
+        ("_press_in_front", mac.press_front),
+        ("_process_window_count", mac.window_count),
+        ("_name_dialog", mac.name_dialog),
+        ("_texts", mac.texts),
+        ("_says", mac.says),
+        ("_window_list", mac.window_list),
+        ("_press", mac.press),
+        ("_process_buttons", mac.process_buttons),
+        ("_process_texts", mac.process_texts),
+        ("_press_in", mac.press_in),
+        ("_process_windows", mac.windows),
+        ("_running", mac.names),
+        ("_roots", mac.roots_of),
+        ("_app_host", mac.app_host),
+        ("_system_events", mac.system_events),
+    ):
+        monkeypatch.setattr(check_app, name, fake, raising=False)
+    monkeypatch.setattr("subprocess.run", mac.run)
+    monkeypatch.setattr(check_app, "_screenshot", lambda path: mac.shots.append(path.name))
+    monkeypatch.setattr(
+        check_app, "_wait_until", lambda test, seconds: any(test() for _ in range(tries))
+    )
+    monkeypatch.setattr(check_app.time, "sleep", lambda seconds: None)
+    if deadline is None:
+        check_app._drive_documents_prompt(tmp_path / "python", tmp_path)
+    else:
+        check_app._drive_documents_prompt(tmp_path / "python", tmp_path, deadline)
+    return folder
+
+
+# How check_ui runs the Documents step: with the time left of the ui step's limit, less what its
+# own end takes.
+_DOCUMENTS_CALL = (
+    "_drive_documents_prompt(python_in(app), screens, started + UI_STEP_LIMIT - UI_STEP_END)"
+)
+
+
+def _tcc_resets(mac: _DocumentsOnAMac) -> list[list[str]]:
+    return [argv for argv in mac.ran if argv[:1] == ["tccutil"]]
+
+
+def _ended_roots_add(mac: _DocumentsOnAMac) -> list[list[str]]:
+    return [argv for argv in mac.ran if argv[0] == "pkill" and _ADDING_A_FOLDER in argv]
+
+
+def test_the_documents_step_gates_nothing() -> None:
+    # Runners may answer macOS's prompt for Documents before any app asks, so the step only
+    # prints what it saw: it is given no checker to fail, and neither it nor its clean-up sends a
+    # key.
+    import inspect
+
+    parameters = inspect.signature(check_app._drive_documents_prompt).parameters
+    assert list(parameters) == ["python", "screens", "deadline"]
+    source = _CHECK_APP.read_text(encoding="utf-8")
+    for name in ("_drive_documents_prompt", "_tidy_documents_step", "_stop_adding_a_folder"):
+        step = _python_function(source, name)
+        for word in ("checker", "key code", "keystroke", "Escape"):
+            assert word not in step, (name, word)
+    ui = _python_function(source, "check_ui")
+    assert ui.index("_drive_reset(") < ui.index(_DOCUMENTS_CALL) < ui.index("elif require_driven:")
+    # What it waits on and ends is the app's own roots add, on the app's profile, as HostCLI
+    # starts it (App/HostCLI.swift and HostText.addFolderArguments).
+    assert check_app.ADDING_A_FOLDER == _ADDING_A_FOLDER
+    assert '["--profile", profile] + verb' in _swift("HostCLI.swift")
+    assert 'var verb = ["--json", "roots", "add"]' in _swift("HostText.swift")
+
+
+def test_with_no_prompt_the_documents_step_says_so_and_leaves_things_as_they_were(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    mac = _DocumentsOnAMac(other_roots={"work": "/Users/someone/work"})
+    folder = _documents_step_on(mac, monkeypatch, tmp_path)
+    assert "no macOS prompt on this runner" in capsys.readouterr().out
+    # The folder the app added is removed through the command line, and no other; the app's note
+    # closed by its OK, which the step read first; and the folder the step made is gone. Nothing
+    # was asked of macOS's privacy settings, System Settings was not touched, and no roots add was
+    # left to end.
+    assert mac.pressed == ["Add Folder", "OK"] and mac.prompt_pressed == []
+    assert mac.roots == {"work": "/Users/someone/work"} and mac.removed == [folder.name]
+    assert not folder.exists()
+    assert _tcc_resets(mac) == [] and not any(argv[0] == "pkill" for argv in mac.ran)
+    assert not _keys_sent(mac.sent), mac.sent
+
+
+def test_with_a_prompt_the_documents_step_refuses_it_and_opens_privacy_settings(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    mac = _DocumentsOnAMac(prompt=True)
+    folder = _documents_step_on(mac, monkeypatch, tmp_path)
+    said = capsys.readouterr().out
+    # Don’t Allow, as macOS spells it, read in the prompt, whose words name the app and are
+    # printed, and pressed there; the app's note says macOS is blocking it, and its Open Privacy
+    # Settings, read first, opens Files & Folders, which the step prints; then System Settings is
+    # quit by its name.
+    assert mac.prompt_pressed == [_DocumentsOnAMac.DONT_ALLOW]
+    assert mac.pressed == ["Add Folder", check_app.OPEN_PRIVACY_SETTINGS]
+    assert f"macOS asked {mac.question}" in said and f"{['Files & Folders']}" in said, said
+    assert f"{check_app.TCC_PROMPT_PROCESS} then shows the windows []" in said, said
+    assert ["pkill", "-TERM", "-x", check_app.SYSTEM_SETTINGS] in mac.ran
+    assert mac.settings is None
+    # The answer given is taken back, for the app and its interpreter alone (which of the two
+    # macOS asks for is not yet known, decisions/0002 §12), and what tccutil said is printed;
+    # the folder is gone, and no roots add was left to end.
+    pins = build_app.load_pins()
+    assert _tcc_resets(mac) == [
+        ["tccutil", "reset", "SystemPolicyDocumentsFolder", pins.bundle_id],
+        ["tccutil", "reset", "SystemPolicyDocumentsFolder", pins.runtime_id],
+    ]
+    assert f"tccutil reset SystemPolicyDocumentsFolder {pins.runtime_id}: " in said
+    assert mac.roots == {} and not folder.exists()
+    assert not mac.adding and _ended_roots_add(mac) == []
+    assert not _keys_sent(mac.sent), mac.sent
+
+
+def test_the_documents_step_presses_dont_allow_wherever_the_prompt_lists_it(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    mac = _DocumentsOnAMac(prompt=True, prompt_buttons=["OK", _DocumentsOnAMac.DONT_ALLOW])
+    _documents_step_on(mac, monkeypatch, tmp_path)
+    assert mac.prompt_pressed == [_DocumentsOnAMac.DONT_ALLOW]
+
+
+@pytest.mark.parametrize("cancel_works", [True, False])
+def test_a_dont_allow_that_does_nothing_leaves_no_roots_add_behind(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    cancel_works: bool,
+) -> None:
+    # The press answered nothing, so the app still checks the folder behind its window, and
+    # roots add still waits on macOS, holding the profile's policy lock. The step presses the
+    # app's Cancel, which it reads first; a roots add still running after that is ended by its
+    # signal. Either way none is left for the checks after this one, and the answer macOS was
+    # asked for is still taken back.
+    mac = _DocumentsOnAMac(prompt=True, answer_works=False, cancel_works=cancel_works)
+    folder = _documents_step_on(mac, monkeypatch, tmp_path)
+    said = capsys.readouterr().out
+    assert mac.prompt_pressed == [_DocumentsOnAMac.DONT_ALLOW]
+    assert mac.pressed == ["Add Folder", "Cancel"]
+    assert not mac.adding
+    ended = _ended_roots_add(mac)
+    assert ended == ([] if cancel_works else [["pkill", "-TERM", "-f", _ADDING_A_FOLDER]])
+    assert ("roots add still runs" in said) is not cancel_works, said
+    assert len(_tcc_resets(mac)) == 2 and not folder.exists() and mac.roots == {}
+    assert not _keys_sent(mac.sent), mac.sent
+
+
+def test_a_question_about_another_app_is_printed_and_not_answered(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # The step answers only a question it has read to be about the app or its interpreter; it
+    # still leaves no roots add behind, and still takes back whatever macOS was asked.
+    question = ["“Another App” would like to access files in your Documents folder."]
+    mac = _DocumentsOnAMac(prompt=True, question=question)
+    _documents_step_on(mac, monkeypatch, tmp_path)
+    said = capsys.readouterr().out
+    assert f"macOS asked {question}" in said and "names neither the app" in said, said
+    assert mac.prompt_pressed == [] and mac.pressed == ["Add Folder", "Cancel"]
+    assert not mac.adding and len(_tcc_resets(mac)) == 2
+
+
+def test_a_question_naming_the_interpreter_is_about_the_app() -> None:
+    pins = build_app.load_pins()
+    for words in (
+        f"“{check_app.APP_NAME}” would like to access files in your Documents folder.",
+        "“lucille-host-runtime” would like to access files in your Documents folder.",
+        f"{pins.runtime_id} would like to access files in your Documents folder.",
+    ):
+        assert check_app._names_the_app([words]), words
+    assert not check_app._names_the_app(["“Another App” would like to access files."])
+    assert not check_app._names_the_app([])
+
+
+def test_the_documents_step_leaves_a_system_settings_it_did_not_start(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    mac = _DocumentsOnAMac(prompt=True, settings_before=True)
+    _documents_step_on(mac, monkeypatch, tmp_path)
+    assert mac.pressed == ["Add Folder", check_app.OPEN_PRIVACY_SETTINGS]
+    assert not any(argv[:1] == ["pkill"] for argv in mac.ran), mac.ran
+    assert "ran before the Documents step, which leaves it" in capsys.readouterr().out
+
+
+def test_a_note_without_open_privacy_settings_is_printed_and_closed_by_its_ok(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    mac = _DocumentsOnAMac(prompt=True, note_buttons=["OK"])
+    folder = _documents_step_on(mac, monkeypatch, tmp_path)
+    assert check_app.OPEN_PRIVACY_SETTINGS in capsys.readouterr().out
+    assert mac.pressed == ["Add Folder", "OK"]
+    assert mac.settings is None and not any(argv[0] == "pkill" for argv in mac.ran)
+    assert len(_tcc_resets(mac)) == 2 and not folder.exists()
+
+
+def test_the_documents_step_never_raises_and_cleans_up(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    mac = _DocumentsOnAMac(choose_raises=True)
+    folder = _documents_step_on(mac, monkeypatch, tmp_path)
+    assert "System Events stopped answering" in capsys.readouterr().out
+    assert not folder.exists() and _tcc_resets(mac) == []
+
+
+def test_each_part_of_the_documents_steps_clean_up_runs_on_its_own(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Reading the host's folders fails: the folder is still removed, and macOS's answer still
+    # taken back, and what stopped is printed.
+    mac = _DocumentsOnAMac(prompt=True, roots_raises=True)
+    folder = _documents_step_on(mac, monkeypatch, tmp_path)
+    said = capsys.readouterr().out
+    assert "could not remove the folder's alias: the host did not answer" in said, said
+    assert not folder.exists() and len(_tcc_resets(mac)) == 2
+
+
+def test_the_documents_step_acts_on_documents_in_a_child_with_a_limit(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # The check's own process never touches Documents: a question about it there would go
+    # unanswered. Each test, mkdir and rm is a child given DOCUMENTS_FILE_LIMIT seconds.
+    mac = _DocumentsOnAMac(prompt=True)
+    _documents_step_on(mac, monkeypatch, tmp_path)
+    for argv in ("/bin/test -e", "/bin/mkdir -p", "/bin/rm -rf"):
+        assert mac.limits[argv] == check_app.DOCUMENTS_FILE_LIMIT, argv
+    source = _python_function(_CHECK_APP.read_text(encoding="utf-8"), "_drive_documents_prompt")
+    for word in (".exists()", ".mkdir(", "rmtree"):
+        assert word not in source, word
+    # A child that does not finish in time: the step says so, and adds nothing.
+
+    def hangs(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        raise subprocess.TimeoutExpired(argv, kwargs.get("timeout") or 0)
+
+    mac = _DocumentsOnAMac()
+    monkeypatch.setattr(mac, "run", hangs)
+    _documents_step_on(mac, monkeypatch, tmp_path)
+    assert mac.chosen == 0
+    assert "could not be looked for" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("prompt", [False, True])
+def test_the_documents_step_removes_its_own_folder_and_nothing_else(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, prompt: bool
+) -> None:
+    # The ui check runs on the real HOME: whatever else is in Documents is someone's, and stays.
+    documents = tmp_path / "Documents"
+    documents.mkdir()
+    (documents / "someone.txt").write_text("kept", encoding="utf-8")
+    mac = _DocumentsOnAMac(prompt=prompt)
+    folder = _documents_step_on(mac, monkeypatch, tmp_path)
+    assert (documents / "someone.txt").read_text(encoding="utf-8") == "kept"
+    assert not folder.exists()
+    assert [argv for argv in mac.ran if argv[0] == "/bin/rm"] == [["/bin/rm", "-rf", str(folder)]]
+
+
+def test_the_documents_steps_folder_is_its_own() -> None:
+    assert check_app._documents_check_folder() == (
+        Path.home() / "Documents" / "lucille-host-ui-check-documents"
+    )
+
+
+def test_the_documents_step_types_only_into_an_open_panel_it_has_read(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # It sends the folder's path as keys, which go to whatever has the focus: only once it has
+    # read the Open panel's own button. No panel, no keys, and nothing added.
+    mac = _DocumentsOnAMac(panel_opens=False)
+    folder = _documents_step_on(mac, monkeypatch, tmp_path)
+    assert mac.blind == 0 and mac.went == 0 and mac.pressed == []
+    assert f"no Open panel with {check_app.OPEN_PROMPT!r} came" in capsys.readouterr().out
+    assert not folder.exists() and mac.roots == {}
+    mac = _DocumentsOnAMac()
+    _documents_step_on(mac, monkeypatch, tmp_path)
+    assert (mac.chosen, mac.went, mac.blind) == (1, 1, 0)
+    step = _python_function(_CHECK_APP.read_text(encoding="utf-8"), "_drive_documents_prompt")
+    assert "_choose_folder(" not in step
+    assert (
+        step.index("_ask_to_add_a_folder()")
+        < step.index("OPEN_PROMPT in _panel_buttons()[1]")
+        < step.index("_go_to_folder(")
+    )
+
+
+def test_dont_allow_is_pressed_only_when_the_question_is_the_one_window(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # The question's words and buttons are read from every window of the process that draws it,
+    # and the press finds its button in any of them: with two up, it could answer the other one.
+    mac = _DocumentsOnAMac(prompt=True, prompt_windows=2)
+    folder = _documents_step_on(mac, monkeypatch, tmp_path)
+    said = capsys.readouterr().out
+    assert mac.prompt_pressed == []
+    assert f"{check_app.TCC_PROMPT_PROCESS} shows 2 windows, not one, so nothing was pressed" in (
+        said
+    ), said
+    assert not mac.adding and len(_tcc_resets(mac)) == 2 and not folder.exists()
+
+
+def test_the_documents_step_presses_each_button_in_the_window_it_read_it_in(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # The app's buttons are read from its front window, and pressed there, never wherever a
+    # button by that name is first found.
+    for mac in (
+        _DocumentsOnAMac(),
+        _DocumentsOnAMac(prompt=True),
+        _DocumentsOnAMac(prompt=True, answer_works=False),
+        _DocumentsOnAMac(prompt=True, note_buttons=["OK"]),
+    ):
+        _documents_step_on(mac, monkeypatch, tmp_path)
+        assert mac.anywhere == [] and mac.front == mac.pressed != [], (mac.front, mac.anywhere)
+
+
+def test_a_question_that_comes_late_is_said_to_be_left_on_screen(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # macOS asks after the step stopped waiting: nothing answers it here, and nothing closes it,
+    # so the step says it is left on screen, and still takes back whatever it is answered.
+    mac = _DocumentsOnAMac(prompt=True, prompt_after=1)
+    folder = _documents_step_on(mac, monkeypatch, tmp_path)
+    said = capsys.readouterr().out
+    assert "no macOS prompt on this runner" in said
+    assert "note: a question of macOS's is left on screen" in said, said
+    assert mac.prompt_pressed == [] and not mac.adding
+    assert len(_tcc_resets(mac)) == 2 and not folder.exists()
+
+
+def test_a_question_that_comes_on_a_later_read_is_answered(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    mac = _DocumentsOnAMac(prompt=True, prompt_after=1)
+    _documents_step_on(mac, monkeypatch, tmp_path, tries=2)
+    assert mac.prompt_pressed == [_DocumentsOnAMac.DONT_ALLOW]
+    assert mac.pressed == ["Add Folder", check_app.OPEN_PRIVACY_SETTINGS]
+
+
+def test_a_roots_add_that_outlives_sigterm_is_killed(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # One left waiting on macOS would hold the profile's policy lock for every later check.
+    mac = _DocumentsOnAMac(prompt=True, answer_works=False, cancel_works=False, term_ends=False)
+    _documents_step_on(mac, monkeypatch, tmp_path)
+    assert _ended_roots_add(mac) == [
+        ["pkill", "-TERM", "-f", _ADDING_A_FOLDER],
+        ["pkill", "-KILL", "-f", _ADDING_A_FOLDER],
+    ]
+    assert not mac.adding
+
+
+def test_once_its_note_is_closed_the_clean_up_reads_no_button(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # The name dialog's buttons and the note's, before its OK: the app has nothing more to cancel.
+    mac = _DocumentsOnAMac()
+    _documents_step_on(mac, monkeypatch, tmp_path)
+    assert mac.pressed == ["Add Folder", "OK"]
+    assert mac.button_reads == 2
+
+
+def test_with_too_little_of_the_ui_steps_time_left_the_documents_step_adds_nothing(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    mac = _DocumentsOnAMac(prompt=True)
+    least = check_app.DOCUMENTS_TIDY_TIME + check_app.DOCUMENTS_LEAST_TIME
+    folder = _documents_step_on(mac, monkeypatch, tmp_path, deadline=time.monotonic() + least - 5)
+    assert mac.ran == [] and mac.chosen == 0 and not folder.exists()
+    assert "too little of the ui step's time is left for the Documents step" in (
+        capsys.readouterr().out
+    )
+
+
+def test_the_documents_step_is_stopped_at_its_time_and_still_cleans_up(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Whatever it waits on, it ends DOCUMENTS_TIDY_TIME before the deadline, and its clean-up
+    # runs; the timer and the handler it used are put back.
+    monkeypatch.setattr(check_app, "DOCUMENTS_LEAST_TIME", 0.1)
+    handler = signal.getsignal(signal.SIGALRM)
+    mac = _DocumentsOnAMac(blocks="ask")
+    started = time.monotonic()
+    deadline = started + check_app.DOCUMENTS_TIDY_TIME + 0.5
+    folder = _documents_step_on(mac, monkeypatch, tmp_path, deadline=deadline)
+    assert time.monotonic() - started < 5
+    said = capsys.readouterr().out
+    assert "note: the Documents step stopped: it reached the end of the time it was given" in (
+        said
+    ), said
+    assert not folder.exists() and ["/bin/rm", "-rf", str(folder)] in mac.ran
+    assert signal.getitimer(signal.ITIMER_REAL) == (0.0, 0.0)
+    assert signal.getsignal(signal.SIGALRM) == handler
+
+
+def test_the_documents_steps_clean_up_ends_by_the_deadline_and_says_what_it_left(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(check_app, "DOCUMENTS_TIDY_TIME", 0.5)
+    monkeypatch.setattr(check_app, "DOCUMENTS_LEAST_TIME", 0.1)
+    handler = signal.getsignal(signal.SIGALRM)
+    mac = _DocumentsOnAMac(prompt=True, blocks="roots")
+    started = time.monotonic()
+    folder = _documents_step_on(mac, monkeypatch, tmp_path, deadline=started + 1.0)
+    assert time.monotonic() - started < 5
+    said = capsys.readouterr().out
+    assert (
+        "could not remove the folder's alias: it reached the end of the time it was given" in said
+    ), said
+    for left in ("remove the folder", "take macOS's answer back"):
+        assert f"the Documents step's clean-up had no time left to {left}" in said, said
+    assert _tcc_resets(mac) == [] and folder.exists()
+    assert signal.getitimer(signal.ITIMER_REAL) == (0.0, 0.0)
+    assert signal.getsignal(signal.SIGALRM) == handler
+
+
+def test_the_ui_check_gives_the_documents_step_the_rest_of_its_time() -> None:
+    ui = _python_function(_CHECK_APP.read_text(encoding="utf-8"), "check_ui")
+    assert ui.count("started = time.monotonic()") == 1
+    assert ui.index("started = time.monotonic()") < ui.index("_stop_earlier_copies(")
+    assert ui.count(_DOCUMENTS_CALL) == 1
+    assert 0 < check_app.UI_STEP_END < check_app.DOCUMENTS_LEAST_TIME
+
+
+def test_the_documents_steps_own_helpers_click_only_what_they_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Run here, as the stand-in above does not: the count reads, the press clicks the button it
+    # names in the app's front window, the menu choice clicks Add a Folder…, and none sends a key.
+    sent: list[list[str]] = []
+
+    def run(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        sent.append([str(arg) for arg in argv])
+        return subprocess.CompletedProcess(argv, 0, "2\n", "")
+
+    monkeypatch.setattr("subprocess.run", run)
+    prompt = check_app.TCC_PROMPT_PROCESS
+    assert check_app._process_window_count(prompt) == 2
+    check_app._press_in_front("Cancel")
+    check_app._ask_to_add_a_folder()
+    count, press, ask = (argv[2] for argv in sent)
+    assert f'tell process "{prompt}"' in count and "count of windows" in count, count
+    assert "click" not in count
+    assert f'tell process "{check_app.APP_NAME}"' in press, press
+    assert press.count("click") == 1 and 'click button "Cancel" of window 1' in press, press
+    assert f'tell process "{check_app.APP_NAME}"' in ask, ask
+    assert 'whose name starts with "Add a Folder"' in ask, ask
+    assert not _keys_sent([count, press, ask])
+
+    # What System Events says when it cannot count is not a count.
+    def fails(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(argv, 1, "", "not allowed assistive access")
+
+    monkeypatch.setattr("subprocess.run", fails)
+    assert check_app._process_window_count(prompt) is None
+
+
+def test_the_documents_step_makes_its_own_folder_or_does_nothing(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # A folder of that name already there is someone's: the step leaves it, and chooses nothing.
+    folder = tmp_path / "Documents" / "lucille-host-ui-check-documents"
+    folder.mkdir(parents=True)
+    (folder / "kept").write_text("x", encoding="utf-8")
+    mac = _DocumentsOnAMac()
+    assert _documents_step_on(mac, monkeypatch, tmp_path) == folder
+    assert mac.chosen == 0 and (folder / "kept").is_file()
+    # And where the step cannot make one, it says so and chooses nothing.
+    shutil.rmtree(folder.parent)
+    folder.parent.write_text("not a folder", encoding="utf-8")
+    mac = _DocumentsOnAMac()
+    _documents_step_on(mac, monkeypatch, tmp_path)
+    assert mac.chosen == 0
+    assert "could not make" in capsys.readouterr().out

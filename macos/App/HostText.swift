@@ -120,6 +120,10 @@ struct FolderCheck: Equatable, Sendable {
 struct Explanation: Equatable, Sendable {
     let message: String
     let detail: String?
+    /// The place in macOS the note that shows it offers, behind its first button (decisions/0002
+    /// §20): Files & Folders only when macOS's privacy protection kept the host from a folder being
+    /// added (`PlaceRules`); nothing otherwise.
+    var place: SystemPlace? = nil
     /// Whether the note that shows it offers Reset Settings…: only when the host refused
     /// `policy_invalid`, whose sentence says that the settings file can't be read (decisions/0002
     /// §14).
@@ -522,6 +526,7 @@ enum HostText {
             return Explanation(
                 message: refusal(error, during: activity),
                 detail: details(of: error, stderr: result.stderr),
+                place: PlaceRules.place(for: error, during: activity),
                 offersReset: error.code == "policy_invalid"
             )
         }

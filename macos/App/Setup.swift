@@ -419,8 +419,10 @@ enum SetupText {
     static let addFolderButton = "Add a Folder…"
     static let removeButton = "Remove"
     static let continueButton = "Continue"
-    /// Words only: Open Privacy Settings comes with the app's one opener.
+    /// Under it, the Folders page offers Open Privacy Settings (`PlaceRules`).
     static let folderBlocked = "macOS is blocking \(appName) from this folder."
+    /// What the note says after it when macOS could not open System Settings.
+    static let folderAllowSteps = "To allow it, open System Settings, choose Privacy & Security, then Files & Folders, and turn on the switch for this folder's location under \(appName)."
     static let folderDenied = "This folder's permissions don't let \(appName) open it."
     static let folderMissing = "This folder isn't there any more."
     static let folderUnopened = "\(appName) couldn't open this folder."

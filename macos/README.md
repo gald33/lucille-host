@@ -77,10 +77,14 @@ Applications folder, then open it from there." A copy in Applications under anot
 Finder's Keep Both gives a second copy, says "This copy is named Capsule 2, so it can't run": with another
 copy of Capsule at `/Applications/Capsule.app` (a folder whose `Info.plist` gives Capsule's bundle
 identifier), it says to move the renamed one to the Trash, then drag the new Capsule into Applications
-again and choose Replace; with none there, to rename it Capsule. Its only button is **Quit**,
-and its menu holds only that line and Quit Capsule. It runs no host verb at all: every program the app
-starts goes through one place, which starts nothing until the app, as it opens, says it is the copy in
-Applications.
+again and choose Replace; with none there, to rename it Capsule. Every other copy, that Capsule judges
+not to be in Applications (on a disk image or another disk, in a folder inside Applications, in your
+home folder's Applications, anywhere else), offers **Show Applications Folder** first, which opens that
+folder in the Finder, so that the copy can be dragged there, and quits; a renamed copy, in Applications
+already, offers **Quit** alone, as every such note offers Quit. If macOS cannot open the folder, the note comes again with "Capsule couldn't open your
+Applications folder." first, and Quit alone. Its menu holds only that line and Quit Capsule. It runs no
+host verb at all: every program the app starts goes through one place, which starts nothing until the
+app, as it opens, says it is the copy in Applications.
 
 The app has no window to show, so when it opens while this Mac is not connected it says where it is:
 "Capsule is in your menu bar". The note first says what Capsule is for, in the two sentences this page
@@ -181,7 +185,8 @@ that Lucille can use the folder for the abilities the user turns on. With no con
 Lucille can use the folder only once it is added again after connecting, because a new connection
 starts with no folders. If the host found no folder there (`not_a_folder`) but
 the app can see one, or macOS refuses the app too, the app says that macOS is blocking Capsule from the
-folder, and where in System Settings to allow it.
+folder, and where in System Settings to allow it, with **Open Privacy Settings**, which opens System
+Settings at Privacy & Security, Files & Folders (see [The one opener](#the-one-opener)).
 
 The menu reads the version, the abilities and the folders again each time it opens. It reads `status`
 at launch, after each step of connecting, and when the menu opens more than 10 seconds after the last
@@ -357,8 +362,8 @@ on its last page ends it, as Done does.
    switch is turned, without waiting for the host's answer or for that question, which comes in its turn
    among the app's notes. The host makes the changes one at a time, under its settings lock.
 2. **Folders Lucille may use**: your folders from `roots list`, each with what `roots check --json` (10
-   minutes) says of it unless the host can open it: "macOS is blocking Capsule from this folder." (in
-   words only: no Open Privacy Settings yet), "This folder's permissions don't let Capsule open it.",
+   minutes) says of it unless the host can open it: "macOS is blocking Capsule from this folder." (with
+   **Open Privacy Settings** under it), "This folder's permissions don't let Capsule open it.",
    "This folder isn't there any more." or "Capsule couldn't open this folder.". The folders are checked
    each time the page comes, and when one is added. **Add a Folder…** is the menu's own (the Open panel,
    the questions and the name dialog), each folder has **Remove**, and **Continue** goes on.
@@ -419,6 +424,35 @@ the item by Capsule's bundle identifier, which a "Capsule 2" shares (not yet tes
   checks it at launch, it writes one line on standard error with the state's name and nothing else, such
   as `login item: enabled`.
 
+## The one opener
+
+Three buttons show you a place in macOS, through the app's one opener (decisions/0002 §20):
+
+- **Open Date & Time Settings**, in the note behind the menu's line that says this Mac's clock is off.
+  The waiting page of the pairing window says how to set the clock in words only.
+- **Open Privacy Settings**, at Privacy & Security, Files & Folders, never Full Disk Access: in the note
+  that says macOS is blocking Capsule from a folder you add, and under such a folder on Set Up's Folders
+  page.
+- **Show Applications Folder**, in the note of a copy Capsule judges not to be in Applications, which
+  a renamed one there is not (see [What the app does when it opens](#what-the-app-does-when-it-opens)).
+
+Each opens only from your click. The places are a closed list, `SystemPlace` in
+[`App/PlaceRules.swift`](App/PlaceRules.swift), which also says which problem offers which place, from
+what the app itself sees: the problem `run` reports, macOS's refusal of a folder, where this copy is.
+No text or request from Lucille offers one, and no request the host turned away does; the clock's place
+follows the clock state `run` reports, which the hub's refusals of this Mac's writes set. Nothing read
+while the app runs can make an address: it only picks one of the three. One call in
+[`App/SystemPlaces.swift`](App/SystemPlaces.swift) opens them, with the addresses written there. When
+macOS cannot open a place, the note comes again with "Capsule couldn't open System Settings." (or "your
+Applications folder") first, and OK alone (Quit, for a copy not in Applications); it already says how
+to get there by hand. For the button under a folder on Set Up's Folders page, which had no note, a note
+says so first, then that macOS is blocking Capsule from the folder and how to allow it by hand, with OK
+alone. The one other button that opens anything is Open at Login's **Open Login Items
+Settings**, which opens System Settings through Apple's own call for it, with no address.
+
+The addresses of the two System Settings pages are the best known for macOS 13 and later, and not yet
+seen on a Mac: `check_app.py places` opens each and prints what System Settings then shows.
+
 ## Keeping the host running
 
 While this Mac is connected, the app runs `run --json-events --exit-on-stdin-eof` as its child. It holds
@@ -447,7 +481,8 @@ The app reads `run`'s events in memory only.
   default, and **Prepare to Update**. There is no Download button. Until the app quits, the menu shows the
   note's line, with the highest version asked for, which shows the note again, and **Prepare to
   Update…**.
-- **Needs attention while `run` runs**, in words only: the Mac's clock, with how to set it; settings the
+- **Needs attention while `run` runs**, in words: the Mac's clock, with how to set it, and **Open Date &
+  Time Settings**, which opens System Settings there (see [The one opener](#the-one-opener)); settings the
   host cannot read; a folder check that is stuck; Lucille not reached for two minutes; a message from
   Lucille that cannot be opened; a connection the host left; or no `state` event for two minutes, which
   the app only shows. After the Mac wakes from sleep, the two that count two minutes wait two minutes
@@ -574,17 +609,27 @@ Two checks keep it so, and neither is a proof:
   ([VERIFYING.md](../VERIFYING.md) lists its rules). It fails if any file but `HostCLI.swift` names
   Foundation's `Process`; if `HostCLI.swift` does not write the bundled runtime's path and the arguments
   above; if any file uses one of the other ways to start a process it lists (`posix_spawn`, `fork`,
-  `exec`, `NSWorkspace`, ...) or one of the ways to reach the network it lists (`URLSession`, Network's
-  types, sockets, `URL(string:)`, reading `contentsOf:` a URL, ...); and if any file reads the
-  pasteboard. It lets a file name a shell in one place only: the first line of the script the self-test
-  writes and starts through `HostCLI.swift`, as a stand-in for the interpreter.
+  `exec`, ...) or one of the ways to reach the network it lists (`URLSession`, Network's types, sockets,
+  `URL(string:)`, reading `contentsOf:` a URL, ...); and if any file reads the pasteboard. It lets a file
+  name a shell in one place only: the first line of the script the self-test writes and starts through
+  `HostCLI.swift`, as a stand-in for the interpreter. It lets one file, `SystemPlaces.swift`, name
+  `NSWorkspace` and make a URL from a string, for one call that opens one of the places written there
+  (see [The one opener](#the-one-opener)), and no other file. That file must be its design token for
+  token, its addresses in their order; every other file may name it only in a call,
+  `SystemPlaces.open(`, may not extend `URL` or the opener's types or give one of them another name,
+  and may hold no backtick, which can make a name of any word. It also refuses the other ways to open
+  a URL or another application it lists (SwiftUI's `openURL` and `Link`, a link attribute or a Markdown
+  link, the sharing services, Apple events), a button pressed by code (`performClick`), a function
+  reached by its symbol, and loading a bundle's code.
   `tests/test_macos_build.py` pins the lines where `HostCLI.swift` gives that path and those arguments
   to the `Process`, and fails if a file names the pasteboard at all, passes `--hub` or `--store-file`, or
   imports anything but Foundation, AppKit and SwiftUI, and ServiceManagement in `LoginItem.swift` alone
   (Foundation and the C library alone, for the files the self-test runs).
 - `check_app.py links` reads what the built app's executable imports (`nm -u`). It fails on the C
-  functions that start a process or open a socket, on the classes that do either, on `NSPasteboard`, and
-  on a link to Network, CFNetwork or WebKit.
+  functions that start a process or open a socket, on the classes that do either, on Launch Services'
+  and the Apple Event Manager's C calls, which open, register or drive another application, on the
+  `NSAppleEventDescriptor` and `NSSharingService` classes, on `NSPasteboard`, and on a link to
+  Network, CFNetwork or WebKit. It does not refuse `NSWorkspace`, which the one opener calls.
 
 Both match names. Code written to get past them can: through the Objective-C runtime, say, which looks a
 class up by a string. Review of every change is what stands behind them.
@@ -635,7 +680,7 @@ check record
 check version --build-number 1
 for c in links signature wrapper; do check "$c"; done
 chmod -R a-w build/macos/Capsule.app
-for c in host probe environment readonly swift relocate install placement launch ui gatekeeper dmg startup; do
+for c in host probe environment readonly swift relocate install places placement launch ui gatekeeper dmg startup; do
   check "$c"
 done
 check suite --copy-to /tmp/capsule-check
@@ -673,11 +718,30 @@ Applications, or in the Applications folder in your home folder.
 On your own Mac, `ui`, `placement` and `pairing` need your terminal to have Accessibility permission
 (System Settings, Privacy & Security, Accessibility), and they take over the screen: `ui` for about two
 minutes, `placement` for one or two, `pairing` for several. Without that permission they drive nothing and
-say so; with `--require-driven`, as the `macos-app` job runs them, that is a failure. They work on the
-app's profile, `mac-app`, for your own HOME:
+say so; with `--require-driven`, as the `macos-app` job runs them, that is a failure. `places` needs it
+too, to read System Settings' windows: without it, every "System Settings shows" fails, unless it is run
+with `--record-only`. It quits System Settings before and after each page, even one you had open, and
+says so first; it touches nothing of the app's. `placement` closes, by its close button, each Finder
+window that shows after Show Applications Folder under a name that was not open before the press, and
+leaves the ones you had open; where it could not read the Finder's windows before the press, it closes
+none. The others work on the app's profile, `mac-app`, for your own HOME:
 
 - `ui` changes the host's settings while it runs (it pauses, switches an ability, adds folders) and puts
-  them back at the end.
+  them back at the end. Its last step adds a folder it makes in Documents,
+  `lucille-host-ui-check-documents`, and leaves a folder of that name alone if one is there; it types
+  the folder's path only once it has read the Open panel's own button. If macOS asks, it prints the
+  question, and answers Don't Allow only if the question names Capsule or its interpreter and is the
+  one window of the process that draws it; afterwards it asks `tccutil reset
+  SystemPolicyDocumentsFolder` to take back the answer, for Capsule's bundle identifier and its
+  interpreter's alone, and prints what tccutil said; that tccutil does this without root is not yet
+  seen on a Mac. If it could not, reset Capsule by hand in System Settings, Privacy & Security, Files &
+  Folders. A question it did not answer, or that came after it stopped waiting, it does not close: it
+  says the question is left on screen, and you answer it. If the folder is still being checked when the
+  step ends, it presses Capsule's Cancel, and ends any `roots add` of `mac-app` still running 30 seconds
+  later. It removes the folder and the name it added, and quits System Settings only if it opened it.
+  It ends within the 15 minutes CI gives the `ui` check, counted from the check's start, its clean-up
+  included: it starts only with about 7 of them left, and prints whatever of its clean-up the time
+  leaves undone, so that you can do it by hand.
 - `pairing` quits a running Capsule, and stops at once if a host process of `mac-app` still runs. It sets
   the profile's folder aside first, says where, and puts it back at the end. If it is killed part way,
   the folder stays at that place. Through Capsule, it also asks macOS to open Capsule when you log in
@@ -773,9 +837,10 @@ that finds a problem fails its job. On `xcode-27` alone, a failed job does not f
 | `swift` | both | The app's own Swift code that runs the command line and reads its output works against the real command line, through the same calls the menu makes: the host's alias suggestion (a path that starts with `-` included) and the app's own when the host gives none it can use, and the corrections of a typed name, which folders are the whole disk (a link to one included), that the command line the app builds for them never has `--allow-home-or-root` and that the host then adds nothing, the plain sentence for each refusal code, never for the host's words, the menu's own verbs read as JSON (the version, the operation `ops enable` and `ops disable` answer with, which the switch follows, a folder added and removed), the refusals that mean a change is already made (an ability already off, a folder already gone), the question asked again for a name in use, which home folder question follows a `broad_folder` refusal, the time limit and Cancel; every verb on `--profile mac-app` with `PATH=/var/empty`; and, on a throwaway profile, `status`, `pair status`, `pair --code-stdin` (which refuses a text that is not a code once it has read it from standard input) and `run` with the lifeline. Against the host's golden JSON fixtures: every object read through the app's reader. The pairing flow's rules (They Match counts only on the drawn number, after a `status` read that shows the same connection and deadline; They Differ stays; `pair status` only while the window shows), and the supervisor's (the exit of every `run` fixture, the back-off, the five-crash stop, the quit and log out steps, never resuming by itself, and Stop What's Running asking for `kill` only while `run` runs), each also walked through 40,000 seeded random steps. Set Up's (the window only after They Match here, then Connected, and never after a relaunch or a confirm in Terminal; `policy previous` read only when this run's own child for the attempt They Match confirmed wrote `policy_reset`, and offered only when set aside at or after the second that attempt started, seconds or a minute after it included; no Add back page for none, a timeout or `previous_invalid`, which gets a note; the whole disk never with a box, whatever the policy set aside marked it, nor a U+FFFD path, a folder already held, or an ability that is on, for testing, missing or lacking; a folder alias not in the host's form makes the whole object unread; a broad folder through the home question and a content-sending ability through the acknowledgement; every box unchecked, and nothing added back but a checked row with a box, once; What Lucille may do switching every operation but one for testing or lacking, `host.describe` included), walked through 40,000 seeded steps too; `policy previous --json` on a profile no pairing has used, and `roots check`, for every folder and for one. Which verbs take the host's settings lock, and that of the runs left behind only those still running whose verb takes it count as stuck. Activity's request log: one entry per request from the `request` fixture, each said in words, with its path quoted, cut, or not shown at all; a request closed as stopped when `run` ends; one written again after a restart kept in its entry, and a job id used again after its request ended given an entry of its own; at most 500, a running one kept; a path that imitates the app's own words behind a quote look-alike (U+201E, U+FF02, U+2033, U+2036) not shown, and every character of the list refused, while a straight quote and apostrophe are still shown. Reset Settings, against the real host in a temporary HOME: a settings file it cannot read is refused in words that offer Reset Settings…, `policy reset --json` sets it aside as `policy.invalid.toml` and leaves only `host.describe` on, and a second reset is `not_invalid`, which is done; the note for each way a reset can end (set aside, nothing to set aside, the lock refused, another refusal, a timeout with and without a run left stuck, a run the app gave up on, a cancel, a signal, another exit status, an exit with no `policy_reset`, a helper program that cannot start), of which only the first says the settings were reset; and a run cancelled or timed out after the host wrote `policy_reset` read as a reset. Where a copy may run, with a made-up name: only `/Applications/<name>.app`, case included, and only when the path it was opened from and the one its links lead to are both that; a copy in Applications under another name, or the same name in another case, whether it was opened by that name or reached through a link at the right one, is a renamed one, its name shown without its control and format characters and cut to 40; a disk image, a folder inside Applications, the Applications folder in the home folder, Downloads, an App Translocation folder, and a link at the right place to a copy elsewhere are each refused for where they are; a bundle with no name is never placed; every refusal has words, and a renamed copy is told to go to the Trash only while another copy of the app, whose `Info.plist` gives the same bundle identifier and which is not itself through a link or another case, is at the app's own name (not a folder with no `Info.plist`, nor another app's). The update notice's words: the version Lucille asks for, where to get the newer one, Prepare to Update, and no Download; a minimum read only as three numbers of at most 9 digits with no leading zero. Before the latch is opened, neither a short verb nor a long-lived child starts, and a stand-in interpreter never runs; a placed copy's token opens it, and that is the first thing the self-test does before it starts anything. The child runner, against stand-in children: a signal read as a signal, the lifeline ending a stand-in `run` while a later child lives, the code on standard input and never in argv, input too long for the pipe refused, lines too long or ending in a carriage return dropped, a burst of 5000 events. `macos-app` compiles the self-test once, with the pinned Xcode, and the smoke jobs run that same program. |
 | `relocate` | `macos-app` | A copy of the app in another folder, with a space in its path, passes `host` and `swift`. |
 | `install` | both | A copy of the read-only bundle is put at `/Applications/Capsule.app`, made read-only in its turn, and passes `readonly` there (M8). `placement`, `launch`, `ui` and `pairing` open that copy, the only one that starts anything, and refuse to run unless it is this build: its executable and its signature's list of files are byte for byte the build's. |
-| `placement` | both | First the control: the copy in `/Applications`, opened, starts the host on the app's profile, which the check sees, and says where its menu is (while the profile holds no confirmed connection; with one, it says neither). Then, one at a time with no other copy running, the build's own copy, and a copy named `Capsule 2.app` in `/Applications`, with `/Applications/Capsule.app` there and then moved aside: each says "Capsule needs to be in your Applications folder" or "This copy is named Capsule 2, so it can't run", with the words for where it is (to the Trash only while the other copy is there; to be renamed while it is not), offers only Quit, starts no host process of the app's profile for 10 seconds, changes nothing in the profile's folder, and quits when Quit is pressed. Whatever happens, the renamed copy is removed and the other put back. Reading the notes needs System Events, as `ui` does: `macos-app` requires it (`--require-driven`); the smoke jobs record whether they could, and watch the host processes and the profile's folder either way. |
+| `places` | both | The two System Settings pages the app's one opener may open, each opened by the check with `/usr/bin/open`, not by the app: System Settings starts, and shows a window named "Date & Time" or "Files & Folders". The check prints the names of System Settings' windows and takes a screenshot of each, then quits System Settings by its name; it sends it no key. It quits System Settings before each page too, and says so when it was running before the check. `/usr/bin/open` is given 60 seconds, and the step's limit covers the check's own worst case for both pages. It needs no app. In `macos-app` it is a gate; the smoke jobs run it with `--record-only`, which prints and fails nothing, since neither the addresses nor the titles are yet seen on a Mac. |
+| `placement` | both | First the control: the copy in `/Applications`, opened, starts the host on the app's profile, which the check sees, and says where its menu is (while the profile holds no confirmed connection; with one, it says neither). Then, one at a time with no other copy running, the build's own copy, and a copy named `Capsule 2.app` in `/Applications`, with `/Applications/Capsule.app` there and then moved aside: each says "Capsule needs to be in your Applications folder" or "This copy is named Capsule 2, so it can't run", with the words for where it is (to the Trash only while the other copy is there; to be renamed while it is not), starts no host process of the app's profile for 10 seconds, and changes nothing in the profile's folder. The build's own copy offers only Show Applications Folder and Quit, in either order (the check prints the order System Events gives, which is not yet seen on a Mac); Show Applications Folder quits it (where it does not, the check prints what the note then says), and the Finder then shows a window named Applications, whose name the check prints and, in `macos-app` only, requires (it is not yet seen on a Mac; one of that name open before proves nothing, and the check says so); the check closes each Finder window under a name that was not open before the press, and leaves those open before (and, where it could not read them before the press, closes none). The renamed copy offers only Quit, and quits when Quit is pressed. Whatever happens, the renamed copy is removed and the other put back. Reading the notes needs System Events, as `ui` does: `macos-app` requires it (`--require-driven`); the smoke jobs record whether they could, and watch the host processes and the profile's folder either way. |
 | `launch` | both | The copy in `/Applications` opens the way Finder opens it, and is still running 10 seconds later. SIGTERM then ends it within 15 seconds, though nothing has closed its note about the menu bar. A copy still running from an earlier step fails this check and the `ui` and `pairing` checks, and is then killed. |
-| `ui` | both | The copy in `/Applications`, driven through System Events as a user would: the app says what it is for and where its menu is when it opens with no confirmed connection (with one, it says nothing about it, and the check presses nothing), and again when it is opened while it runs; the menu bar item's title or description, which VoiceOver reads as its name, is "Capsule" (its tooltip does not count); the menu shows the version, "Not connected to Lucille" and every item, and lists abilities in plain words, each with its sentence on what Lucille gets; Pause Lucille and Resume Lucille change the host's pause flag, the status line and the menu bar item's name; an ability switches on, shows a checkmark, and switches off; Add a Folder… goes through the Open panel and the name dialog, where a typed name the host would refuse comes back corrected, and adds the folder; Remove in the Folders submenu removes it; the home folder brings up the question first, Choose a Smaller Folder goes back to the Open panel, and Add Anyway adds it; the Data volume, then `/` through a link to it, each bring up the note that refuses the whole disk, with Choose a Smaller Folder, which goes back to the Open panel, and Cancel, and no button that adds the folder, and neither is added (that the note has no other button is checked in its source by the build tests). The Open panel's buttons are looked for in every window of the app, and in each sheet and group in it, since where they sit differs between macOS versions; where its prompt is nowhere, Return, its default button, chooses the folder, and what the app shows next is checked as before. Then Activity…: its window says what it keeps and for how long, its one button is Show the Host's Log, and that shows the host's own log lines as it wrote them; its close button closes it (that nothing in it can be selected is checked in its source by the build tests). Then the pairing window: with a code-shaped text on the pasteboard, Connect to Lucille… opens it with its field empty, and the field stays empty once it has the focus; a typed word gets the hint, and Connect stays off; Command-V pastes exactly the text copied; Connect hands it to the host, which refuses it as no code, and the app says so; nothing is connected, and neither text reaches the app's standard output or error. Last, Reset Settings: the check writes a settings file the host cannot read; the menu says so, its note offers Reset Settings…, which asks first, and the question's Reset Settings sets the file aside as `policy.invalid.toml`, leaves only `host.describe` on and no folder, and says "Settings reset", whose OK runs nothing more; the settings file, and any file an earlier reset set aside, are put back as they were afterwards, whatever happened. Each step is checked against what the host's command line then reports, on the app's profile. In `macos-app` (`--require-driven`), a machine where System Events cannot drive the app fails the check; the smoke jobs record whether it could, and where it could, a driven step that fails fails the check there too. Screenshots are kept in the job's logs artifact. |
+| `ui` | both | The copy in `/Applications`, driven through System Events as a user would: the app says what it is for and where its menu is when it opens with no confirmed connection (with one, it says nothing about it, and the check presses nothing), and again when it is opened while it runs; the menu bar item's title or description, which VoiceOver reads as its name, is "Capsule" (its tooltip does not count); the menu shows the version, "Not connected to Lucille" and every item, and lists abilities in plain words, each with its sentence on what Lucille gets; Pause Lucille and Resume Lucille change the host's pause flag, the status line and the menu bar item's name; an ability switches on, shows a checkmark, and switches off; Add a Folder… goes through the Open panel and the name dialog, where a typed name the host would refuse comes back corrected, and adds the folder; Remove in the Folders submenu removes it; the home folder brings up the question first, Choose a Smaller Folder goes back to the Open panel, and Add Anyway adds it; the Data volume, then `/` through a link to it, each bring up the note that refuses the whole disk, with Choose a Smaller Folder, which goes back to the Open panel, and Cancel, and no button that adds the folder, and neither is added (that the note has no other button is checked in its source by the build tests). The Open panel's buttons are looked for in every window of the app, and in each sheet and group in it, since where they sit differs between macOS versions; where its prompt is nowhere, Return, its default button, chooses the folder, and what the app shows next is checked as before. Then Activity…: its window says what it keeps and for how long, its one button is Show the Host's Log, and that shows the host's own log lines as it wrote them; its close button closes it (that nothing in it can be selected is checked in its source by the build tests). Then the pairing window: with a code-shaped text on the pasteboard, Connect to Lucille… opens it with its field empty, and the field stays empty once it has the focus; a typed word gets the hint, and Connect stays off; Command-V pastes exactly the text copied; Connect hands it to the host, which refuses it as no code, and the app says so; nothing is connected, and neither text reaches the app's standard output or error. Then Reset Settings: the check writes a settings file the host cannot read; the menu says so, its note offers Reset Settings…, which asks first, and the question's Reset Settings sets the file aside as `policy.invalid.toml`, leaves only `host.describe` on and no folder, and says "Settings reset", whose OK runs nothing more; the settings file, and any file an earlier reset set aside, are put back as they were afterwards, whatever happened. Last, best effort and never a gate, a folder in Documents: the check makes one, in a child with a time limit, and adds it, typing its path only once it has read the Open panel's own button; if macOS asks, it prints the question and its buttons and, where the question names Capsule or its interpreter and is the one window of the process that draws it, answers Don't Allow, reads that the app says macOS is blocking Capsule from the folder, presses Open Privacy Settings and prints what System Settings shows; if macOS does not ask, it prints "no macOS prompt on this runner". Then, each on its own: where the app still checks the folder it presses Capsule's Cancel, and it ends any `roots add` of the app's profile still running 30 seconds later, so that none holds the profile's lock for the checks after it; it prints what `UserNotificationCenter` still shows, and says when a question is left on screen, which it closes no other way; it quits System Settings if it opened it, removes the folder, and asks `tccutil reset` to take back the answer macOS asked for, printing what tccutil said. It ends, its clean-up included, inside the ui step's limit, counted from the check's start (`UI_STEP_LIMIT`, which `tests/test_ci_workflow.py` holds to the workflow's), and prints whatever of its clean-up it then leaves undone. Each step but that last is checked against what the host's command line then reports, on the app's profile. In `macos-app` (`--require-driven`), a machine where System Events cannot drive the app fails the check; the smoke jobs record whether it could, and where it could, a driven step that fails fails the check there too. Screenshots are kept in the job's logs artifact. |
 | `library-snapshot`, `library-diff` | both | `~/Library` is walked before `launch` and after `ui`, and in `macos-app` again before and after `pairing`, so that what Set Up and registering the login item write under `~/Library` is held to it too (macOS keeps the item's own record elsewhere, believed to be outside `~/Library`, which no diff sees; that diff makes the profile's writes itself first, since `pairing` puts the profile back as it found it). A new, changed or removed path whose name holds the bundle identifier, the app's name or "lucille", and that [`tools/macos/library-allowlist.txt`](../tools/macos/library-allowlist.txt) does not allow, fails the check; every other change is printed. The state folder of the app's profile, `mac-app`, must be among the changes (in the smoke jobs, the check makes those writes itself first), or the check fails. It skips `~/Library/Developer` and `~/Library/Android`, and cannot see a write to a path whose name says nothing of the app. The snapshots are never uploaded. |
 | `gatekeeper` | `macos-app` | Prints `spctl`'s verdict. It is "rejected", as expected for an ad hoc signature, and does not fail the build. |
 | `dmg` | both | Exactly one disk image was built, its name ends `-adhoc-macOS-arm64.dmg`, and it verifies, mounts, and holds the app, with a valid signature, and a link to `/Applications`. |
@@ -786,14 +851,16 @@ that finds a problem fails its job. On `xcode-27` alone, a failed job does not f
 
 ## What CI does not check
 
-CI adds its folders under the home folder, where macOS asks nothing, and it connects through a test
-harness with a hub of its own. These need a Mac and a person, and none has been done yet:
+CI adds its folders under the home folder, outside the folders macOS protects, but for the `ui` check's
+best-effort folder in Documents, and it connects through a test harness with a hub of its own. These
+need a Mac and a person, and none has been done yet:
 
 - **A folder in Documents, Desktop or Downloads.** Whether macOS asks at all after the Open panel,
   whether its question names Capsule rather than `lucille-host-runtime` and shows Capsule's sentence on
   what it is for, and whether the folder is added after Allow. After Don't Allow, whether the app says
   that macOS is blocking it, and whether System Settings, Privacy & Security, Files & Folders then shows a
-  switch under Capsule.
+  switch under Capsule. The `ui` check tries a folder in Documents, best effort: a runner may ask
+  nothing, and then the check says so.
 - **A folder on an external or network drive, one in iCloud Drive, and one from another file provider.**
 - **A stalled network drive.** Whether Cancel works, and whether the menu then says a folder check is
   stuck.
@@ -872,6 +939,11 @@ harness with a hub of its own. These need a Mac and a person, and none has been 
   clock, Lucille not reached, a message that cannot be opened, a connection the host left, the helper
   program not responding, and the exits 20, 23, 24 and 25); the log out panel; the Stop Connecting
   question.
+- **The one opener, beyond what CI presses.** Not reached by CI: Open Date & Time Settings in the app's
+  own note, since a runner's clock cannot be set wrong without breaking its connections; Open Privacy
+  Settings where macOS asks nothing on the runner, and under a folder on Set Up's Folders page; and the
+  notes that come again when macOS cannot open a place. What each System Settings page is called, and
+  that its address opens it, `places` prints, and requires on macOS 15 only.
 - **Set Up, beyond the path CI drives.** The Add back page end to end: the app's own `pair --code-stdin`
   cannot reach CI's hub, since the app never passes `--hub`, so CI's pairing sets no policy aside that
   the app saw. Its rules and what it leaves out are checked in the self-test only, and its words there
@@ -992,10 +1064,6 @@ a downloaded, quarantined copy run from Terminal is not yet tested on a Mac.
 - **A Welcome window and a main window.** The design has a Welcome window that leads through
   connecting, choosing a folder and turning on an ability, and a main window with the status, folders,
   abilities, activity and settings. This build has the menu, and a note that says where it is.
-- **Open Privacy Settings, Open Date & Time Settings and Show Applications Folder buttons.** When macOS
-  blocks a folder, or the Mac's clock is wrong, the app says where to go in System Settings, and a copy
-  outside Applications says where to drag itself, but none can open anything: that needs `NSWorkspace`,
-  which the checks above keep out of the app.
 - An app icon.
 
 ## Choices made for the first build
@@ -1051,7 +1119,6 @@ build; the design may change it.
 - **The Open panel opens where macOS chooses**, not in Documents.
 - **What macOS may ask is said in the name dialog**, just before the run that makes macOS ask, not in a
   screen before the Open panel.
-- **There are no Open Privacy Settings and Open Date & Time Settings buttons** (see "Not done yet").
 - **The pause icon replaces the app's icon**, a pause sign in place of the computer, where the design adds
   a pause badge to the app's icon.
 - **Pausing shows no note.** The design confirms Pause with "Paused. Lucille's requests will be turned

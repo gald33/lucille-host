@@ -178,7 +178,7 @@ DENIED_SWIFT = [
     "let h = gethostbyname(host)",
     "try? String(contentsOf: remote, encoding: .utf8)",
     "var parts = URLComponents()",
-    # Every URL(string:), the System Settings one included: nothing here opens it.
+    # Every URL(string:) outside the one opener, a System Settings page included.
     'let url = URL(string: "x-apple.systempreferences:com.apple.preference.security")',
     "let url = URL(string: text)",
     "let url = URL( string : text)",
@@ -850,6 +850,623 @@ def test_the_process_file_is_one_path() -> None:
     assert macos_lint.PROCESS_FILE == "macos/App/HostCLI.swift"
     assert macos_lint.RUNTIME_IN_APP == "Contents/Resources/runtime/bin/lucille-host-runtime"
     assert macos_lint.RUNTIME_ARGV == ("-I", "-B", "-X", "utf8", "-m", "lucille_host")
+
+
+# --- The one opener (decisions/0002 §20) ------------------------------------------------------
+
+OPENER = "macos/App/SystemPlaces.swift"
+# The two System Settings pages the opener may show, as tools/guards/macos_lint.py's OPENABLE
+# holds them. Not yet seen on a Mac: check_app.py places opens each and says what it shows.
+DATE_PANE = "x-apple.systempreferences:com.apple.Date-Time-Settings.extension"
+FILES_PANE = "x-apple.systempreferences:com.apple.preference.security?Privacy_FilesAndFolders"
+
+# The opener as designed: a closed list of three places, the URL of each written here, and one
+# call that opens it. Its comments do not name the class they call.
+SYSTEM_PLACES = textwrap.dedent(
+    f"""\
+    import AppKit
+
+    /// The app's one opener: it shows the user a place in macOS, from a click.
+    @MainActor
+    enum SystemPlaces {{
+        /// Show `place`. False when macOS could not open it.
+        static func open(_ place: SystemPlace) -> Bool {{
+            let url: URL?
+            switch place {{
+            case .dateAndTime:
+                url = URL(string: "{DATE_PANE}")
+            case .filesAndFolders:
+                url = URL(string: "{FILES_PANE}")
+            case .applicationsFolder:
+                url = URL(fileURLWithPath: "/Applications", isDirectory: true)
+            }}
+            guard let url else {{
+                return false
+            }}
+            return NSWorkspace.shared.open(url)
+        }}
+    }}
+    """
+)
+OPEN_CALL = "        return NSWorkspace.shared.open(url)\n"
+DATE_URL = f'URL(string: "{DATE_PANE}")'
+FOLDER_URL = 'URL(fileURLWithPath: "/Applications", isDirectory: true)'
+
+
+def _opener(old: str, new: str) -> str:
+    assert SYSTEM_PLACES.count(old) == 1, old
+    return SYSTEM_PLACES.replace(old, new)
+
+
+def test_the_opener_as_designed_is_clean() -> None:
+    assert swift_rules(SYSTEM_PLACES, OPENER) == set()
+    # The literals are read decoded: a raw string that is an entry of OPENABLE is that entry.
+    raw = _opener(f'"{DATE_PANE}"', f'#"{DATE_PANE}"#')
+    assert swift_rules(raw, OPENER) == set()
+    # The same file anywhere else is the denylist's, as before.
+    assert "swift-denylist" in swift_rules(SYSTEM_PLACES, APP)
+
+
+# Each way the opener may not be widened, at OPEN_FILE, with the finding that says so: each case is
+# here for one of the [open] rule's checks, and its finding is that check's own words, so that
+# taking that one check away fails this test, whatever else the case also breaks.
+SECOND_CALL = "NSWorkspace a second time"
+NOT_THE_CALL = "NSWorkspace other than as NSWorkspace.shared.open(<a name>)"
+NO_CALL = "NSWorkspace.shared.open(<a name>), is not here"
+CONFIGURATION = "opens with a configuration"
+ANOTHER_APP = "opens with another application"
+FILE_PATH = "makes a file URL that is not the Applications folder"
+RELATIVE = "makes a URL relative to another"
+ADDED = "adds to a URL"
+TAKEN_AWAY = "takes part of a URL away"
+NOT_ONE_LITERAL = "a URL made from something other than one string literal"
+NOT_OPENABLE = "is not a place the opener may open (OPENABLE)"
+EACH_ONCE = "must be opened by exactly one URL here"
+FOLDER_ONCE = 'URL(fileURLWithPath: "/Applications", isDirectory: true) once, alone'
+OTHER_URL = "a URL the opener may not make"
+OTHER_STRING = "is a string the opener has no use for"
+NOT_DESIGNED = "where the opener's design (OPEN_DESIGN) has"
+ENDS_EARLY = "the opener ends where its design (OPEN_DESIGN) goes on"
+OUT_OF_ORDER = "the opener's strings, in order, are not OPEN_LITERALS"
+FULL_DISK = "names Full Disk Access"
+GUARD = "        guard let url else {\n"
+FILES_URL = f'URL(string: "{FILES_PANE}")'
+MAILTO = "mailto:a@example.com"
+
+PLANTED_OPENER: list[tuple[str, str, str]] = [
+    # A second call, or a comment that names the class: counted in the whole text.
+    (
+        "a second open",
+        SYSTEM_PLACES + "func again(_ url: URL) -> Bool {\n    NSWorkspace.shared.open(url)\n}\n",
+        SECOND_CALL,
+    ),
+    (
+        "a comment naming it",
+        _opener("/// Show `place`.", "/// Show `place`, through NSWorkspace."),
+        SECOND_CALL,
+    ),
+    # No call at all: an opener that opens nothing is no opener.
+    ("no call", _opener(OPEN_CALL, "        return true\n"), NO_CALL),
+    # The class other than in its one call: another of its members, or kept under another name.
+    (
+        "openApplication",
+        _opener(
+            OPEN_CALL,
+            "        NSWorkspace.shared.openApplication(at: url, configuration: c)\n"
+            "        return true\n",
+        ),
+        NOT_THE_CALL,
+    ),
+    (
+        "activateFileViewerSelecting",
+        _opener(
+            OPEN_CALL,
+            "        NSWorkspace.shared.activateFileViewerSelecting([url])\n        return true\n",
+        ),
+        NOT_THE_CALL,
+    ),
+    (
+        "requestAuthorization",
+        _opener(
+            OPEN_CALL,
+            "        NSWorkspace.shared.requestAuthorization(to: .replaceFile) { _, _ in }\n"
+            "        return true\n",
+        ),
+        NOT_THE_CALL,
+    ),
+    (
+        "let ws = NSWorkspace.shared",
+        _opener(OPEN_CALL, "        let ws = NSWorkspace.shared\n        return ws.open(url)\n"),
+        NOT_THE_CALL,
+    ),
+    # What opens an application, asked of the call or of the URL.
+    (
+        "configuration:",
+        _opener(
+            OPEN_CALL,
+            "        NSWorkspace.shared.open(url, configuration: c, completionHandler: nil)\n"
+            "        return true\n",
+        ),
+        CONFIGURATION,
+    ),
+    (
+        "configuration: on the next line",
+        _opener("open(url)", "open(\n            url, configuration: c, completionHandler: nil)"),
+        CONFIGURATION,
+    ),
+    (
+        "withApplicationAt",
+        _opener("open(url)", "open([url], withApplicationAt: a, configuration: c)"),
+        ANOTHER_APP,
+    ),
+    ("URL(filePath:", _opener(FOLDER_URL, 'URL(filePath: "/Applications")'), FILE_PATH),
+    (
+        "relativeTo:",
+        _opener(FOLDER_URL, FOLDER_URL.replace("true)", "true, relativeTo: nil)")),
+        RELATIVE,
+    ),
+    ("a path added", _opener(FOLDER_URL, FOLDER_URL + ".appendingPathComponent(name)"), ADDED),
+    (
+        "a path taken away",
+        _opener(FOLDER_URL, FOLDER_URL + ".deletingLastPathComponent()"),
+        TAKEN_AWAY,
+    ),
+    # A URL from a string: one literal, and nothing else, or text, or joined.
+    ("URL(string: text)", _opener(DATE_URL, "URL(string: text)"), NOT_ONE_LITERAL),
+    ("URL.init(string: text)", _opener(DATE_URL, "URL.init(string: text)"), NOT_ONE_LITERAL),
+    (
+        "a URL joined",
+        _opener(DATE_URL, 'URL(string: "x-apple.systempreferences:" + pane)'),
+        NOT_ONE_LITERAL,
+    ),
+    (
+        "a literal and more",
+        _opener(DATE_URL, DATE_URL.replace('")', '", encodingInvalidCharacters: false)')),
+        NOT_ONE_LITERAL,
+    ),
+    # A URL from a literal that is not an entry of OPENABLE: a System Settings page not listed, a
+    # mailto URL, the folder's path as a string, or a mailto URL in a name that shadows the
+    # designed one, each OPENABLE entry still used once.
+    (
+        "an x-apple string not in OPENABLE",
+        _opener(DATE_PANE, "x-apple.systempreferences:com.apple.Network-Settings.extension"),
+        NOT_OPENABLE,
+    ),
+    ("a mailto URL", _opener(DATE_URL, f'URL(string: "{MAILTO}")'), NOT_OPENABLE),
+    ("the folder as a string", _opener(DATE_URL, 'URL(string: "/Applications")'), NOT_OPENABLE),
+    (
+        "a mailto URL shadowing the name",
+        _opener(GUARD, f'        guard let url = URL(string: "{MAILTO}") else {{\n'),
+        NOT_OPENABLE,
+    ),
+    # Each OPENABLE entry once: one used twice, and so the other used by no literal; or one unused.
+    ("an entry twice", _opener(FILES_URL, DATE_URL), EACH_ONCE),
+    (
+        "an entry unused",
+        _opener(f"            url = {DATE_URL}\n", "            url = nil\n"),
+        EACH_ONCE,
+    ),
+    # The Applications folder, once, alone: another file, one from text, the folder twice, a second
+    # file URL beside it, or something taken from it.
+    (
+        "another file",
+        _opener(FOLDER_URL, 'URL(fileURLWithPath: "/System/Applications/Utilities/Terminal.app")'),
+        FOLDER_ONCE,
+    ),
+    (
+        "a file from text",
+        _opener(FOLDER_URL, "URL(fileURLWithPath: path, isDirectory: true)"),
+        FOLDER_ONCE,
+    ),
+    ("the folder twice", _opener(DATE_URL, FOLDER_URL), FOLDER_ONCE),
+    (
+        "a second file URL",
+        _opener(GUARD, "        _ = URL(fileURLWithPath: path)\n" + GUARD),
+        FOLDER_ONCE,
+    ),
+    (
+        "something taken from the folder",
+        _opener(FOLDER_URL, FOLDER_URL + ".absoluteURL"),
+        FOLDER_ONCE,
+    ),
+    # A URL made any other way.
+    ("a URL from an alias", _opener(DATE_URL, "URL(resolvingAliasFileAt: alias)"), OTHER_URL),
+    # A string that is not a place's.
+    ("another string", _opener(GUARD, '        let note = "Opening"\n' + GUARD), OTHER_STRING),
+    ("a mailto string", _opener(GUARD, f'        let _ = "{MAILTO}"\n' + GUARD), OTHER_STRING),
+    # Full Disk Access, plainly or escaped, in the opener too.
+    ("Privacy_AllFiles", _opener("Privacy_FilesAndFolders", "Privacy_AllFiles"), FULL_DISK),
+    (
+        "Privacy_AllFiles escaped",
+        _opener("Privacy_FilesAndFolders", "Privacy_\\u{41}llFiles"),
+        FULL_DISK,
+    ),
+    # Code that is not the design's: a URL kept from a property or another object; a second
+    # overload that any file could call with a URL of its own; a URL taken from a member that
+    # another file's extension adds; more after the design, or less.
+    (
+        "a URL from a property",
+        _opener(
+            OPEN_CALL,
+            "        let home = URL.homeDirectory\n        return NSWorkspace.shared.open(home)\n",
+        ),
+        NOT_DESIGNED,
+    ),
+    (
+        "a URL from another object",
+        _opener(
+            OPEN_CALL,
+            "        let app = Bundle.main.bundleURL\n"
+            "        return NSWorkspace.shared.open(app)\n",
+        ),
+        NOT_DESIGNED,
+    ),
+    (
+        "a second overload",
+        _opener(
+            OPEN_CALL + "    }\n",
+            "        return open(url)\n    }\n\n    static func open(_ url: URL) -> Bool {\n"
+            + OPEN_CALL
+            + "    }\n",
+        ),
+        NOT_DESIGNED,
+    ),
+    (
+        "SystemPlaces.url ??",
+        _opener(GUARD, "        guard let url = SystemPlaces.url ?? url else {\n"),
+        NOT_DESIGNED,
+    ),
+    (
+        "place.url ??",
+        _opener(GUARD, "        guard let url = place.url ?? url else {\n"),
+        NOT_DESIGNED,
+    ),
+    (
+        ".applicationsFolder ??",
+        _opener(FOLDER_URL, ".applicationsFolder ?? " + FOLDER_URL),
+        NOT_DESIGNED,
+    ),
+    ("more after the design", SYSTEM_PLACES + "extension SystemPlaces {}\n", NOT_DESIGNED),
+    # A backtick, and a # the lexer reads as code next to a literal, are tokens of their own: the
+    # design reads a literal's hashes only when they close it.
+    ("a backtick", _opener("let url: URL?", "let url: `URL`?"), NOT_DESIGNED),
+    ("a # after a literal", _opener(DATE_URL, DATE_URL.replace('")', '"#)')), NOT_DESIGNED),
+    ("less than the design", SYSTEM_PLACES.removesuffix("}\n"), ENDS_EARLY),
+    # Each place its own address: the two pages swapped, which nothing else here would see.
+    (
+        "the pages swapped",
+        SYSTEM_PLACES.replace(DATE_PANE, "\0")
+        .replace(FILES_PANE, DATE_PANE)
+        .replace("\0", FILES_PANE),
+        OUT_OF_ORDER,
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    ("what", "text", "said"), PLANTED_OPENER, ids=[what for what, _, _ in PLANTED_OPENER]
+)
+def test_each_way_to_widen_the_opener_is_reported(what: str, text: str, said: str) -> None:
+    found = macos_lint.check_swift(text, OPENER, phrases())
+    assert any(v.rule == "open" and said in v.message for v in found), (what, found)
+
+
+def test_the_pages_swapped_is_found_by_their_order_alone() -> None:
+    # Swapped, each page is still one OPENABLE entry used once, in the designed code: only the
+    # order of the strings says that Open Date & Time Settings would open Files & Folders.
+    (text,) = [text for what, text, _ in PLANTED_OPENER if what == "the pages swapped"]
+    found = macos_lint.check_swift(text, OPENER, phrases())
+    assert [v.message.split(":")[0] for v in found] == [OUT_OF_ORDER], found
+
+
+def test_the_design_is_the_opener_as_built() -> None:
+    # OPEN_DESIGN is read as the opener is: the real file and the test's copy have its tokens, and
+    # its strings are the places, in the order of SystemPlace's cases.
+    designed = [token for _, token in macos_lint.design_tokens(macos_lint.OPEN_DESIGN)]
+    for text in (SYSTEM_PLACES, (REPO_ROOT / OPENER).read_text(encoding="utf-8")):
+        code = macos_lint.swift_scan(text).code
+        assert [token for _, token in macos_lint.design_tokens(code)] == designed
+    assert macos_lint.OPEN_LITERALS == (DATE_PANE, FILES_PANE, "/Applications")
+    assert set(macos_lint.OPEN_LITERALS[:2]) == macos_lint.OPENABLE
+    # White space and a raw string are not the design's to hold: the same tokens are the same code.
+    flush = "\n".join(line.strip() for line in SYSTEM_PLACES.splitlines())
+    assert swift_rules(flush, OPENER) == set()
+
+
+def test_an_opener_finding_names_its_line() -> None:
+    text = PLANTED_OPENER[0][1]
+    second = text.splitlines().index("    NSWorkspace.shared.open(url)") + 1
+    found = macos_lint.check_swift(text, OPENER, phrases())
+    assert second in {v.line for v in found if v.rule == "open"}, found
+
+
+# What the opener may do is the opener's alone: everywhere else, every line it is allowed is still
+# refused, a System Settings page or Full Disk Access is named nowhere, and each way to open, end
+# or register another application that the denylist did not see is refused too.
+PLANTED_OUTSIDE_OPENER: list[tuple[str, str, str]] = [
+    ("swift-denylist", APP, SYSTEM_PLACES),
+    ("swift-denylist", "macos/App/Opener.swift", SYSTEM_PLACES),
+    ("swift-denylist", APP, "_ = NSWorkspace.shared.open(url)"),
+    ("swift-denylist", APP, f"let url = {DATE_URL}"),
+    ("swift-denylist", TEST, f"let url = {DATE_URL}"),
+    ("open", APP, f'let pane = "{DATE_PANE}"'),
+    ("open", APP, f'let pane = "{FILES_PANE}"'),
+    ("open", TEST, f'let pane = "{DATE_PANE}"'),
+    ("open", PROCESS, HOST_CLI + f'let pane = "{DATE_PANE}"\n'),
+    ("open", APP, 'let pane = "x-apple.systempreferences\\u{3A}com.apple.preference.security"'),
+    ("open", APP, 'let pane = "X-Apple.SystemPreferences:com.apple.preference.security"'),
+    ("open", APP, "// x-apple.systempreferences:com.apple.preference.security"),
+    ("open", APP, 'let pane = "Privacy_AllFiles"'),
+    ("open", APP, 'let pane = "Privacy_\\u{41}llFiles"'),
+    ("open", TEST, 'let pane = "Privacy_AllFiles"'),
+    # The probe holes, everywhere, the opener included.
+    ("swift-denylist", APP, "let url: URL? = .init(string: text)"),
+    ("swift-denylist", APP, "let url = URL(dataRepresentation: data, relativeTo: nil)"),
+    ("swift-denylist", APP, "let files = FileManager(authorization: authorization)"),
+    ("swift-denylist", APP, "_ = app.forceTerminate()"),
+    (
+        "swift-denylist",
+        APP,
+        "let apps = NSRunningApplication.runningApplications(withBundleIdentifier: id)",
+    ),
+    ("swift-denylist", APP, "LSSetDefaultHandlerForURLScheme(scheme as CFString, id as CFString)"),
+    ("swift-denylist", APP, "LSSetDefaultRoleHandlerForContentType(type, .all, id)"),
+    ("swift-denylist", APP, "LSRegisterURL(url as CFURL, true)"),
+    ("swift-denylist", APP, "AESendMessage(&event, &reply, mode, timeout)"),
+    ("swift-denylist", APP, "center.requestAuthorization(options: [.alert]) { _, _ in }"),
+    # ... with white space where the pattern allows it.
+    ("swift-denylist", APP, "let url: URL? = . init ( string : text)"),
+    ("swift-denylist", APP, "let url = URL ( dataRepresentation : data, relativeTo: nil)"),
+    ("swift-denylist", APP, "let apps = runningApplications ( withBundleIdentifier : id)"),
+    ("swift-denylist", APP, "let files = FileManager ( authorization : authorization)"),
+    # An initializer with its type left out after a keyword, where a symbol does not come first.
+    ("swift-denylist", APP, "func make(_ text: String) -> URL? { return .init(string: text) }"),
+    ("swift-denylist", APP, "let urls: [URL?] = texts.map { text in .init(string: text) }"),
+    ("swift-denylist", APP, "let url: URL? = try .init(string: text)"),
+    ("swift-denylist", APP, "let url: URL? = await .init(string: text)"),
+    ("swift-denylist", APP, "yield .init(string: text)"),
+    # Other ways to open a URL: SwiftUI's action, a link, a link attribute, Markdown, read or in a
+    # literal that SwiftUI's Text shows, plainly or raw.
+    ("swift-denylist", APP, "@Environment(\\.openURL) private var openURL"),
+    ("swift-denylist", APP, "let action = OpenURLAction { _ in .handled }"),
+    ("swift-denylist", APP, 'Link("Terminal", destination: url)'),
+    ("swift-denylist", APP, 'Link\t( "Terminal", destination: url)'),
+    ("swift-denylist", APP, "let words = [NSAttributedString.Key.link: url]"),
+    ("swift-denylist", APP, "let text = try AttributedString(markdown: said)"),
+    ("swift-denylist", APP, 'Text("[Open](file:///System/Applications/Utilities/Terminal.app)")'),
+    ("swift-denylist", APP, 'let note = #"[Open](file:///Applications)"#'),
+    # Other ways to find, drive or hand something to another application.
+    ("swift-denylist", APP, "NSRunningApplication(processIdentifier: pid)?.terminate()"),
+    ("swift-denylist", APP, "let app = NSRunningApplication ( processIdentifier : pid)"),
+    ("swift-denylist", APP, "let event = NSAppleEventDescriptor.null()"),
+    ("swift-denylist", APP, "NSSharingService(named: .composeEmail)?.perform(withItems: [text])"),
+    ("swift-denylist", APP, "let picker = NSSharingServicePicker(items: [url])"),
+    ("swift-denylist", APP, "ShareLink(item: url)"),
+    # A bundle's code, loaded.
+    ("swift-denylist", APP, "_ = Bundle(url: url)?.load()"),
+    ("swift-denylist", APP, "_ = Bundle(url: url)?.load ( )"),
+    ("swift-denylist", APP, "try Bundle(path: path)?.loadAndReturnError()"),
+    ("swift-denylist", APP, "let type = Bundle(url: url)?.principalClass"),
+    # Other ways to make a URL that is not a file from data or text.
+    (
+        "swift-denylist",
+        APP,
+        "let url = URL(absoluteURLWithDataRepresentation: data, relativeTo: nil)",
+    ),
+    (
+        "swift-denylist",
+        APP,
+        "let url = NSURL(absoluteURLWithDataRepresentation: data, relativeTo: nil)",
+    ),
+    ("swift-denylist", APP, "let url = CFURLCreateWithString(nil, text as CFString, nil)"),
+    ("swift-denylist", APP, "let url = CFURLCreateWithBytes(nil, bytes, count, encoding, nil)"),
+    (
+        "swift-denylist",
+        APP,
+        "let url = CFURLCreateAbsoluteURLWithBytes(nil, bytes, count, encoding, nil, true)",
+    ),
+    ("swift-denylist", APP, "let url = NSURL(scheme: scheme, host: host, path: path)"),
+    # A button pressed by code, not by a click; and a function reached by its symbol, or put in
+    # another's place, whichever name the code calls it by.
+    ("swift-denylist", APP, "button.performClick(nil)"),
+    (
+        "swift-denylist",
+        APP,
+        '@_silgen_name("$s7Capsule12SystemPlacesO4openySbAA0B5PlaceOFZ")\n'
+        "func placeAtLaunch(_ place: SystemPlace) -> Bool",
+    ),
+    ("swift-denylist", APP, '@_cdecl("place_at_launch") func placeAtLaunch() {}'),
+    (
+        "swift-denylist",
+        APP,
+        "@_dynamicReplacement(for: open(_:))\n"
+        "static func again(_ place: SystemPlace) -> Bool { true }",
+    ),
+    ("swift-denylist", TEST, "button.performClick(nil)"),
+    # The opener's type other than in a call, which a build test would not find by its text: a
+    # function reference, a call split over lines or spaced, a type alias.
+    ("open", APP, "let show = SystemPlaces.open\n_ = show(.dateAndTime)"),
+    ("open", APP, "_ = SystemPlaces\n    .open(.filesAndFolders)"),
+    ("open", APP, "_ = SystemPlaces .open(.dateAndTime)"),
+    ("open", APP, "typealias S = SystemPlaces"),
+    ("open", TEST, "let show = SystemPlaces.open"),
+    # An extension, in another file, of a type the opener's code names, which could add the member
+    # it reads or change the initializer it calls.
+    ("open", APP, "extension SystemPlaces {\n    static var url: URL? { nil }\n}"),
+    ("open", APP, "extension SystemPlace {\n    var url: URL? { nil }\n}"),
+    ("open", APP, "extension URL {\n    init?(string text: String, _ x: Int) { return nil }\n}"),
+    ("open", APP, "extension Foundation.URL {}"),
+    ("open", APP, "extension NSURL {}"),
+    ("open", APP, "extension Optional where Wrapped == URL {}"),
+    ("open", APP, "extension Equatable {\n    var url: URL? { nil }\n}"),
+    ("open", APP, "extension Sendable {}"),
+    # A new declaration of a name the opener's code uses, which could stand in for it there.
+    (
+        "open",
+        APP,
+        "func URL(fileURLWithPath path: String, isDirectory: Bool) -> Int { 0 }",
+    ),
+    ("open", APP, "typealias URL = NSURL"),
+    ("open", APP, "struct SystemPlaces {}"),
+    ("open", APP, "let URL = 0"),
+    ("open", APP, "var NSURL = 0"),
+    # ... or a new name for one of those types, whose extension the rules above would not see: an
+    # initializer added to URL under another name would be the one the opener's URL(string:) calls.
+    (
+        "open",
+        APP,
+        "typealias PlaceAddress = URL\n"
+        "extension PlaceAddress {\n"
+        "    init?(string: String) {\n"
+        '        self.init(fileURLWithPath: "/System/Applications/Utilities/Terminal.app")\n'
+        "    }\n"
+        "}",
+    ),
+    ("open", APP, "typealias Address = Foundation.URL"),
+    ("open", APP, "typealias Maybe = Optional\nextension Maybe where Wrapped == Foundation.URL {}"),
+    ("open", APP, "typealias Maybe<T> = Swift.Optional<T>"),
+    ("open", APP, "typealias Place =\n    SystemPlace"),
+    ("open", TEST, "typealias Address = URL"),
+    # ... or a backtick, which makes a name of any word and so hides one from the rules above. The
+    # app's code has none, its strings included; a comment may.
+    ("open", APP, "extension `URL` {\n    init?(string: String) { return nil }\n}"),
+    ("open", APP, "extension Foundation.`URL` {}"),
+    ("open", APP, "extension `SystemPlace` {}"),
+    ("open", APP, "extension `Optional` where Wrapped == Foundation.URL {}"),
+    ("open", APP, "func `URL`(string: String) -> Foundation.URL? { nil }"),
+    ("open", APP, "let url = `URL`(string: text)"),
+    ("open", APP, 'let note = "Press `Open` first."'),
+    ("open", TEST, "let `URL` = 0"),
+]
+
+
+@pytest.mark.parametrize(
+    "case", PLANTED_OUTSIDE_OPENER, ids=[_planted_id(case) for case in PLANTED_OUTSIDE_OPENER]
+)
+def test_what_only_the_opener_may_do_is_reported_everywhere_else(
+    case: tuple[str, str, str],
+) -> None:
+    rule, rel, text = case
+    assert rule in swift_rules(text, rel), text
+
+
+@pytest.mark.parametrize(
+    ("line", "named"),
+    [
+        ("_ = app.forceTerminate()", "forceTerminate"),
+        ("let url: URL? = .init(string: text)", ".init(string:"),
+        ("LSRegisterURL(url as CFURL, true)", "LSRegister"),
+        ("center.requestAuthorization(options: [.alert]) { _, _ in }", "requestAuthorization"),
+        ("button.performClick(nil)", "performClick"),
+        ('@_silgen_name("x") func f()', "_silgen_name"),
+    ],
+)
+def test_the_probe_holes_are_refused_in_the_opener_too(line: str, named: str) -> None:
+    # The opener names the class the denylist refuses elsewhere, so a denylist finding there says
+    # nothing by itself: the finding must name the hole.
+    found = macos_lint.check_swift(SYSTEM_PLACES + line + "\n", OPENER, phrases())
+    assert any(v.rule == "swift-denylist" and named in v.message for v in found), found
+
+
+CLEAN_AROUND_THE_OPENER = [
+    # A type's own initializer with a string is not a URL, nor is an attributed string.
+    'let field = CodeField(string: "")',
+    "shown.append(NSAttributedString(string: said, attributes: words))",
+    "let title = NSAttributedString.init(string: said)",
+    "let title = NSAttributedString .init(string: said)",
+    "let folder = URL(fileURLWithPath: folder.path, isDirectory: true)",
+    # Calling the opener is not opening: tests/test_macos_build.py holds each call to a click.
+    "if !SystemPlaces.open(place) { show() }",
+    # A comment may name the opener; only its code is held to the call.
+    "// `SystemPlaces` opens a place, from that button's click.",
+    "/* SystemPlaces.open */ let x = 1",
+    "case dateAndTime",
+    'let title = "Open Date & Time Settings"',
+    'let steps = "Open System Settings, choose Privacy & Security, then Files & Folders."',
+    "let me = NSRunningApplication.current",
+    # An extension of the app's own types, and names that only start like a refused one.
+    "extension Ability {}",
+    "extension HostObject {}",
+    "let urls: [URL] = []",
+    'NavigationLink("More", destination: view)',
+    "controller.loadView()",
+    # A bracket and a parenthesis in words, and a call through a subscript, are not links.
+    'let note = "Folders [2] (Documents)"',
+    "actions[0]()",
+    # A type alias of the app's own, a backtick in a comment, and an edit action the window sends
+    # on its own key press.
+    "typealias Handler = () -> Void",
+    "// `run` acts on nothing until the file can be read again.",
+    "/* `URL` */ let x = 1",
+    "NSApp.sendAction(action, to: nil, from: self)",
+    "override func performKeyEquivalent(with event: NSEvent) -> Bool { false }",
+]
+
+
+@pytest.mark.parametrize("line", CLEAN_AROUND_THE_OPENER)
+def test_what_the_rest_of_the_app_does_around_the_opener_is_not_reported(line: str) -> None:
+    assert swift_rules(line) == set(), line
+
+
+def test_a_tree_with_the_opener_or_without_it_is_clean(tmp_path: Path) -> None:
+    # Opening nothing is safe: unlike the process file, the opener is not required.
+    root = _clean_tree(tmp_path)
+    assert macos_lint.check(root) == []
+    _tree(root, {OPENER: SYSTEM_PLACES})
+    assert OPENER in macos_lint.lint_files(root)
+    assert macos_lint.check(root) == []
+
+
+def test_the_opener_anywhere_else_is_reported(tmp_path: Path) -> None:
+    moved = "macos/App/Opener.swift"
+    root = _tree(_clean_tree(tmp_path), {moved: SYSTEM_PLACES})
+    found = {(v.path, v.rule) for v in macos_lint.check(root)}
+    assert (moved, "swift-denylist") in found
+
+
+def test_openable_is_the_list_0002_records() -> None:
+    # Two System Settings pages, by the spellings 0002 §20 records, and never Full Disk Access.
+    assert isinstance(macos_lint.OPENABLE, frozenset)
+    assert macos_lint.OPENABLE == frozenset({DATE_PANE, FILES_PANE})
+    for entry in macos_lint.OPENABLE:
+        assert entry.startswith("x-apple.systempreferences:"), entry
+        assert "Privacy_AllFiles" not in entry, entry
+    record = (REPO_ROOT / "decisions" / "0002-macos-app.md").read_text(encoding="utf-8")
+    section = record.split("\n## 20. ", 1)[1].split("\n## 21. ", 1)[0]
+    for entry in sorted(macos_lint.OPENABLE):
+        assert f"`{entry}`" in section, entry
+    assert f"`{macos_lint.OPEN_FILE}`" in section
+    assert "`NSWorkspace`" in section and "`Privacy_AllFiles`" in section
+    # It no longer says the exception is still to come.
+    assert "is not allowed yet either" not in " ".join(section.split())
+
+
+def test_the_open_file_is_one_path() -> None:
+    # Only one path is ever allowed, as for the process file; the opener at any other is the
+    # denylist's.
+    assert macos_lint.OPEN_FILE == "macos/App/SystemPlaces.swift"
+    assert macos_lint.OPEN_FILE != macos_lint.PROCESS_FILE
+    assert swift_rules(SYSTEM_PLACES, macos_lint.OPEN_FILE) == set()
+    for elsewhere in (
+        "macos/App/systemplaces.swift",
+        "macos/Sources/CapsuleKit/SystemPlaces.swift",
+        "macos/Tests/SystemPlaces.swift",
+        "SystemPlaces.swift",
+    ):
+        assert "swift-denylist" in swift_rules(SYSTEM_PLACES, elsewhere), elsewhere
+
+
+def test_the_docstring_says_the_open_rule() -> None:
+    doc = " ".join((macos_lint.__doc__ or "").split())
+    assert "[open]" in doc
+    assert ":data:`OPEN_FILE`" in doc and ":data:`OPENABLE`" in doc
+    assert "with no exception" not in doc
+    assert "``SMAppService.agent``, the login item's fallback, is allowed" not in doc
+    # It names what [open] refuses outside the opener, a new name and a backtick among them, and
+    # what it cannot see, an action sent by code.
+    for words in ("``typealias``", "no backtick", "``performClick``", "``_silgen_name``"):
+        assert words in doc, words
+    assert "an action sent by code" in doc
 
 
 def test_repository_is_clean() -> None:

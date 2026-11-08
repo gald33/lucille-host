@@ -363,6 +363,7 @@ def test_ci_macos_jobs() -> None:
         "relocate",
         "library-snapshot",
         "install",
+        "places",
         "placement",
         "launch",
         "ui",
@@ -394,6 +395,7 @@ def test_ci_macos_jobs() -> None:
         "swift",
         "library-snapshot",
         "install",
+        "places",
         "placement",
         "launch",
         "ui",
@@ -435,12 +437,24 @@ def test_ci_macos_jobs() -> None:
             < checks.index("placement")
             < checks.index("launch")
         ), job
+        # The places check opens each System Settings page the app's one opener may show, once,
+        # after install and before the checks that open the app (decisions/0002 §20).
+        assert checks.count("places") == 1, job
+        assert checks.index("install") < checks.index("places") < checks.index("placement"), job
         assert not any("build_app.py" in run for run in runs if job == "macos-smoke")
     # macos-app requires the menu to be driven; on the newer images that is recorded, not required.
     ui = [run.strip() for run in _runs(doc, "macos-app") if "check_app.py ui" in run]
     assert ui == ["uv run --no-project python tools/macos/check_app.py ui --require-driven"]
     ui = [run.strip() for run in _runs(doc, "macos-smoke") if "check_app.py ui" in run]
     assert ui == ["uv run --no-project python tools/macos/check_app.py ui"]
+    # The ui step's limit is the one check_ui gives its last, best-effort step the rest of, so
+    # that it ends inside it, its clean-up included, and can never time the step out: a time-out
+    # would fail a gated step, and kill the check before it put anything back.
+    for job in ("macos-app", "macos-smoke"):
+        (step,) = [step for step in _steps(doc, job) if "check_app.py ui" in str(step.get("run"))]
+        assert step["timeout-minutes"] * 60 == check_app.UI_STEP_LIMIT, job
+    least = check_app.UI_STEP_END + check_app.DOCUMENTS_TIDY_TIME + check_app.DOCUMENTS_LEAST_TIME
+    assert least < check_app.UI_STEP_LIMIT / 2
     # The same for placement, which reads the note a misplaced copy shows; install drives nothing.
     for job, driven in (("macos-app", " --require-driven"), ("macos-smoke", "")):
         runs = [run.strip() for run in _runs(doc, job)]
@@ -450,6 +464,22 @@ def test_ci_macos_jobs() -> None:
         assert [run for run in runs if "check_app.py placement" in run] == [
             f"uv run --no-project python tools/macos/check_app.py placement{driven}"
         ], job
+    # The places check gates on macos-15; on macOS 26 and 27 it records what each page shows, and
+    # fails nothing, whatever it saw: the pages' spellings and titles are not yet seen on a Mac.
+    for job, flag in (("macos-app", ""), ("macos-smoke", " --record-only")):
+        runs = [run.strip() for run in _runs(doc, job)]
+        assert [run for run in runs if "check_app.py places" in run] == [
+            f"uv run --no-project python tools/macos/check_app.py places{flag}"
+        ], job
+        # Not even a step time-out fails a job that only records it.
+        (step,) = [
+            step for step in _steps(doc, job) if "check_app.py places" in str(step.get("run"))
+        ]
+        assert step.get("continue-on-error") is (True if flag else None), job
+        # And its limit covers the check's own worst case for every page, so that a slow page is
+        # the check's to report, not a step killed before its finally quits System Settings.
+        pages = len(check_app.SETTINGS_PANES) * check_app.PLACES_PAGE_LIMIT
+        assert step["timeout-minutes"] * 60 >= pages, (job, step["timeout-minutes"], pages)
     diff = [run for run in _runs(doc, "macos-smoke") if "library-diff" in run]
     assert len(diff) == 1 and "--control-run" in diff[0]
     # The smoke jobs check the restored bytes before anything else uses them, and run no check
@@ -576,8 +606,8 @@ def test_the_pairing_check_runs_with_the_suites_copy_of_the_runtime() -> None:
     # jobs, at most half the job's as this one's is: a hang in any of them must leave the job the
     # time to upload what shows it.
     for job_id, names in (
-        ("macos-app", ("swift", "relocate", "placement", "ui", "suite", "pairing")),
-        ("macos-smoke", ("swift", "placement", "ui")),
+        ("macos-app", ("swift", "relocate", "places", "placement", "ui", "suite", "pairing")),
+        ("macos-smoke", ("swift", "places", "placement", "ui")),
     ):
         job = doc["jobs"][job_id]
         for name in names:
@@ -1738,9 +1768,12 @@ def test_every_new_check_is_a_choice() -> None:
         "selftest",
         "handoff",
         "handoff-check",
+        "places",
     }
     # The bytecode check needs the app and no option: a person can run it as it is, on a copy.
     assert "bytecode" not in check_app.NEEDS_NO_APP and "bytecode" not in check_app.REQUIRED
+    # The places check opens System Settings, never the app: it needs no app at all.
+    assert "places" in check_app.NEEDS_NO_APP and "places" not in check_app.OPENS_INSTALLED
 
 
 def _as_mac(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1799,6 +1832,31 @@ def test_unpack_dmg_and_handoff_check_need_no_app(
     assert "exists" not in capsys.readouterr().out
     args[-1] = dmg
     assert check_app.main(args) == 1
+
+
+@pytest.mark.parametrize(("flag", "record_only"), [([], False), (["--record-only"], True)])
+def test_places_runs_with_no_app_and_passes_record_only_on(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    flag: list[str],
+    record_only: bool,
+) -> None:
+    # From the command line CI runs: with no app at --out, places still runs, and --record-only
+    # reaches the check, which on macOS 26 and 27 is what keeps it from gating.
+    _as_mac(monkeypatch)
+    out = tmp_path / "out"
+    out.mkdir()
+    seen: list[tuple[Path, bool]] = []
+
+    def places(checker: check_app.Checker, work: Path, record_only: bool = False) -> None:
+        seen.append((work, record_only))
+        checker.expect(record_only, "recorded only")
+
+    monkeypatch.setattr(check_app, "check_places", places)
+    assert check_app.main(["places", *flag, "--out", str(out)]) == (0 if record_only else 1)
+    assert seen == [(out.resolve() / "check", record_only)]
+    assert "exists" not in capsys.readouterr().out
 
 
 def test_check_app_runs_on_a_mac_only(tmp_path: Path) -> None:

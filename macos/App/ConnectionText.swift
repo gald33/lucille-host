@@ -438,7 +438,8 @@ enum ConnectionText {
     static let forgottenElsewhere = "This Mac was disconnected."
 
     /// The clock's problem: how far off, when the host knows (`skew` is positive when this Mac's
-    /// clock is behind), then what to do. Words only: the app opens no settings itself.
+    /// clock is behind), then what to do. The note behind the line offers Open Date & Time Settings
+    /// too (`PlaceRules`).
     static func clock(skew: Double?) -> String {
         guard let skew else {
             return "Your Mac's clock is more than 5 minutes off, so \(appName) can't answer Lucille. " + clockDirections

@@ -2,13 +2,14 @@
 
     uv run --no-project python tools/macos/check_app.py CHECK [--out build/macos] [options]
 
-Each check prints what it saw and exits 1 if anything is wrong (2 on a usage error, and off a
-Mac). The app is ``<out>/<name>.app``; every check but ``dmg``, ``unpack-dmg``, ``handoff-check``
-and ``library-snapshot`` refuses to run without it. Only the copy at ``/Applications/<name>.app``
-starts anything (decisions/0002 §13): ``install`` puts one there, and ``launch``, ``ui`` and
-``pairing`` open that copy and refuse to run without it. The interpreter always runs as the app runs
-it, ``lucille-host-runtime -I -B -X utf8`` (:data:`build_app.RUNTIME_FLAGS`), except the bytecode
-program, which adds ``-S`` and ``-W ignore`` (:data:`build_app.BYTECODE_FLAGS`).
+Each check prints what it saw and exits 1 if anything is wrong (2 on a usage error, and off a Mac).
+The app is ``<out>/<name>.app``; every check but ``dmg``, ``unpack-dmg``, ``handoff-check``,
+``library-snapshot`` and ``places`` refuses to run without it. Only the copy at
+``/Applications/<name>.app`` starts anything (decisions/0002 §13): ``install`` puts one there, and
+``launch``, ``ui`` and ``pairing`` open that copy and refuse to run without it. The interpreter
+always runs as the app runs it, ``lucille-host-runtime -I -B -X utf8``
+(:data:`build_app.RUNTIME_FLAGS`), except the bytecode program, which adds ``-S`` and ``-W ignore``
+(:data:`build_app.BYTECODE_FLAGS`).
 
 The bundle as built:
 
@@ -39,7 +40,8 @@ The bundle as built:
   where each one resolves. No Mach-O file says it needs a newer macOS than
   ``LSMinimumSystemVersion``; no file in the bundle holds the build folder's path; and the app's
   own executable imports no function from :data:`FORBIDDEN_IMPORTS` and the lists after it, which
-  start processes or open network connections, and links none of :data:`FORBIDDEN_LIBRARIES`.
+  start processes, open network connections, or open, register, drive or hand something to
+  another application, and links none of :data:`FORBIDDEN_LIBRARIES`.
   That last part reads only what the executable imports by name: code that reaches such a
   function another way (through the Objective-C runtime, say) is not seen.
 - ``signature``: ``codesign --verify --deep --strict`` passes on the app, and ``codesign --verify
@@ -94,16 +96,28 @@ On the bundle made read-only (CI runs ``chmod -R a-w`` first):
   It never sets a copy aside over one set aside before. ``placement``, ``launch``, ``ui`` and
   ``pairing`` refuse to run unless the copy in ``/Applications`` is this build
   (:func:`is_this_build`), so a copy an earlier build left there never answers for this one.
+- ``places [--record-only]``: the two System Settings pages the app's one opener may show
+  (:data:`SETTINGS_PANES`, decisions/0002 §20), each opened by the check with ``/usr/bin/open``,
+  not by the app: System Settings starts and shows a window with the page's title. It prints the
+  names of System Settings' windows and takes a screenshot of each, ``places-<n>.png``, then quits
+  System Settings by its name, sending it no key; it quits it before each page too, saying so if it
+  was running before the check. It needs no app. ``--record-only``, which the
+  smoke jobs pass, prints what it would have checked and fails nothing: the pages' addresses and
+  titles are not yet seen on a Mac, and the first runs settle them.
 - ``placement``: only the copy at ``/Applications/<name>.app`` starts anything. The control first:
   that copy, opened, starts the host on the app's profile, which the check sees, and says where its
   menu is (with no confirmed pair on the profile; with one, it says neither). Then, one at a time
   with no other copy running, the build's copy, and a copy named ``<name> 2.app`` in
   ``/Applications`` with the copy at the app's own name there and then moved aside: for 10 seconds
-  each starts no host process on the app's profile and changes nothing in the profile's folder, says
-  why it can't run and how to fix that, offers only Quit, and quits when Quit is pressed. The
-  renamed copy is removed and the other put back, whatever happens. Reading the notes needs System
-  Events, as ``ui`` does (``--require-driven`` makes not being able to a failure). Screenshots
-  ``0-placement-*.png`` go to ``check/screens``.
+  each starts no host process on the app's profile and changes nothing in the profile's folder, and
+  says why it can't run and how to fix that. The build's copy offers only Show Applications Folder
+  and Quit, in either order, which the check prints as read, and Show Applications Folder quits it
+  and shows a Finder window named Applications, whose name the check prints and, with
+  ``--require-driven``, requires, and which it closes if it opened it; the renamed copy offers only
+  Quit, and quits when Quit is pressed. A button is pressed
+  only once the check has read it on the note. The renamed copy is removed and the other put back,
+  whatever happens. Reading the notes needs System Events, as ``ui`` does (``--require-driven``
+  makes not being able to a failure). Screenshots ``0-placement-*.png`` go to ``check/screens``.
 - ``launch``: opens the copy in ``/Applications`` the way Finder does, checks that it is still
   running 10 seconds later, then stops it.
 - ``ui``: opens the copy in ``/Applications`` and drives it as a user would, through System Events:
@@ -113,20 +127,30 @@ On the bundle made read-only (CI runs ``chmod -R a-w`` first):
   an ability on and off; adds a folder through the Open panel and the name dialog, with a name the
   app must correct first, and removes it from the Folders submenu; chooses the home folder, which
   the app asks about first, picks Choose a Smaller Folder once, then adds it; chooses the Data
-  volume, and then ``/`` through a link to it, which the app refuses each time with Choose a Smaller
-  Folder and Cancel and no button that adds the folder, and adds neither. The Open panel's buttons
-  are looked for in every window, sheet and group, since where they sit differs between macOS
-  versions; where its prompt is nowhere, Return, its default button, chooses
+  volume, and then ``/`` through a link to it, which the app refuses each time with Choose a
+  Smaller Folder and Cancel and no button that adds the folder, and adds neither. The Open panel's
+  buttons are looked for in every window, sheet and group, since where they sit differs between
+  macOS versions; where its prompt is nowhere, Return, its default button, chooses
   (:data:`CHOOSE_IN_PANEL`), and what the app shows next is checked as before. Then, with a
-  code-shaped text on the pasteboard, it chooses Connect to Lucille…: the code window opens with its
-  field empty, and the field stays empty once it has the focus, so the app read nothing from the
-  pasteboard; a typed word gets the hint; Command-V, typed through System Events, pastes exactly
-  what was copied; Connect hands it to the host, which refuses it as no code, and the app says so in
-  its own words. It checks each step against the host's own state, on the app's own profile
-  (:data:`APP_PROFILE`). It uses the real HOME and leaves the host as it found it. Where macOS does
-  not let System Events drive other apps, it says so and drives nothing, which is a failure with
-  ``--require-driven`` (the macos-app job passes it; the smoke jobs record whether it could drive).
-  Screenshots go to ``check/screens``.
+  code-shaped text on the pasteboard, it chooses Connect to Lucille…: the code window opens with
+  its field empty, and the field stays empty once it has the focus, so the app read nothing from
+  the pasteboard; a typed word gets the hint; Command-V, typed through System Events, pastes
+  exactly what was copied; Connect hands it to the host, which refuses it as no code, and the app
+  says so in its own words. Last, best effort and failing nothing, it adds a folder it makes in
+  Documents, typing its path only once it has read the Open panel's button: if macOS asks, it
+  prints the question and, where it names the app or its interpreter and is the one window of the
+  process that draws it, answers Don't Allow, reads that the app says macOS is blocking it,
+  presses Open Privacy Settings and prints what System Settings shows; if macOS does not ask, it
+  says so; either way, each on its own, it presses the app's Cancel if the folder is still being
+  checked, ends a ``roots add`` of the app's profile still running 30 seconds later, says when a
+  question of macOS's is left on screen, removes the folder, quits System Settings if it started
+  it, and asks ``tccutil reset`` to take back what macOS was asked. It ends, clean-up included,
+  inside the ui step's limit, :data:`UI_STEP_LIMIT` (:func:`_drive_documents_prompt`). It checks
+  each step against the host's own state, on the app's own profile (:data:`APP_PROFILE`). It uses
+  the real HOME and leaves the host as it found it. Where macOS does not let System Events drive
+  other apps, it says so and drives nothing, which is a failure with ``--require-driven`` (the
+  macos-app job passes it; the smoke jobs record whether it could drive). Screenshots go to
+  ``check/screens``.
 - ``library-snapshot --to F`` and ``library-diff --before F`` (M12): ``~/Library`` is walked
   before ``launch`` and after ``ui``, and again before and after ``pairing`` (``Developer`` and
   ``Android`` skipped, no link followed). A
@@ -211,7 +235,7 @@ import tempfile
 import time
 import traceback
 import zipfile
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Final
@@ -236,6 +260,7 @@ LOGIC_SOURCES: Final = (
     "Placement.swift",
     "Setup.swift",
     "LoginRules.swift",
+    "PlaceRules.swift",
 )
 # The host's golden fixtures (spec/CLI.md section 11), which the self-test reads through the
 # app's JSON reader and its pairing, supervision and Set Up state machines.
@@ -256,8 +281,11 @@ LOAD_COMMANDS: Final = frozenset(
     }
 )
 # What the app's own executable must not import: functions that start a process or open a
-# network connection, and the classes that do either. HostCLI.swift starts the interpreter with
-# Foundation's Process (NSTask), which imports none of these names.
+# network connection, and the classes that do either; and Launch Services' and the Apple Event
+# Manager's C calls, which open, register or drive another application. HostCLI.swift starts the
+# interpreter with Foundation's Process (NSTask), which imports none of these names. NSWorkspace is
+# not refused here: the app's one opener (SystemPlaces.swift) calls it, and macos_lint keeps it to
+# that file and to one call that opens one of a closed list of places (decisions/0002 §20).
 FORBIDDEN_IMPORTS: Final = frozenset(
     {
         "_fork",
@@ -295,11 +323,16 @@ FORBIDDEN_IMPORT_PREFIXES: Final = (
     "_CFHost",
     "_CFNetService",
     "_xpc_connection",
+    "_LSOpen",
+    "_LSSetDefault",
+    "_LSRegister",
+    "_AESend",
     "_OBJC_CLASS_$_NSURLSession",
     "_OBJC_CLASS_$_NSURLConnection",
     "_OBJC_CLASS_$_NSURLDownload",
-    "_OBJC_CLASS_$_NSWorkspace",
     "_OBJC_CLASS_$_NSAppleScript",
+    "_OBJC_CLASS_$_NSAppleEventDescriptor",
+    "_OBJC_CLASS_$_NSSharingService",
     "_OBJC_CLASS_$_NSUserScriptTask",
     "_OBJC_CLASS_$_NSUserUnixTask",
     "_OBJC_CLASS_$_NSUserAppleScriptTask",
@@ -2878,12 +2911,46 @@ LOGIN_NOTE_CLOSES: Final = {NEEDS_APPROVAL_TITLE: NOT_NOW, LOGIN_FAILED_TITLE: "
 # What the app says of its login item once it has none: macOS gives notRegistered, or notFound
 # when it never had one to find.
 LOGIN_ITEM_GONE: Final = ("notRegistered", "notFound")
+# The app's one opener (decisions/0002 §20), as App/PlaceRules.swift and App/HostText.swift spell
+# it (tests/test_macos_build.py checks): the placement note's button, the button of the note that
+# says macOS is blocking a folder, and the first sentence of that note. Then the System Settings
+# pages the opener may show, each with the title the places check expects of its window: the same
+# URLs as tools/guards/macos_lint.py's OPENABLE, which this script cannot import (the lint needs
+# yaml), so a build test holds that they agree. Neither the URLs nor the titles have been seen on a
+# Mac yet: the places check prints what each page shows, and gates only on macos-15. Then the
+# processes the checks read: System Settings, the Finder and its window on the Applications
+# folder, and the one that draws macOS's question about a protected folder (not seen on a Mac yet).
+SHOW_APPLICATIONS_FOLDER: Final = "Show Applications Folder"
+OPEN_PRIVACY_SETTINGS: Final = "Open Privacy Settings"
+BLOCKED_BY_MACOS: Final = f"macOS is blocking {APP_NAME} from this folder."
+DATE_AND_TIME_PANE: Final = "x-apple.systempreferences:com.apple.Date-Time-Settings.extension"
+FILES_AND_FOLDERS_PANE: Final = (
+    "x-apple.systempreferences:com.apple.preference.security?Privacy_FilesAndFolders"
+)
+SETTINGS_PANES: Final = {
+    DATE_AND_TIME_PANE: "Date & Time",
+    FILES_AND_FOLDERS_PANE: "Files & Folders",
+}
+SYSTEM_SETTINGS: Final = "System Settings"
+FINDER: Final = "Finder"
+APPLICATIONS_WINDOW: Final = "Applications"
+TCC_PROMPT_PROCESS: Final = "UserNotificationCenter"
+# The answer to macOS's question that the ui check gives, its apostrophe folded, and the privacy
+# service of the Documents folder, whose answer for the app tccutil takes back afterwards.
+DONT_ALLOW: Final = "Don't Allow"
+DOCUMENTS_SERVICE: Final = "SystemPolicyDocumentsFolder"
 
 
 def _system_events(body: str, timeout: float = 30) -> tuple[bool, str]:
     """Run AppleScript against the app's process through System Events: (worked, what it said)."""
-    name = build_app.load_pins().app_name
-    script = f'tell application "System Events"\ntell process "{name}"\n{body}\nend tell\nend tell'
+    return _tell(build_app.load_pins().app_name, body, timeout)
+
+
+def _tell(process: str, body: str, timeout: float = 30) -> tuple[bool, str]:
+    """Run AppleScript against ``process`` through System Events: (worked, what it said)."""
+    script = (
+        f'tell application "System Events"\ntell process "{process}"\n{body}\nend tell\nend tell'
+    )
     try:
         done = subprocess.run(
             ["osascript", "-e", script],
@@ -3161,14 +3228,19 @@ def _drive_abilities(checker: Checker, python: Path, screens: Path) -> None:
             _app_host(python, ["ops", "disable", op])
 
 
-def _choose_folder(folder: Path, screens: Path, shot: str) -> tuple[bool, str]:
-    """Choose Add a Folder…, go to ``folder`` in the Open panel and choose it. Whatever the app
-    shows next is left open."""
-    worked, said = _system_events(
+def _ask_to_add_a_folder() -> tuple[bool, str]:
+    """Choose Add a Folder… from the app's menu, which opens the Open panel."""
+    return _system_events(
         f"click {STATUS_ITEM}\ndelay 1\n"
         f'click (first menu item of {MENU} whose name starts with "Add a Folder")',
         timeout=60,
     )
+
+
+def _choose_folder(folder: Path, screens: Path, shot: str) -> tuple[bool, str]:
+    """Choose Add a Folder…, go to ``folder`` in the Open panel and choose it. Whatever the app
+    shows next is left open."""
+    worked, said = _ask_to_add_a_folder()
     if not worked:
         return False, f"choosing Add a Folder: {said}"
     time.sleep(2)
@@ -3419,6 +3491,12 @@ def _says(words: str) -> bool:
 def _press(name: str) -> tuple[bool, str]:
     """Click the button named ``name``, in whichever window of the app holds it."""
     return _system_events(_target("button", name) + 'click theTarget\nreturn "pressed"')
+
+
+def _press_in_front(name: str) -> tuple[bool, str]:
+    """Click the button named ``name`` of the app's front window, whose buttons the caller has
+    just read there (:func:`_window_list`)."""
+    return _system_events(f'click button {_quoted(name)} of window 1\nreturn "pressed"')
 
 
 def _toggle(name: str) -> tuple[bool, str]:
@@ -3990,6 +4068,99 @@ def _close_window(title: str) -> tuple[bool, str]:
     )
 
 
+# Another application, as the checks of the app's one opener see it (decisions/0002 §20): System
+# Settings, the Finder, and the process that draws macOS's question about a protected folder. The
+# checks only read these, close a window they opened, and press a button they have just read; they
+# send them no key.
+
+
+def _process_windows(process: str) -> tuple[bool, list[str]]:
+    """The name of every window of ``process``, another application, as System Events gives
+    them; with what System Events said instead when it could not read them (``process`` not
+    running, say)."""
+    worked, said = _tell(process, f"{LINES}return (name of every window) as text")
+    return worked, said.splitlines() if worked else [f"(System Events: {said})"]
+
+
+def _windows_until(process: str, title: str, seconds: float) -> tuple[bool, list[str]]:
+    """Read ``process``'s windows until one is named ``title``, for at most ``seconds``: whether
+    one was, and the names last read."""
+    seen: list[str] = []
+
+    def named() -> bool:
+        worked, names = _process_windows(process)
+        seen[:] = names
+        return worked and title in names
+
+    return _wait_until(named, seconds), list(seen)
+
+
+def _process_window_count(process: str) -> int | None:
+    """How many windows ``process`` shows, one with no name included, which
+    :func:`_process_windows` cannot show; None when System Events could not say."""
+    worked, said = _tell(process, "return (count of windows) as text")
+    return int(said) if worked and said.isdigit() else None
+
+
+def _process_every(process: str, what: str) -> tuple[bool, list[str]]:
+    """``what`` (``name of every button``, say) of every window of ``process``, wherever it sits
+    (:func:`_in_each_place`), one per line; none when it has no window or is not running."""
+    worked, said = _tell(
+        process,
+        "set found to {}\n"
+        + _in_each_place(f"try\nset found to found & ({what} of {{place}})\nend try\n")
+        + f"{LINES}return found as text",
+        timeout=60,
+    )
+    return worked, [line for line in said.splitlines() if line] if worked else []
+
+
+def _process_buttons(process: str) -> tuple[bool, list[str]]:
+    """The name of every button of every window of ``process`` (:func:`_process_every`)."""
+    return _process_every(process, "name of every button")
+
+
+def _process_texts(process: str) -> tuple[bool, list[str]]:
+    """Every static text of every window of ``process`` (:func:`_process_every`): the words of
+    macOS's question, say."""
+    return _process_every(process, "value of every static text")
+
+
+def _press_in(process: str, name: str) -> tuple[bool, str]:
+    """Click the button named ``name`` in whichever window of ``process`` holds it."""
+    return _tell(
+        process,
+        "set theTarget to missing value\n"
+        + _in_each_place(_click_in_place(name))
+        + "if theTarget is missing value then error "
+        + _quoted(f"no button named {name}")
+        + '\nclick theTarget\nreturn "pressed"',
+        timeout=60,
+    )
+
+
+def _close_window_of(process: str, title: str) -> tuple[bool, str]:
+    """Click the close button of ``process``'s window named ``title``."""
+    return _tell(
+        process,
+        f'click (first button of window {_quoted(title)} whose subrole is "AXCloseButton")',
+    )
+
+
+def _quit_by_name(name: str) -> bool:
+    """Quit the application named ``name`` (System Settings), if it runs: SIGTERM, then SIGKILL
+    if it still runs 15 seconds later. No key is sent, since a key goes to whichever window has
+    the focus. True when nothing ran, or SIGTERM ended it."""
+    if not _running(name):
+        return True
+    subprocess.run(["pkill", "-TERM", "-x", name], check=False)
+    if _wait_until(lambda: not _running(name), 15):
+        return True
+    subprocess.run(["pkill", "-KILL", "-x", name], check=False)
+    _wait_until(lambda: not _running(name), 10)
+    return False
+
+
 def _host_log(python: Path) -> list[str]:
     """The host's log on the app's profile, oldest first, as ``log --json --limit 200`` gives the
     app its lines; each cut as Activity cuts it (:data:`LONGEST_LOG_LINE`)."""
@@ -4164,20 +4335,374 @@ def _drive_reset(checker: Checker, python: Path, screens: Path) -> None:
                 path.write_bytes(held)
 
 
+def _documents_check_folder() -> Path:
+    """The folder the ui check's last step makes in Documents, a folder macOS protects."""
+    return Path.home() / "Documents" / "lucille-host-ui-check-documents"
+
+
+# The host's ``roots add`` on the app's profile, as the app starts it (App/HostCLI.swift and
+# HostText.addFolderArguments): what the Documents step waits on, and ends if it is left running.
+ADDING_A_FOLDER: Final = f"lucille_host --profile {APP_PROFILE} --json roots add"
+# How long the Documents step lets a file operation in Documents take, in a child: the check's
+# own process may be asked about that folder too, and nobody would answer.
+DOCUMENTS_FILE_LIMIT: Final = 15
+# The ui step's limit in CI, and what check_ui keeps of it for its own end (the app stopped, 15 s
+# at most, and its logs printed) and its start. The Documents step ends by what is left, its
+# clean-up included, so that a step that fails nothing can never time out the ui step: that would
+# fail a gated step, and kill the check before it put anything back (tests/test_ci_workflow.py
+# holds the limit to ci.yml's). Its clean-up is given the last DOCUMENTS_TIDY_TIME seconds of it,
+# and it starts only with DOCUMENTS_LEAST_TIME seconds more than that left.
+UI_STEP_LIMIT: Final = 15 * 60
+UI_STEP_END: Final = 60
+DOCUMENTS_TIDY_TIME: Final = 240
+DOCUMENTS_LEAST_TIME: Final = 120
+
+
+# How the Documents step's notes name its clean-up.
+TIDY: Final = "the Documents step's clean-up"
+
+
+class _OutOfTime(Exception):
+    """What :func:`_until` raises in what it stops."""
+
+
+@contextlib.contextmanager
+def _until(deadline: float | None) -> Iterator[None]:
+    """Stop what runs inside at ``deadline``, a ``time.monotonic()`` time, by raising
+    :class:`_OutOfTime` there from SIGALRM, whatever it waits on: ``subprocess.run`` kills the
+    child it waits for as the exception passes. It rings once, and the timer and the handler
+    before it are put back on the way out. With no deadline, it stops nothing."""
+    if deadline is None:
+        yield
+        return
+    rung: list[bool] = []
+
+    def ring(signum: int, frame: Any) -> None:
+        if not rung:
+            rung.append(True)
+            raise _OutOfTime("it reached the end of the time it was given")
+
+    previous = signal.signal(signal.SIGALRM, ring)
+    signal.setitimer(signal.ITIMER_REAL, max(deadline - time.monotonic(), 0.001))
+    try:
+        yield
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous)
+
+
+def _adding_a_folder() -> list[int]:
+    """The host's ``roots add`` processes on the app's profile, whoever started them."""
+    done = subprocess.run(
+        ["pgrep", "-f", ADDING_A_FOLDER], capture_output=True, text=True, check=False
+    )
+    return [int(pid) for pid in done.stdout.split()]
+
+
+def _in_documents(argv: list[str]) -> tuple[bool | None, str]:
+    """Run ``argv``, which acts on the Documents step's folder, in a child for at most
+    :data:`DOCUMENTS_FILE_LIMIT` seconds: whether it exited 0, or None when it did not finish, and
+    what it said."""
+    try:
+        done = subprocess.run(
+            argv, capture_output=True, text=True, timeout=DOCUMENTS_FILE_LIMIT, check=False
+        )
+    except subprocess.TimeoutExpired:
+        return None, f"{argv[0]} did not finish within {DOCUMENTS_FILE_LIMIT} s"
+    return done.returncode == 0, _shown(done)
+
+
+def _names_the_app(texts: Sequence[str]) -> bool:
+    """Whether a question of macOS's, by its words, is about the app or its interpreter."""
+    pins = build_app.load_pins()
+    names = (APP_NAME, Path(build_app.INTERPRETER).name, pins.bundle_id, pins.runtime_id)
+    return any(name in text for text in texts for name in names)
+
+
+def _stop_adding_a_folder() -> None:
+    """Wait up to 30 seconds for no ``roots add`` of the app's profile to run, then end any still
+    running, with SIGTERM and then SIGKILL, and say which: one left waiting on macOS's question
+    would hold the profile's policy lock for every check after this one."""
+    if _wait_until(lambda: not _adding_a_folder(), 30):
+        return
+    print(f"note: roots add still runs after the Documents step: {_adding_a_folder()}", flush=True)
+    subprocess.run(["pkill", "-TERM", "-f", ADDING_A_FOLDER], check=False)
+    if not _wait_until(lambda: not _adding_a_folder(), 10):
+        subprocess.run(["pkill", "-KILL", "-f", ADDING_A_FOLDER], check=False)
+        _wait_until(lambda: not _adding_a_folder(), 10)
+    print(f"roots add left running after SIGTERM and SIGKILL: {_adding_a_folder()}", flush=True)
+
+
+def _drive_documents_prompt(python: Path, screens: Path, deadline: float | None = None) -> None:
+    """Best effort, and it fails nothing: add a folder in Documents, which macOS protects
+    (decisions/0002 §20). It chooses Add a Folder…, and types the folder's path only once it has
+    read the Open panel's own button. If macOS asks whether the app may use the folder, the step
+    prints the question's words and buttons, and answers Don't Allow, the one button of it this
+    step presses, only once it has read that button there, words that name the app or its
+    interpreter, and that the process that draws the question shows that one window: the host is
+    refused the folder, the app says macOS is blocking it and offers Open Privacy Settings, which
+    the step presses once it has read it, and it prints the windows System Settings then shows. If
+    no question comes, as on a runner where it was answered before, it says so, and closes the
+    app's note by its OK, once read. Each of the app's buttons is pressed in the window it was read
+    in. What macOS asks on a runner is not known, so nothing here is a gate. Whatever happens,
+    each clean-up on its own: where the app still shows its Cancel (the folder still being
+    checked), the step presses it, once read; a ``roots add`` of the app's profile still running
+    30 seconds later is ended, so that it holds no lock; it prints the windows
+    UserNotificationCenter still shows, and says so when a question of macOS's is left on screen,
+    which it closes no other way than by the answer above; System Settings is quit if this step
+    started it; every folder alias the host has for the folder is removed through the command
+    line; the folder made here is removed; and, if macOS asked, its answer is taken back with
+    ``tccutil reset``, for the app's and its interpreter's identifiers alone, and what tccutil
+    said is printed. A folder of that name already there is someone's: the step leaves it, and
+    adds nothing. The folder is tested for, made and removed in a child with a time limit, never
+    by the check's own process. With ``deadline`` (check_ui's, from the ui step's limit), the step
+    ends by then, its clean-up included (:func:`_until`): it starts only with
+    :data:`DOCUMENTS_TIDY_TIME` and :data:`DOCUMENTS_LEAST_TIME` seconds left, it is stopped
+    :data:`DOCUMENTS_TIDY_TIME` seconds before the deadline, and what of its clean-up the deadline
+    leaves undone is printed."""
+    if deadline is not None:
+        left = deadline - time.monotonic()
+        if left < DOCUMENTS_TIDY_TIME + DOCUMENTS_LEAST_TIME:
+            print(
+                f"note: too little of the ui step's time is left for the Documents step "
+                f"({left:.0f} s), so it added nothing",
+                flush=True,
+            )
+            return
+    folder = _documents_check_folder()
+    there, said = _in_documents(["/bin/test", "-e", str(folder)])
+    if there is not False:
+        why = "is there already" if there else f"could not be looked for ({said})"
+        print(f"note: {folder} {why}, so the Documents step added nothing", flush=True)
+        return
+    made, said = _in_documents(["/bin/mkdir", "-p", str(folder)])
+    if not made:
+        print(f"note: the Documents step could not make {folder}: {said}", flush=True)
+        return
+    settings_ran = bool(_running(SYSTEM_SETTINGS))
+    added = False
+    asked_once = False
+    closed = False
+    try:
+        with _until(None if deadline is None else deadline - DOCUMENTS_TIDY_TIME):
+            worked, said = _ask_to_add_a_folder()
+            if not worked:
+                print(
+                    f"note: the Documents step could not choose Add a Folder…: {said}", flush=True
+                )
+                return
+            if not _wait_until(lambda: OPEN_PROMPT in _panel_buttons()[1], 10):
+                print(
+                    f"note: no Open panel with {OPEN_PROMPT!r} came, so the Documents step typed "
+                    "nothing",
+                    flush=True,
+                )
+                return
+            worked, said = _go_to_folder(folder, screens, "25-documents-panel.png")
+            if not worked:
+                print(f"note: the Documents step could not choose {folder}: {said}", flush=True)
+                return
+            worked, alias = _name_dialog()
+            _, buttons = _window_list("name of every button")
+            print(f"the name dialog for {folder.name}: {alias!r}, with {buttons}", flush=True)
+            if not worked or "Add Folder" not in buttons:
+                print("note: no name dialog with Add Folder, so the Documents step added nothing")
+                return
+            added = True
+            _press_in_front("Add Folder")
+            asked: list[str] = []
+
+            def asks() -> bool:
+                worked, found = _process_buttons(TCC_PROMPT_PROCESS)
+                asked[:] = found if worked else []
+                return bool(asked)
+
+            answered = False
+            if not _wait_until(asks, 20):
+                print("no macOS prompt on this runner", flush=True)
+                _screenshot(screens / "26-documents-no-prompt.png")
+            else:
+                # Taken back afterwards however it went: macOS asked, so it had no answer before.
+                asked_once = True
+                _, question = _process_texts(TCC_PROMPT_PROCESS)
+                print(f"macOS asked {question}, with the buttons {asked}", flush=True)
+                _screenshot(screens / "26-documents-prompt.png")
+                answer = next(
+                    (name for name in asked if name.replace("’", "'") == DONT_ALLOW), None
+                )
+                if answer is None:
+                    print(f"note: macOS's question has no {DONT_ALLOW!r}, so nothing was pressed")
+                    return
+                if not _names_the_app(question):
+                    print(
+                        "note: macOS's question names neither the app nor its interpreter, so "
+                        "nothing was pressed",
+                        flush=True,
+                    )
+                    return
+                # Its words and buttons were read from every window of the process, and the
+                # press finds its button in any: only with one window are they all that one's.
+                count = _process_window_count(TCC_PROMPT_PROCESS)
+                if count != 1:
+                    shown = f"shows {count} windows, not one"
+                    if count is None:
+                        shown = "could not count its windows"
+                    print(
+                        f"note: {TCC_PROMPT_PROCESS} {shown}, so nothing was pressed: the press "
+                        "might answer another question",
+                        flush=True,
+                    )
+                    return
+                answered = True
+                worked, said = _press_in(TCC_PROMPT_PROCESS, answer)
+                print(f"{DONT_ALLOW}: {said}", flush=True)
+            if not _wait_until(lambda: _says(BLOCKED_BY_MACOS), 30 if answered else 5):
+                closes = _wait_until(lambda: "OK" in _window_list("name of every button")[1], 15)
+                print(f"the app then says: {_texts()}", flush=True)
+                if closes:
+                    closed = _press_in_front("OK")[0]
+                return
+            _, buttons = _window_list("name of every button")
+            _screenshot(screens / "27-documents-blocked.png")
+            print(f"the app says {BLOCKED_BY_MACOS!r}, with the buttons {buttons}", flush=True)
+            if OPEN_PRIVACY_SETTINGS not in buttons:
+                print(f"note: that note does not offer {OPEN_PRIVACY_SETTINGS!r}", flush=True)
+                if "OK" in buttons:
+                    closed = _press_in_front("OK")[0]
+                return
+            closed, said = _press_in_front(OPEN_PRIVACY_SETTINGS)
+            title = SETTINGS_PANES[FILES_AND_FOLDERS_PANE]
+            shown, names = _windows_until(SYSTEM_SETTINGS, title, 30)
+            _screenshot(screens / "28-documents-privacy-settings.png")
+            print(
+                f"{OPEN_PRIVACY_SETTINGS} ({said}): System Settings windows: {names}; {title!r} "
+                f"among them: {shown}",
+                flush=True,
+            )
+    except Exception as exc:  # it fails nothing: what stopped it is printed
+        print(f"note: the Documents step stopped: {exc}", flush=True)
+    finally:
+        _tidy_documents_step(
+            python,
+            folder,
+            pending=added and not closed,
+            added=added,
+            asked=asked_once,
+            settings_ran=settings_ran,
+            deadline=deadline,
+        )
+
+
+def _tidy_documents_step(
+    python: Path,
+    folder: Path,
+    *,
+    pending: bool,
+    added: bool,
+    asked: bool,
+    settings_ran: bool,
+    deadline: float | None = None,
+) -> None:
+    """What :func:`_drive_documents_prompt` puts back, each part on its own, so that one that
+    stops leaves the others to run, and what stopped it is printed. ``pending`` is whether the app
+    may still be adding the folder, with no note the step closed; ``added``, whether the step
+    pressed Add Folder; ``asked``, whether macOS asked; ``deadline``, when it must have ended: a
+    part still running then is stopped, and each part after it is printed as not done."""
+    left_on_screen: list[bool] = []
+
+    def cancel() -> None:
+        worked, buttons = _window_list("name of every button")
+        if worked and "Cancel" in buttons:
+            print(f"the app still shows {buttons}: pressing its Cancel", flush=True)
+            _press_in_front("Cancel")
+
+    def prompt_windows() -> None:
+        count = _process_window_count(TCC_PROMPT_PROCESS)
+        _, names = _process_windows(TCC_PROMPT_PROCESS)
+        counted = "which could not be counted" if count is None else f"{count} in all"
+        print(f"{TCC_PROMPT_PROCESS} then shows the windows {names}, {counted}", flush=True)
+        if count:
+            # Nothing here closes it: the step answers only a question it has read to be the
+            # app's, alone on the screen. What macOS was asked is taken back all the same.
+            left_on_screen.append(True)
+            print(
+                "note: a question of macOS's is left on screen, which the Documents step did not "
+                "answer and does not close",
+                flush=True,
+            )
+
+    def settings() -> None:
+        if settings_ran:
+            print(f"{SYSTEM_SETTINGS} ran before the Documents step, which leaves it", flush=True)
+        else:
+            _quit_by_name(SYSTEM_SETTINGS)
+
+    def aliases() -> None:
+        for alias, path in _roots(python).items():
+            if path == str(folder):
+                _app_host(python, ["roots", "remove", alias])
+
+    def remove() -> None:
+        removed, said = _in_documents(["/bin/rm", "-rf", str(folder)])
+        if not removed:
+            print(f"note: the Documents step could not remove {folder}: {said}", flush=True)
+
+    def answers() -> None:
+        if not (asked or left_on_screen):
+            return
+        pins = build_app.load_pins()
+        # The app's and its interpreter's: which of the two macOS asks for is not yet known
+        # (decisions/0002 §12). Whether tccutil does this with no root is not yet seen on a Mac.
+        for identifier in (pins.bundle_id, pins.runtime_id):
+            done = subprocess.run(
+                ["tccutil", "reset", DOCUMENTS_SERVICE, identifier],
+                capture_output=True,
+                text=True,
+                timeout=60,
+                check=False,
+            )
+            print(f"tccutil reset {DOCUMENTS_SERVICE} {identifier}: {_shown(done)}", flush=True)
+
+    parts = [("press the app's Cancel", cancel)] if pending else []
+    parts += [("end roots add", _stop_adding_a_folder)]
+    parts += [(f"read {TCC_PROMPT_PROCESS}'s windows", prompt_windows)] if added else []
+    parts += [
+        (f"quit {SYSTEM_SETTINGS}", settings),
+        ("remove the folder's alias", aliases),
+        ("remove the folder", remove),
+    ]
+    parts += [("take macOS's answer back", answers)] if added else []
+    try:
+        with _until(deadline):
+            for what, part in parts:
+                if deadline is not None and time.monotonic() >= deadline:
+                    print(f"note: {TIDY} had no time left to {what}", flush=True)
+                    continue
+                try:
+                    part()
+                except Exception as exc:  # each on its own: what stopped it is printed
+                    print(f"note: {TIDY} could not {what}: {exc}", flush=True)
+    except _OutOfTime as exc:
+        print(f"note: {TIDY} stopped: {exc}", flush=True)
+
+
 def check_ui(app: Path, checker: Checker, work: Path, require_driven: bool = False) -> None:
     """Open the app and drive it the way a user would, through System Events: read the note that
     says what it is for and where its menu is, when it opens with no confirmed pair (with one, it
-    shows none) and when it is opened again; read the menu; choose Pause Lucille and Resume Lucille,
-    and watch the host's pause flag; switch an ability on and off; add a folder through the Open
-    panel and the name dialog, and remove it from the Folders submenu; add the home folder, which
-    the app asks about first; choose the Data volume, and ``/`` through a link to it, which the app
-    refuses; open Activity, and the host's log in it (:func:`_drive_activity`); open the code window
-    and paste into it (:func:`_drive_code_window`); and, last, reset a settings file the host cannot
-    read (:func:`_drive_reset`). Each step is checked against the host's own state, on the app's own
-    profile. It uses the real HOME, and leaves the host as it found it. Where macOS does not let
-    System Events drive other apps (no accessibility permission), it says so and drives nothing;
-    with ``require_driven`` that is a failure. Screenshots go to ``<out>/check/screens``."""
+    shows none) and when it is opened again; read the menu; choose Pause Lucille and Resume
+    Lucille, and watch the host's pause flag; switch an ability on and off; add a folder through
+    the Open panel and the name dialog, and remove it from the Folders submenu; add the home
+    folder, which the app asks about first; choose the Data volume, and ``/`` through a link to it,
+    which the app refuses; open Activity, and the host's log in it (:func:`_drive_activity`); open
+    the code window and paste into it (:func:`_drive_code_window`); reset a settings file the host
+    cannot read (:func:`_drive_reset`); and, last, best effort and failing nothing, add a folder in
+    Documents, and answer macOS's question about it if one comes (:func:`_drive_documents_prompt`).
+    Each step but that last is checked against the host's own state, on the app's own profile. It
+    uses the real HOME, and leaves the host as it found it. Where macOS does not let System Events
+    drive other apps (no accessibility permission), it says so and drives nothing; with
+    ``require_driven`` that is a failure. Screenshots go to ``<out>/check/screens``."""
     name = build_app.load_pins().app_name
+    started = time.monotonic()
     screens = work / "screens"
     screens.mkdir(parents=True, exist_ok=True)
     flag = _profile_folder() / "state" / "paused"
@@ -4212,6 +4737,7 @@ def check_ui(app: Path, checker: Checker, work: Path, require_driven: bool = Fal
             _drive_activity(checker, python_in(app), screens)
             _drive_code_window(checker, python_in(app), screens, (out_log, err_log))
             _drive_reset(checker, python_in(app), screens)
+            _drive_documents_prompt(python_in(app), screens, started + UI_STEP_LIMIT - UI_STEP_END)
         elif require_driven:
             checker.expect(False, "System Events drove the menu, as --require-driven asks")
     finally:
@@ -4301,12 +4827,24 @@ def _placement_control(checker: Checker, screens: Path, require_driven: bool) ->
 
 
 def _refusing_copy(
-    copy: Path, checker: Checker, screens: Path, label: str, words: tuple[str, str], driven: bool
+    copy: Path,
+    checker: Checker,
+    screens: Path,
+    label: str,
+    words: tuple[str, str],
+    driven: bool,
+    *,
+    shows_folder: bool = False,
+    require_driven: bool = False,
 ) -> None:
     """Open ``copy``, which is not the copy at /Applications/<name>.app, with no other copy of
     the app running. For :data:`REFUSAL_WATCH` seconds it starts no host process on the app's
     profile and changes nothing in the profile's folder; it says ``words``, a title and a sentence
-    of its note, which offers only Quit; and Quit quits it. Screenshots ``0-placement-*``."""
+    of its note, which offers only Quit, and Quit quits it. With ``shows_folder``, for a copy the
+    app judges not to be in the Applications folder, the note offers only Show Applications Folder
+    and Quit, in either order, which is printed as read, and Show Applications Folder shows that
+    folder and quits it (:func:`_shows_applications_folder`). A button is pressed only once the
+    check has read it on the note. Screenshots ``0-placement-*``."""
     _stop_the_app(checker, "a copy of the app")
     folder = _profile_folder()
     before = _folder_state(folder)
@@ -4336,21 +4874,155 @@ def _refusing_copy(
             shown and _says(sentence), f"it says {title!r}, and {sentence!r}", f"{_texts()}"
         )
         worked, buttons = _window_list("name of every button")
+        offered = [SHOW_APPLICATIONS_FOLDER, QUIT_BUTTON] if shows_folder else [QUIT_BUTTON]
+        # In which order System Events lists them is not yet seen on a Mac (the Swift's is the
+        # build test's to hold): either is taken, and the first runs print it.
+        print(f"its note's buttons, as System Events lists them: {buttons}", flush=True)
+        right = worked and sorted(buttons) == sorted(offered)
         checker.expect(
-            worked and buttons == [QUIT_BUTTON],
-            f"its note offers only {QUIT_BUTTON!r}",
-            f"{buttons}",
+            right,
+            "its note offers only " + " and ".join(repr(button) for button in offered),
+            "" if right else f"{buttons}",
         )
-        worked, said = _press(QUIT_BUTTON)
-        checker.expect(
-            worked and _wait_until(lambda: not _running(APP_NAME), 15),
-            f"{QUIT_BUTTON} quits it",
-            said,
-        )
+        if shows_folder:
+            if worked and SHOW_APPLICATIONS_FOLDER in buttons:
+                _shows_applications_folder(checker, screens, label, require_driven)
+        elif worked and QUIT_BUTTON in buttons:
+            worked, said = _press(QUIT_BUTTON)
+            checker.expect(
+                worked and _wait_until(lambda: not _running(APP_NAME), 15),
+                f"{QUIT_BUTTON} quits it",
+                said,
+            )
     else:
         _screenshot(screens / f"0-placement-{label}.png")
         print(f"note: System Events cannot read the app's note here, so {title!r} was not read")
     _stop_the_app(checker, "it")
+
+
+def _shows_applications_folder(
+    checker: Checker, screens: Path, label: str, require_driven: bool
+) -> None:
+    """Press Show Applications Folder, which the note of a copy the app judges not to be in the
+    Applications folder has just been read to offer: the app quits, and the Finder shows a window
+    named Applications, whose windows the check prints. That window's name is not yet seen on a
+    Mac, so only with ``require_driven`` (macos-15) is it a gate; elsewhere it is printed. Where a
+    window of that name was open before, its name proves nothing, and the check says so. Each
+    Finder window then under a name that was not open before the press, whatever that name, is
+    closed by its own close button, and the check prints each one it closed; one under a name open
+    before is left open, and where the windows before the press could not be read, none is
+    closed."""
+    read, before = _process_windows(FINDER)
+    was_open = read and APPLICATIONS_WINDOW in before
+    worked, said = _press(SHOW_APPLICATIONS_FOLDER)
+    quits = worked and _wait_until(lambda: not _running(APP_NAME), 15)
+    checker.expect(
+        quits, f"{SHOW_APPLICATIONS_FOLDER} quits it", "" if quits else f"{said} {_texts()}"
+    )
+    shown, after = _windows_until(FINDER, APPLICATIONS_WINDOW, 15)
+    print(f"the Finder's windows after {SHOW_APPLICATIONS_FOLDER}: {after}", flush=True)
+    _screenshot(screens / f"0-placement-{label}-folder.png")
+    what = f"then a Finder window named {APPLICATIONS_WINDOW!r} shows the folder"
+    if was_open:
+        print(
+            f"note: a Finder window named {APPLICATIONS_WINDOW!r} was open before the press, so "
+            "its name proves nothing here",
+            flush=True,
+        )
+    if require_driven:
+        checker.expect(shown, what, "" if shown else f"before: {before}; after: {after}")
+    else:
+        print(f"recorded, not a gate: {'yes' if shown else 'no'}, {what}", flush=True)
+    # Read again: what a wait that timed out read last may be System Events' error. Where the
+    # windows open before could not be read, none is closed, since any might be someone's.
+    read_after, now = _process_windows(FINDER)
+    opened = [name for name in now if name not in before] if read and read_after else []
+    if not (read and read_after):
+        print(f"note: the Finder's windows could not be read, so none was closed: {now}")
+    for name in opened:
+        try:
+            _, said = _close_window_of(FINDER, name)
+        except ValueError as exc:  # a name AppleScript cannot quote here
+            said = str(exc)
+        print(f"closing the Finder's window {name!r}, which the press opened: {said}", flush=True)
+
+
+# How long the places check lets ``/usr/bin/open`` take, and the most one page can take by the
+# check's own limits: quitting System Settings (SIGTERM, 15 s, then SIGKILL, 10 s) before and
+# after, ``open``, 30 s for System Settings to start, 30 s for its window, then a System Events read
+# of up to 30 s begun just before those end and the one more read :func:`_wait_until` makes once
+# its time is up, and a screenshot of up to 30 s. CI gives the step more than two pages' worth
+# (tests/test_ci_workflow.py checks).
+OPEN_LIMIT: Final = 60
+PLACES_PAGE_LIMIT: Final = 25 + OPEN_LIMIT + 30 + 30 + 30 + 30 + 30 + 25
+
+
+def check_places(checker: Checker, work: Path, record_only: bool = False) -> None:
+    """The System Settings pages the app's one opener may show (:data:`SETTINGS_PANES`,
+    decisions/0002 §20), each opened by the check, not the app, with ``/usr/bin/open``, the way
+    the opener hands its URL to macOS: System Settings starts, and shows a window with the title
+    the page should have. It prints the names of System Settings' windows, so that the first run
+    on each macOS says what each page is called, and takes a screenshot, ``places-<n>.png``. Then
+    it quits System Settings by its name (:func:`_quit_by_name`), however the page went, and sends
+    it no key. System Settings is quit before each page too, so that the window read is the
+    page's: one already running when the check starts, someone's own, is quit, and the check says
+    so first. ``open`` is given :data:`OPEN_LIMIT` seconds. It needs no app. With ``record_only``
+    (the smoke jobs, on macOS 26 and 27) it prints what it would have checked, and fails nothing,
+    whatever it saw or whatever stopped it: the pages' spellings and titles are not yet seen on a
+    Mac, and macos-15 gates them. At worst, each page takes :data:`PLACES_PAGE_LIMIT` seconds."""
+    screens = work / "screens"
+    screens.mkdir(parents=True, exist_ok=True)
+    if _running(SYSTEM_SETTINGS):
+        print(
+            f"note: {SYSTEM_SETTINGS} was running before the places check, which quits it now",
+            flush=True,
+        )
+
+    def expect(ok: bool, what: str, detail: str) -> bool:
+        if record_only:
+            shown = f"\n{detail}" if detail else ""
+            print(f"recorded, not a gate: {'yes' if ok else 'no'}, {what}{shown}", flush=True)
+            return ok
+        return checker.expect(ok, what, detail)
+
+    for number, (url, title) in enumerate(SETTINGS_PANES.items(), start=1):
+        started = False
+        try:
+            _quit_by_name(SYSTEM_SETTINGS)
+            try:
+                done = subprocess.run(
+                    ["/usr/bin/open", url],
+                    capture_output=True,
+                    text=True,
+                    timeout=OPEN_LIMIT,
+                    check=False,
+                )
+                opened, said = done.returncode == 0, _shown(done)
+            except subprocess.TimeoutExpired:
+                opened, said = False, f"/usr/bin/open did not finish within {OPEN_LIMIT} s"
+            started = opened and _wait_until(lambda: bool(_running(SYSTEM_SETTINGS)), 30)
+            said = "" if started else said
+            if not expect(started, f"open {url} starts System Settings", said):
+                continue
+            shown, names = _windows_until(SYSTEM_SETTINGS, title, 30)
+            print(f"{url}: System Settings windows: {names}", flush=True)
+            _screenshot(screens / f"places-{number}.png")
+            expect(shown, f"System Settings shows {title!r}", "" if shown else f"{names}")
+        except Exception as exc:
+            if not record_only:
+                raise
+            print(f"recorded, not a gate: {url} could not be checked: {exc}", flush=True)
+        finally:
+            try:
+                quits = _quit_by_name(SYSTEM_SETTINGS)
+            except Exception as exc:
+                if not record_only:
+                    raise
+                print(f"recorded, not a gate: quitting System Settings: {exc}", flush=True)
+                quits = False
+            if started:
+                said = "" if quits else "it still ran 15 s after SIGTERM, and was killed"
+                expect(quits, "System Settings quits when asked by its name, with SIGTERM", said)
 
 
 def check_placement(app: Path, checker: Checker, work: Path, require_driven: bool = False) -> None:
@@ -4358,8 +5030,10 @@ def check_placement(app: Path, checker: Checker, work: Path, require_driven: boo
     control: that copy, opened, starts the host (:func:`_placement_control`). Then, one at a time
     with no other copy running, ``app`` (the build's copy, in a folder of its own), and a copy in
     /Applications named as the Finder's Keep Both names a second one, with the copy at the app's
-    own name there and then set aside: each says why it can't run, offers only Quit, starts no
-    host process and changes nothing in the app's profile (:func:`_refusing_copy`). Whatever
+    own name there and then set aside: each says why it can't run, starts no host process and
+    changes nothing in the app's profile (:func:`_refusing_copy`). The build's copy offers only
+    Show Applications Folder and Quit, and Show Applications Folder shows that folder in the
+    Finder and quits; the renamed copy, in that folder already, offers only Quit. Whatever
     happens, the copy set aside goes back and the renamed one is removed. Screenshots go to
     ``<out>/check/screens``."""
     screens = work / "screens"
@@ -4371,7 +5045,8 @@ def check_placement(app: Path, checker: Checker, work: Path, require_driven: boo
         return
     driven = _placement_control(checker, screens, require_driven)
     words = (PLACEMENT_TITLE, PLACEMENT_ELSEWHERE)
-    _refusing_copy(app, checker, screens, "elsewhere", words, driven)
+    outside = dict(shows_folder=True, require_driven=require_driven)
+    _refusing_copy(app, checker, screens, "elsewhere", words, driven, **outside)
     renamed = installed.with_name(f"{RENAMED_COPY}.app")
     # Beside the installed copy, so that it moves within /Applications, and not ending in .app, so
     # that macOS does not take it for an app.
@@ -5920,6 +6595,7 @@ CHECKS: Final = (
     "signature",
     "library-snapshot",
     "install",
+    "places",
     "placement",
     "launch",
     "ui",
@@ -5936,8 +6612,10 @@ CHECKS: Final = (
     "unpack-dmg",
 )
 # The checks that run with no app at ``<out>``: the disk image's, those that put the app there,
-# and the first ~/Library snapshot.
-NEEDS_NO_APP: Final = frozenset({"dmg", "unpack-dmg", "handoff-check", "library-snapshot"})
+# the first ~/Library snapshot, and the places check, which opens System Settings, never the app.
+NEEDS_NO_APP: Final = frozenset(
+    {"dmg", "unpack-dmg", "handoff-check", "library-snapshot", "places"}
+)
 # The checks that open the copy ``install`` put in /Applications, the only one that starts
 # anything (decisions/0002 §13), and refuse to run unless it is a copy of this build: one an
 # earlier build left there would answer for this one.
@@ -5965,6 +6643,11 @@ def _parser() -> argparse.ArgumentParser:
         action="store_true",
         help="ui, placement, pairing: fail if System Events cannot drive the app (macos-app "
         "passes this)",
+    )
+    parser.add_argument(
+        "--record-only",
+        action="store_true",
+        help="places: print what each page shows, and fail nothing (the smoke jobs pass this)",
     )
     copies = parser.add_mutually_exclusive_group()
     copies.add_argument(
@@ -6051,6 +6734,8 @@ def _run_check(args: argparse.Namespace, out: Path, checker: Checker) -> None:
         check_library_snapshot(args.to.resolve(), checker)
     elif check == "install":
         check_install(app, checker, replace=args.replace, restore=args.restore)
+    elif check == "places":
+        check_places(checker, work, args.record_only)
     elif check == "placement":
         check_placement(app, checker, work, args.require_driven)
     elif check == "launch":

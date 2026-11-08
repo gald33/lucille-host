@@ -116,21 +116,39 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
 /// What a copy that is not at /Applications/<name>.app says when it opens, when it is opened
 /// again, and from its menu's one line (decisions/0002 §3.3 and §13): why it can't run, and how
-/// to fix that. Its one button is Quit, through `Connection.quitChosen`, the app's one way to quit.
+/// to fix that. Every such copy the app judges not to be in the Applications folder offers Show
+/// Applications Folder first, the place `PlaceRules` gives it (decisions/0002 §20), which shows
+/// that folder in the Finder and quits; a renamed one, in that folder already, does not. Every such
+/// note offers Quit. Both quit through `Connection.quitChosen`, the app's one way to quit.
 @MainActor
 enum PlacementNote {
-    static func show() {
+    /// Show the note. `failed` is the place macOS could not open when it was offered: the note
+    /// then says so first, and offers Quit alone.
+    static func show(couldNotOpen failed: SystemPlace? = nil) {
         guard let note = ConnectionText.placement(Placement.current) else {
             return
         }
+        let place = failed == nil ? PlaceRules.place(for: Placement.current) : nil
+        let text = failed.map { PlaceText.couldNotOpen($0) + " " + note.text } ?? note.text
         Alerts.shared.show(key: "placement", front: true, {
             let alert = NSAlert()
             alert.alertStyle = .warning
             alert.messageText = note.title
-            alert.informativeText = note.text
+            alert.informativeText = text
+            if let place {
+                alert.addButton(withTitle: PlaceText.button(place))
+            }
             alert.addButton(withTitle: ConnectionText.quitButton)
             return alert
-        }, done: { _ in
+        }, done: { response in
+            if let place, response == .alertFirstButtonReturn {
+                if SystemPlaces.open(place) {
+                    Connection.shared.quitChosen()
+                } else {
+                    PlacementNote.show(couldNotOpen: place)
+                }
+                return
+            }
             Connection.shared.quitChosen()
         })
     }
