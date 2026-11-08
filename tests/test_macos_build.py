@@ -1629,7 +1629,30 @@ def test_hdiutil_gives_up_after_its_last_try(monkeypatch: pytest.MonkeyPatch) ->
     done = build_app.hdiutil(["create", "x.dmg"], sleep=waits.append)
     assert done.returncode == 1 and busy in done.stderr
     assert len(fake.calls) == build_app.HDIUTIL_TRIES
-    assert waits == [5 * n for n in range(1, build_app.HDIUTIL_TRIES)]
+    assert waits == list(build_app.HDIUTIL_WAITS)
+
+
+def test_hdiutil_waits_two_minutes_in_all_and_says_each_wait_at_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # On 2026-11-08 a macos-15 runner still refused `hdiutil verify` of a disk image it had just
+    # made after 5, 10 and 15 s of waits. The waits now grow and add up to two minutes, one try
+    # after each; and each wait is said, flushed, before it starts, so the job log's times for it
+    # are true.
+    assert build_app.HDIUTIL_WAITS == (5, 10, 15, 20, 30, 40)
+    assert sum(build_app.HDIUTIL_WAITS) == 120
+    assert build_app.HDIUTIL_TRIES == len(build_app.HDIUTIL_WAITS) + 1
+    busy = build_app.HDIUTIL_BUSY[1]
+    fake = _Hdiutil([(1, busy), (0, "")])
+    monkeypatch.setattr("subprocess.run", fake)
+    said: list[tuple[str, bool]] = []
+    monkeypatch.setattr(
+        "builtins.print",
+        lambda *parts, flush=False, **_: said.append((" ".join(map(str, parts)), flush)),
+    )
+    build_app.hdiutil(["verify", "x.dmg"], sleep=lambda seconds: None)
+    told = [(line, flushed) for line, flushed in said if line.startswith("hdiutil is busy")]
+    assert told == [(f"hdiutil is busy; trying again in 5 s (try 1 of 7): {busy}", True)]
 
 
 def test_every_hdiutil_call_goes_through_the_retry() -> None:
