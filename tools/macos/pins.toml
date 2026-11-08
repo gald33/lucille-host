@@ -44,5 +44,6 @@ commit = ""
 
 [signing]
 # Whether ad hoc builds are signed with the hardened runtime (decisions/0002 §7). Developer ID
-# builds always are.
-adhoc_hardened_runtime = true
+# builds always are. False since 2026-11-08: on a real Mac, dyld refused cryptography's extension
+# in an ad hoc build signed with it ("different Team IDs"), which §7 reads as library validation.
+adhoc_hardened_runtime = false

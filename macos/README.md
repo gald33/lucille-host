@@ -9,8 +9,10 @@ command line and files.
 
 This folder holds the Swift sources of a first, small version of Capsule; the scripts that build and check
 it are in [`tools/macos/`](../tools/macos/). It is not a release and it is not ready for anyone who is not
-developing it. It can connect this Mac to Lucille: you paste the code Lucille's page shows, then compare
-the number the app shows with the one on Lucille's page. While it is open, it keeps the host running.
+developing it. It is meant to connect this Mac to Lucille: you paste the code Lucille's page shows, then
+compare the number the app shows with the one on Lucille's page. So far that has worked only in CI: the
+one try on a real Mac, on 2026-11-08, failed ([Signing](#signing)), and a build without the hardened
+runtime is not yet tried there. While it is open, it keeps the host running.
 This way of connecting is only for the repository owner's own Mac, because anyone can make a code that
 passes the host's checks ([decisions/0002](../decisions/0002-macos-app.md) §11.1). Builds stay ad hoc
 signed, for that Mac. The disk image is not notarized, so macOS refuses to open it normally (see [The
@@ -787,10 +789,18 @@ module the host needs cannot go missing without a test failing.
 ## Signing
 
 The build signs every Mach-O file in the bundle, innermost first, then the interpreter, and then the
-bundle. The signature is ad hoc (`codesign -s -`), with the hardened runtime, as
-`tools/macos/pins.toml` asks, and no entitlements. It never uses `--deep` to sign. Each file gets its own
-identifier: the interpreter `com.lucille-ai.capsule.runtime`, and every other one
-`com.lucille-ai.capsule.` followed by its path in the bundle. CI checks the following on every build:
+bundle. The signature is ad hoc (`codesign -s -`), without the hardened runtime, as
+`tools/macos/pins.toml` asks, and with no entitlements. It never uses `--deep` to sign. Each file gets its
+own identifier: the interpreter `com.lucille-ai.capsule.runtime`, and every other one
+`com.lucille-ai.capsule.` followed by its path in the bundle.
+
+Ad hoc builds used to have the hardened runtime. On a real Mac (2026-11-08, macOS 26.2), dyld then
+refused cryptography's extension ("different Team IDs"), and the app failed to pair; that the refusal
+caused the failure is inferred from the app's error. GitHub's runners had loaded the same extension, so
+CI did not show this. [decisions/0002](../decisions/0002-macos-app.md) §7 has the run and the error.
+Whether an ad hoc build without the hardened runtime pairs on that Mac is not yet tested.
+
+CI checks the following on every build:
 
 - the app and every Mach-O file in it were signed ad hoc by the build, not only by the linker, with the
   identifier the build gave each and no Team ID, and the Mach-O files are exactly the expected ones;
@@ -799,14 +809,17 @@ identifier: the interpreter `com.lucille-ai.capsule.runtime`, and every other on
 - `codesign --verify --strict` passes on each Mach-O file in the bundle on its own. The interpreter and
   the dependencies' native libraries are under `Contents/Resources`, where the bundle's signature may
   seal them as plain files and not check their own signatures, so this is checked separately;
-- every Mach-O file has the hardened runtime flag, exactly when the pins ask for it;
-- the dependencies' native code (cffi, cryptography, and keyring's macOS backend) loads under the
-  hardened runtime with no entitlement: in the `macos-app` job on macOS 15, and in the smoke jobs on
-  macOS 26 and 27.
+- every Mach-O file has the hardened runtime flag exactly when the pins ask for it, so now none has,
+  and none has the `library-validation` flag either;
+- the dependencies' native code (cffi, cryptography, and keyring's macOS backend) loads with no
+  entitlement: in the `macos-app` job on macOS 15, and in the smoke jobs on macOS 26 and 27. The runners
+  also loaded it under the hardened runtime, which a real Mac then refused, so this check passing does
+  not show that a person's Mac loads it.
 
 A signature that macOS trusts needs a Developer ID certificate and notarization. This build does
-neither. Whether the native code still loads with no entitlement under a Developer ID signature is
-not tested yet, and nor is whether Apple's notary service accepts code under `Contents/Resources`.
+neither. Whether the native code loads with no entitlement under a Developer ID signature, with the
+hardened runtime, is not tested yet, and nor is whether Apple's notary service accepts code under
+`Contents/Resources`.
 There is reason to expect that it does: BeeWare's Briefcase signs the Mach-O files it puts under
 `Contents/Resources` the same way, inside out, and its apps are notarized.
 
@@ -828,7 +841,7 @@ that finds a problem fails its job. On `xcode-27` alone, a failed job does not f
 | `record` | `macos-app` | Each wheel `MANIFEST.json` names is one `uv.lock` pins (name, version, file, URL and sha256), and the host wheel's sha256 is the one the wheel step output. Each, the host's included, is found again and hashed; the installed distributions are exactly those; every file in `site-packages` is byte for byte a file of its wheel, apart from the installer's own files in each `*.dist-info` folder and the `.pyc` files the build writes, one beside each `.py` a `RECORD` lists (`bytecode` checks what they hold). Each Mach-O file is compared with its wheel's after `codesign --remove-signature` on a copy of each, and that comparison is reported in the job summary, not failed: SAME, or DIFFERENT with both sizes, or, where codesign fails on either copy, which copy and what it said, with nothing compared. |
 | `version` | `macos-app` | `Info.plist`'s two version strings follow the version rule, and `MANIFEST.json`, the bundled host's `--version` and the pins agree with them. |
 | `links` | `macos-app` | Every library a Mach-O file loads is macOS's own (`/usr/lib/`, `/System/Library/`), or resolves to a file that exists inside the bundle. `@loader_path`, `@executable_path` and `@rpath` are resolved as dyld resolves them, `..` included, so a path that climbs out of the bundle, and a library the build removed, both fail. Every run path must resolve inside the bundle. The log shows where each library and run path resolves. No Mach-O file needs a newer macOS than the app's minimum, and no file holds the build folder's path. The app's executable imports nothing on the lists above. |
-| `signature` | both | The signature is valid, on the app and on each Mach-O file in it; each is signed ad hoc as `bundle` says, with the hardened runtime exactly when the pins ask for it, and nothing has entitlements. It runs again as the last check, on the build's copy and on the copy in `/Applications` that `install` made, so a run that wrote into either fails it. |
+| `signature` | both | The signature is valid, on the app and on each Mach-O file in it; each is signed ad hoc as `bundle` says, with the hardened runtime exactly when the pins ask for it (and, when they do not, with no `library-validation` flag either), and nothing has entitlements. It runs again as the last check, on the build's copy and on the copy in `/Applications` that `install` made, so a run that wrote into either fails it. |
 | `wrapper` | both | On a writable copy of the app, the wrapper runs the host through a link to it from another folder, and never a runtime beside the link; it runs on the app's profile, `mac-app`, not on `default`. Neither it nor the interpreter run with the app's flags writes anything into the copy. Every `.pyc` the build wrote is valid, so even without `-B` none would be written again: the check first removes the copy's `.pyc` of `lucille_host/__init__.py`, which each run then compiles from source. The same run without `-B` writes a new one in its place, so the check can see a write. |
 | `host` | both | On the bundle made read-only (`chmod -R a-w`), the interpreter runs the host with the app's flags and nonsense in `PYTHONHOME` and `PYTHONPATH`: `--version`, through the wrapper too, `ops list`, a `roots` round trip, `pause` and `resume`, and the refusal of a home folder. The dependencies' native code loads. |
 | `probe` | both | Prints what `status`, `pair status`, `pair --code-stdin` and `run` do on the runner, run as the app runs them, under a fresh HOME and under the runner's own. It gates nothing. |
@@ -855,6 +868,9 @@ CI adds its folders under the home folder, outside the folders macOS protects, b
 best-effort folder in Documents, and it connects through a test harness with a hub of its own. These
 need a Mac and a person, and none has been done yet:
 
+- **Whether a person's Mac loads the native code of an ad hoc build without the hardened runtime, and
+  pairs.** The runners loaded, under the hardened runtime, the extension a real Mac then refused
+  ([Signing](#signing)), so a passing `host` or `pairing` check does not show it.
 - **A folder in Documents, Desktop or Downloads.** Whether macOS asks at all after the Open panel,
   whether its question names Capsule rather than `lucille-host-runtime` and shows Capsule's sentence on
   what it is for, and whether the folder is added after Allow. After Don't Allow, whether the app says

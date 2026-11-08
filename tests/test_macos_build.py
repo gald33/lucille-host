@@ -35,6 +35,8 @@ from tools.guards import ast_lint, macos_lint
 from tools.macos import build_app, check_app, payload
 
 PINS_TEXT = build_app.PINS_FILE.read_text(encoding="utf-8")
+# The signing pin's line as committed: ad hoc builds without the hardened runtime.
+SIGNING_PIN = "adhoc_hardened_runtime = false"
 CONSTRAINTS_TEXT = build_app.BUILD_CONSTRAINTS.read_text(encoding="utf-8")
 SWIFT_FILES = sorted(build_app.SWIFT_DIR.glob("*.swift"))
 WORKFLOW = build_app.REPO_ROOT / ".github" / "workflows" / "ci.yml"
@@ -89,8 +91,9 @@ def test_the_pins_are_well_formed() -> None:
         ('commit = ""', 'commit = "main"'),
         ('commit = ""', 'commit = "4466aba"'),
         ('commit = ""', "commit = false"),
-        ("adhoc_hardened_runtime = true", 'adhoc_hardened_runtime = "yes"'),
-        ("adhoc_hardened_runtime = true", "adhoc_hardened_runtime = 1"),
+        (SIGNING_PIN, 'adhoc_hardened_runtime = "yes"'),
+        (SIGNING_PIN, "adhoc_hardened_runtime = 1"),
+        (SIGNING_PIN, "adhoc_hardened_runtime = 0"),
         ("[signing]", "[signing]\nnotarize = false"),
         ("[ripgrep]", '[extra]\nx = "y"\n\n[ripgrep]'),
         ('name = "Capsule"', 'name = "Capsule/Capsule"'),
@@ -120,8 +123,27 @@ def test_a_pins_file_without_a_table_is_refused() -> None:
     # A pin the build reads, with no other change, still parses: the refusals above are each
     # for the one change they make.
     assert build_app.parse_pins(PINS_TEXT.replace('commit = ""', 'commit = "' + "a" * 40 + '"'))
-    off = build_app.parse_pins(PINS_TEXT.replace("= true", "= false"))
-    assert off.adhoc_hardened_runtime is False
+    # The signing pin takes either value: true is still a path the build can take.
+    assert SIGNING_PIN in PINS_TEXT
+    assert build_app.parse_pins(PINS_TEXT).adhoc_hardened_runtime is False
+    on = PINS_TEXT.replace(SIGNING_PIN, "adhoc_hardened_runtime = true", 1)
+    assert build_app.parse_pins(on).adhoc_hardened_runtime is True
+
+
+def test_ad_hoc_builds_are_signed_without_the_hardened_runtime() -> None:
+    # On the maintainer's Mac (2026-11-08, macOS 26.2), the ad hoc build of ci run 42509782273,
+    # signed with the hardened runtime, could not load cryptography's Rust extension: dyld
+    # refused it ("mapping process and mapped file (non-platform) have different Team IDs").
+    # The app then failed to pair; that this refusal caused it is inferred from the app's error.
+    # In that run the macos-15 runner had loaded the same build, so CI did not show this.
+    # decisions/0002 §7 records it. Set the pin back only on new evidence from a Mac.
+    assert build_app.load_pins().adhoc_hardened_runtime is False
+    assert re.findall(r"^adhoc_hardened_runtime = .*$", PINS_TEXT, re.MULTILINE) == [SIGNING_PIN]
+    decision = (build_app.REPO_ROOT / "decisions" / "0002-macos-app.md").read_text(encoding="utf-8")
+    section = decision.split("\n## 7. ", 1)[1].split("\n## 8. ", 1)[0]
+    assert "run 42509782273" in section
+    assert "different Team IDs" in section
+    assert SIGNING_PIN in " ".join(section.split())
 
 
 def _host_wheel(folder: Path) -> tuple[Path, str]:
@@ -2734,6 +2756,9 @@ def test_signing_order(tmp_path: Path, hardened: bool) -> None:
         assert not {"--deep", "--prefix", "--entitlements", "--timestamp"} & set(argv)
         has_runtime = "--options" in argv and argv[argv.index("--options") + 1] == "runtime"
         assert has_runtime is hardened
+        # Without the hardened runtime, no option at all: codesign's `library` option would turn
+        # library validation on by itself (from memory of codesign's manual, not read here).
+        assert argv.count("--options") == int(hardened)
 
 
 def test_the_signing_identifier_never_takes_codesigns_derived_name(tmp_path: Path) -> None:

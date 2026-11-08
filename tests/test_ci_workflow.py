@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import contextlib
 import copy
+import dataclasses
 import hashlib
 import io
 import json
@@ -689,6 +690,31 @@ def test_the_probe_runs_after_the_host_check_on_the_read_only_bundle() -> None:
         assert made_readonly < host < probe[0], job
 
 
+def test_the_mac_app_jobs_print_system_integrity_protection_state() -> None:
+    # A real Mac refused the ad hoc build's cryptography extension, where the macos-app and
+    # macos-smoke runners had loaded it (decisions/0002 §7). Why they differ is not established,
+    # so those two jobs print `csrutil status` after `sw_vers` and `uname -m`. It is printed,
+    # never a gate. The `test` job also runs on macOS and does not print it.
+    doc = _ci()
+    shown = {"macos-app": "Show the machine and the tools", "macos-smoke": "Show the machine"}
+    for job, name in shown.items():
+        (step,) = [step for step in _steps(doc, job) if step.get("name") == name]
+        assert "if" not in step, job
+        lines = [line.strip() for line in str(step["run"]).splitlines()]
+        assert lines[:3] == ["sw_vers", "uname -m", "csrutil status || true"], job
+    found = [
+        (job_id, step.get("name"))
+        for job_id, job in doc["jobs"].items()
+        for step in job.get("steps", [])
+        if "csrutil" in str(step.get("run", ""))
+    ]
+    assert found == list(shown.items())
+    for job_id, name in found:
+        (step,) = [step for step in _steps(doc, job_id) if step.get("name") == name]
+        uses = [line.strip() for line in str(step["run"]).splitlines() if "csrutil" in line]
+        assert uses == ["csrutil status || true"], job_id
+
+
 def test_ci_steps_take_github_values_only_through_the_environment() -> None:
     doc = _ci()
     for job_id, job in doc["jobs"].items():
@@ -711,6 +737,9 @@ def test_ci_actions_are_pinned_to_the_known_commits() -> None:
 # ---------------------------------------------------------------------------------------------
 # Signatures and the Mach-O files
 
+# The interpreter's signature as ad hoc builds had it while they carried the hardened runtime
+# (the pin true). The bundle check (hardened=None) ignores the flag; with the committed pin,
+# false, the signature check wants _codesign_plain() instead.
 CODESIGN_GOOD = """\
 Executable=/Users/runner/work/x/build/macos/Capsule.app/Contents/Resources/runtime/bin/lucille-host-runtime
 Identifier=com.lucille-ai.capsule.runtime
@@ -729,15 +758,27 @@ def _codesign(old: str, new: str) -> str:
     return CODESIGN_GOOD.replace(old, new)
 
 
+def _codesign_plain(flags: str = "flags=0x2(adhoc)") -> str:
+    # The same signature without the hardened runtime, as the committed pin wants it. That
+    # codesign then shows `flags=0x2(adhoc)` and no Runtime Version line is from memory, not seen
+    # on a Mac; the check reads only the names in the brackets.
+    return _codesign("flags=0x10002(adhoc,runtime)", flags).replace("Runtime Version=15.0.0\n", "")
+
+
 def test_codesign_problems() -> None:
     runtime = PINS.runtime_id
     assert check_app.codesign_problems(CODESIGN_GOOD, identifier=runtime, hardened=True) == []
     assert check_app.codesign_problems(CODESIGN_GOOD, identifier=runtime, hardened=None) == []
     assert check_app.codesign_problems(CODESIGN_GOOD, identifier=runtime, hardened=False)
-    plain = _codesign("(adhoc,runtime)", "(adhoc)")
+    plain = _codesign_plain()
     assert check_app.codesign_problems(plain, identifier=runtime, hardened=False) == []
     assert check_app.codesign_problems(plain, identifier=runtime, hardened=True)
     assert check_app.codesign_problems(CODESIGN_GOOD, identifier=PINS.bundle_id, hardened=None)
+    # Library validation without the hardened runtime is what the ad hoc pin keeps out.
+    library = _codesign_plain("flags=0x2002(adhoc,library-validation)")
+    problems = check_app.codesign_problems(library, identifier=runtime, hardened=False)
+    assert problems and all("library validation" in problem for problem in problems), problems
+    assert check_app.codesign_problems(library, identifier=runtime, hardened=None) == []
 
 
 @pytest.mark.parametrize(
@@ -814,6 +855,44 @@ def test_each_mach_o_file_has_the_identifier_the_build_gave_it(tmp_path: Path) -
     identifier = check_app.expected_identifier(app, rust, PINS)
     assert identifier == build_app.signing_identifier(app, rust, PINS)
     assert identifier.startswith(PINS.bundle_id + ".")
+
+
+@pytest.mark.parametrize("hardened", [True, False])
+def test_the_signature_check_holds_every_signed_file_to_the_pin(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, hardened: bool
+) -> None:
+    # check_signature is the one check of the pin on a built bundle. With codesign stubbed, each
+    # file it shows with the other state of the runtime flag (the bundle, which stands for the
+    # app's executable, included) is one failure naming that file, and none is no failure.
+    pins = dataclasses.replace(PINS, adhoc_hardened_runtime=hardened)
+    monkeypatch.setattr(check_app.build_app, "load_pins", lambda: pins)
+    app = tmp_path / f"{pins.app_name}.app"
+    for rel in EXPECTED_MACHO:
+        (app / rel).parent.mkdir(parents=True, exist_ok=True)
+        (app / rel).write_bytes(b"\xcf\xfa\xed\xfe" + bytes(28))
+    signed = check_app._signed_files(app, pins)
+    assert signed[0] == app and len(signed) == len(EXPECTED_MACHO)
+    odd: list[Path] = []
+
+    def run(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        path = Path(argv[-1])
+        if argv[:3] != ["codesign", "--display", "--verbose=2"]:
+            return subprocess.CompletedProcess(argv, 0, "", "")
+        text = CODESIGN_GOOD if hardened is not (path in odd) else _codesign_plain()
+        named = f"Identifier={check_app.expected_identifier(app, path, pins)}"
+        text = text.replace(f"Identifier={PINS.runtime_id}", named)
+        return subprocess.CompletedProcess(argv, 0, "", text)
+
+    monkeypatch.setattr("subprocess.run", run)
+    checker = check_app.Checker()
+    check_app.check_signature(app, checker)
+    assert checker.failures == []
+    for path in signed:
+        odd[:] = [path]
+        checker = check_app.Checker()
+        check_app.check_signature(app, checker)
+        assert len(checker.failures) == 1, path
+        assert checker.failures[0].startswith(f"{path.relative_to(app.parent)} is signed ad hoc")
 
 
 def test_the_checks_run_the_host_with_the_apps_flags(tmp_path: Path) -> None:
