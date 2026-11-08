@@ -530,7 +530,8 @@ def test_the_alias_vectors_are_valid_host_aliases() -> None:
 
 
 # What a Swift file may import. The logic files run in the self-test without a screen, so they
-# use Foundation alone; the app's other files add AppKit and SwiftUI, and nothing else.
+# use Foundation alone; the app's other files add AppKit and SwiftUI, and nothing else but the
+# one exception below.
 _SWIFT_IMPORT = re.compile(
     r"^\s*(?:@\w+\s+)*import\s+(?:(?:typealias|struct|class|enum|protocol|let|var|func)\s+)?"
     r"(\w+)",
@@ -538,6 +539,10 @@ _SWIFT_IMPORT = re.compile(
 )
 _LOGIC_IMPORTS = {"Foundation", "Darwin", "Glibc"}
 _APP_IMPORTS = _LOGIC_IMPORTS | {"AppKit", "SwiftUI"}
+# One file may import one framework more, by name: the login item's (decisions/0002 §9).
+_IMPORT_EXCEPTIONS: dict[str, frozenset[str]] = {
+    "LoginItem.swift": frozenset({"ServiceManagement"}),
+}
 
 
 def _swift_imports(text: str) -> set[str]:
@@ -568,9 +573,21 @@ def test_the_self_test_compiles_every_file_that_draws_nothing() -> None:
 
 
 def test_the_app_imports_only_apples_ui_frameworks() -> None:
+    # One named exception: LoginItem.swift, and no other file, imports ServiceManagement, for the
+    # login item. It is not added to _APP_IMPORTS, so no other file may; and LoginItem.swift is
+    # not a logic file, so the self-test, which runs without a screen, never registers anything.
     assert SWIFT_FILES
+    names = {path.name for path in SWIFT_FILES}
+    assert set(_IMPORT_EXCEPTIONS) <= names, sorted(set(_IMPORT_EXCEPTIONS) - names)
     for path in SWIFT_FILES:
-        assert _swift_imports(path.read_text(encoding="utf-8")) <= _APP_IMPORTS, path.name
+        imports = _swift_imports(path.read_text(encoding="utf-8"))
+        allowed = _IMPORT_EXCEPTIONS.get(path.name, frozenset())
+        assert imports <= _APP_IMPORTS | allowed, path.name
+        assert allowed <= imports, path.name
+    assert _swift_imports(_swift("LoginItem.swift")) == {"Foundation", "ServiceManagement"}
+    assert "LoginItem.swift" not in check_app.LOGIC_SOURCES
+    assert "ServiceManagement" not in _APP_IMPORTS
+    assert "ServiceManagement" not in _swift_imports(_SELF_TEST.read_text(encoding="utf-8"))
 
 
 # What the Swift sources may not do (start a process other than the bundled runtime, use the
@@ -1612,7 +1629,30 @@ def test_hdiutil_gives_up_after_its_last_try(monkeypatch: pytest.MonkeyPatch) ->
     done = build_app.hdiutil(["create", "x.dmg"], sleep=waits.append)
     assert done.returncode == 1 and busy in done.stderr
     assert len(fake.calls) == build_app.HDIUTIL_TRIES
-    assert waits == [5 * n for n in range(1, build_app.HDIUTIL_TRIES)]
+    assert waits == list(build_app.HDIUTIL_WAITS)
+
+
+def test_hdiutil_waits_two_minutes_in_all_and_says_each_wait_at_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # On 2026-11-08 a macos-15 runner still refused `hdiutil verify` of a disk image it had just
+    # made after 5, 10 and 15 s of waits. The waits now grow and add up to two minutes, one try
+    # after each; and each wait is said, flushed, before it starts, so the job log's times for it
+    # are true.
+    assert build_app.HDIUTIL_WAITS == (5, 10, 15, 20, 30, 40)
+    assert sum(build_app.HDIUTIL_WAITS) == 120
+    assert build_app.HDIUTIL_TRIES == len(build_app.HDIUTIL_WAITS) + 1
+    busy = build_app.HDIUTIL_BUSY[1]
+    fake = _Hdiutil([(1, busy), (0, "")])
+    monkeypatch.setattr("subprocess.run", fake)
+    said: list[tuple[str, bool]] = []
+    monkeypatch.setattr(
+        "builtins.print",
+        lambda *parts, flush=False, **_: said.append((" ".join(map(str, parts)), flush)),
+    )
+    build_app.hdiutil(["verify", "x.dmg"], sleep=lambda seconds: None)
+    told = [(line, flushed) for line, flushed in said if line.startswith("hdiutil is busy")]
+    assert told == [(f"hdiutil is busy; trying again in 5 s (try 1 of 7): {busy}", True)]
 
 
 def test_every_hdiutil_call_goes_through_the_retry() -> None:
@@ -2952,9 +2992,9 @@ def test_compare_reports_same_different_and_failed(
     assert "**FAILED**" in capsys.readouterr().out
 
 
-# The pairing screen, run supervision, Activity and the placement rule: the Foundation-only files
-# they are built from, and the rules those keep. The self-test (macos/Tests/SelfTest.swift) checks
-# their behaviour on a Mac.
+# The pairing screen, run supervision, Activity, the placement rule, Set Up and the login item's
+# rules: the Foundation-only files they are built from, and the rules those keep. The self-test
+# (macos/Tests/SelfTest.swift) checks their behaviour on a Mac.
 SPEC_CLI = build_app.REPO_ROOT / "spec" / "CLI.md"
 NEW_LOGIC = (
     "HostJSON.swift",
@@ -2964,6 +3004,7 @@ NEW_LOGIC = (
     "RequestLog.swift",
     "Placement.swift",
     "Setup.swift",
+    "LoginRules.swift",
 )
 
 
@@ -3782,8 +3823,9 @@ _RESET_VERB = '["--json", "policy", "reset"]'
 def test_reset_settings_is_offered_only_while_the_policy_is_invalid() -> None:
     # Reset Settings… is shown only while the settings file is invalid: in the note behind the
     # menu's problem line, when its explanation is the host's `policy_invalid` refusal
-    # (`offersReset`, set in one place), and in the note behind run's Needs attention line for
-    # `policy` `invalid`. No menu item offers it, and no other note.
+    # (`offersReset`, set in one place), in the note behind run's Needs attention line for
+    # `policy` `invalid`, and, while connected, as an item of the Settings menu, behind the same
+    # flag (decisions/0002 §14). No other item offers it, and no other note.
     words = _swift("ConnectionText.swift")
     text = _swift("HostText.swift")
     model = _swift("HostModel.swift")
@@ -3791,7 +3833,12 @@ def test_reset_settings_is_offered_only_while_the_policy_is_invalid() -> None:
     assert 'static let resetSettingsItem = "Reset Settings…"' in words
     for path in SWIFT_FILES:
         source = path.read_text(encoding="utf-8")
-        if path.name not in ("ConnectionText.swift", "HostModel.swift", "Connection.swift"):
+        if path.name not in (
+            "ConnectionText.swift",
+            "HostModel.swift",
+            "Connection.swift",
+            "MenuBarApp.swift",
+        ):
             assert "resetSettingsItem" not in source, path.name
             assert "resetSettingsChosen" not in source, path.name
         if path.name != "ConnectionText.swift":
@@ -3826,9 +3873,15 @@ def test_reset_settings_is_offered_only_while_the_policy_is_invalid() -> None:
     assert "actions = [{ HostModel.shared.resetSettingsChosen() }, {}]" in branch_body
     assert connection.count("resetSettingsItem") == 1
     assert connection.count("resetSettingsChosen()") == 1
-    # Not a menu item (decisions/0002 puts it under Settings, which a later change adds, with
-    # Open at Login).
-    assert "reset" not in _swift("MenuBarApp.swift").lower()
+    # The Settings menu's item, with Open at Login: once, behind the problem line's own flag, and
+    # running the same action (test_open_at_login_is_a_switch_in_a_settings_menu_while_connected).
+    menu = _flat(_swift("MenuBarApp.swift"))
+    assert menu.count("ConnectionText.resetSettingsItem") == 1
+    assert menu.count("resetSettingsChosen()") == 1
+    assert (
+        "if model.problem?.offersReset == true {"
+        " Button(ConnectionText.resetSettingsItem) { model.resetSettingsChosen() } }"
+    ) in menu
 
 
 def test_reset_settings_asks_first_then_runs_policy_reset() -> None:
@@ -4032,8 +4085,11 @@ def test_the_restore_list_goes_through_the_same_gates() -> None:
     assert "self.feedSetUp(.itemDone(row: row))" in restoring
     assert restoring.index("HostModel.shared.restore(") < restoring.index(".itemDone(")
     assert connection.count("HostModel.shared.restore(") == 1
-    # The flow's only effect that adds anything is `restore`, and it restores only a row the
-    # user checked that has a box: checkSetup and checkSetupWalk hold it to that.
+    # The flow's only effect that adds anything back is `restore`, and it restores only a row
+    # the user checked that has a box: checkSetup and checkSetupWalk hold it to that. Its one
+    # other effect that widens anything, `registerLoginItem`, asks macOS to open the app at login,
+    # only from Done with Ready's box checked
+    # (test_ready_asks_to_open_at_login_and_only_done_registers).
     flow = _swift("Setup.swift")
     # The whole disk gets no box by its spelling, whatever the set-aside policy marked it, and
     # by the disk for a folder marked broad; an ordinary folder is not read.
@@ -4050,7 +4106,7 @@ def test_the_restore_list_goes_through_the_same_gates() -> None:
     )
     assert effects is not None
     cases = re.findall(r"^        case (\w+)", effects.group(1), re.MULTILINE)
-    assert cases == ["readPrevious", "show", "restore", "note", "close"]
+    assert cases == ["readPrevious", "show", "restore", "note", "registerLoginItem", "close"]
 
 
 def test_set_up_opens_once_they_match_here_is_connected() -> None:
@@ -4265,10 +4321,13 @@ def test_the_pairing_check_sets_up_after_connected() -> None:
     # by itself, within 60 s: with no Add back page, since the harness paired through the
     # command line, so the app saw no policy_reset; on Folders, which lists none; then on What
     # Lucille may do, files.sha256's switch shows it off, is turned on (`ops list --json` then says
-    # it is enabled, and the switch shows it on), and off again; then Ready, and Done closes it.
-    # A Set Up check that fails does not stop the pairing check: it closes the window and turns
-    # files.sha256 off, and needs only those two facts, so that the fingerprint step's request
-    # while it is off still meets not_enabled (M18), and the later steps still run.
+    # it is enabled, and the switch shows it on), and off again; then Ready, whose box "Open
+    # <name> when you log in" is checked and which says macOS's notice; and Done closes it, after
+    # which the app says on standard error which state macOS gave its login item, and its words
+    # agree with that state (login_after_done). A Set Up check that fails does not stop the
+    # pairing check: it closes the window and any note about opening at login, and turns
+    # files.sha256 off, and needs only those facts, so that the fingerprint step's request while
+    # it is off still meets not_enabled (M18), and the later steps still run.
     source = _CHECK_APP.read_text(encoding="utf-8")
     go = _python_function(source, "go")
     assert (
@@ -4279,18 +4338,25 @@ def test_the_pairing_check_sets_up_after_connected() -> None:
     outer = _python_function(source, "set_up_after_connected")
     walked = outer.index("self.set_up_pages()")
     closed = outer.index("_close_window(SETUP_TITLE)")
+    noted = outer.index("_close_login_note()")
     disabled = outer.index('self.host("--json", "ops", "disable", "files.sha256")')
     needed = outer.index("self.need(")
-    assert walked < closed < disabled < needed
+    assert walked < closed < noted < disabled < needed
     assert outer.count("self.need(") == 1
-    assert (
-        'self.op_enabled("files.sha256") is False and SETUP_TITLE not in _window_names()'
-        in outer[needed:]
-    )
+    assert 'off = self.op_enabled("files.sha256") is False' in outer[disabled:needed]
+    assert "clear = SETUP_TITLE not in _window_names() and _login_note() is None" in outer
+    assert "self.need(\n            off and clear," in outer
+    # Its detail is made only when it failed.
+    assert 'detail = "" if off and clear else ' in outer
     step = _python_function(source, "set_up_pages")
     # Each Set Up fact is expected, and the walk returns at the first one the rest needs: none
     # stops the pairing check.
     assert "self.need(" not in step and "_Stop" not in step
+    # Done's detail, which reads the app's windows through System Events, only when Done failed.
+    assert (
+        'closed, "Done closes the Set Up window", "" if closed else f"{said} {_window_names()}"'
+        in step
+    )
     opened = step.index("_wait_until(lambda: SETUP_TITLE in _window_names(), 60)")
     folders = step.index("_says(SETUP_FOLDERS)")
     assert opened < folders < step.index("not _says(SETUP_ADD_BACK)")
@@ -4310,6 +4376,20 @@ def test_the_pairing_check_sets_up_after_connected() -> None:
     assert step.rindex("SETUP_TITLE not in _window_names()") > step.index("_press(SETUP_DONE)")
     for shot in ("p-setup-folders.png", "p-setup-abilities.png", "p-setup-ready.png"):
         assert shot in step, shot
+    # Ready's box, checked, and macOS's notice in words; then Done, and what came of it.
+    ready = step.index("_says(SETUP_READY)")
+    box = step.index("box = _checked(OPEN_AT_LOGIN_BOX)")
+    notice = step.index("_says(OPEN_AT_LOGIN_NOTICE)")
+    mark = step.index("before = len(self.stderr_now())")
+    done = step.index("_press(SETUP_DONE)")
+    assert ready < box < notice < mark < done < step.index("self.login_after_done(before)")
+    assert 'box == "1"' in step
+    after = _python_function(source, "login_after_done")
+    assert "_login_state(self.stderr_now()[before:])" in after
+    assert "_dump_login_items()" in after and "LOGIN_NOTE_AFTER_DONE[state]" in after
+    assert "p-setup-after-done.png" in after
+    # Open Login Items Settings would open System Settings: the checks never press it.
+    assert "_press(OPEN_LOGIN_ITEMS" not in source and "_choose(OPEN_LOGIN_ITEMS" not in source
     enabled = _python_function(source, "op_enabled")
     assert 'self.host("--json", "ops", "list")' in enabled
     assert '"enabled"' in enabled
@@ -4350,9 +4430,30 @@ def test_the_pairing_check_reads_an_operation_as_the_host_writes_it(
     assert check_app._PairingCheck.op_enabled(stand_in, "files.sha256") is None
 
 
+# What the Set Up step needs once it has run, whatever failed in it.
+_SET_UP_PUT_RIGHT = (
+    "after Set Up, files.sha256 is off, and no Set Up window and no note about opening at login"
+    " is open"
+)
+
+
+def _login_note_buttons() -> dict[str, str]:
+    """The button that closes each note about opening at login and does nothing else, by the
+    note's title."""
+    return {check_app.NEEDS_APPROVAL_TITLE: check_app.NOT_NOW, check_app.LOGIN_FAILED_TITLE: "OK"}
+
+
 class _SetUpOnAMac:
     """The Set Up window as System Events would see it, and the host's files.sha256, for running
-    the pairing check's Set Up step here. Each flag makes one thing go wrong."""
+    the pairing check's Set Up step here. Each flag makes one thing go wrong.
+
+    Ready's box "Open <name> when you log in" is checked unless ``box_on`` is false. Done with it
+    checked asks macOS to open the app at login: the app writes ``login item: <login_state>`` on
+    standard error (nothing when ``login_state`` is None), and shows the note that goes with that
+    state (none while ``enabled``), or, with ``login_words`` false, the wrong one. The note's Not
+    Now, or OK, closes it unless ``note_closes`` is false. Ready says macOS's notice unless
+    ``notice`` is false. Every body sent to System Events is kept in ``sent``. Its words are read
+    only at run time: an instance is made when this module is imported."""
 
     def __init__(
         self,
@@ -4366,8 +4467,26 @@ class _SetUpOnAMac:
         switch_moves: bool = True,
         offered: bool = False,
         stderr: str = "",
+        box_on: bool = True,
+        login_state: str | None = "enabled",
+        login_words: bool = True,
+        note_closes: bool = True,
+        notice: bool = True,
     ) -> None:
         self.page: str | None = "folders" if opens else None
+        self.box_on = box_on
+        self.notice = notice
+        self.sent: list[str] = []
+        self.login_state = login_state
+        self.login_words = login_words
+        self.note_closes = note_closes
+        # The note about opening at login that is up, by its title; the app's standard error,
+        # once the runner has made it; every button pressed; and how often the login items were
+        # printed.
+        self.note: str | None = None
+        self.log: Path | None = None
+        self.pressed: list[str] = []
+        self.dumps = 0
         self.switch = drawn_on
         self.op_on = False
         self.host_turns_on = host_turns_on
@@ -4391,6 +4510,7 @@ class _SetUpOnAMac:
     def system_events(self, body: str, timeout: float = 30) -> tuple[bool, str]:
         """What the step reads through System Events beyond the names it reads above: the menu,
         and every window, which only a failure's detail reads."""
+        self.sent.append(body)
         if "name of every menu item of" in body:
             self.menu_reads += 1
             return True, "\n".join(self.menu)
@@ -4401,25 +4521,53 @@ class _SetUpOnAMac:
         return False, f"not on a Mac: {body!r}"
 
     def texts(self) -> list[str]:
-        return {
-            "folders": [check_app.SETUP_FOLDERS, check_app.SETUP_NO_FOLDERS],
-            "abilities": [check_app.SETUP_ABILITIES],
-            "ready": [check_app.SETUP_READY],
-            None: [],
-        }[self.page]
+        if self.page == "ready":
+            notice = f"{check_app.OPEN_AT_LOGIN_NOTICE} That is expected."
+            shown = [check_app.SETUP_READY, check_app.OPEN_AT_LOGIN_BOX]
+            shown += [notice] if self.notice else []
+        else:
+            shown = {
+                "folders": [check_app.SETUP_FOLDERS, check_app.SETUP_NO_FOLDERS],
+                "abilities": [check_app.SETUP_ABILITIES],
+                None: [],
+            }[self.page]
+        return shown + ([self.note] if self.note is not None else [])
 
     def says(self, words: str) -> bool:
         return any(words in text for text in self.texts())
 
     def press(self, name: str) -> tuple[bool, str]:
+        self.pressed.append(name)
         if name == check_app.SETUP_CONTINUE and self.page in ("folders", "abilities"):
             self.page = {"folders": "abilities", "abilities": "ready"}[self.page]
             return True, "pressed"
         if name == check_app.SETUP_DONE and self.page == "ready":
             if self.done_closes:
                 self.page = None
+                self.done()
+            return True, "pressed"
+        if self.note is not None and _login_note_buttons()[self.note] == name:
+            if self.note_closes:
+                self.note = None
             return True, "pressed"
         return False, f"no button named {name}"
+
+    def done(self) -> None:
+        """Done, with Ready's box checked: the app asks macOS to open it at login, says on
+        standard error which state macOS then gives, and shows the note for that state."""
+        if not self.box_on or self.login_state is None:
+            return
+        assert self.log is not None
+        said = self.log.read_text(encoding="utf-8")
+        self.log.write_text(said + f"login item: {self.login_state}\n", encoding="utf-8")
+        right = check_app.LOGIN_NOTE_AFTER_DONE[self.login_state]
+        if self.login_words:
+            self.note = right
+        else:
+            self.note = check_app.NEEDS_APPROVAL_TITLE if right is None else None
+
+    def dump(self) -> None:
+        self.dumps += 1
 
     def toggle(self, name: str) -> tuple[bool, str]:
         if self.page != "abilities" or name != check_app.ABILITY_TITLES["files.sha256"]:
@@ -4434,6 +4582,8 @@ class _SetUpOnAMac:
         return True, "clicked"
 
     def checked(self, name: str) -> str:
+        if self.page == "ready" and name == check_app.OPEN_AT_LOGIN_BOX:
+            return "1" if self.box_on else "0"
         if self.page != "abilities" or name != check_app.ABILITY_TITLES["files.sha256"]:
             return "absent"
         return "1" if self.switch else "0"
@@ -4472,11 +4622,15 @@ def _set_up_step_on(
         monkeypatch.setattr(check_app, name, fake)
     monkeypatch.setattr(check_app, "_screenshot", lambda path: mac.shots.append(path.name))
     monkeypatch.setattr(check_app, "_wait_until", lambda test, seconds: test())
+    monkeypatch.setattr(check_app, "_value_within", lambda get, seconds: get())
+    # Never sudo here. raising=False: the stand-in is set whether or not the check has the name.
+    monkeypatch.setattr(check_app, "_dump_login_items", mac.dump, raising=False)
     check = object.__new__(check_app._PairingCheck)
     check.checker = check_app.Checker()
     check.screens = tmp_path
     stderr = tmp_path / "pairing-pairing-stderr.txt"
     stderr.write_text(mac.stderr, encoding="utf-8")
+    mac.log = stderr
     check.logs = [stderr]
     check.op_enabled = mac.op_enabled  # type: ignore[method-assign]
     check.host = mac.host  # type: ignore[method-assign]
@@ -4495,8 +4649,29 @@ def test_the_set_up_step_passes_on_an_app_that_works(
     assert (mac.page, mac.op_on, mac.disabled_by_cli, mac.closed_by_button) == (None, False, 0, 0)
     # The missing window's detail is made only when the window is missing. Made on every run, it
     # took a missing window's screenshot and read the menu, Escape and all, while Set Up was open.
-    assert mac.shots == ["p-setup-folders.png", "p-setup-abilities.png", "p-setup-ready.png"]
+    assert mac.shots == [
+        "p-setup-folders.png",
+        "p-setup-abilities.png",
+        "p-setup-ready.png",
+        "p-setup-after-done.png",
+    ]
     assert mac.menu_reads == 0
+    # With the login item enabled, no note follows Done, and nothing is pressed after it; macOS's
+    # login items are printed once.
+    assert mac.note is None and mac.dumps == 1
+    assert mac.pressed[-1] == check_app.SETUP_DONE
+    # And no key goes anywhere: an Escape sent with no menu open closed the Set Up window in CI
+    # run 42395410137 (_MenuOnAMac).
+    assert not _keys_sent(mac.sent), mac.sent
+
+
+def _keys_sent(bodies: list[str]) -> list[str]:
+    """The bodies sent to System Events that press a key: Escape, Return, Space or any other."""
+    return [
+        body
+        for body in bodies
+        if body == check_app.CLOSE_MENU or "keystroke" in body or "key code" in body
+    ]
 
 
 @pytest.mark.parametrize(
@@ -4508,18 +4683,55 @@ def test_the_set_up_step_passes_on_an_app_that_works(
         (_SetUpOnAMac(host_turns_off=False), "clicked again"),
         (_SetUpOnAMac(done_closes=False), "Done closes the Set Up window"),
         (_SetUpOnAMac(switch_moves=False), "shows it on"),
+        (_SetUpOnAMac(box_on=False), "Ready's box"),
+        (_SetUpOnAMac(login_state=None), "which state macOS gives its login item"),
+        (_SetUpOnAMac(login_state="requiresApproval", login_words=False), "words agree"),
+        (_SetUpOnAMac(login_state="notFound", login_words=False), "words agree"),
+        (_SetUpOnAMac(login_words=False), "words agree"),
+        (_SetUpOnAMac(notice=False), "and Ready says"),
+        # A line from before Done is not what Done gave: only the lines after it count.
+        (
+            _SetUpOnAMac(stderr="login item: enabled\n", login_state=None),
+            "which state macOS gives its login item",
+        ),
     ],
 )
 def test_a_set_up_step_that_fails_is_counted_and_put_right(
     mac: _SetUpOnAMac, first_failure: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     # Each way Set Up can go wrong is the step's first failure, and the step goes on to close the
-    # window and turn files.sha256 off, the two facts the later steps need, so the pairing check
-    # still runs them.
+    # window and any note about opening at login, and turn files.sha256 off, the facts the later
+    # steps need, so the pairing check still runs them.
     checker = _set_up_step_on(mac, monkeypatch, tmp_path)
     assert checker.failures and first_failure in checker.failures[0], checker.failures
-    assert mac.page is None and mac.op_on is False
-    assert checker.failures[-1] != "after Set Up, files.sha256 is off and no Set Up window is open"
+    assert mac.page is None and mac.op_on is False and mac.note is None
+    assert checker.failures[-1] != _SET_UP_PUT_RIGHT
+    assert "Open Login Items Settings" not in mac.pressed
+
+
+def test_ready_with_its_box_unchecked_is_one_failure_and_reads_no_login_item(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # With the box off, Done registers nothing and the app writes no line: the step counts the
+    # box, once, and does not go on to look for a state Done never gave, which would be a second,
+    # false failure, nor print macOS's login items.
+    mac = _SetUpOnAMac(box_on=False)
+    checker = _set_up_step_on(mac, monkeypatch, tmp_path)
+    assert len(checker.failures) == 1 and "Ready's box" in checker.failures[0], checker.failures
+    assert mac.dumps == 0 and mac.note is None
+    assert mac.pressed[-1] == check_app.SETUP_DONE
+
+
+def test_a_done_that_does_not_close_the_window_is_one_failure_and_reads_no_login_item(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # Done that did not close the window asked macOS for nothing: the step counts that, once, and
+    # does not go on to look for a state Done never gave, nor print macOS's login items.
+    mac = _SetUpOnAMac(done_closes=False)
+    checker = _set_up_step_on(mac, monkeypatch, tmp_path)
+    assert len(checker.failures) == 1, checker.failures
+    assert "Done closes the Set Up window" in checker.failures[0]
+    assert mac.dumps == 0 and mac.note is None
 
 
 def test_a_set_up_step_whose_cleanup_fails_stops_the_pairing_check(
@@ -4574,6 +4786,882 @@ def test_a_missing_set_up_window_is_described(
     assert "pair None, run None" in detail
     assert f"the app's standard error so far: {said!r}" in detail
     assert mac.shots == ["p-setup-missing.png"] and mac.menu_reads == 1
+
+
+class _CountingSetUpOnAMac(_SetUpOnAMac):
+    """As _SetUpOnAMac, counting each read of every text the window and its notes show
+    (``text_reads``), and how many there had been when the check read Ready's box
+    (``reads_at_ready``). ``says`` reads them without counting."""
+
+    def __init__(self, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self.text_reads = 0
+        self.reads_at_ready: int | None = None
+
+    def texts(self) -> list[str]:
+        self.text_reads += 1
+        return super().texts()
+
+    def says(self, words: str) -> bool:
+        return any(words in text for text in super().texts())
+
+    def checked(self, name: str) -> str:
+        if name == check_app.OPEN_AT_LOGIN_BOX and self.reads_at_ready is None:
+            self.reads_at_ready = self.text_reads
+        return super().checked(name)
+
+
+@pytest.mark.parametrize("state", ["enabled", "requiresApproval", "notRegistered", "notFound"])
+def test_from_ready_on_a_set_up_step_that_passes_builds_no_failure_detail(
+    state: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # A failure's detail, which reads the screen through System Events, is built only when the
+    # check failed. From Ready's box on (what Open at Login added: the notice, Done,
+    # what came of opening at login, and the cleanup), a step that passes reads no text for one.
+    mac = _CountingSetUpOnAMac(login_state=state)
+    checker = _set_up_step_on(mac, monkeypatch, tmp_path)
+    assert checker.failures == []
+    assert mac.reads_at_ready is not None and mac.text_reads == mac.reads_at_ready
+
+
+@pytest.mark.parametrize(
+    ("state", "closed_with"),
+    [
+        ("enabled", []),
+        ("requiresApproval", ["Not Now"]),
+        ("notRegistered", ["OK"]),
+        ("notFound", ["OK"]),
+    ],
+)
+def test_after_done_the_set_up_step_reads_the_login_item_and_its_words(
+    state: str,
+    closed_with: list[str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # What macOS answers an ad-hoc build is not known (decisions/0002 §9), so the step passes on
+    # each state, as long as the app says on standard error which it was and its words agree:
+    # no note while enabled; the note that macOS needs the user's OK, closed with Not Now, never
+    # Open Login Items Settings; or the note that it couldn't, closed with OK. It says once which
+    # state it read, and prints macOS's login items once.
+    mac = _SetUpOnAMac(login_state=state)
+    checker = _set_up_step_on(mac, monkeypatch, tmp_path)
+    assert checker.failures == []
+    assert mac.note is None and mac.dumps == 1
+    after = mac.pressed[mac.pressed.index(check_app.SETUP_DONE) + 1 :]
+    assert after == closed_with
+    assert not _keys_sent(mac.sent), mac.sent
+    said = capsys.readouterr().out
+    assert said.count(f"after Done, macOS gives the app's login item the state {state}\n") == 1
+
+
+def test_a_note_about_opening_at_login_left_up_stops_the_pairing_check(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # A note left up is modal: the later steps' menu reads would find no menu. When the step
+    # cannot close it, the cleanup's one need stops the check.
+    mac = _SetUpOnAMac(login_state="requiresApproval", note_closes=False)
+    made: list[check_app.Checker] = []
+    real = check_app.Checker
+
+    def checker() -> check_app.Checker:
+        made.append(real())
+        return made[-1]
+
+    monkeypatch.setattr(check_app, "Checker", checker)
+    with pytest.raises(check_app._Stop):
+        _set_up_step_on(mac, monkeypatch, tmp_path)
+    assert mac.note == check_app.NEEDS_APPROVAL_TITLE
+    # The step pressed Not Now itself and counted that it did not close the note; the cleanup
+    # pressed it once more, before its need stopped the check.
+    assert made[0].failures[0] == "Not Now closes the note", made[0].failures
+    after = mac.pressed[mac.pressed.index(check_app.SETUP_DONE) + 1 :]
+    assert after == ["Not Now", "Not Now"]
+
+
+def test_the_login_item_lines_are_read_as_the_app_writes_them() -> None:
+    # The app writes one line, "login item: <state>", each time it acts on its login item or
+    # checks it at launch (App/LoginItem.swift); the check reads the last one in what it is given.
+    said = "Set Up shows Ready\nlogin item: requiresApproval\nrun exited 0 (drained, stdin_end)\n"
+    assert check_app._login_state(said) == "requiresApproval"
+    assert check_app._login_state(said + "login item: notRegistered\n") == "notRegistered"
+    assert check_app._login_state("login item: enabled") == "enabled"
+    for wrong in ("login item:enabled\n", "login item: Enabled\n", "login item: enabled now\n"):
+        assert check_app._login_state(wrong) is None, wrong
+
+
+@pytest.mark.parametrize("trouble", ["missing", "timeout", "refused", "works"])
+def test_the_login_items_are_printed_and_never_checked(
+    trouble: str, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # `sudo -n sfltool dumpbtm` lists macOS's login and background items. The checks print the
+    # records that name the app, for the record; nothing gates on it, and a machine with no
+    # password-less sudo, no sfltool, or one that hangs, prints why and goes on.
+    bundle_id = build_app.load_pins().bundle_id
+    record = f" #3:\n                 UUID: x\n           Identifier: 2.{bundle_id}\n"
+    # A record that names the app by its path only, as macOS's list may for the app itself.
+    by_path = f" #5:\n                 URL: file:///Applications/{check_app.APP_NAME}.app/\n"
+    other = " #4:\n                 UUID: y\n           Identifier: 2.com.example.other\n"
+    calls: list[list[str]] = []
+
+    def run(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        calls.append(argv)
+        if trouble == "missing":
+            raise FileNotFoundError(2, "No such file or directory", "sudo")
+        if trouble == "timeout":
+            raise subprocess.TimeoutExpired(argv, 60)
+        if trouble == "refused":
+            return subprocess.CompletedProcess(argv, 1, "", "sudo: a password is required\n")
+        return subprocess.CompletedProcess(argv, 0, f"========\n{record}\n{other}\n{by_path}\n", "")
+
+    monkeypatch.setattr("subprocess.run", run)
+    check_app._dump_login_items()
+    said = capsys.readouterr().out
+    assert calls == [["sudo", "-n", "sfltool", "dumpbtm"]]
+    if trouble in ("missing", "timeout"):
+        assert "sudo -n sfltool dumpbtm did not run" in said
+    elif trouble == "refused":
+        assert "exited 1: 0 record(s) name the app" in said and "a password is required" in said
+    else:
+        assert "exited 0: 2 record(s) name the app" in said
+        assert bundle_id in said and "com.example.other" not in said
+        assert f"/Applications/{check_app.APP_NAME}.app/" in said
+    named = check_app._login_items_naming(f"{record}\n{other}", (bundle_id,))
+    assert [block.strip() for block in named] == [record.strip()]
+    source = _CHECK_APP.read_text(encoding="utf-8")
+    dump = _python_function(source, "_dump_login_items")
+    assert "checker" not in dump and "expect(" not in dump and "need(" not in dump
+    assert dump.count("subprocess.run(") == 1 and "timeout=" in dump
+
+
+class _LaunchOnAMac:
+    """The app as System Events sees it once ``open`` has started it, for running the pairing
+    check's launch here. It shows the note that says where its menu is at launch only while no
+    confirmed pair is held (``paired`` false), or, with ``welcome_when_paired``, always. Paired,
+    it writes ``login item: <state>`` on standard error once it has checked its login item
+    (unless ``login_line`` is false), and, with the item in requiresApproval, shows the note that
+    it won't start at login (unless ``login_note`` is false; ``note_anyway`` shows it whatever the
+    state), whose Keep It Off closes it (unless ``keep_it_off_closes`` is false) and turns the
+    item off, so that the app says ``login item: <keep_it_off_line>`` (nothing, and no change,
+    when ``keep_it_off_works`` is false). Every body sent to System Events is kept in ``sent``.
+    Its words are read only at run time: an instance is made when this module is imported."""
+
+    def __init__(
+        self,
+        *,
+        paired: bool,
+        state: str = "enabled",
+        welcome_when_paired: bool = False,
+        login_line: bool = True,
+        login_note: bool = True,
+        note_anyway: bool = False,
+        keep_it_off_works: bool = True,
+        keep_it_off_closes: bool = True,
+        keep_it_off_line: str = "notRegistered",
+    ) -> None:
+        self.paired = paired
+        self.state = state
+        self.welcome_when_paired = welcome_when_paired
+        self.login_line = login_line
+        self.login_note = login_note
+        self.note_anyway = note_anyway
+        self.keep_it_off_works = keep_it_off_works
+        self.keep_it_off_closes = keep_it_off_closes
+        self.keep_it_off_line = keep_it_off_line
+        self.opened = False
+        self.log: Path | None = None
+        # The notes up, the front one first; every button pressed; every body sent to System
+        # Events; each screenshot.
+        self.notes: list[str] = []
+        self.pressed: list[str] = []
+        self.sent: list[str] = []
+        self.shots: list[str] = []
+
+    def open(self, err: Path) -> None:
+        self.opened = True
+        self.log = err
+        if not self.paired or self.welcome_when_paired:
+            self.notes.append(check_app.WELCOME_TITLE)
+        if not self.paired:
+            return
+        if self.login_line:
+            self.write(f"login item: {self.state}\n")
+        if self.note_anyway or (self.state == "requiresApproval" and self.login_note):
+            self.notes.append(check_app.LAUNCH_OFF_TITLE)
+
+    def write(self, line: str) -> None:
+        assert self.log is not None
+        self.log.write_text(self.log.read_text(encoding="utf-8") + line, encoding="utf-8")
+
+    def texts(self) -> list[str]:
+        """The front note's words: Alerts shows one note at a time."""
+        if not self.notes:
+            return []
+        if self.notes[0] == check_app.WELCOME_TITLE:
+            return [
+                check_app.WELCOME_TITLE,
+                "Click it, up by the clock, to see it.",
+                check_app.PURPOSE,
+            ]
+        return [check_app.LAUNCH_OFF_TITLE, "Opening at login is turned off in System Settings."]
+
+    def says(self, words: str) -> bool:
+        return any(words in text for text in self.texts())
+
+    def window_list(self, what: str) -> tuple[bool, list[str]]:
+        return True, self.texts()
+
+    def system_events(self, body: str, timeout: float = 30) -> tuple[bool, str]:
+        self.sent.append(body)
+        if body == 'click button "OK" of window 1' and self.notes[:1] == [check_app.WELCOME_TITLE]:
+            self.pressed.append("OK")
+            self.notes.pop(0)
+            return True, ""
+        return False, f"not on a Mac: {body!r}"
+
+    def press(self, name: str) -> tuple[bool, str]:
+        self.pressed.append(name)
+        if name == check_app.KEEP_IT_OFF and self.notes[:1] == [check_app.LAUNCH_OFF_TITLE]:
+            if self.keep_it_off_closes:
+                self.notes.pop(0)
+            if self.keep_it_off_works:
+                self.state = self.keep_it_off_line
+                self.write(f"login item: {self.keep_it_off_line}\n")
+            return True, "pressed"
+        return False, f"no button named {name}"
+
+
+def _launch_check(
+    mac: _LaunchOnAMac, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> check_app._PairingCheck:
+    """A _PairingCheck whose launches open ``mac``."""
+
+    def run(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        if argv[0] == "open":
+            mac.open(Path(argv[argv.index("--stderr") + 1]))
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr("subprocess.run", run)
+    monkeypatch.setattr(check_app, "_running", lambda name: ["4242"] if mac.opened else [])
+    monkeypatch.setattr(check_app, "_can_drive", lambda: True)
+    monkeypatch.setattr(check_app, "_wait_until", lambda test, seconds: test())
+    monkeypatch.setattr(check_app, "_value_within", lambda get, seconds: get())
+    monkeypatch.setattr(check_app.time, "sleep", lambda seconds: None)
+    for name, fake in (
+        ("_window_list", mac.window_list),
+        ("_system_events", mac.system_events),
+        ("_texts", mac.texts),
+        ("_says", mac.says),
+        ("_press", mac.press),
+    ):
+        monkeypatch.setattr(check_app, name, fake)
+    monkeypatch.setattr(check_app, "_screenshot", lambda path: mac.shots.append(path.name))
+    check = object.__new__(check_app._PairingCheck)
+    check.checker = check_app.Checker()
+    check.screens = tmp_path
+    check.work = tmp_path
+    check.app = tmp_path / f"{check_app.APP_NAME}.app"
+    check.logs = []
+    check.require_driven = True
+    return check
+
+
+def _launch_on(
+    mac: _LaunchOnAMac,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    label: str,
+    *,
+    paired: bool,
+) -> check_app.Checker:
+    """Run _PairingCheck.launch(label, paired=paired) against ``mac``."""
+    check = _launch_check(mac, monkeypatch, tmp_path)
+    check.launch(label, paired=paired)
+    return check.checker
+
+
+class _CountingLaunchOnAMac(_LaunchOnAMac):
+    """As _LaunchOnAMac, counting each read of every text the notes show (``text_reads``): a
+    failure's detail reads them, and a launch that passes builds none. ``says`` reads the notes
+    without counting, as System Events' own test would."""
+
+    def __init__(self, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self.text_reads = 0
+
+    def texts(self) -> list[str]:
+        self.text_reads += 1
+        return super().texts()
+
+    def says(self, words: str) -> bool:
+        return any(words in text for text in super().texts())
+
+
+@pytest.mark.parametrize("state", ["enabled", "requiresApproval", "notRegistered"])
+def test_a_paired_launch_that_passes_builds_no_failure_detail(
+    state: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # A failure's detail, which reads the screen through System Events, is built only when the
+    # check failed. A paired launch that passes reads no text for one, with
+    # or without the note about opening at login.
+    mac = _CountingLaunchOnAMac(paired=True, state=state)
+    checker = _launch_on(mac, monkeypatch, tmp_path, "relaunched", paired=True)
+    assert checker.failures == []
+    assert mac.text_reads == 0
+
+
+class _PausedLaunchOnAMac(_LaunchOnAMac):
+    """As _LaunchOnAMac, with the host paused: the note that says so comes after the notes the
+    app shows at launch (Alerts shows one at a time, in order), and its Resume resumes the host
+    (``paused``)."""
+
+    def __init__(self, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self.paused = True
+
+    def open(self, err: Path) -> None:
+        super().open(err)
+        self.notes.append(check_app.PAUSED_TITLE)
+
+    def texts(self) -> list[str]:
+        if self.notes[:1] == [check_app.PAUSED_TITLE]:
+            return [check_app.PAUSED_TITLE]
+        return super().texts()
+
+    def enabled(self, name: str) -> str:
+        front = self.notes[:1] == [check_app.PAUSED_TITLE]
+        return "true" if front and name == check_app.RESUME_BUTTON else "absent"
+
+    def press(self, name: str) -> tuple[bool, str]:
+        if name == check_app.RESUME_BUTTON and self.notes[:1] == [check_app.PAUSED_TITLE]:
+            self.pressed.append(name)
+            self.notes.pop(0)
+            self.paused = False
+            return True, "pressed"
+        return super().press(name)
+
+
+@pytest.mark.parametrize("state", ["enabled", "requiresApproval"])
+def test_the_paused_launch_finds_the_paused_note_behind_the_note_about_opening_at_login(
+    state: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # At a paired launch, the first status read checks the login item, and queues its note when
+    # macOS waits for the user's OK, before afterWelcome queues the paused note; the app shows one
+    # note at a time. The check chooses Keep It Off on the first, then finds the paused note, and
+    # Resume resumes the host. It sends no key.
+    mac = _PausedLaunchOnAMac(paired=True, state=state)
+    check = _launch_check(mac, monkeypatch, tmp_path)
+    monkeypatch.setattr(check_app, "_enabled", mac.enabled)
+    check.status = lambda: {"paused": mac.paused}  # type: ignore[method-assign]
+    check.paused_at_launch()
+    assert check.checker.failures == []
+    keep = ["Keep It Off"] if state == "requiresApproval" else []
+    assert mac.pressed == [*keep, check_app.RESUME_BUTTON]
+    assert mac.notes == [] and mac.paused is False and mac.sent == []
+
+
+def test_an_unpaired_launch_reads_the_note_about_the_menu_bar_and_chooses_ok(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # With no confirmed pair, the app says where its menu is at launch, as before
+    # (decisions/0002, What is built today).
+    mac = _LaunchOnAMac(paired=False)
+    checker = _launch_on(mac, monkeypatch, tmp_path, "pairing", paired=False)
+    assert checker.failures == []
+    assert mac.pressed == ["OK"] and mac.notes == []
+    assert "p-pairing-welcome.png" in mac.shots
+
+
+@pytest.mark.parametrize("state", ["enabled", "notRegistered", "notFound"])
+def test_a_paired_launch_shows_no_note_and_the_check_presses_nothing(
+    state: str,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # Paired, the app goes straight on: no note about its menu bar, and none about opening at
+    # login unless macOS says it needs the user's OK. The check sends nothing to a note it has not
+    # seen: no OK, no key. It says once which state it read.
+    mac = _LaunchOnAMac(paired=True, state=state)
+    checker = _launch_on(mac, monkeypatch, tmp_path, "relaunched", paired=True)
+    assert checker.failures == []
+    assert mac.pressed == [] and mac.notes == []
+    # Nothing at all goes to System Events: no click, no key press. (What the check reads, it
+    # reads through _says and _texts.)
+    assert mac.sent == []
+    said = capsys.readouterr().out
+    line = f"at launch (relaunched), macOS gives the app's login item the state {state}\n"
+    assert said.count(line) == 1
+
+
+def test_a_paired_launch_with_opening_at_login_off_keeps_it_off(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # The launch note (decisions/0002 §3.3, amended): "<name> won't start when you log in", with
+    # Open Login Items Settings and Keep It Off. The check chooses Keep It Off, which takes the
+    # item away, so the later launches show no note; it never opens System Settings.
+    mac = _LaunchOnAMac(paired=True, state="requiresApproval")
+    checker = _launch_on(mac, monkeypatch, tmp_path, "relaunched", paired=True)
+    assert checker.failures == []
+    assert mac.pressed == ["Keep It Off"] and mac.notes == [] and mac.state == "notRegistered"
+    assert "p-relaunched-login-off.png" in mac.shots
+    assert mac.sent == []
+
+
+def test_keep_it_off_may_leave_the_login_item_not_found(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # An item macOS no longer finds is gone too: the app writes the state macOS gives, and
+    # notFound is one way it says there is none.
+    mac = _LaunchOnAMac(paired=True, state="requiresApproval", keep_it_off_line="notFound")
+    checker = _launch_on(mac, monkeypatch, tmp_path, "relaunched", paired=True)
+    assert checker.failures == []
+    assert mac.pressed == ["Keep It Off"] and mac.notes == [] and mac.state == "notFound"
+
+
+def test_a_note_keep_it_off_leaves_up_stops_the_pairing_check(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # The app shows one note at a time: left up, the launch note would hold the next step's note
+    # behind it, so the steps after this one cannot run, and the check stops here, saying why.
+    mac = _LaunchOnAMac(paired=True, state="requiresApproval", keep_it_off_closes=False)
+    with pytest.raises(check_app._Stop, match="Keep It Off closes the note"):
+        _launch_on(mac, monkeypatch, tmp_path, "relaunched", paired=True)
+    assert mac.pressed == ["Keep It Off"] and mac.sent == []
+
+
+def test_a_note_about_the_menu_bar_at_a_paired_launch_is_counted_then_closed(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # That rule broken: the note shows at a paired launch. That is counted, and the check, which
+    # has just read the note, closes it with OK, as at an unpaired launch: left up, it would hold
+    # back the paused note and a pairing left unfinished, and every later step with them.
+    mac = _LaunchOnAMac(paired=True, welcome_when_paired=True)
+    checker = _launch_on(mac, monkeypatch, tmp_path, "relaunched", paired=True)
+    assert len(checker.failures) == 1 and "shows no note about its menu bar" in checker.failures[0]
+    assert mac.pressed == ["OK"] and mac.notes == []
+    assert mac.sent == ['click button "OK" of window 1']
+
+
+@pytest.mark.parametrize(
+    ("mac", "first_failure"),
+    [
+        (_LaunchOnAMac(paired=True, welcome_when_paired=True), "shows no note about its menu bar"),
+        (_LaunchOnAMac(paired=True, login_line=False), "which state macOS gives its login item"),
+        (
+            _LaunchOnAMac(paired=True, state="requiresApproval", login_note=False),
+            "won't start when you log in",
+        ),
+        (_LaunchOnAMac(paired=True, note_anyway=True), "no note about opening at login"),
+        (
+            _LaunchOnAMac(paired=True, state="requiresApproval", keep_it_off_works=False),
+            "Keep It Off turns",
+        ),
+        (
+            _LaunchOnAMac(
+                paired=True, state="requiresApproval", keep_it_off_line="requiresApproval"
+            ),
+            "Keep It Off turns",
+        ),
+    ],
+)
+def test_a_paired_launch_that_goes_wrong_is_counted(
+    mac: _LaunchOnAMac, first_failure: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    checker = _launch_on(mac, monkeypatch, tmp_path, "relaunched", paired=True)
+    assert checker.failures and first_failure in checker.failures[0], checker.failures
+    # A note the check did not expect is left alone: it presses only Keep It Off, on its note,
+    # and OK only on the note about the menu bar it has just read; it sends no key.
+    pressed = {"Keep It Off", "OK"} if mac.welcome_when_paired else {"Keep It Off"}
+    assert set(mac.pressed) <= pressed
+    assert set(mac.sent) <= {'click button "OK" of window 1'}
+
+
+def test_each_launch_of_the_pairing_check_says_whether_it_is_paired() -> None:
+    # Only the first launch holds no confirmed pair (the harness left the SAS pending): it alone
+    # expects the note about the menu bar. Every later one is paired. Opened again while it runs,
+    # the app shows that note paired or not (welcome_again, which backoff and quit_and_drain use).
+    source = _CHECK_APP.read_text(encoding="utf-8")
+    calls = re.findall(r"self\.launch\(([^)]*)\)", source)
+    assert calls == [
+        '"pairing", paired=False',
+        '"relaunched", paired=True',
+        '"stop-whats-running", paired=True',
+        '"too-old", paired=True',
+        '"stop-now", paired=True',
+        '"paused", paired=True',
+    ]
+    launch = _python_function(source, "launch")
+    assert "def launch(self, label: str, *, paired: bool) -> None:" in launch
+    unpaired = launch.index("if not paired:")
+    assert unpaired < launch.index("_welcome(") < launch.index("self.login_at_launch(label)")
+    assert "_says(WELCOME_TITLE)" in launch
+    at_launch = _python_function(source, "login_at_launch")
+    assert "_press(KEEP_IT_OFF)" in at_launch and "LAUNCH_OFF_TITLE" in at_launch
+    assert at_launch.index('if state != "requiresApproval":') < at_launch.index(
+        "_press(KEEP_IT_OFF)"
+    )
+    again = _python_function(source, "welcome_again")
+    assert "_says(WELCOME_TITLE)" in again
+    paused = _python_function(source, "paused_at_launch")
+    assert paused.index('self.launch("paused", paired=True)') < paused.index("PAUSED_TITLE")
+
+
+class _DisconnectOnAMac:
+    """The app, its menu and the host as the pairing check's Disconnect sees them, for running
+    that step here. Before Disconnect the app has said ``login item: <state>`` (nothing when
+    ``state`` is None). Disconnect drains run, forgets the pair, takes the login item away and
+    says the state macOS then gives, as the app does: ``notFound`` when it had none to find,
+    else ``notRegistered`` (nothing when ``line`` is false; ``still`` when unregistering failed,
+    and then the note says how to turn it off by hand). Its note adds that the app won't open at
+    login when ``sentence`` says so (by default, exactly when the item was enabled or waited for
+    approval, and was taken away). While connected the menu holds Settings (unless ``settings``
+    is false); once disconnected it does not (unless ``settings_after``)."""
+
+    def __init__(
+        self,
+        *,
+        state: str | None = "enabled",
+        sentence: bool | None = None,
+        line: bool = True,
+        settings: bool = True,
+        settings_after: bool = False,
+        still: str | None = None,
+    ) -> None:
+        self.state = state
+        registered = state in ("enabled", "requiresApproval") and still is None
+        self.sentence = registered if sentence is None else sentence
+        self.line = line
+        self.still = still
+        self.settings = settings
+        self.settings_after = settings_after
+        self.asked = False
+        self.disconnected = False
+        self.told = False
+        self.log: Path | None = None
+        self.pressed: list[str] = []
+        self.dumps = 0
+
+    def menu_until(
+        self, test: Callable[[list[str]], bool], seconds: float, shot: Path | None = None
+    ) -> tuple[bool, list[str]]:
+        if self.disconnected:
+            shown = [check_app.NOT_CONNECTED, check_app.CONNECT_ITEM]
+            shown += [check_app.SETTINGS_MENU] if self.settings_after else []
+        else:
+            shown = [check_app.CONNECTED, check_app.DISCONNECT_ITEM]
+            shown += [check_app.SETTINGS_MENU] if self.settings else []
+        return test(shown), shown
+
+    def choose(self, start: str) -> tuple[bool, str]:
+        if not self.disconnected and check_app.DISCONNECT_ITEM.startswith(start):
+            self.asked = True
+            return True, "chosen"
+        return False, f"no item {start}"
+
+    def texts(self) -> list[str]:
+        if self.asked:
+            return [check_app.DISCONNECT_TITLE]
+        if self.told:
+            said = check_app.DISCONNECTED_TOLD
+            if self.sentence:
+                said += " " + check_app.OFF_AFTER_DISCONNECT
+            return [check_app.DISCONNECTED_TOLD.removesuffix(" Lucille was told."), said]
+        return []
+
+    def says(self, words: str) -> bool:
+        return any(words in text for text in self.texts())
+
+    def press(self, name: str) -> tuple[bool, str]:
+        self.pressed.append(name)
+        if name == check_app.DISCONNECT_BUTTON and self.asked:
+            self.asked = False
+            self.disconnected = True
+            self.told = True
+            assert self.log is not None
+            said = self.log.read_text(encoding="utf-8") + check_app.DRAINED_LINE + "\n"
+            if self.line:
+                gone = "notFound" if self.state == "notFound" else "notRegistered"
+                said += f"login item: {self.still or gone}\n"
+            self.log.write_text(said, encoding="utf-8")
+            return True, "pressed"
+        if name == "OK" and self.told:
+            self.told = False
+            return True, "pressed"
+        return False, f"no button named {name}"
+
+    def dump(self) -> None:
+        self.dumps += 1
+
+
+def _disconnect_on(
+    mac: _DisconnectOnAMac, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> check_app.Checker:
+    """Run _PairingCheck.disconnect against ``mac``."""
+    for name, fake in (
+        ("_menu_until", mac.menu_until),
+        ("_choose", mac.choose),
+        ("_texts", mac.texts),
+        ("_says", mac.says),
+        ("_press", mac.press),
+    ):
+        monkeypatch.setattr(check_app, name, fake)
+    monkeypatch.setattr(check_app, "_screenshot", lambda path: None)
+    monkeypatch.setattr(check_app, "_wait_until", lambda test, seconds: test())
+    monkeypatch.setattr(check_app, "_value_within", lambda get, seconds: get())
+    monkeypatch.setattr(check_app, "_alive", lambda pid: not mac.disconnected)
+    monkeypatch.setattr(check_app, "_dump_login_items", mac.dump, raising=False)
+    check = object.__new__(check_app._PairingCheck)
+    check.checker = check_app.Checker()
+    check.screens = tmp_path
+    stderr = tmp_path / "pairing-paused-stderr.txt"
+    stderr.write_text("" if mac.state is None else f"login item: {mac.state}\n", encoding="utf-8")
+    mac.log = stderr
+    check.logs = [stderr]
+    check.run_pid = lambda: None if mac.disconnected else 42  # type: ignore[method-assign]
+    check.pair_state = lambda: "none" if mac.disconnected else "confirmed"  # type: ignore[method-assign]
+    check.disconnect()
+    return check.checker
+
+
+@pytest.mark.parametrize("state", ["enabled", "requiresApproval", "notRegistered", "notFound"])
+def test_disconnect_takes_the_login_item_away_and_says_so_when_there_was_one(
+    state: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # decisions/0002 §9: the pair gone, the login item goes. The app says
+    # "login item: notRegistered" on standard error whatever it had (notFound, when macOS had
+    # none to find); its note adds
+    # "<name> won't open when you log in." exactly when it had one, by the last line it
+    # wrote before (the paused launch's check). The menu holds Settings while connected, and not
+    # after.
+    mac = _DisconnectOnAMac(state=state)
+    checker = _disconnect_on(mac, monkeypatch, tmp_path)
+    assert checker.failures == []
+    assert mac.pressed == [check_app.DISCONNECT_BUTTON, "OK"] and mac.dumps == 1
+
+
+@pytest.mark.parametrize(
+    ("mac", "first_failure"),
+    [
+        (_DisconnectOnAMac(state="enabled", sentence=False), "exactly when the login item"),
+        (_DisconnectOnAMac(state="notRegistered", sentence=True), "exactly when the login item"),
+        (_DisconnectOnAMac(line=False), "login item: notRegistered"),
+        # The paused launch's own line is not what Disconnect gave: only the lines after it count.
+        (_DisconnectOnAMac(state="notRegistered", line=False), "login item: notRegistered"),
+        (_DisconnectOnAMac(state=None), "before Disconnect, the app has said"),
+        (_DisconnectOnAMac(settings=False), "while connected, the menu holds"),
+        (_DisconnectOnAMac(settings_after=True), "no longer holds"),
+    ],
+)
+def test_a_disconnect_that_leaves_the_login_item_wrong_is_counted(
+    mac: _DisconnectOnAMac, first_failure: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    checker = _disconnect_on(mac, monkeypatch, tmp_path)
+    assert checker.failures and first_failure in checker.failures[0], checker.failures
+
+
+def test_a_disconnect_that_leaves_the_login_item_registered_is_counted(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # Unregistering failed: macOS still has the item, the app says so on standard error and adds
+    # no "won't open" sentence. Both are counted.
+    mac = _DisconnectOnAMac(state="enabled", still="enabled")
+    checker = _disconnect_on(mac, monkeypatch, tmp_path)
+    assert any("exactly when the login item" in failure for failure in checker.failures)
+    assert any("login item: notRegistered" in failure for failure in checker.failures)
+
+
+def test_the_disconnect_step_reads_the_login_item_before_and_after() -> None:
+    source = _CHECK_APP.read_text(encoding="utf-8")
+    step = _python_function(source, "disconnect")
+    was = step.index("was = _login_state(self.stderr_now())")
+    chosen = step.index('_choose(DISCONNECT_ITEM.removesuffix("…"))')
+    mark = step.index("before = len(self.stderr_now())")
+    pressed = step.index("_press(DISCONNECT_BUTTON)")
+    sentence = step.index("_says(OFF_AFTER_DISCONNECT)")
+    after = step.index("_login_state(self.stderr_now()[before:])")
+    assert was < chosen < mark < pressed < sentence < after
+    assert 'registered = was in ("enabled", "requiresApproval")' in step
+    assert step.index("SETTINGS_MENU in shown") < chosen
+    assert step.rindex("SETTINGS_MENU not in shown") > after
+    assert "_dump_login_items()" in step[after:]
+
+
+def _welcome_world(monkeypatch: pytest.MonkeyPatch, *, welcome_at_launch: bool) -> list[str]:
+    """The app as the ui check sees it once check_ui has opened it: the note about its menu bar
+    up when ``welcome_at_launch``, and up again whenever ``open`` opens it while it runs. Returns
+    the notes read with _welcome, by when."""
+    welcomed: list[str] = []
+    up = {"welcome": welcome_at_launch}
+
+    def run(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        if argv[0] == "open":
+            up["welcome"] = True
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    def welcome(checker: check_app.Checker, shot: Path, when: str) -> None:
+        checker.expect(up["welcome"], f"{when}, the app says where its menu is")
+        up["welcome"] = False
+        welcomed.append(when)
+
+    monkeypatch.setattr("subprocess.run", run)
+    monkeypatch.setattr(check_app, "_welcome", welcome)
+    monkeypatch.setattr(
+        check_app, "_says", lambda words: words == check_app.WELCOME_TITLE and up["welcome"]
+    )
+    monkeypatch.setattr(
+        check_app, "_texts", lambda: [check_app.WELCOME_TITLE] if up["welcome"] else []
+    )
+    monkeypatch.setattr(check_app, "_wait_until", lambda test, seconds: test())
+    monkeypatch.setattr(check_app, "_screenshot", lambda path: None)
+    return welcomed
+
+
+@pytest.mark.parametrize(("paired", "at_launch"), [(False, True), (True, False), (True, True)])
+def test_the_ui_check_reads_the_note_at_launch_only_while_unpaired(
+    paired: bool, at_launch: bool, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # The ui check opens the app with whatever pair the profile holds (none, on CI): unpaired, the
+    # note about the menu bar comes at launch; paired, it must not. Opened again while it runs,
+    # the note comes either way.
+    welcomed = _welcome_world(monkeypatch, welcome_at_launch=at_launch)
+    reads: list[int] = []
+    texts = check_app._texts
+    monkeypatch.setattr(check_app, "_texts", lambda: reads.append(1) or texts())
+    checker = check_app.Checker()
+    check_app._drive_welcome(checker, tmp_path, tmp_path / "x.app", paired=paired)
+    # A failure's detail reads the screen only when it failed.
+    assert len(reads) == (1 if paired and at_launch else 0)
+    if paired:
+        assert welcomed == ["when it is opened again"]
+        assert bool(checker.failures) == at_launch, checker.failures
+        if at_launch:
+            assert "shows no note about its menu bar" in checker.failures[0]
+    else:
+        assert welcomed == ["when it opens", "when it is opened again"]
+        assert checker.failures == []
+    source = _CHECK_APP.read_text(encoding="utf-8")
+    ui = _python_function(source, "check_ui")
+    asked = ui.index('paired = _pair_state(python_in(app)) == "confirmed"')
+    assert (
+        asked
+        < ui.index('["open", "--stdout"')
+        < ui.index("_drive_welcome(checker, screens, app, paired=paired)")
+    )
+
+
+@pytest.mark.parametrize(("state", "paired"), [("confirmed", True), ("none", False), (None, False)])
+def test_check_ui_reads_the_pair_before_it_opens_the_app_and_says_which(
+    state: str | None,
+    paired: bool,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # check_ui itself, run against a stand-in Mac as far as the note about the menu bar: the
+    # pair is read before ``open``, said once, and the note is driven for that pair state; a
+    # status that can't be read counts as unpaired.
+    events: list[str] = []
+    running = {"app": False}
+
+    def run(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        events.append(argv[0])
+        if argv[0] == "open":
+            running["app"] = True
+        if argv[0] == "pkill":
+            running["app"] = False
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    def pair_state(python: Path) -> str | None:
+        events.append("pair")
+        return state
+
+    driven: list[bool] = []
+
+    def drive_welcome(
+        checker: check_app.Checker, screens: Path, app: Path, *, paired: bool
+    ) -> None:
+        driven.append(paired)
+
+    monkeypatch.setattr("subprocess.run", run)
+    monkeypatch.setattr(check_app, "_pair_state", pair_state)
+    monkeypatch.setattr(check_app, "_profile_folder", lambda: tmp_path / "profile")
+    monkeypatch.setattr(check_app, "_stop_earlier_copies", lambda checker, name: True)
+    monkeypatch.setattr(check_app, "_running", lambda name: ["4242"] if running["app"] else [])
+    monkeypatch.setattr(check_app, "_wait_until", lambda test, seconds: test())
+    monkeypatch.setattr(check_app.time, "sleep", lambda seconds: None)
+    monkeypatch.setattr(check_app, "_can_drive", lambda: True)
+    monkeypatch.setattr(check_app, "_drive_welcome", drive_welcome)
+    monkeypatch.setattr(check_app, "_screenshot", lambda path: None)
+    monkeypatch.setattr(check_app, "_drive_menu", lambda checker, screens, flag: False)
+    checker = check_app.Checker()
+    check_app.check_ui(tmp_path / f"{check_app.APP_NAME}.app", checker, tmp_path)
+    assert checker.failures == []
+    assert driven == [paired]
+    assert events.index("pair") < events.index("open")
+    said = capsys.readouterr().out
+    assert said.count("the app's profile holds a confirmed pair: ") == 1
+    assert f"the app's profile holds a confirmed pair: {paired}\n" in said
+
+
+@pytest.mark.parametrize(("paired", "welcomes"), [(False, True), (True, False), (True, True)])
+def test_the_placement_control_expects_the_note_only_while_unpaired(
+    paired: bool,
+    welcomes: bool,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # The control copy, opened, says where its menu is only when the profile holds no confirmed
+    # pair (decisions/0002, What is built today); paired, it says neither that nor where it
+    # should be.
+    installed = tmp_path / "Applications" / f"{check_app.APP_NAME}.app"
+    monkeypatch.setattr(check_app, "installed_app_path", lambda: installed)
+    _placement_world(tmp_path, monkeypatch, starts=True, writes=False)
+    monkeypatch.setattr(check_app, "_can_drive", lambda: True)
+    monkeypatch.setattr(check_app, "_pair_state", lambda python: "confirmed" if paired else "none")
+    monkeypatch.setattr(
+        check_app, "_says", lambda words: words == check_app.WELCOME_TITLE and welcomes
+    )
+    reads: list[int] = []
+
+    def texts() -> list[str]:
+        reads.append(1)
+        return [check_app.WELCOME_TITLE] if welcomes else []
+
+    monkeypatch.setattr(check_app, "_texts", texts)
+    checker = check_app.Checker()
+    assert check_app._placement_control(checker, tmp_path, True) is True
+    assert bool(checker.failures) == (paired == welcomes), checker.failures
+    # The failure's detail reads the screen only when it failed.
+    assert len(reads) == len(checker.failures)
+    # Said once, so the run's log shows which way the control went.
+    said = capsys.readouterr().out
+    assert said.count(f"the app's profile holds a confirmed pair: {paired}\n") == 1
+    control = _python_function(_CHECK_APP.read_text(encoding="utf-8"), "_placement_control")
+    asked = control.index('paired = _pair_state(python_in(installed)) == "confirmed"')
+    assert asked < control.index('subprocess.run(["open", str(installed)]')
+
+
+@pytest.mark.parametrize("paired", [False, True])
+def test_the_placement_control_fails_when_it_says_where_it_should_be(
+    paired: bool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The copy in /Applications must never say where it should be, paired or not, though it
+    # says, or not, where its menu is as it should.
+    installed = tmp_path / "Applications" / f"{check_app.APP_NAME}.app"
+    monkeypatch.setattr(check_app, "installed_app_path", lambda: installed)
+    _placement_world(tmp_path, monkeypatch, starts=True, writes=False)
+    monkeypatch.setattr(check_app, "_can_drive", lambda: True)
+    monkeypatch.setattr(check_app, "_pair_state", lambda python: "confirmed" if paired else "none")
+    shown = {check_app.PLACEMENT_TITLE} | (set() if paired else {check_app.WELCOME_TITLE})
+    monkeypatch.setattr(check_app, "_says", lambda words: words in shown)
+    monkeypatch.setattr(check_app, "_texts", lambda: sorted(shown))
+    checker = check_app.Checker()
+    check_app._placement_control(checker, tmp_path, True)
+    assert len(checker.failures) == 1, checker.failures
+    assert check_app.PLACEMENT_TITLE in checker.failures[0]
 
 
 class _MenuOnAMac:
@@ -4872,6 +5960,578 @@ def test_the_set_up_check_looks_for_the_apps_own_words() -> None:
     assert "HostText.refusal(error)" in _swift_function(
         _swift("Connection.swift"), "    private func setUpEffect("
     )
+
+
+# --- Open at Login (decisions/0002 §3.1 step 10, §3.3, §9, §14) --------------------------------
+
+# Ways to register something to start at login other than the app itself, and the APIs before
+# SMAppService: none of them is in the app's Swift, or in the self-test's.
+_OTHER_LOGIN_ITEMS = (
+    r"\.agent\s*\(",
+    r"\.loginItem\s*\(\s*identifier\s*:",
+    r"\.daemon\s*\(",
+    r"\bSMLoginItemSetEnabled\b",
+    r"\bSMJobBless\b",
+    r"\bSMJobSubmit\b",
+    r"\bLSSharedFileList",
+    r"\bkLSSharedFileListSessionLoginItems\b",
+)
+_LOGIN_ITEM_FUNCTIONS = (
+    "    static var state: LoginState {",
+    "    static func checked() -> LoginState {",
+    "    static func register() -> LoginOutcome {",
+    "    static func unregisterIfRegistered() -> LoginRemoval {",
+    "    static func openSettings() {",
+)
+
+
+def _flat(text: str) -> str:
+    """``text`` with every run of white space one space, to compare Swift whatever its wrapping."""
+    return re.sub(r"\s+", " ", text)
+
+
+def test_the_login_item_is_the_main_app_only() -> None:
+    # The app's one login item is the app itself (SMAppService.mainApp, decisions/0002 §9): not an
+    # agent, a helper or a daemon, nor the APIs before SMAppService. Only LoginItem.swift names
+    # SMAppService, and there only mainApp's register(), unregister() and status, and
+    # openSystemSettingsLoginItems(). Every function there is synchronous, so unregister() is its
+    # synchronous form, not the async one a call in an async context would take; and each refuses
+    # unless this copy is the one at /Applications/<name>.app, since mainApp is keyed by the bundle
+    # identifier, which a "<name> 2" shares. The app asks macOS to register it only from the
+    # user's click: Ready's Done with its box checked, and the Settings menu's Open at Login.
+    login = _swift("LoginItem.swift")
+    code = _code_of(login)
+    for path in [*SWIFT_FILES, _SELF_TEST]:
+        text = _code_of(path.read_text(encoding="utf-8"))
+        if path.name != "LoginItem.swift":
+            assert "SMAppService" not in text, path.name
+            assert "ServiceManagement" not in text, path.name
+        for pattern in _OTHER_LOGIN_ITEMS:
+            assert not re.search(pattern, text), (path.name, pattern)
+    assert set(re.findall(r"SMAppService\s*\.\s*(\w+)", code)) == {
+        "mainApp",
+        "openSystemSettingsLoginItems",
+    }
+    assert set(re.findall(r"SMAppService\.mainApp\.(\w+)", code)) == {
+        "register",
+        "unregister",
+        "status",
+    }
+    assert code.count("try SMAppService.mainApp.register()") == 1
+    assert code.count("try SMAppService.mainApp.unregister()") == 1
+    assert code.count("SMAppService.mainApp.status") == 1
+    assert code.count("SMAppService.openSystemSettingsLoginItems()") == 1
+    for word in ("async", "await", "Task", "completionHandler", "DispatchQueue", "@MainActor"):
+        assert not re.search(rf"(?<![\w@]){re.escape(word)}\b", code), word
+    assert "synchronous" in login
+    assert "enum LoginItem {" in code
+    for signature in _LOGIN_ITEM_FUNCTIONS:
+        body = _swift_function(login, signature)
+        assert "guard Placement.current.isPlaced else {" in body, signature
+    # The status is read in one place, and every case of it is named, an unknown one too.
+    state = _swift_function(login, "    static var state: LoginState {")
+    assert "switch SMAppService.mainApp.status {" in state
+    for case in ("notRegistered", "enabled", "requiresApproval", "notFound"):
+        assert f"case .{case}:\n            return .{case}\n" in state, case
+    assert "@unknown default:" in state
+    # One line on standard error, the state's name and nothing else (decisions/0002 §15), from
+    # one place, for each time it acts or checks: never from the plain read the menu makes.
+    assert code.count('Connection.log("login item: \\(') == 1
+    assert 'Connection.log("login item: \\(state.rawValue)")' in code
+    assert "Connection.log" not in state
+    for signature in _LOGIN_ITEM_FUNCTIONS[1:4]:
+        assert "said(" in _swift_function(login, signature), signature
+    # What came of a register or an unregister is decided from macOS's state afterwards, by
+    # LoginRules, which the self-test checks.
+    assert "LoginRules.afterRegister(state: " in _swift_function(
+        login, "    static func register() -> LoginOutcome {"
+    )
+    assert "LoginRules.removal(before: " in _swift_function(
+        login, "    static func unregisterIfRegistered() -> LoginRemoval {"
+    )
+    # register() is asked for only from a click: twice in Connection.swift, and nowhere else.
+    counts = {
+        path.name: _code_of(path.read_text(encoding="utf-8")).count("LoginItem.register()")
+        for path in SWIFT_FILES
+    }
+    assert {name: count for name, count in counts.items() if count} == {"Connection.swift": 2}
+    for path in SWIFT_FILES:
+        text = _code_of(path.read_text(encoding="utf-8")).replace("LoginItem.register()", "")
+        if path.name != "LoginItem.swift":
+            assert ".register(" not in text, path.name
+    connection = _swift("Connection.swift")
+    effect = _swift_function(connection, "    private func setUpEffect(")
+    done = effect.split("        case .registerLoginItem:\n", 1)
+    assert len(done) == 2
+    done_case = done[1].split("\n        case ", 1)[0]
+    assert "showLoginOutcome(LoginItem.register())" in done_case
+    assert done_case.index("guard mayRegisterLoginItem() else {") < done_case.index(
+        "LoginItem.register()"
+    )
+    chosen = _swift_function(connection, "    func openAtLoginChosen(_ on: Bool) {")
+    assert chosen.count("LoginItem.register()") == 1
+    assert chosen.index("guard isConfirmed(), ladder == nil, !exiting else {") < chosen.index(
+        "LoginItem.register()"
+    )
+    assert (
+        chosen.index("if on {")
+        < chosen.index("guard mayRegisterLoginItem() else {")
+        < chosen.index("LoginItem.register()")
+    )
+    # Both go through one test: a confirmed pair, by status or by run, and not once run's exit has
+    # said the Mac is not connected, when status may still say confirmed; not during a Disconnect
+    # (its drain, or forget), nor while the app quits.
+    may = _swift_function(connection, "    private func mayRegisterLoginItem() -> Bool {")
+    assert "LoginRules.mayRegister(confirmed: confirmed, phase: supervisor.phase)" in may
+    assert "let confirmed = isConfirmed()" in may
+    assert "return ladder == nil && !exiting && disconnecting == nil && !forgetting" in may
+    assert _code_of(connection).count("mayRegisterLoginItem()") == 3
+    rule = _swift_function(
+        _swift("LoginRules.swift"),
+        "    static func mayRegister(confirmed: Bool, phase: RunSupervisor.Phase) -> Bool {",
+    )
+    assert (
+        "        if case .halted(.notConnected) = phase {\n            return false\n        }\n"
+        "        return confirmed\n"
+    ) in rule
+    # The Settings app is opened only from a button: the note after Done or the switch, and the
+    # launch note.
+    opened = sum(
+        _code_of(path.read_text(encoding="utf-8")).count("LoginItem.openSettings()")
+        for path in SWIFT_FILES
+    )
+    assert opened == 2 and _code_of(connection).count("LoginItem.openSettings()") == 2
+
+
+def test_every_way_a_pair_ends_unregisters() -> None:
+    # decisions/0002 §9: the login item is unregistered whenever the pair ends: run's exit or a
+    # status read the supervisor asked for that says it is gone (notPaired, leaked, expired, ended,
+    # forgotten; not noGate, whose pair is kept until Stop Connecting, nor a reason this release
+    # does not know); Stop Connecting's pair reject; a status read that finds no pair once one was
+    # seen; and Disconnect, whether or not a quit came during it, once forget is done. Taking it
+    # away only narrows, so it needs no click (only widening needs the user's), and
+    # LoginItem.unregisterIfRegistered calls unregister() only for an item that is enabled or
+    # waits for approval.
+    supervisor = _swift("Supervisor.swift")
+    effect_cases = supervisor.split("    enum Effect: Equatable, Sendable {", 1)[1]
+    assert "        case pairGone\n" in effect_cases.split("\n    }\n", 1)[0]
+    exited = _swift_function(supervisor, "    private mutating func exited(")
+    halted = exited.split("            case .notConnected(let why):\n", 1)[1]
+    halted = halted.split("\n            case ", 1)[0]
+    assert "phase = .halted(.notConnected(why))" in halted
+    assert (
+        "if LoginRules.pairGone(why) {\n                    effects.append(.pairGone)\n" in halted
+    )
+    read = _swift_function(supervisor, "    private mutating func statusRead(")
+    assert read.count("LoginRules.pairGone(") == 1
+    assert (
+        "if case .halted(.notConnected(let why)) = phase, LoginRules.pairGone(why) {\n"
+        "            return [.pairGone]\n"
+    ) in read
+    assert supervisor.count("LoginRules.pairGone(") == 2
+    rules = _swift("LoginRules.swift")
+    gone = _swift_function(rules, "    static func pairGone(_ why: NotConnected) -> Bool {")
+    assert (
+        "case .notPaired, .leaked, .expired, .ended, .forgotten:\n            return true\n" in gone
+    )
+    assert "case .noGate, .other:\n            return false\n" in gone
+    assert "default" not in gone
+    connection = _swift("Connection.swift")
+    effect = _swift_function(connection, "    private func runEffect(")
+    case = effect.split("        case .pairGone:\n", 1)
+    assert len(case) == 2
+    gone_case = case[1].split("\n        case ", 1)[0]
+    # And status is read again, so the menu and a Set Up window follow an exit that ended it.
+    assert gone_case.index("LoginItem.unregisterIfRegistered()") < gone_case.index(
+        "refreshStatus()"
+    )
+    # Stop Connecting's pair reject forgot the pair, or the host found none: a pair whose gate
+    # record was lost (no_gate) is ended only this way, as Disconnect is not offered for it.
+    flow = _swift_function(connection, "    private func flowEffect(")
+    said = flow.split("        case .say(let note):\n", 1)[1].split("\n        case ", 1)[0]
+    assert (
+        "if LoginRules.pairForgotten(note) {\n"
+        "                // Stop Connecting forgot the pair, or there is none: the login item goes"
+    ) in said
+    assert said.index("if LoginRules.pairForgotten(note) {") < said.index(
+        "_ = LoginItem.unregisterIfRegistered()"
+    )
+    forgotten = _swift_function(
+        _swift("LoginRules.swift"), "    static func pairForgotten(_ note: PairingNote) -> Bool {"
+    )
+    assert "        case .rejected:\n            return true\n" in forgotten
+    assert (
+        '        case .refused(let code, _, _):\n            return code == "none"\n' in forgotten
+    )
+    assert "default" not in forgotten
+    # Disconnect: done is decided before the early return of a quit that came during it, and the
+    # login item goes before that return, so both ways out have it gone; the note says so.
+    forget = _swift_function(connection, "    private func forget() {")
+    early = forget.index("if self.ladder != nil || self.exiting {")
+    decided = forget.index("var done = false")
+    removed = forget.index("let removal = self.loginItemAfterForget(done)")
+    assert decided < removed < early
+    # Taken away by a method of its own, not by the task that waited for forget
+    # (test_the_login_item_is_asked_from_synchronous_code_only).
+    assert "LoginItem." not in _code_of(forget)
+    after_forget = _swift_function(
+        connection, "    private func loginItemAfterForget(_ done: Bool) -> LoginRemoval {"
+    )
+    assert "        done ? LoginItem.unregisterIfRegistered() : .nothingToRemove\n" in after_forget
+    assert "LoginText.afterDisconnect(removal)" in forget[early:]
+    # A confirmed pair seen, and then status finds none, whoever ended it.
+    publish = _swift_function(connection, "    private func publish() {")
+    ended = publish.split("} else if setUpSawPair, ", 1)[1].split("\n        }\n", 1)[0]
+    assert ended.index("setUpSawPair = false") < ended.index("LoginItem.unregisterIfRegistered()")
+    # Nothing else takes it away but the switch and the launch note's Keep It Off.
+    assert _code_of(connection).count("LoginItem.unregisterIfRegistered()") == 6
+    for path in SWIFT_FILES:
+        if path.name not in ("Connection.swift", "LoginItem.swift"):
+            assert "unregisterIfRegistered" not in path.read_text(encoding="utf-8"), path.name
+    unregister = _swift_function(
+        _swift("LoginItem.swift"), "    static func unregisterIfRegistered() -> LoginRemoval {"
+    )
+    guarded = unregister.index("guard before == .enabled || before == .requiresApproval else {")
+    assert guarded < unregister.index("try SMAppService.mainApp.unregister()")
+    # With nothing to take away, it still says the state macOS gives: after a Done that macOS
+    # refused, or a Keep It Off, this is the only line Disconnect's check can read.
+    assert (
+        "        guard before == .enabled || before == .requiresApproval else {\n"
+        "            _ = said(before)\n"
+        "            return .nothingToRemove\n"
+        "        }\n"
+    ) in unregister
+
+
+def _swift_blocks(code: str, opener: str) -> list[str]:
+    """Each block of ``code`` that the regex ``opener`` opens (it ends at the block's ``{``),
+    from where it matched to the brace that closes it. ``code`` holds no brace in a string."""
+    blocks = []
+    for found in re.finditer(opener, code):
+        depth = 0
+        for at in range(found.end() - 1, len(code)):
+            if code[at] == "{":
+                depth += 1
+            elif code[at] == "}":
+                depth -= 1
+                if depth == 0:
+                    blocks.append(code[found.start() : at + 1])
+                    break
+    return blocks
+
+
+def test_the_login_item_is_asked_from_synchronous_code_only() -> None:
+    # SMAppService's unregister() has an async form too, which a call in an async context would
+    # take, and which would not compile without await. LoginItem's functions are synchronous, so
+    # each call they make is the synchronous one; and they are called only from synchronous code,
+    # never inside a task nor in an async function. Once forget is done, a method of its own
+    # takes the item away, not the task that waited for forget.
+    for path in SWIFT_FILES:
+        if path.name not in ("Connection.swift", "LoginItem.swift"):
+            assert "LoginItem." not in _code_of(path.read_text(encoding="utf-8")), path.name
+    code = _code_of(_swift("Connection.swift"))
+    strings = re.findall(r'"(?:[^"\\\n]|\\.)*"', code)
+    assert strings and not [text for text in strings if "{" in text or "}" in text]
+    tasks = _swift_blocks(code, r"\bTask(?:\.detached)?\s*(?:\([^)]*\))?\s*\{")
+    asyncs = _swift_blocks(code, r"\bfunc [^{]*\basync\b[^{]*\{")
+    assert len(tasks) >= 10 and len(asyncs) >= 4
+    # forget's task among them, which once took the item away itself.
+    forgetting = 'self.cli, ["--json", "forget"], on: VerbQueue.store'
+    assert sum(forgetting in task for task in tasks) == 1
+    for block in tasks + asyncs:
+        assert "LoginItem." not in block, block[:300]
+    assert code.count("LoginItem.") == 12
+    login = _code_of(_swift("LoginItem.swift"))
+    for word in ("async", "await", "Task"):
+        assert not re.search(rf"\b{word}\b", login), word
+
+
+def test_the_login_rules_draw_nothing_and_the_self_test_checks_them() -> None:
+    # LoginRules.swift is Foundation only, compiled by the self-test (NEW_LOGIC), which runs
+    # checkLoginRules over the host's fixtures: the pair gone or kept for each, the launch note,
+    # what came of a register and of an unregister, and the words of each.
+    assert "LoginRules.swift" in check_app.LOGIC_SOURCES
+    rules = _swift("LoginRules.swift")
+    for declared in (
+        "enum LoginState: String, Equatable, Sendable {",
+        "enum LoginOutcome: Equatable, Sendable {",
+        "enum LoginRemoval: Equatable, Sendable {",
+        "enum LoginRules {",
+        "enum LoginText {",
+        "    static func pairGone(_ why: NotConnected) -> Bool {",
+        "    static func pairForgotten(_ note: PairingNote) -> Bool {",
+        "    static func mayRegister(confirmed: Bool, phase: RunSupervisor.Phase) -> Bool {",
+        "    static func isPaired(_ pair: StatusPair?) -> Bool {",
+        "    static func launchNote(paired: Bool, state: LoginState) -> Bool {",
+        "    static func afterRegister(state: LoginState, error: String?) -> LoginOutcome {",
+        "    static func removal(before: LoginState, after: LoginState) -> LoginRemoval {",
+        "    static func afterDisconnect(_ removal: LoginRemoval) -> String? {",
+    ):
+        assert declared in rules, declared
+    states = rules.split("enum LoginState: String, Equatable, Sendable {", 1)[1].split("\n}\n")[0]
+    assert re.findall(r"^    case (\w+)$", states, re.MULTILINE) == list(check_app.LOGIN_STATES)
+    for name in ("SMAppService", "ServiceManagement", "LoginItem.", "NSAlert", "Alerts"):
+        assert name not in _code_of(rules), name
+    selftest = _SELF_TEST.read_text(encoding="utf-8")
+    main_body = _swift_function(selftest, "    static func main() {")
+    assert main_body.index("checkSupervisor(fixtures, report)") < main_body.index(
+        "checkLoginRules(fixtures, report)"
+    )
+    checks = _swift_function(selftest, "    static func checkLoginRules(")
+    for fixture in (
+        "status-unpaired",
+        "status-paired",
+        "status-unreadable",
+        "run-events-ended",
+        "run-events-expired",
+        "run-events-leaked",
+        "run-events-not-paired",
+        "run-events-no-gate",
+        "run-events-several-pairs",
+        "run-events-pair-unusable",
+        "run-events-insecure-keyring",
+    ):
+        assert f'"{fixture}"' in checks, fixture
+    for function in (
+        "LoginRules.launchNote(",
+        "LoginRules.afterRegister(",
+        "LoginRules.removal(",
+        "LoginRules.pairForgotten(",
+        "LoginRules.mayRegister(",
+    ):
+        assert function in checks, function
+    # And after each run-events exit that ends the pair, a click can't register on the status
+    # read before the spawn.
+    supervised = _swift_function(selftest, "    static func checkSupervisor(")
+    assert "let mayAfter = LoginRules.mayRegister(confirmed: true, phase: sup.phase)" in supervised
+    # The supervisor's checks: each run-events fixture's exit, and the walk.
+    supervise = _swift_function(selftest, "    static func checkSupervisor(")
+    assert "let gone: Set<String> = [" in supervise and ".pairGone" in supervise
+    walk = _swift_function(selftest, "    static func checkSupervisorWalk(_ report: Report) {")
+    assert "effects.contains(.pairGone)" in walk
+
+
+def test_ready_asks_to_open_at_login_and_only_done_registers() -> None:
+    # decisions/0002 §3.1 step 10: Ready has the box "Open <name> when you log in", on, and macOS's
+    # notice in words; Done with the box checked asks the app to register (the effect
+    # registerLoginItem, which Connection runs as LoginItem.register()). Nothing else does: not the
+    # window closed on Ready, which ends Set Up as Done does, and not the box itself. Set Up is
+    # owed, and Ready reached, only after They Match here (checkSetupWalk).
+    flow = _swift("Setup.swift")
+    handle = _swift_function(flow, "    mutating func handle(_ input: Input) -> [Effect] {")
+    inputs = flow.split("    enum Input: Equatable, Sendable {", 1)[1].split("\n    }\n", 1)[0]
+    effects = flow.split("    enum Effect: Equatable, Sendable {", 1)[1].split("\n    }\n", 1)[0]
+    assert "        case openAtLogin(Bool)\n" in inputs
+    assert "        case registerLoginItem\n" in effects
+    assert "    private(set) var openAtLogin = true\n" in flow
+    done = handle.split("        case .done:\n", 1)[1].split("\n        case ", 1)[0]
+    assert "guard windowOpen, page == .ready else {" in done
+    assert "return openAtLogin ? [.close, .registerLoginItem] : [.close]" in done
+    assert _code_of(flow).count(".registerLoginItem") == 1
+    box = handle.split("        case .openAtLogin(let on):\n", 1)[1].split("\n        case ", 1)[0]
+    assert "guard windowOpen, page == .ready else {" in box and "openAtLogin = on" in box
+    shown = _swift_function(flow, "    private mutating func next() -> [Effect] {")
+    ready_again = (
+        "case .abilities?:\n            openAtLogin = true\n            return showPage(.ready)"
+    )
+    assert ready_again in shown
+    panel = _swift("SetupPanel.swift")
+    ready = _flat(_swift_function(panel, "    private func readyPage() -> NSView {"))
+    assert (
+        "NSButton(checkboxWithTitle: SetupText.openAtLoginBox, target: self, action:"
+        " #selector(openAtLoginChanged(_:)))"
+    ) in ready
+    assert "box.state = .on" in ready
+    assert "label(SetupText.openAtLoginNotice, secondary: true)" in ready
+    assert "    var onOpenAtLogin: ((Bool) -> Void)?\n" in panel
+    assert "onOpenAtLogin?(sender.state == .on)" in panel
+    connection = _swift("Connection.swift")
+    assert (
+        "        setupPanel.onOpenAtLogin = { [weak self] on in\n"
+        "            self?.feedSetUp(.openAtLogin(on))\n"
+        "        }\n"
+    ) in connection
+    selftest = _SELF_TEST.read_text(encoding="utf-8")
+    walk = _swift_function(selftest, "    static func checkSetupWalk(_ report: Report) {")
+    assert "case .registerLoginItem:" in walk and "registers" in walk
+
+
+def test_open_at_login_is_a_switch_in_a_settings_menu_while_connected() -> None:
+    # decisions/0002 §14: while connected, a Settings submenu holds Open at
+    # Login, whose switch shows whether macOS will open the app at login (the state read again
+    # from macOS, never kept by the app) and turns it on or off; and, while the settings file
+    # can't be read, Reset Settings…, the action #16 added. Disconnect stays where it is.
+    menu = _flat(_swift("MenuBarApp.swift"))
+    items = menu.split("struct HostItems: View {", 1)[1]
+    settings = items.split("if connection.connected { Menu(LoginText.settingsMenu) { ", 1)
+    assert len(settings) == 2
+    inside = settings[1]
+    assert inside.startswith(
+        "Toggle( LoginText.openAtLoginItem, isOn: Binding( get: { connection.openAtLogin },"
+        " set: { connection.openAtLoginChosen($0) } ) ) if model.problem?.offersReset == true {"
+        " Button(ConnectionText.resetSettingsItem) { model.resetSettingsChosen() } } } }"
+    )
+    assert menu.count("LoginText.settingsMenu") == 1
+    assert menu.count("Button(ConnectionText.disconnectItem)") == 1
+    connection = _swift("Connection.swift")
+    assert "    @Published private(set) var openAtLogin = false\n" in connection
+    refresh = _swift_function(connection, "    private func refreshLoginItem() {")
+    assert "let on = LoginItem.state == .enabled" in refresh
+    assert "refreshLoginItem()" in _swift_function(connection, "    private func menuOpened() {")
+    chosen = _swift_function(connection, "    func openAtLoginChosen(_ on: Bool) {")
+    assert "LoginItem.unregisterIfRegistered()" in chosen and "refreshLoginItem()" in chosen
+
+
+def test_the_welcome_note_shows_at_launch_only_while_unpaired() -> None:
+    # decisions/0002, What is built today: at launch, the note that says where the menu is
+    # waits for the first status read, and shows only when it finds no confirmed pair; a paired
+    # launch goes straight on (afterWelcome: the paused note, a pairing left unfinished). Opened
+    # again while it runs, the app shows it, paired or not. The first status read also checks the
+    # login item while paired, and shows the launch note before anything afterWelcome shows.
+    menu = _swift("MenuBarApp.swift")
+    finished = _swift_function(menu, "    func applicationDidFinishLaunching(")
+    hook = finished.index("Connection.shared.onFirstStatusRead = { [weak self] paired in\n")
+    assert hook < finished.index("Connection.shared.launch()")
+    assert "self?.launchRead(paired: paired)" in finished
+    assert "showWhereTheMenuIs()" not in finished
+    assert "Task.sleep" not in finished.split("Connection.shared.launch()", 1)[1]
+    read = _swift_function(menu, "    private func launchRead(paired: Bool) {")
+    assert (
+        "        guard !launchHandled else {\n            return\n        }\n"
+        "        if paired {\n"
+        "            launchHandled = true\n"
+        "            Connection.shared.afterWelcome()\n"
+        "        } else {\n"
+        "            showWhereTheMenuIs()\n"
+        "        }\n"
+    ) in read
+    reopen = _swift_function(menu, "    func applicationShouldHandleReopen(")
+    assert "showWhereTheMenuIs()" in reopen
+    # Its definition, launchRead and the reopen.
+    assert menu.count("showWhereTheMenuIs()") == 3
+    connection = _swift("Connection.swift")
+    assert "    var onFirstStatusRead: ((Bool) -> Void)?\n" in connection
+    status = _swift_function(connection, "    private func readStatus(")
+    assert (
+        "        if !firstStatusRead {\n"
+        "            firstStatusRead = true\n"
+        "            firstStatusArrived()\n"
+        "        }\n"
+    ) in status
+    arrived = _swift_function(connection, "    private func firstStatusArrived() {")
+    paired = arrived.index("let paired = LoginRules.isPaired(status?.pair)")
+    # Only a paired launch checks the login item: an unpaired one writes no line about it, and
+    # shows no note about opening at login (checkLoginItemAtLaunch takes the pair as given).
+    guarded = arrived.index(
+        "        if paired && ladder == nil && !exiting {\n"
+        "            checkLoginItemAtLaunch()\n"
+        "        }\n"
+    )
+    checked = arrived.index("checkLoginItemAtLaunch()")
+    told = arrived.index("told?(paired)")
+    assert paired < guarded < checked < told < arrived.index("afterWelcomeIfReady()")
+    assert arrived.count("checkLoginItemAtLaunch()") == 1
+    assert _code_of(connection).count("checkLoginItemAtLaunch()") == 2  # its definition, and here
+    assert "onFirstStatusRead = nil" in arrived
+    launch = _swift_function(connection, "    private func checkLoginItemAtLaunch() {")
+    assert "let state = LoginItem.checked()" in launch
+    assert "guard LoginRules.launchNote(paired: true, state: state) else {" in launch
+    note = _flat(launch)
+    assert 'Alerts.shared.show(key: "login-off", {' in note
+    assert re.findall(r"addButton\(withTitle: ([\w.]+)\)", note) == [
+        "LoginText.openSettingsButton",
+        "LoginText.keepItOffButton",
+    ]
+    assert "LoginItem.openSettings()" in note and "LoginItem.unregisterIfRegistered()" in note
+    assert _code_of(connection).count("LoginItem.checked()") == 1
+
+
+def test_the_login_item_check_looks_for_the_apps_own_words() -> None:
+    # What the pairing check reads of Open at Login, as App/LoginRules.swift and App/Setup.swift
+    # spell it, and the rest of those words.
+    rules = _swift("LoginRules.swift")
+    setup = _swift("Setup.swift")
+    words = {
+        "settingsMenu": check_app.SETTINGS_MENU,
+        "openSettingsButton": check_app.OPEN_LOGIN_ITEMS,
+        "keepItOffButton": check_app.KEEP_IT_OFF,
+        "needsApprovalTitle": check_app.NEEDS_APPROVAL_TITLE,
+        "couldNotTurnOnTitle": check_app.LOGIN_FAILED_TITLE,
+        "launchOffTitle": check_app.LAUNCH_OFF_TITLE,
+        "offAfterDisconnect": check_app.OFF_AFTER_DISCONNECT,
+    }
+    for constant, said in words.items():
+        assert f'static let {constant} = "{_named_in_swift(said)}"' in rules, constant
+        assert check_app._quoted(said) == f'"{said}"'
+    name = check_app.APP_NAME
+    where = "System Settings › General › Login Items & Extensions"
+    assert check_app.SETTINGS_MENU == "Settings"
+    assert check_app.OPEN_LOGIN_ITEMS == "Open Login Items Settings"
+    assert check_app.KEEP_IT_OFF == "Keep It Off"
+    assert check_app.NEEDS_APPROVAL_TITLE == (
+        f"macOS needs your OK before {name} can open when you log in"
+    )
+    assert check_app.LOGIN_FAILED_TITLE == f"{name} couldn't turn on opening at login"
+    assert check_app.LAUNCH_OFF_TITLE == f"{name} won't start when you log in"
+    # True whether the item was on or only waited for the user's approval.
+    assert check_app.OFF_AFTER_DISCONNECT == f"{name} won't open when you log in."
+    rest = {
+        "openAtLoginItem": "Open at Login",
+        "needsApprovalText": (
+            f"Turn \\(appName) on in {where}. Until then, Lucille can reach this Mac only while"
+            " \\(appName) is open."
+        ),
+        "couldNotTurnOnText": (
+            "Open \\(appName) yourself after you log in: Lucille can reach this Mac only while"
+            " \\(appName) is open. To try again, choose Settings, then Open at Login, in"
+            " \\(appName)'s menu."
+        ),
+        "couldNotTurnOffTitle": "\\(appName) couldn't stop opening when you log in",
+        "turnOffByHand": f"Turn it off in {where}.",
+        "launchOffText": (
+            "Opening at login is turned off in System Settings. Lucille can reach this Mac only"
+            " while \\(appName) is open."
+        ),
+        "removeByHand": f"\\(appName) couldn't turn off opening at login. Turn it off in {where}.",
+    }
+    for constant, said in rest.items():
+        assert f'static let {constant} = "{said}"' in rules, constant
+    assert "    private static let appName = HostText.appName\n" in rules
+    assert f'static let openAtLoginBox = "{_named_in_swift(check_app.OPEN_AT_LOGIN_BOX)}"' in setup
+    assert check_app.OPEN_AT_LOGIN_BOX == f"Open {name} when you log in"
+    notice = _named_in_swift(check_app.OPEN_AT_LOGIN_NOTICE)
+    assert (
+        f'static let openAtLoginNotice = "{notice} That is expected. You can change it later in'
+        f' {where}."'
+    ) in setup
+    assert check_app.OPEN_AT_LOGIN_NOTICE == (
+        f"macOS will show a notice that {name} can now open when you log in."
+    )
+    # Disconnect's note adds a sentence for what became of the login item, or none.
+    after = _swift_function(
+        rules, "    static func afterDisconnect(_ removal: LoginRemoval) -> String? {"
+    )
+    assert "case .nothingToRemove:\n            return nil\n" in after
+    assert "case .removed:\n            return offAfterDisconnect\n" in after
+    assert "case .failed:\n            return removeByHand\n" in after
+    # The line on standard error, which the pairing check reads, and the note for each state
+    # after Done.
+    assert check_app.LOGIN_STATES == ("notRegistered", "enabled", "requiresApproval", "notFound")
+    for state in check_app.LOGIN_STATES:
+        assert check_app._login_state(f"x\nlogin item: {state}\ny\n") == state
+    assert check_app._login_state("login item: moon\n") is None
+    assert check_app._login_state("a login item: enabled\n") is None
+    assert check_app._login_state("") is None
+    said = "login item: notRegistered\nlogin item: enabled\n"
+    assert check_app._login_state(said) == "enabled"
+    assert check_app.LOGIN_NOTE_AFTER_DONE == {
+        "enabled": None,
+        "requiresApproval": check_app.NEEDS_APPROVAL_TITLE,
+        "notRegistered": check_app.LOGIN_FAILED_TITLE,
+        "notFound": check_app.LOGIN_FAILED_TITLE,
+    }
+    for said in (check_app.OPEN_AT_LOGIN_BOX, check_app.OPEN_AT_LOGIN_NOTICE, check_app.NOT_NOW):
+        assert check_app._quoted(said) == f'"{said}"'
 
 
 # --- Only the copy at /Applications/<name>.app acts; one update notice (0002 §13 and §16) -------
@@ -5418,7 +7078,7 @@ def test_the_pairing_check_asks_for_a_newer_release_then_prepares_to_update() ->
         < go.index("self.stop_now")
     )
     step = _python_function(source, "too_old_then_prepare")
-    assert 'self.launch("too-old")' in step
+    assert 'self.launch("too-old", paired=True)' in step
     first = step.index("min_host_version=UPDATE_MIN_VERSION")
     second = step.index("min_host_version=UPDATE_HIGHER_VERSION")
     shown = step.index("_says(UPDATE_TITLE)")
@@ -5438,7 +7098,7 @@ def test_the_pairing_check_asks_for_a_newer_release_then_prepares_to_update() ->
         "_screenshot(",
     ):
         assert name in step, name
-    assert 'self.launch("stop-now")' in _python_function(source, "stop_now")
+    assert 'self.launch("stop-now", paired=True)' in _python_function(source, "stop_now")
 
 
 def test_the_placement_check_sees_its_control_before_it_reads_a_refusal() -> None:

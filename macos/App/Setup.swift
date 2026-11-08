@@ -128,6 +128,9 @@ extension Ability {
 ///   nothing to offer, gives no Add back page.
 /// - Nothing is added back but a row the user checked that has a box, each once, in order. Every
 ///   box starts unchecked, and there is no way to check them all at once.
+/// - Ready's box, Open <name> when you log in, is checked each time Ready comes from What Lucille
+///   may do. Only Done on Ready with it checked asks to register the login item
+///   (`registerLoginItem`): not the box itself, and not the window closed on Ready.
 struct SetupFlow: Equatable, Sendable {
     /// `policy previous` loads the policy set aside, which can wait on a stalled mount.
     static let previousLimit: TimeInterval = 30
@@ -156,6 +159,9 @@ struct SetupFlow: Equatable, Sendable {
         case restore(row: Int, RestoreItem)
         /// A note: the policy set aside can't be read.
         case note(HostError)
+        /// Ask macOS to open the app when the user logs in: Done, with Ready's box checked, once
+        /// the window has closed.
+        case registerLoginItem
         /// Close the window.
         case close
     }
@@ -179,6 +185,8 @@ struct SetupFlow: Equatable, Sendable {
         case itemDone(row: Int)
         /// Continue.
         case next
+        /// Ready's box, Open <name> when you log in, checked or not.
+        case openAtLogin(Bool)
         case done
         /// The user closed the window.
         case windowClosed
@@ -202,6 +210,8 @@ struct SetupFlow: Equatable, Sendable {
     private var reading = false
     /// The window has opened since They Match last confirmed.
     private var opened = false
+    /// Ready's box: checked each time Ready is shown from What Lucille may do.
+    private(set) var openAtLogin = true
 
     init(home: String) {
         self.home = home
@@ -249,6 +259,12 @@ struct SetupFlow: Equatable, Sendable {
             return itemDone(row)
         case .next:
             return next()
+        case .openAtLogin(let on):
+            guard windowOpen, page == .ready else {
+                return []
+            }
+            openAtLogin = on
+            return []
         case .done:
             guard windowOpen, page == .ready else {
                 return []
@@ -256,7 +272,7 @@ struct SetupFlow: Equatable, Sendable {
             owed = false
             windowOpen = false
             page = nil
-            return [.close]
+            return openAtLogin ? [.close, .registerLoginItem] : [.close]
         case .windowClosed:
             guard windowOpen else {
                 return []
@@ -364,6 +380,7 @@ struct SetupFlow: Equatable, Sendable {
         case .folders?:
             return showPage(.abilities)
         case .abilities?:
+            openAtLogin = true
             return showPage(.ready)
         default:
             return []
@@ -416,6 +433,10 @@ enum SetupText {
     // The Ready page.
     static let readyTitle = "\(appName) is ready"
     static let readyText = "Lucille can now ask this Mac to do what is turned on, in the folders you added."
+    /// Checked when Ready comes. With it checked, Done asks macOS to open the app at login, and
+    /// macOS shows its own notice, which the line under it announces (decisions/0002 §3.1 step 10).
+    static let openAtLoginBox = "Open \(appName) when you log in"
+    static let openAtLoginNotice = "macOS will show a notice that \(appName) can now open when you log in. That is expected. You can change it later in System Settings › General › Login Items & Extensions."
     static let doneButton = "Done"
 
     /// What the Folders page says under a folder, from `roots check` (spec/CLI.md §9.2): nothing

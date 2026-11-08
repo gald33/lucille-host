@@ -480,7 +480,8 @@ CLEAN_SWIFT = [
     # A phrase in a comment is not a string the app shows.
     "// Never say: Your data never leaves your device.",
     '/* Never say "private" */ let x = 1',
-    # The login item the app registers is an agent, not a daemon.
+    # An agent is not a daemon, so the lint allows it; the app's one login item is the app
+    # itself, mainApp (decisions/0002 §9), and tests/test_macos_build.py refuses .agent( there.
     'let service = SMAppService.agent(plistName: "x.plist")',
     "let service = SMAppService.mainApp",
     "let name = NSApplication.ActivationPolicy.accessory",

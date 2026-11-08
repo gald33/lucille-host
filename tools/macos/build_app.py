@@ -916,15 +916,19 @@ def _run(argv: list[str], *, cwd: Path | None = None, env: Mapping[str, str] | N
 
 # hdiutil fails now and then on a busy machine, while the disk-image helper is still at work on
 # an earlier call: "Resource busy" or "Resource temporarily unavailable" (EAGAIN). Both pass if
-# the same call is made again a few seconds later.
+# the same call is made again later. A few seconds was not always enough: on 2026-11-08 a macos-15
+# runner still refused `hdiutil verify` of a disk image it had just made after 30 s of waits
+# (5, 10 and 15 s), every try failing at once. So the waits now add up to two minutes.
 HDIUTIL_BUSY: Final = ("Resource busy", "Resource temporarily unavailable")
-HDIUTIL_TRIES: Final = 4
+HDIUTIL_WAITS: Final = (5, 10, 15, 20, 30, 40)
+HDIUTIL_TRIES: Final = len(HDIUTIL_WAITS) + 1
 
 
 def hdiutil(args: Sequence[str], *, sleep: Any = time.sleep) -> subprocess.CompletedProcess[str]:
     """Run ``hdiutil`` with ``args`` and return how it ended, output captured as text. A call
     that fails because the machine is busy is made again, up to ``HDIUTIL_TRIES`` times in all,
-    waiting 5, 10 and 15 s between them; any other failure is returned at once."""
+    waiting each of ``HDIUTIL_WAITS`` in turn between them; any other failure is returned at
+    once. Each wait is said, and flushed, before it starts, so the log's times are true."""
     argv = ["hdiutil", *args]
     for attempt in range(1, HDIUTIL_TRIES + 1):
         print("+ " + shlex.join(argv), flush=True)
@@ -933,8 +937,12 @@ def hdiutil(args: Sequence[str], *, sleep: Any = time.sleep) -> subprocess.Compl
         if not busy or attempt == HDIUTIL_TRIES:
             return done
         said = done.stderr.strip()
-        print(f"hdiutil is busy; trying again (try {attempt} of {HDIUTIL_TRIES}): {said}")
-        sleep(5 * attempt)
+        wait = HDIUTIL_WAITS[attempt - 1]
+        print(
+            f"hdiutil is busy; trying again in {wait} s (try {attempt} of {HDIUTIL_TRIES}): {said}",
+            flush=True,
+        )
+        sleep(wait)
     raise AssertionError("unreachable")
 
 

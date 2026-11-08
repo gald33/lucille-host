@@ -96,38 +96,40 @@ On the bundle made read-only (CI runs ``chmod -R a-w`` first):
   (:func:`is_this_build`), so a copy an earlier build left there never answers for this one.
 - ``placement``: only the copy at ``/Applications/<name>.app`` starts anything. The control first:
   that copy, opened, starts the host on the app's profile, which the check sees, and says where its
-  menu is. Then, one at a time with no other copy running, the build's copy, and a copy named
-  ``<name> 2.app`` in ``/Applications`` with the copy at the app's own name there and then moved
-  aside: for 10 seconds each starts no host process on the app's profile and changes nothing in the
-  profile's folder, says why it can't run and how to fix that, offers only Quit, and quits when Quit
-  is pressed. The renamed copy is removed and the other put back, whatever happens. Reading the
-  notes needs System Events, as ``ui`` does (``--require-driven`` makes not being able to a
-  failure). Screenshots ``0-placement-*.png`` go to ``check/screens``.
+  menu is (with no confirmed pair on the profile; with one, it says neither). Then, one at a time
+  with no other copy running, the build's copy, and a copy named ``<name> 2.app`` in
+  ``/Applications`` with the copy at the app's own name there and then moved aside: for 10 seconds
+  each starts no host process on the app's profile and changes nothing in the profile's folder, says
+  why it can't run and how to fix that, offers only Quit, and quits when Quit is pressed. The
+  renamed copy is removed and the other put back, whatever happens. Reading the notes needs System
+  Events, as ``ui`` does (``--require-driven`` makes not being able to a failure). Screenshots
+  ``0-placement-*.png`` go to ``check/screens``.
 - ``launch``: opens the copy in ``/Applications`` the way Finder does, checks that it is still
   running 10 seconds later, then stops it.
 - ``ui``: opens the copy in ``/Applications`` and drives it as a user would, through System Events:
-  reads the note
-  that says what the app is for and where the menu is, when the app opens and when it is opened
-  again; reads the menu bar item's name and the menu; chooses Pause Lucille, then Resume Lucille,
-  and reads the name again; switches an ability on and off; adds a folder through the Open panel
-  and the name dialog, with a name the app must correct first, and removes it from the Folders
-  submenu; chooses the home folder, which the app asks about first, picks Choose a Smaller Folder
-  once, then adds it; chooses the Data volume, and then ``/`` through a link to it, which the app
-  refuses each time with Choose a Smaller Folder and Cancel and no button that adds the folder,
-  and adds neither. The Open panel's buttons are looked for in every window, sheet and group, since
-  where they sit differs between macOS versions; where its prompt is nowhere, Return, its default
-  button, chooses (:data:`CHOOSE_IN_PANEL`), and what the app shows next is checked as before.
-  Then, with a code-shaped text on the pasteboard, it chooses Connect to Lucille…: the code window
-  opens with its field empty, and the field stays empty once it has the focus, so the app read
-  nothing from the pasteboard; a typed word gets the hint; Command-V, typed through System Events,
-  pastes exactly what was copied; Connect hands it to the host, which refuses it as no code, and
-  the app says so in its own words. It checks each step against the host's own state, on the
-  app's own profile (:data:`APP_PROFILE`). It uses the real HOME and leaves the host as it found
-  it. Where macOS does not let System Events drive other apps, it says so and drives nothing,
-  which is a failure with ``--require-driven`` (the macos-app job passes it; the smoke jobs record
-  whether it could drive). Screenshots go to ``check/screens``.
+  reads the note that says what the app is for and where the menu is, when the app opens with no
+  confirmed pair (with one, it shows none) and when it is opened again; reads the menu bar item's
+  name and the menu; chooses Pause Lucille, then Resume Lucille, and reads the name again; switches
+  an ability on and off; adds a folder through the Open panel and the name dialog, with a name the
+  app must correct first, and removes it from the Folders submenu; chooses the home folder, which
+  the app asks about first, picks Choose a Smaller Folder once, then adds it; chooses the Data
+  volume, and then ``/`` through a link to it, which the app refuses each time with Choose a Smaller
+  Folder and Cancel and no button that adds the folder, and adds neither. The Open panel's buttons
+  are looked for in every window, sheet and group, since where they sit differs between macOS
+  versions; where its prompt is nowhere, Return, its default button, chooses
+  (:data:`CHOOSE_IN_PANEL`), and what the app shows next is checked as before. Then, with a
+  code-shaped text on the pasteboard, it chooses Connect to Lucille…: the code window opens with its
+  field empty, and the field stays empty once it has the focus, so the app read nothing from the
+  pasteboard; a typed word gets the hint; Command-V, typed through System Events, pastes exactly
+  what was copied; Connect hands it to the host, which refuses it as no code, and the app says so in
+  its own words. It checks each step against the host's own state, on the app's own profile
+  (:data:`APP_PROFILE`). It uses the real HOME and leaves the host as it found it. Where macOS does
+  not let System Events drive other apps, it says so and drives nothing, which is a failure with
+  ``--require-driven`` (the macos-app job passes it; the smoke jobs record whether it could drive).
+  Screenshots go to ``check/screens``.
 - ``library-snapshot --to F`` and ``library-diff --before F`` (M12): ``~/Library`` is walked
-  before ``launch`` and after ``ui`` (``Developer`` and ``Android`` skipped, no link followed). A
+  before ``launch`` and after ``ui``, and again before and after ``pairing`` (``Developer`` and
+  ``Android`` skipped, no link followed). A
   new, changed or removed path whose name holds the bundle id, the app's name or "lucille" and
   that ``tools/macos/library-allowlist.txt`` does not allow is a failure; every other change is
   printed. The state folder of the app's profile must be among the changes, the control that the
@@ -152,7 +154,13 @@ On the bundle made read-only (CI runs ``chmod -R a-w`` first):
   confirms; the app starts ``run``, which reads the room Lucille offers; once the menu says
   Connected, the Set Up window opens by itself, with no Add back page (the app saw no
   ``policy_reset``, the harness having paired), on Folders, and its switch for ``files.sha256``
-  turns it on and off again, through ``ops``, before Done closes it; a ``files.sha256``
+  turns it on and off again, through ``ops``; Ready's box "Open <name> when you log in" is
+  checked, and Done closes the window and asks macOS to open the app at login: the app says on
+  standard error which state macOS gave, and its words agree with it (what macOS answers an
+  ad-hoc build is not known, so agreement is the gate, and ``sudo -n sfltool dumpbtm`` is printed,
+  never gated); each later launch is paired, and shows no note about the menu bar, and says the
+  login item's state, with Keep It Off chosen if the app says it won't start at login; a
+  ``files.sha256``
   request on a folder added through the command line is answered; ``run`` killed with SIGKILL is
   started again after the back-off; ``run`` drains when the app itself is killed; the app's own
   Quit asks first, shows the finishing panel, and waits for ``run`` to drain; Stop What's Running
@@ -160,7 +168,8 @@ On the bundle made read-only (CI runs ``chmod -R a-w`` first):
   notice, which no later request brings back, and Prepare to Update asks nothing, lets ``run``
   drain and quits;
   Stop now pauses the host, which the app never undoes on its own; Disconnect drains ``run``, then
-  forgets the pair. It drives the copy in ``/Applications``.
+  forgets the pair, takes the login item away and says so when there was one, and the menu's
+  Settings goes. It drives the copy in ``/Applications``.
   The app's profile, if there was one, is set aside first and put back at the end. Screenshots go
   to ``check/screens``.
 - ``gatekeeper``: prints what ``spctl`` says about the app and the disk image. It never fails: an
@@ -226,6 +235,7 @@ LOGIC_SOURCES: Final = (
     "RequestLog.swift",
     "Placement.swift",
     "Setup.swift",
+    "LoginRules.swift",
 )
 # The host's golden fixtures (spec/CLI.md section 11), which the self-test reads through the
 # app's JSON reader and its pairing, supervision and Set Up state machines.
@@ -2834,6 +2844,40 @@ PREPARE_TO_UPDATE_ITEM: Final = "Prepare to Update…"
 # end began (``RunSupervisor.describe``), and the start of the one for a ``run`` a signal ended.
 DRAINED_LINE: Final = "run exited 0 (drained, stdin_end)"
 SIGNALED_LINE: Final = "run ended by signal"
+# Open at Login (decisions/0002 §3.1 step 10, §3.3, §9), as App/Setup.swift and App/LoginRules.swift
+# spell it (tests/test_macos_build.py checks that they agree): Ready's box and the first sentence
+# of the notice under it; the line the app writes on standard error each time it acts on its login
+# item or checks it at launch, with each state macOS can give; the note after Done when macOS needs
+# the user's OK, the one when it couldn't, and the button that opens System Settings, which the
+# checks never press; the note at launch while paired and the item waits for approval, and its
+# button that takes the item away; the sentence Disconnect's note adds; and the menu's submenu
+# while connected. Then the note the app shows after Done for each state, none while enabled.
+OPEN_AT_LOGIN_BOX: Final = f"Open {APP_NAME} when you log in"
+OPEN_AT_LOGIN_NOTICE: Final = (
+    f"macOS will show a notice that {APP_NAME} can now open when you log in."
+)
+LOGIN_STATES: Final = ("notRegistered", "enabled", "requiresApproval", "notFound")
+LOGIN_ITEM_LINE: Final = re.compile(
+    r"^login item: (notRegistered|enabled|requiresApproval|notFound)$", re.MULTILINE
+)
+NEEDS_APPROVAL_TITLE: Final = f"macOS needs your OK before {APP_NAME} can open when you log in"
+LOGIN_FAILED_TITLE: Final = f"{APP_NAME} couldn't turn on opening at login"
+OPEN_LOGIN_ITEMS: Final = "Open Login Items Settings"
+LAUNCH_OFF_TITLE: Final = f"{APP_NAME} won't start when you log in"
+KEEP_IT_OFF: Final = "Keep It Off"
+OFF_AFTER_DISCONNECT: Final = f"{APP_NAME} won't open when you log in."
+SETTINGS_MENU: Final = "Settings"
+LOGIN_NOTE_AFTER_DONE: Final = {
+    "enabled": None,
+    "requiresApproval": NEEDS_APPROVAL_TITLE,
+    "notRegistered": LOGIN_FAILED_TITLE,
+    "notFound": LOGIN_FAILED_TITLE,
+}
+# The button that closes each of those notes and does nothing else, by its title.
+LOGIN_NOTE_CLOSES: Final = {NEEDS_APPROVAL_TITLE: NOT_NOW, LOGIN_FAILED_TITLE: "OK"}
+# What the app says of its login item once it has none: macOS gives notRegistered, or notFound
+# when it never had one to find.
+LOGIN_ITEM_GONE: Final = ("notRegistered", "notFound")
 
 
 def _system_events(body: str, timeout: float = 30) -> tuple[bool, str]:
@@ -2951,10 +2995,20 @@ def _welcome(checker: Checker, shot: Path, when: str) -> None:
     )
 
 
-def _drive_welcome(checker: Checker, screens: Path, app: Path) -> None:
-    """The app has no window and no Dock icon, so when it opens, and when it is opened again
-    while it runs, it says where its menu is."""
-    _welcome(checker, screens / "1-welcome.png", "when it opens")
+def _drive_welcome(checker: Checker, screens: Path, app: Path, *, paired: bool) -> None:
+    """The app has no window and no Dock icon, so when it opens with no confirmed pair, and
+    whenever it is opened again while it runs, it says where its menu is (decisions/0002, What
+    is built today). Opened while ``paired``, it goes straight on: the check sees no such note,
+    and presses nothing."""
+    if paired:
+        shown = _wait_until(lambda: _says(WELCOME_TITLE), 10)
+        checker.expect(
+            not shown,
+            "opened while paired, the app shows no note about its menu bar",
+            f"{_texts()}" if shown else "",
+        )
+    else:
+        _welcome(checker, screens / "1-welcome.png", "when it opens")
     done = subprocess.run(["open", str(app)], capture_output=True, text=True, check=False)
     checker.expect(done.returncode == 0, "open opens the running app again", _shown(done))
     _welcome(checker, screens / "1-welcome-again.png", "when it is opened again")
@@ -3493,6 +3547,64 @@ def _pair_state(python: Path) -> str | None:
     except (IndexError, KeyError, TypeError, ValueError):
         print(f"note: status --json: {_shown(done)}")
         return None
+
+
+def _login_state(text: str) -> str | None:
+    """The state of the last ``login item: <state>`` line in ``text``, as the app writes it on
+    standard error each time it acts on its login item or checks it at launch
+    (App/LoginItem.swift); None when there is none."""
+    found = LOGIN_ITEM_LINE.findall(text)
+    return found[-1] if found else None
+
+
+def _login_note() -> str | None:
+    """The title of the note about opening at login that the app shows after Done or the
+    Settings menu's switch, if one is up: that macOS needs the user's OK, or that it couldn't."""
+    for title in LOGIN_NOTE_CLOSES:
+        if _says(title):
+            return title
+    return None
+
+
+def _close_login_note() -> None:
+    """Close the note about opening at login that is up, with the button that does nothing else
+    (:data:`LOGIN_NOTE_CLOSES`): never Open Login Items Settings. Nothing is pressed when no such
+    note is up."""
+    note = _login_note()
+    if note is not None:
+        _press(LOGIN_NOTE_CLOSES[note])
+        _wait_until(lambda: _login_note() is None, 10)
+
+
+def _login_items_naming(text: str, names: Sequence[str]) -> list[str]:
+    """The records of ``sfltool dumpbtm``'s listing, blocks parted by a blank line, that hold any
+    of ``names``."""
+    return [block for block in re.split(r"\n\s*\n", text) if any(name in block for name in names)]
+
+
+def _dump_login_items() -> None:
+    """Print what macOS's own list of login and background items (``sfltool dumpbtm``, which
+    needs root) holds about the app: how many records name its bundle identifier or its path,
+    and the first five of them. For the record only, never a gate: what macOS answers an ad-hoc
+    build is not known (decisions/0002 §9). ``sudo -n`` asks for no password; where it is
+    refused, where there is no sudo or no sfltool, or where it hangs, it says so and goes on."""
+    argv = ["sudo", "-n", "sfltool", "dumpbtm"]
+    shown = " ".join(argv)
+    try:
+        done = subprocess.run(
+            argv, capture_output=True, text=True, errors="replace", timeout=60, check=False
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        print(f"note: {shown} did not run: {exc}", flush=True)
+        return
+    records = _login_items_naming(
+        done.stdout, (build_app.load_pins().bundle_id, f"/{APP_NAME}.app")
+    )
+    print(f"{shown} exited {done.returncode}: {len(records)} record(s) name the app", flush=True)
+    for record in records[:5]:
+        print(record.strip("\n"), flush=True)
+    if done.returncode != 0:
+        print(f"its standard error: {done.stderr[-2000:]!r}", flush=True)
 
 
 def _drive_folders(checker: Checker, python: Path, screens: Path) -> None:
@@ -4054,18 +4166,17 @@ def _drive_reset(checker: Checker, python: Path, screens: Path) -> None:
 
 def check_ui(app: Path, checker: Checker, work: Path, require_driven: bool = False) -> None:
     """Open the app and drive it the way a user would, through System Events: read the note that
-    says what it is for and where its menu is, when it opens and when it is opened again; read the
-    menu; choose Pause Lucille and Resume Lucille, and watch the host's pause flag; switch an
-    ability on and off; add a folder through the Open panel and the name dialog, and remove it from
-    the Folders submenu; add the home folder, which the app asks about first; choose the Data
-    volume, and ``/`` through a link to it, which the app refuses; open Activity, and the host's
-    log in it (:func:`_drive_activity`); open the code window and paste into it
-    (:func:`_drive_code_window`); and, last, reset a settings file the host cannot read
-    (:func:`_drive_reset`). Each step is checked against the host's own state, on the app's own
-    profile. It uses the real HOME, and leaves the host as it found it. Where macOS
-    does not let System Events drive other apps (no accessibility permission), it says so and
-    drives nothing; with ``require_driven`` that is a failure. Screenshots go to
-    ``<out>/check/screens``."""
+    says what it is for and where its menu is, when it opens with no confirmed pair (with one, it
+    shows none) and when it is opened again; read the menu; choose Pause Lucille and Resume Lucille,
+    and watch the host's pause flag; switch an ability on and off; add a folder through the Open
+    panel and the name dialog, and remove it from the Folders submenu; add the home folder, which
+    the app asks about first; choose the Data volume, and ``/`` through a link to it, which the app
+    refuses; open Activity, and the host's log in it (:func:`_drive_activity`); open the code window
+    and paste into it (:func:`_drive_code_window`); and, last, reset a settings file the host cannot
+    read (:func:`_drive_reset`). Each step is checked against the host's own state, on the app's own
+    profile. It uses the real HOME, and leaves the host as it found it. Where macOS does not let
+    System Events drive other apps (no accessibility permission), it says so and drives nothing;
+    with ``require_driven`` that is a failure. Screenshots go to ``<out>/check/screens``."""
     name = build_app.load_pins().app_name
     screens = work / "screens"
     screens.mkdir(parents=True, exist_ok=True)
@@ -4075,6 +4186,9 @@ def check_ui(app: Path, checker: Checker, work: Path, require_driven: bool = Fal
     err_log = work / "app-stderr.txt"
     for log in (out_log, err_log):
         log.write_text("", encoding="utf-8")
+    # Whether the app opens paired, which decides whether it says where its menu is at launch.
+    paired = _pair_state(python_in(app)) == "confirmed"
+    print(f"the app's profile holds a confirmed pair: {paired}", flush=True)
     done = subprocess.run(
         ["open", "--stdout", str(out_log), "--stderr", str(err_log), str(app)],
         capture_output=True,
@@ -4088,7 +4202,7 @@ def check_ui(app: Path, checker: Checker, work: Path, require_driven: bool = Fal
     try:
         driven = _can_drive()
         if driven:
-            _drive_welcome(checker, screens, app)
+            _drive_welcome(checker, screens, app, paired=paired)
             _screenshot(screens / "1-menu-bar.png")
             driven = _drive_menu(checker, screens, flag)
         if driven:
@@ -4141,7 +4255,8 @@ def _stop_the_app(checker: Checker, what: str) -> None:
 def _placement_control(checker: Checker, screens: Path, require_driven: bool) -> bool:
     """The control: the copy at :func:`installed_app_path`, opened, starts the host on the app's
     profile, which :func:`_profile_processes` sees, and says where its menu is, not where it
-    should be. Without it, seeing no host process later would prove nothing. Whether System
+    should be; while the profile holds a confirmed pair, it says neither (decisions/0002, What is
+    built today). Without it, seeing no host process later would prove nothing. Whether System
     Events can drive the app here; with ``require_driven``, not being able to is a failure."""
     installed = installed_app_path()
     _stop_earlier_copies(checker, APP_NAME)
@@ -4150,6 +4265,8 @@ def _placement_control(checker: Checker, screens: Path, require_driven: bool) ->
         "no host process of the app's profile runs before the control",
         f"{_profile_processes()}",
     )
+    paired = _pair_state(python_in(installed)) == "confirmed"
+    print(f"the app's profile holds a confirmed pair: {paired}", flush=True)
     before = _folder_state(_profile_folder())
     done = subprocess.run(["open", str(installed)], capture_output=True, text=True, check=False)
     checker.expect(
@@ -4168,11 +4285,13 @@ def _placement_control(checker: Checker, screens: Path, require_driven: bool) ->
     if driven:
         welcomed = _wait_until(lambda: _says(WELCOME_TITLE), 20)
         _screenshot(screens / "0-placement-control.png")
-        checker.expect(
-            welcomed and not _says(PLACEMENT_TITLE),
-            f"it says {WELCOME_TITLE!r}, and not {PLACEMENT_TITLE!r}",
-            f"{_texts()}",
+        said = (
+            f"opened while paired, it says neither {WELCOME_TITLE!r} nor {PLACEMENT_TITLE!r}"
+            if paired
+            else f"it says {WELCOME_TITLE!r}, and not {PLACEMENT_TITLE!r}"
         )
+        right = welcomed != paired and not _says(PLACEMENT_TITLE)
+        checker.expect(right, said, "" if right else f"{_texts()}")
     elif require_driven:
         checker.expect(False, "System Events drove the app, as --require-driven asks")
     _stop_the_app(checker, "the copy in Applications")
@@ -4539,9 +4658,13 @@ class _PairingCheck:
         found = reply.get("body") if isinstance(reply, dict) else None
         return found if isinstance(found, dict) else {}
 
-    def launch(self, label: str) -> None:
-        """Open the app as Finder does, its standard output and error into files of their own,
-        and choose OK on the note it shows first."""
+    def launch(self, label: str, *, paired: bool) -> None:
+        """Open the app as Finder does, its standard output and error into files of their own.
+        With no confirmed pair it says where its menu is, and the check chooses OK on that note.
+        ``paired``, it shows no such note (decisions/0002, What is built today), and the check
+        presses nothing on one it has not seen; one that shows is counted, then closed with OK,
+        so that the later steps still run. It reads which state the app says macOS gives its
+        login item, and the note about that, if any (:meth:`login_at_launch`)."""
         out = self.work / f"pairing-{label}-stdout.txt"
         err = self.work / f"pairing-{label}-stderr.txt"
         for log in (out, err):
@@ -4563,7 +4686,75 @@ class _PairingCheck:
             if self.require_driven:
                 self.checker.expect(False, "System Events drove the app, as --require-driven asks")
             raise _Stop("System Events cannot drive the app here")
-        _welcome(self.checker, self.screens / f"p-{label}-welcome.png", f"when it opens ({label})")
+        if not paired:
+            _welcome(
+                self.checker, self.screens / f"p-{label}-welcome.png", f"when it opens ({label})"
+            )
+            return
+        self.login_at_launch(label)
+        shown = _wait_until(lambda: _says(WELCOME_TITLE), 5)
+        self.checker.expect(
+            not shown,
+            f"opened while paired ({label}), the app shows no note about its menu bar",
+            f"{_texts()}" if shown else "",
+        )
+        if shown:
+            # Counted above. Left up, it would hold back the paused note and a pairing left
+            # unfinished, which come only once it is closed: the check has just read it, so it
+            # closes it with OK, as at an unpaired launch, and the later steps still run.
+            _system_events('click button "OK" of window 1')
+            _wait_until(lambda: not _says(WELCOME_TITLE), 10)
+
+    def login_at_launch(self, label: str) -> None:
+        """Opened while paired, the app checks its login item and says on standard error which
+        state macOS gives it. Only when that is requiresApproval does it say that it won't start
+        when the user logs in (decisions/0002 section 3.3), with Open Login Items Settings, which
+        the check never presses, and Keep It Off, which takes the item away: the check chooses
+        that, so the later launches show no such note."""
+        state = _value_within(lambda: _login_state(self.stderr_now()), 60)
+        self.checker.expect(
+            state is not None,
+            f"opened while paired ({label}), the app says on standard error which state macOS "
+            "gives its login item",
+            "" if state is not None else self.stderr_now()[-2000:],
+        )
+        print(
+            f"at launch ({label}), macOS gives the app's login item the state {state}", flush=True
+        )
+        if state != "requiresApproval":
+            noted = _wait_until(lambda: _says(LAUNCH_OFF_TITLE), 3)
+            self.checker.expect(
+                not noted,
+                f"with the login item {state}, it shows no note about opening at login",
+                f"{_texts()}" if noted else "",
+            )
+            return
+        noted = _wait_until(lambda: _says(LAUNCH_OFF_TITLE), 15)
+        _screenshot(self.screens / f"p-{label}-login-off.png")
+        if not self.checker.expect(
+            noted,
+            f"with the login item requiresApproval, it says {LAUNCH_OFF_TITLE!r}",
+            "" if noted else f"{_texts()}",
+        ):
+            return
+        before = len(self.stderr_now())
+        worked, said = _press(KEEP_IT_OFF)
+        closed = worked and _wait_until(lambda: not _says(LAUNCH_OFF_TITLE), 10)
+        # Left up, the note would hold every later note behind it (the app shows one at a time),
+        # and the next step's note with it: the steps after this one need it closed.
+        self.need(
+            closed,
+            f"{KEEP_IT_OFF} closes the note {LAUNCH_OFF_TITLE!r}",
+            "" if closed else f"{said} {_texts()}",
+        )
+        after = _value_within(lambda: _login_state(self.stderr_now()[before:]), 15)
+        off = after in LOGIN_ITEM_GONE
+        self.checker.expect(
+            off,
+            f"{KEEP_IT_OFF} turns the login item off: the app says 'login item: notRegistered' "
+            "(or notFound, when macOS has none to find)",
+            "" if off else f"{after}",
+        )
 
     def through_the_command_line(self, *args: str) -> None:
         """Run ``args`` on the app's profile, as a user would in Terminal; it must work."""
@@ -4687,7 +4878,7 @@ class _PairingCheck:
     def confirm_in_the_app(self) -> None:
         """Open the pairing window from the menu: it shows Lucille's number, Return and Space
         answer nothing, and They Match confirms."""
-        self.launch("pairing")
+        self.launch("pairing", paired=False)
         sas = self.lucille.sas()
         # The app picks a pending pairing back up once its first note is closed, and may show the
         # compare page on its own. Close it, as a user would, and open it again from the menu.
@@ -4808,27 +4999,39 @@ class _PairingCheck:
         """Once the menu says Connected after They Match in the app, the Set Up window opens by
         itself (decisions/0002 section 3.1, steps 8 to 10), and its pages are walked
         (:meth:`set_up_pages`). A Set Up check that fails does not stop the pairing check: the
-        window is closed and files.sha256 turned off again, and only those two facts, which the
-        later steps need, are needed: the fingerprint step's request while files.sha256 is off
-        must still meet not_enabled (M18)."""
+        window and any note about opening at login are closed, and files.sha256 turned off again,
+        and only those facts, which the later steps need, are needed: a note left up would hold
+        the menu back, and the fingerprint step's request while files.sha256 is off must still
+        meet not_enabled (M18)."""
         self.set_up_pages()
         if SETUP_TITLE in _window_names():
             _close_window(SETUP_TITLE)
+        _close_login_note()
         if self.op_enabled("files.sha256") is not False:
             self.host("--json", "ops", "disable", "files.sha256")
+        off = self.op_enabled("files.sha256") is False
+        clear = SETUP_TITLE not in _window_names() and _login_note() is None
+        detail = "" if off and clear else f"{self.ops_and_windows()}"
         self.need(
-            self.op_enabled("files.sha256") is False and SETUP_TITLE not in _window_names(),
-            "after Set Up, files.sha256 is off and no Set Up window is open",
-            f"{_shown(self.host('--json', 'ops', 'list'))} {_window_names()}",
+            off and clear,
+            "after Set Up, files.sha256 is off, and no Set Up window and no note about opening at "
+            "login is open",
+            detail,
         )
+
+    def ops_and_windows(self) -> str:
+        """``ops list`` on the app's profile, and what the app's windows show, for a failure's
+        detail."""
+        return f"{_shown(self.host('--json', 'ops', 'list'))} {_window_names()} {_texts()}"
 
     def set_up_pages(self) -> None:
         """Set Up's pages as CI can reach them. It has no Add back page: the harness paired
         through the command line, so the app saw no policy_reset. It opens on Folders, which lists
         none. On What Lucille may do, files.sha256's switch shows it off; clicked, the host says it
-        is on, and the switch shows it on; clicked again, both say off. Then Ready, and Done closes
-        the window. Each is expected; at the first one the next steps here need that fails, it
-        returns."""
+        is on, and the switch shows it on; clicked again, both say off. Then Ready, whose box
+        "Open <name> when you log in" is checked and which says macOS's notice; and Done closes the
+        window, after which the app says what came of opening at login (:meth:`login_after_done`).
+        Each is expected; at the first one the next steps here need that fails, it returns."""
         opened = _wait_until(lambda: SETUP_TITLE in _window_names(), 60)
         # The missing window's detail only when it is missing: it takes a screenshot and reads
         # the menu, which a window that is open must not have done to it.
@@ -4896,12 +5099,61 @@ class _PairingCheck:
         ):
             return
         _screenshot(self.screens / "p-setup-ready.png")
-        worked, said = _press(SETUP_DONE)
+        box = _checked(OPEN_AT_LOGIN_BOX)
+        self.checker.expect(box == "1", f"Ready's box {OPEN_AT_LOGIN_BOX!r} is checked", box)
+        noticed = _says(OPEN_AT_LOGIN_NOTICE)
         self.checker.expect(
-            worked and _wait_until(lambda: SETUP_TITLE not in _window_names(), 10),
-            "Done closes the Set Up window",
-            f"{said} {_window_names()}",
+            noticed,
+            f"and Ready says {OPEN_AT_LOGIN_NOTICE!r}",
+            "" if noticed else f"{_texts()}",
         )
+        before = len(self.stderr_now())
+        worked, said = _press(SETUP_DONE)
+        closed = worked and _wait_until(lambda: SETUP_TITLE not in _window_names(), 10)
+        self.checker.expect(
+            closed, "Done closes the Set Up window", "" if closed else f"{said} {_window_names()}"
+        )
+        if closed and box == "1":
+            self.login_after_done(before)
+
+    def login_after_done(self, before: int) -> None:
+        """Done, with Ready's box checked, asks macOS to open the app when the user logs in. What
+        macOS answers an ad-hoc build is not known (decisions/0002 section 9), so the gate is
+        agreement: the app says on standard error which state macOS gave its login item, after
+        ``before``, and its words agree with that state: no note while enabled; while
+        requiresApproval, that macOS needs the user's OK, closed with Not Now; otherwise, that it
+        couldn't, closed with OK. Open Login Items Settings, which would open System Settings, is
+        never pressed. macOS's own list of login items is printed."""
+        state = _value_within(lambda: _login_state(self.stderr_now()[before:]), 15)
+        _dump_login_items()
+        if not self.checker.expect(
+            state is not None,
+            "after Done, the app says on standard error which state macOS gives its login item",
+            "" if state is not None else self.stderr_now()[before:][-2000:],
+        ):
+            return
+        print(f"after Done, macOS gives the app's login item the state {state}", flush=True)
+        title = LOGIN_NOTE_AFTER_DONE[state]
+        if title is None:
+            _wait_until(lambda: _login_note() is not None, 5)
+        else:
+            _wait_until(lambda: _login_note() == title, 15)
+        _screenshot(self.screens / "p-setup-after-done.png")
+        note = _login_note()
+        agree = note == title
+        if not self.checker.expect(
+            agree,
+            f"after Done, the app's words agree with the state {state}: "
+            + (f"it says {title!r}" if title else "no note about opening at login"),
+            "" if agree else f"{_texts()}",
+        ):
+            return
+        if note is None:
+            return
+        button = LOGIN_NOTE_CLOSES[note]
+        worked, said = _press(button)
+        closed = worked and _wait_until(lambda: _login_note() is None, 10)
+        self.checker.expect(closed, f"{button} closes the note", "" if closed else said)
 
     def set_up_missing(self) -> str:
         """What tells apart the ways Set Up's window can be missing, for that failure's detail: a
@@ -5027,7 +5279,7 @@ class _PairingCheck:
         )
 
     def relaunch(self) -> None:
-        self.launch("relaunched")
+        self.launch("relaunched", paired=True)
         run = _value_within(self.run_pid, 60)
         self.need(
             run is not None and _parent(run) == self.app_pid(),
@@ -5102,7 +5354,7 @@ class _PairingCheck:
         paused, while ``run`` goes on. The app resumes nothing on its own; Resume Lucille, from
         the menu, resumes. While no request runs, the menu does not offer it. The app is then
         quit, as the next step expects."""
-        self.launch("stop-whats-running")
+        self.launch("stop-whats-running", paired=True)
         run = _value_within(self.run_pid, 60)
         self.need(run is not None, "opened again, the app starts run")
         self.need(_wait_until(self.reading, 90), "run reads the room again")
@@ -5172,7 +5424,7 @@ class _PairingCheck:
         its line, with the highest version, which opens the notice again, drawn with that
         version, and Prepare to Update…, which asks no Quit question, lets run drain, and quits.
         Stop now's step opens the app again."""
-        self.launch("too-old")
+        self.launch("too-old", paired=True)
         run = _value_within(self.run_pid, 60)
         self.need(run is not None, "opened again, the app starts run")
         self.need(_wait_until(self.reading, 90), "run reads the room again")
@@ -5278,7 +5530,7 @@ class _PairingCheck:
     def stop_now(self) -> None:
         """Quit while a request runs that would outlast the check, then Stop now: ``kill``
         stops the request, Lucille is told, and the host is paused."""
-        self.launch("stop-now")
+        self.launch("stop-now", paired=True)
         run = _value_within(self.run_pid, 60)
         self.need(run is not None, "opened again, the app starts run")
         self.need(_wait_until(self.reading, 90), "run reads the room again")
@@ -5312,7 +5564,7 @@ class _PairingCheck:
 
     def paused_at_launch(self) -> None:
         """Opened again, the app says the host is paused, and resumes it only when asked."""
-        self.launch("paused")
+        self.launch("paused", paired=True)
         asked = _wait_until(lambda: _says(PAUSED_TITLE), 30)
         _screenshot(self.screens / "p11-paused-at-launch.png")
         self.need(
@@ -5333,20 +5585,51 @@ class _PairingCheck:
         )
 
     def disconnect(self) -> None:
-        """Disconnect drains ``run``, then forgets the pair, and says whether Lucille was told."""
+        """Disconnect drains ``run``, then forgets the pair, and says whether Lucille was told.
+        The login item goes with the pair (decisions/0002 section 9): the app says
+        ``login item: notRegistered`` on standard error, and its note adds that it won't open at
+        login exactly when it had one, as the last state it said before shows. While
+        connected the menu holds Settings, and once disconnected it does not."""
         run = _value_within(self.run_pid, 60)
         self.need(run is not None, "run is running")
         found, shown = _menu_until(lambda items: DISCONNECT_ITEM in items, 60)
         self.need(found, f"while connected, the menu offers {DISCONNECT_ITEM!r}", f"{shown}")
+        self.checker.expect(
+            SETTINGS_MENU in shown, f"while connected, the menu holds {SETTINGS_MENU!r}", f"{shown}"
+        )
+        was = _login_state(self.stderr_now())
+        self.checker.expect(
+            was is not None,
+            "before Disconnect, the app has said which state macOS gives its login item",
+            "" if was is not None else self.stderr_now()[-2000:],
+        )
+        registered = was in ("enabled", "requiresApproval")
         worked, said = _choose(DISCONNECT_ITEM.removesuffix("…"))
         asked = worked and _wait_until(lambda: _says(DISCONNECT_TITLE), 15)
         _screenshot(self.screens / "p12-disconnect-question.png")
         self.need(asked, f"Disconnect asks first: {DISCONNECT_TITLE!r}", f"{said} {_texts()}")
+        before = len(self.stderr_now())
         worked, said = _press(DISCONNECT_BUTTON)
         told = worked and _wait_until(lambda: _says(DISCONNECTED_TOLD), 120)
         _screenshot(self.screens / "p13-disconnected.png")
         self.checker.expect(told, f"then the app says {DISCONNECTED_TOLD!r}", f"{said} {_texts()}")
+        sentence = _says(OFF_AFTER_DISCONNECT)
+        added = told and sentence == registered
+        self.checker.expect(
+            added,
+            f"its note adds {OFF_AFTER_DISCONNECT!r} exactly when the login item was registered: "
+            f"it was {was}",
+            "" if added else f"{_texts()}",
+        )
         _press("OK")
+        after = _value_within(lambda: _login_state(self.stderr_now()[before:]), 30)
+        self.checker.expect(
+            after in LOGIN_ITEM_GONE,
+            "the pair gone, the app says on standard error 'login item: notRegistered' (or "
+            "notFound, when macOS has none to find)",
+            f"{after}",
+        )
+        _dump_login_items()
         self.checker.expect(not _alive(run), "run has exited")
         self.checker.expect(
             DRAINED_LINE in self.stderr_now(),
@@ -5361,6 +5644,9 @@ class _PairingCheck:
         )
         self.checker.expect(
             found, f"the menu then says {NOT_CONNECTED!r}, and offers {CONNECT_ITEM!r}", f"{shown}"
+        )
+        self.checker.expect(
+            SETTINGS_MENU not in shown, f"and no longer holds {SETTINGS_MENU!r}", f"{shown}"
         )
 
     def tidy(self) -> None:

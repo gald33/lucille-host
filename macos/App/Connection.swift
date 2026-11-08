@@ -378,6 +378,12 @@ final class DetailsDisclosure: NSView {
 ///   keeps App Nap from slowing the app.
 /// - Only the copy at /Applications/<name>.app launches (`Placement`): any other starts nothing,
 ///   and only says why.
+/// - The login item (`LoginItem`, decisions/0002 §9) is registered only from the user's click:
+///   Set Up's Done with Ready's box checked, and the Settings menu's Open at Login, while
+///   connected, and not once `run`'s exit has said the pair is gone. It is taken away whenever the
+///   pair ends: the supervisor's `pairGone`, Stop Connecting's `pair reject`, a Disconnect once
+///   `forget` is done, quit or not, and a `status` that finds no pair once one was seen. Its state
+///   is read again from macOS each time; the app keeps none of it.
 /// - Quit: the app's own Quit asks first while `run` runs, unless a Disconnect is under way or the
 ///   user chose Prepare to Update; a quit by Apple event (logout, restart, shutdown, another app)
 ///   never asks. Either way the app answers `.terminateLater` and replies once `run` has drained
@@ -441,6 +447,13 @@ final class Connection: ObservableObject {
     /// Set Up is owed and its window was closed before its last page: the menu offers Set Up
     /// Folders and Abilities….
     @Published private(set) var setUpOffered = false
+    /// What the Settings menu's Open at Login shows: macOS has the login item on. Read again from
+    /// macOS (`refreshLoginItem`), never kept.
+    @Published private(set) var openAtLogin = false
+    /// Called once, with whether the launch is paired (`LoginRules.isPaired`), when the first
+    /// `status` read at launch has come, the login item checked by then: the app delegate then says
+    /// where the menu is, or goes straight on (decisions/0002 §3.1, and What is built today).
+    var onFirstStatusRead: ((Bool) -> Void)?
 
     private let cli: HostCLI
     private var flow = PairingFlow()
@@ -568,8 +581,9 @@ final class Connection: ObservableObject {
         feedRun(.start)
     }
 
-    /// The note that says where the menu is was closed at launch: say that the host is paused if
-    /// it is, then pick up a pairing left unfinished. Only Resume resumes.
+    /// The note that says where the menu is was closed at launch, or a paired launch showed none:
+    /// say that the host is paused if it is, then pick up a pairing left unfinished. Only Resume
+    /// resumes.
     func afterWelcome() {
         welcomeDone = true
         afterWelcomeIfReady()
@@ -1141,6 +1155,12 @@ final class Connection: ObservableObject {
             }
         case .log(let line):
             Connection.log(line)
+        case .pairGone:
+            // Taking it away only narrows, so it needs no click: only widening waits for the
+            // user's. `LoginItem` asks macOS only when it has one on or waiting for approval. `status` is read again, so that the
+            // menu, and a Set Up window still open, follow an exit of `run` that ended the pair.
+            _ = LoginItem.unregisterIfRegistered()
+            refreshStatus()
         }
     }
 
@@ -1258,13 +1278,9 @@ final class Connection: ObservableObject {
             let outcome = VerbOutcome(result)
             self.disconnecting?.close()
             self.disconnecting = nil
-            if self.ladder != nil || self.exiting {
-                // A quit came during the Disconnect: nothing more is shown or started, and the
-                // app may now reply.
-                Connection.log("forget at quit exited \(result.status)")
-                self.replyIfDone()
-                return
-            }
+            // Whether the pair is gone: `forget` forgot it, or there was none (`none`); not
+            // `room_not_left`, nor a failure (spec/CLI.md §6). Decided, and the login item taken
+            // away with the pair, before a quit's early return, so that both ways out leave none.
             var done = false
             switch outcome {
             case .done:
@@ -1274,7 +1290,18 @@ final class Connection: ObservableObject {
             default:
                 done = false
             }
+            let removal = self.loginItemAfterForget(done)
+            if self.ladder != nil || self.exiting {
+                // A quit came during the Disconnect: nothing more is shown or started, and the
+                // app may now reply.
+                Connection.log("forget at quit exited \(result.status)")
+                self.replyIfDone()
+                return
+            }
             var note = ConnectionText.disconnected(outcome)
+            if let said = LoginText.afterDisconnect(removal) {
+                note = ConnectionNote(title: note.title, text: note.text + " " + said, detail: note.detail)
+            }
             if paused {
                 note = ConnectionNote(title: note.title, text: note.text + " " + ConnectionText.pausedByDisconnect, detail: note.detail)
             }
@@ -1286,6 +1313,13 @@ final class Connection: ObservableObject {
                 self.feedRun(.start)
             }
         }
+    }
+
+    /// The login item taken away once `forget` has forgotten the pair, or found none. A method of
+    /// its own, so that `LoginItem` is called from synchronous code here too, and not from the
+    /// task that waited for `forget` (App/LoginItem.swift says why).
+    private func loginItemAfterForget(_ done: Bool) -> LoginRemoval {
+        done ? LoginItem.unregisterIfRegistered() : .nothingToRemove
     }
 
     // MARK: The pairing flow's effects
@@ -1339,6 +1373,11 @@ final class Connection: ObservableObject {
             if note == .confirmed {
                 // They Match, clicked here, confirmed the pair: Set Up is owed.
                 feedSetUp(.confirmedHere(epoch: epoch))
+            }
+            if LoginRules.pairForgotten(note) {
+                // Stop Connecting forgot the pair, or there is none: the login item goes with
+                // it (decisions/0002 §9). A pair whose gate record was lost ends only this way.
+                _ = LoginItem.unregisterIfRegistered()
             }
         case .refreshStatus:
             refreshStatus()
@@ -1502,6 +1541,9 @@ final class Connection: ObservableObject {
         setupPanel.onNext = { [weak self] in
             self?.feedSetUp(.next)
         }
+        setupPanel.onOpenAtLogin = { [weak self] on in
+            self?.feedSetUp(.openAtLogin(on))
+        }
         setupPanel.onDone = { [weak self] in
             self?.feedSetUp(.done)
         }
@@ -1625,6 +1667,14 @@ final class Connection: ObservableObject {
         case .close:
             Connection.log("Set Up closed by the app")
             setupPanel.close()
+        case .registerLoginItem:
+            // Done, with Ready's box checked: the user's click, which widening needs, after the
+            // window closed.
+            guard mayRegisterLoginItem() else {
+                Connection.log("Set Up's Done asked for no login item: not connected, or quitting")
+                return
+            }
+            showLoginOutcome(LoginItem.register())
         }
     }
 
@@ -1684,6 +1734,118 @@ final class Connection: ObservableObject {
         }
     }
 
+    // MARK: Open at Login
+
+    /// The Settings menu's Open at Login, clicked (decisions/0002 §9): on asks macOS to open the
+    /// app when the user logs in, which widens what can happen, so only a click does it, and not
+    /// once `run` has said the pair is gone, nor during a Disconnect; off takes the login item
+    /// away. Only while connected, and not while the app quits. The switch then shows what macOS
+    /// says.
+    func openAtLoginChosen(_ on: Bool) {
+        guard isConfirmed(), ladder == nil, !exiting else {
+            refreshLoginItem()
+            return
+        }
+        if on {
+            guard mayRegisterLoginItem() else {
+                refreshLoginItem()
+                return
+            }
+            showLoginOutcome(LoginItem.register())
+        } else if LoginItem.unregisterIfRegistered() == .failed {
+            Alerts.shared.note(
+                ConnectionNote(title: LoginText.couldNotTurnOffTitle, text: LoginText.turnOffByHand, detail: nil),
+                warning: true
+            )
+        }
+        refreshLoginItem()
+    }
+
+    /// Whether the user's click may ask macOS to open the app at login (decisions/0002 §9): while
+    /// a pair is confirmed and the supervisor has not said it is gone (`LoginRules.mayRegister`),
+    /// and not during a Disconnect, nor while the app quits.
+    private func mayRegisterLoginItem() -> Bool {
+        let confirmed = isConfirmed()
+        guard LoginRules.mayRegister(confirmed: confirmed, phase: supervisor.phase) else {
+            return false
+        }
+        return ladder == nil && !exiting && disconnecting == nil && !forgetting
+    }
+
+    /// At launch, while paired: the login item's state, said on standard error, and, when macOS
+    /// waits for the user's approval, the note that the app won't start when they log in
+    /// (decisions/0002 §3.3), with Open Login Items Settings and Keep It Off. Keep It Off takes the
+    /// item away, so macOS stops saying that it waits: the app needs to keep nothing.
+    private func checkLoginItemAtLaunch() {
+        let state = LoginItem.checked()
+        let on = state == .enabled
+        if openAtLogin != on {
+            openAtLogin = on
+        }
+        guard LoginRules.launchNote(paired: true, state: state) else {
+            return
+        }
+        Alerts.shared.show(key: "login-off", {
+            let alert = NSAlert()
+            alert.messageText = LoginText.launchOffTitle
+            alert.informativeText = LoginText.launchOffText
+            alert.addButton(withTitle: LoginText.openSettingsButton)
+            alert.addButton(withTitle: LoginText.keepItOffButton)
+            return alert
+        }, done: { [weak self] response in
+            if response == .alertFirstButtonReturn {
+                LoginItem.openSettings()
+            } else if response == .alertSecondButtonReturn {
+                _ = LoginItem.unregisterIfRegistered()
+            }
+            self?.refreshLoginItem()
+        })
+    }
+
+    /// The switch follows macOS: whether it has the login item on now. Nothing is kept.
+    private func refreshLoginItem() {
+        let on = LoginItem.state == .enabled
+        if openAtLogin != on {
+            openAtLogin = on
+        }
+    }
+
+    /// What came of asking macOS to open the app at login: nothing more while it is on; a note
+    /// that macOS needs the user's OK, with Open Login Items Settings and Not Now; or a note that
+    /// it couldn't, with macOS's own words behind Show Details.
+    private func showLoginOutcome(_ outcome: LoginOutcome) {
+        refreshLoginItem()
+        switch outcome {
+        case .enabled:
+            break
+        case .requiresApproval:
+            Alerts.shared.show(key: "login-approval", {
+                let alert = NSAlert()
+                alert.messageText = LoginText.needsApprovalTitle
+                alert.informativeText = LoginText.needsApprovalText
+                alert.addButton(withTitle: LoginText.openSettingsButton)
+                alert.addButton(withTitle: ConnectionText.notNowButton)
+                return alert
+            }, done: { response in
+                if response == .alertFirstButtonReturn {
+                    LoginItem.openSettings()
+                }
+            })
+        case .failed(let detail):
+            Alerts.shared.show(key: "login-failed", {
+                let alert = NSAlert()
+                alert.alertStyle = .warning
+                alert.messageText = LoginText.couldNotTurnOnTitle
+                alert.informativeText = LoginText.couldNotTurnOnText
+                alert.addButton(withTitle: ConnectionText.okButton)
+                if let detail, !detail.isEmpty {
+                    alert.accessoryView = DetailsDisclosure(lines: [detail], alert: alert)
+                }
+                return alert
+            })
+        }
+    }
+
     // MARK: status
 
     /// Read `status --json`, keep what it says, and return it. After a few seconds a window says
@@ -1713,10 +1875,26 @@ final class Connection: ObservableObject {
         }
         if !firstStatusRead {
             firstStatusRead = true
-            afterWelcomeIfReady()
+            firstStatusArrived()
         }
         publish()
         return outcome
+    }
+
+    /// The first `status` read since launch, worked or not. While paired, the login item is
+    /// checked, and its note, if any, queued, before anything `afterWelcome` shows; then the app
+    /// delegate is told whether the launch is paired; then, if the note that says where the menu
+    /// is has been closed, or a paired launch showed none, the paused note and a pairing left
+    /// unfinished follow.
+    private func firstStatusArrived() {
+        let paired = LoginRules.isPaired(status?.pair)
+        if paired && ladder == nil && !exiting {
+            checkLoginItemAtLaunch()
+        }
+        let told = onFirstStatusRead
+        onFirstStatusRead = nil
+        told?(paired)
+        afterWelcomeIfReady()
     }
 
     /// Read `status` again for the menu, at most one reading at a time.
@@ -1754,6 +1932,10 @@ final class Connection: ObservableObject {
     /// The menu opened: show what is known, and read `status` again if it is old and no child of
     /// the app runs, whose events, or whose verbs, say more.
     private func menuOpened() {
+        if connected {
+            // The Settings menu's switch shows what macOS says now, whatever `run` is doing.
+            refreshLoginItem()
+        }
         publish()
         guard ladder == nil, !exiting, runChild == nil, pairChild == nil, !statusRefreshing else {
             return
@@ -1810,6 +1992,8 @@ final class Connection: ObservableObject {
             // pairing is set up, when `status` says no pair yet: no pair was confirmed then.
             setUpSawPair = false
             feedSetUp(.pairEnded)
+            // And the login item with it (decisions/0002 §9).
+            _ = LoginItem.unregisterIfRegistered()
         }
         // Not while `run` drains: the drain's own ladder stops the operation, and the supervisor
         // asks for nothing then.
