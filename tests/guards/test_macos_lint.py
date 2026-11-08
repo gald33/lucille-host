@@ -1127,6 +1127,10 @@ PLANTED_OPENER: list[tuple[str, str, str]] = [
         NOT_DESIGNED,
     ),
     ("more after the design", SYSTEM_PLACES + "extension SystemPlaces {}\n", NOT_DESIGNED),
+    # The other ways to URL's initializers, which [swift-denylist] refuses outside the opener, are
+    # its design's to refuse here, as any code the design does not have.
+    ("URL.self", _opener(DATE_URL, f'URL.self.init(string: "{DATE_PANE}")'), NOT_DESIGNED),
+    ("NSURL", _opener("let url: URL?", "let url: NSURL?"), NOT_DESIGNED),
     # A backtick, and a # the lexer reads as code next to a literal, are tokens of their own: the
     # design reads a literal's hashes only when they close it.
     ("a backtick", _opener("let url: URL?", "let url: `URL`?"), NOT_DESIGNED),
@@ -1225,6 +1229,96 @@ PLANTED_OUTSIDE_OPENER: list[tuple[str, str, str]] = [
     ("swift-denylist", APP, "let url: URL? = try .init(string: text)"),
     ("swift-denylist", APP, "let url: URL? = await .init(string: text)"),
     ("swift-denylist", APP, "yield .init(string: text)"),
+    # URL's initializers by another spelling: URL's type as a value, whichever way it is written.
+    ("swift-denylist", APP, f'let url = URL.self.init(string: "{MAILTO}")'),
+    ("swift-denylist", APP, "let T = URL.self\nlet url = T.init(string: text)"),
+    ("swift-denylist", TEST, "let Made = URL.self\nlet url = Made(string: text)"),
+    ("swift-denylist", APP, "let url = (URL).self.init(string: text)"),
+    ("swift-denylist", APP, "let url = Foundation.URL.self.init(string: text)"),
+    ("swift-denylist", APP, "let T = URL . self; let url = T.init(string: text)"),
+    ("swift-denylist", APP, "let T = URL\n    .self; let url = T(string: text)"),
+    # ... in parentheses, and called.
+    ("swift-denylist", APP, "let url = (URL)(string: text)"),
+    ("swift-denylist", APP, "let url = ((Foundation.URL)) (string: text)"),
+    # ... its type as a type, or a member type of URL that is URL itself, NSURL, or a parser.
+    ("swift-denylist", APP, "func make(_ t: URL.Type, _ s: String) -> URL? { t.init(string: s) }"),
+    ("swift-denylist", APP, "let url = URL.ValueType(string: text)"),
+    ("swift-denylist", APP, "let url = URL.UnwrappedType(string: text)"),
+    ("swift-denylist", APP, "let url = URL.ReferenceType(string: text)"),
+    ("swift-denylist", APP, "let url = URL._ObjectiveCType(string: text)"),
+    ("swift-denylist", APP, "let url = try URL.ParseStrategy(scheme: .required).parse(text)"),
+    ("swift-denylist", APP, "let url = try URL.FormatStyle().parseStrategy.parse(text)"),
+    ("swift-denylist", APP, 'let template = URL.Template("mailto:{to}")'),
+    # ... with white space on both sides of the dot, which Swift reads as a member of the type
+    # before it, as it does not white space after the dot alone.
+    ("swift-denylist", APP, "let url = URL . ValueType(string: text)"),
+    (
+        "swift-denylist",
+        APP,
+        "func make(_ t: URL . Type, _ s: String) -> URL? { t.init(string: s) }",
+    ),
+    ("swift-denylist", APP, "let url = [URL]\n    .\n    Element(string: text)"),
+    ("swift-denylist", APP, "let url = URL/* a */./* b */ValueType(string: text)"),
+    ("swift-denylist", APP, "let url = Result<URL, any Error> . Success(string: text)"),
+    # ... or a member type of a type that holds URL, which is URL.
+    ("swift-denylist", APP, "let url = [URL].Element(string: text)"),
+    ("swift-denylist", APP, "let url = Optional<URL>.Wrapped(string: text)"),
+    ("swift-denylist", APP, "let url = URL?.Wrapped(string: text)"),
+    ("swift-denylist", APP, "let url = [String: URL].Value(string: text)"),
+    ("swift-denylist", APP, "let url = Result<URL, any Error>.Success(string: text)"),
+    ("swift-denylist", APP, "let urls = try JSONDecoder().decode([URL].self, from: data)"),
+    # ... URL's initializer not called, which from a string is init(string:).
+    ("swift-denylist", APP, "let urls = texts.compactMap(URL.init)"),
+    ("swift-denylist", APP, "let make: (String) -> URL? = URL.init"),
+    # ... a value's type, which for a URL is URL's own, called at once (which the rule for an
+    # initializer whose type is left out refused already) or kept; and init(string:) on any type
+    # taken as a value.
+    ("swift-denylist", APP, "let url = type(of: home).init(string: text)"),
+    ("swift-denylist", APP, "let T = type(of: home); let url = T.init(string: text)"),
+    ("swift-denylist", APP, "let T = Swift.type (of: home); let url = T(string: text)"),
+    ("swift-denylist", APP, "let url = T.self.init(string: text)"),
+    ("swift-denylist", APP, "let url = maker . self . init ( string : text)"),
+    # ... a generic parameter, Self or an associated type made URL, whose name then reaches URL's
+    # initializers.
+    (
+        "swift-denylist",
+        APP,
+        "func make<T>(_ s: String, as _: T?) -> T? where T == URL { T(string: s) }",
+    ),
+    (
+        "swift-denylist",
+        APP,
+        "func made<T>(_ s: String, as _: T?) -> T? where URL == T { T(string: s) }",
+    ),
+    (
+        "swift-denylist",
+        APP,
+        "extension Collection where Element == Foundation.URL { "
+        "static func make(_ s: String) -> Element? { Element(string: s) } }",
+    ),
+    (
+        "swift-denylist",
+        APP,
+        "extension Hashable where Self == URL { "
+        "static func make(_ s: String) -> Self? { Self(string: s) } }",
+    ),
+    ("swift-denylist", APP, "protocol Maker { associatedtype Made = URL }"),
+    # ... a URL parsed or expanded from text.
+    ("swift-denylist", APP, "let url = try URL(text, strategy: .url)"),
+    ("swift-denylist", APP, "let url = try URL(text, strategy: .url.scheme(.required))"),
+    ("swift-denylist", APP, "let url = URL(template: template, variables: [:])"),
+    # ... and NSURL at all, which the app's code does not use: its own initializers, a subclass's
+    # and the pasteboard's make a URL from a string by names no rule above lists.
+    ("swift-denylist", APP, "let url = NSURL.self.init(string: text)"),
+    ("swift-denylist", APP, "let T: NSURL.Type = NSURL.self"),
+    (
+        "swift-denylist",
+        APP,
+        f'let url = NSURL(pasteboardPropertyList: "{MAILTO}", ofType: .URL)',
+    ),
+    ("swift-denylist", APP, "let url = NSURL(from: NSPasteboard.general)"),
+    ("swift-denylist", APP, "class Address: NSURL {}\nlet url = Address(string: text)"),
+    ("swift-denylist", APP, "let path = (home as NSURL).path"),
     # Other ways to open a URL: SwiftUI's action, a link, a link attribute, Markdown, read or in a
     # literal that SwiftUI's Text shows, plainly or raw.
     ("swift-denylist", APP, "@Environment(\\.openURL) private var openURL"),
@@ -1235,6 +1329,56 @@ PLANTED_OUTSIDE_OPENER: list[tuple[str, str, str]] = [
     ("swift-denylist", APP, "let text = try AttributedString(markdown: said)"),
     ("swift-denylist", APP, 'Text("[Open](file:///System/Applications/Utilities/Terminal.app)")'),
     ("swift-denylist", APP, 'let note = #"[Open](file:///Applications)"#'),
+    # ... a link attribute by its own name, or an attribute named by a string.
+    ("swift-denylist", APP, 'let words = [NSAttributedString.Key("NSLink"): target]'),
+    ("swift-denylist", APP, 'let words = [NSAttributedString.Key(rawValue: "NS\\u{4C}ink"): x]'),
+    ("swift-denylist", APP, "let words = [NSAttributedString.Key(rawValue: name): target]"),
+    ("swift-denylist", APP, "let key = NSAttributedString.Key.init(name)"),
+    ("swift-denylist", APP, "said[AttributeScopes.FoundationAttributes.LinkAttribute.self] = url"),
+    # ... links made of the text a view shows, by its setting, its key or its check.
+    ("swift-denylist", APP, "text.isAutomaticLinkDetectionEnabled = true"),
+    ("swift-denylist", APP, "text.isAutomaticDataDetectionEnabled = true"),
+    ("swift-denylist", APP, "text.toggleAutomaticLinkDetection(nil)"),
+    ("swift-denylist", APP, 'text.setValue(true, forKey: "automaticLinkDetectionEnabled")'),
+    ("swift-denylist", APP, "text.enabledTextCheckingTypes = 32"),
+    ("swift-denylist", APP, "text.checkText(in: range, types: 32, options: [:])"),
+    ("swift-denylist", APP, "text.checkTextInDocument(nil)"),
+    # ... rich text read from data, whose links are links too.
+    ("swift-denylist", APP, "let said = NSAttributedString(html: data, documentAttributes: nil)"),
+    ("swift-denylist", APP, "let said = NSAttributedString(html: data, baseURL: base)"),
+    (
+        "swift-denylist",
+        APP,
+        "let said = try NSAttributedString(data: data, options: [.documentType: kind], "
+        "documentAttributes: nil)",
+    ),
+    ("swift-denylist", APP, "let kind = NSAttributedString.DocumentType.html"),
+    ("swift-denylist", APP, 'let options: Options = [.init(rawValue: "DocumentType"): "NSHTML"]'),
+    ("swift-denylist", APP, "let options = [NSAttributedString.DocumentReadingOptionKey: Any]()"),
+    ("swift-denylist", APP, "let said = try NSAttributedString(data: data)"),
+    ("swift-denylist", APP, "let said = try NSMutableAttributedString(url: file, options: [:])"),
+    ("swift-denylist", APP, "let said = NSTextStorage(data: data)"),
+    ("swift-denylist", APP, "let said = NSAttributedString(rtf: data, documentAttributes: nil)"),
+    ("swift-denylist", APP, "let said = NSAttributedString(rtfd: data, documentAttributes: nil)"),
+    (
+        "swift-denylist",
+        APP,
+        "let said = NSAttributedString(docFormat: data, documentAttributes: x)",
+    ),
+    ("swift-denylist", APP, "text.replaceCharacters(in: range, withRTF: data)"),
+    ("swift-denylist", APP, "_ = text.readRTFD(fromFile: path)"),
+    # ... and a key SwiftUI reads as Markdown, made from text or with its type left out for Text.
+    ("swift-denylist", APP, "Text(LocalizedStringKey(line))"),
+    ("swift-denylist", APP, "Text(LocalizedStringKey(stringLiteral: line))"),
+    ("swift-denylist", APP, "let key: LocalizedStringKey = .init(line)"),
+    ("swift-denylist", APP, "Text(.init(line))"),
+    ("swift-denylist", APP, "Text( . init (line))"),
+    (
+        "swift-denylist",
+        APP,
+        "let said = AttributedString(localized: String.LocalizationValue(line))",
+    ),
+    ("swift-denylist", APP, "let said = LocalizedStringResource(stringLiteral: line)"),
     # Other ways to find, drive or hand something to another application.
     ("swift-denylist", APP, "NSRunningApplication(processIdentifier: pid)?.terminate()"),
     ("swift-denylist", APP, "let app = NSRunningApplication ( processIdentifier : pid)"),
@@ -1266,6 +1410,18 @@ PLANTED_OUTSIDE_OPENER: list[tuple[str, str, str]] = [
         "let url = CFURLCreateAbsoluteURLWithBytes(nil, bytes, count, encoding, nil, true)",
     ),
     ("swift-denylist", APP, "let url = NSURL(scheme: scheme, host: host, path: path)"),
+    # ... or found in text, by a data detector asked for links by their raw value, or by a text
+    # checker.
+    ("swift-denylist", APP, "let detector = try NSDataDetector(types: 1 << 5)"),
+    ("swift-denylist", APP, "let kind = NSTextCheckingResult.CheckingType(rawValue: 32)"),
+    ("swift-denylist", APP, "let types: NSTextCheckingTypes = 32"),
+    ("swift-denylist", APP, "let checker = NSTextCheckingController(client: view)"),
+    (
+        "swift-denylist",
+        APP,
+        "let found = NSSpellChecker.shared.check(text, range: range, types: 32, options: nil, "
+        "inSpellDocumentWithTag: 0, orthography: nil, wordCount: nil)",
+    ),
     # A button pressed by code, not by a click; and a function reached by its symbol, or put in
     # another's place, whichever name the code calls it by.
     ("swift-denylist", APP, "button.performClick(nil)"),
@@ -1400,6 +1556,37 @@ CLEAN_AROUND_THE_OPENER = [
     "/* `URL` */ let x = 1",
     "NSApp.sendAction(action, to: nil, from: self)",
     "override func performKeyEquivalent(with event: NSEvent) -> Bool { false }",
+    # Near URL's type, but not a way to its initializers from a string: another type's own, or an
+    # initializer the app's type calls on itself; a file URL, a static member, or an initializer
+    # from a path, kept as a function; a comparison with a URL; another type as a value; a member
+    # that is not a type; and a sentence that ends with "URL.", in a comment or a string.
+    'let field = NSTextField(string: "")',
+    "convenience init(text: String) { self.init(string: text) }",
+    "let home = URL.homeDirectory",
+    "let files = paths.map(URL.init(fileURLWithPath:))",
+    "if folder == URL(fileURLWithPath: home) { show() }",
+    "if folder == URL.homeDirectory { show() }",
+    "let value = try single.decode(Bool.self)",
+    "let none = Optional<URL>.none",
+    "let urls = [URL]()",
+    "let byName: [String: URL] = [:]",
+    "func pair(_ url: URL, _ names: [String]) -> Pair.Kind { .folder }",
+    "// The host is given the folder's URL. The rest stays here.",
+    'let note = "Choose a folder, not a URL. Then press Add."',
+    # A label named type, a type's own associated type, and another type's parse strategy.
+    "let entry = Entry(type: .folder, of: owner)",
+    "protocol Place {\n    associatedtype Label = String\n}",
+    "let date = try Date(text, strategy: .iso8601)",
+    # Near a link, rich text and Markdown, but none of them: the app's own text views and their
+    # attributes, the self-test's own check, and a string that Text shows as it is.
+    "requestsBox = NSTextView.scrollableTextView()",
+    "let words: [NSAttributedString.Key: Any] = [.font: font]",
+    "let font = NSAttributedString.Key.font",
+    "checkText(report)",
+    "static func checkText(_ report: Report) {}",
+    "Text(model.title)",
+    "Text(verbatim: line)",
+    'let note = "Not an HTML page."',
 ]
 
 
@@ -1467,6 +1654,54 @@ def test_the_docstring_says_the_open_rule() -> None:
     for words in ("``typealias``", "no backtick", "``performClick``", "``_silgen_name``"):
         assert words in doc, words
     assert "an action sent by code" in doc
+
+
+def test_the_docstring_says_each_way_to_urls_initializers() -> None:
+    # It names the other ways to URL's initializers it refuses outside the opener, and the ways to
+    # URL's type it cannot see.
+    doc = " ".join((macos_lint.__doc__ or "").split())
+    for words in (
+        ":data:`URL_INITIALIZERS`",
+        "``NSURL``",
+        "``URL.self``",
+        "``URL.Type``",
+        "``URL.ValueType``",
+        "``[URL].Element``",
+        "``URL.init``",
+        "``type(of:``",
+        "``.self.init(string:``",
+        "``where T == URL``",
+        "``strategy: .url``",
+        "``C.Element``",
+    ):
+        assert words in doc, words
+    # A member type with white space on both sides of its dot is refused, and Swift does not
+    # compile white space after the dot alone: neither is among what the lint cannot see.
+    assert "white space on both sides of it" in doc
+    assert "a member type written with white space after its dot" not in doc
+
+
+def test_the_docstring_says_each_way_to_a_link_or_a_url_found_in_text() -> None:
+    # It names the links, rich text, Markdown keys and text checkers it refuses, and the ones with
+    # their type left out that it cannot see.
+    doc = " ".join((macos_lint.__doc__ or "").split())
+    for words in (
+        "``NSLink``",
+        "``NSAttributedString.Key(``",
+        "``isAutomaticLinkDetectionEnabled``",
+        "``html:``",
+        "``documentType``",
+        "``LocalizedStringKey``",
+        "``Text(.init(``",
+        "``NSDataDetector``",
+        "``NSSpellChecker``",
+        "``NSKeyedUnarchiver``",
+        "``.init(rawValue: name)``",
+        "``.init(data:``",
+        "``Toggle(.init(line), isOn: on)``",
+        "``read(from:``",
+    ):
+        assert words in doc, words
 
 
 def test_repository_is_clean() -> None:
