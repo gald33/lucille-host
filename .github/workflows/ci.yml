@@ -116,10 +116,14 @@ jobs:
           enable-cache: false
       - name: Select the pinned Xcode
         run: uv run --no-project python tools/macos/build_app.py toolchain --github-env "$GITHUB_ENV"
+      # csrutil status is printed for System Integrity Protection's state, and gates nothing
+      # (decisions/0002 §7): a real Mac refused an extension these runners had loaded under the
+      # hardened runtime, and why is not established.
       - name: Show the machine and the tools
         run: |
           sw_vers
           uname -m
+          csrutil status || true
           xcodebuild -version
           xcrun swiftc --version
           uv --version
@@ -354,10 +358,12 @@ jobs:
           version: "0.11.32"
           python-version: "3.13"
           enable-cache: false
+      # csrutil status is printed for System Integrity Protection's state; it gates nothing.
       - name: Show the machine
         run: |
           sw_vers
           uname -m
+          csrutil status || true
           test "$(uname -m)" = arm64
       - name: Restore the disk image and the self-test macos-app built
         uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0

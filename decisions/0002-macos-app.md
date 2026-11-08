@@ -164,9 +164,9 @@ developing the app. Its builds stay ad hoc signed, for the repository owner's ow
   while a request's process runs, Stop What's Running; and, while Lucille needs a newer release, the
   update notice's line and Prepare to Update…. A copy that is not at `/Applications/Capsule.app` shows only
   the line that says why, and Quit Capsule.
-- **It is signed ad hoc**, with the hardened runtime and no entitlements, each Mach-O file with its own
-  identifier and the interpreter with `com.lucille-ai.capsule.runtime` (§7). It is not notarized, so macOS
-  refuses to open it normally.
+- **It is signed ad hoc**, without the hardened runtime and with no entitlements, each Mach-O file with its
+  own identifier and the interpreter with `com.lucille-ai.capsule.runtime` (§7). It is not notarized, so
+  macOS refuses to open it normally.
 - **`ci.yml`** builds it on every pull request and every push to `main`. Its `macos-app` job builds on
   GitHub's `macos-15` runner, runs each check in `tools/macos/check_app.py` and the host's whole test suite
   on a copy of the bundled runtime, then, with that copy's interpreter, an end-to-end check of pairing and
@@ -684,11 +684,28 @@ ripgrep.
   `allow-unsigned-executable-memory`. No Python file in `cryptography`, `switchboard` or `keyring` imports
   `cffi` (measured), but `cryptography`'s Rust extension initialises a cffi module. If the signed build
   proves the entitlement is needed, it goes on the interpreter only, with the reason. **Not decided yet.**
-- **Ad-hoc builds keep the hardened runtime.** `tools/macos/pins.toml` says so (`[signing]
-  adhoc_hardened_runtime = true`), and the build signs every Mach-O file and the bundle ad hoc (`--sign -`,
-  `--timestamp=none`) with `--options runtime` and no entitlements. `check_app.py signature` requires the
-  runtime flag on each of them exactly when the pin asks for it, and `check_app.py bundle` refuses a file
-  that only the linker signed, or that carries a Team ID.
+- **Ad-hoc builds are signed without the hardened runtime.** `tools/macos/pins.toml` says so (`[signing]
+  adhoc_hardened_runtime = false`), and the build signs every Mach-O file and the bundle ad hoc (`--sign -`,
+  `--timestamp=none`) without `--options runtime`, and with no entitlements. `check_app.py signature`
+  requires the runtime flag on each of them exactly when the pin asks for it, so now it refuses that flag,
+  and the `library-validation` flag, on every one of them. `check_app.py bundle` refuses a file that only
+  the linker signed, or that carries a Team ID. The build keeps its path for `true`. Developer ID builds always take the hardened runtime (above).
+  - Why: on a real Mac, an ad-hoc build signed with it could not load `cryptography`. On 2026-11-08 the
+    maintainer downloaded the disk image of `ci.yml` run 42509782273 (a manual run on `main` at 8f50a9f)
+    with a browser, on their own Mac (macOS 26.2, 25C56, Apple silicon). They opened it with Open Anyway,
+    moved the app to `/Applications` and opened it again with Open Anyway. The app ran, and its menu worked
+    (abilities, pause, Activity, adding and removing a folder). Pairing with a real code from Lucille
+    failed: the app said "Capsule couldn't answer this code. Nothing was connected.", with "the code was not
+    answered (error)". In Terminal, the bundled interpreter, run as `lucille-host-runtime -I -B -c "import
+    cryptography.hazmat.primitives.asymmetric.x25519"`, failed with an `ImportError`: dyld refused
+    `site-packages/cryptography/hazmat/bindings/_rust.abi3.so`, as its code signature was "not valid for use
+    in process: mapping process and mapped file (non-platform) have different Team IDs". In switchboard
+    2.6.0's `pairing.py`, that `ImportError` leaves `AVAILABLE` false, and accepting a code then raises
+    "pairing needs the `cryptography` package" with no state, which the host reports as `answer_failed`,
+    "the code was not answered (error)" (`link.py`). The app's message matches that path; that its failure
+    took it is inferred from the message, not traced. That is the refusal the next point expected, so the
+    pin is now `false`. Whether an ad-hoc build without the hardened runtime pairs on that Mac is not yet
+    tested; the next ad-hoc build tried there settles it.
   - Why it was first expected to fail: under the hardened runtime, library validation lets a process load
     only code "signed by Apple or signed with the same Team ID as the main executable" (Apple, "Disable
     Library Validation Entitlement"). An ad-hoc signature has no Team ID, and a reported ad-hoc,
@@ -696,16 +713,22 @@ ripgrep.
     different Team IDs" (dotnet/macios#26609, macOS 26.6.2). This bundle loads the `lib-dynload`
     modules it imports and two wheel extensions, so it was expected to fail the same way, and an earlier
     draft of this record kept the hardened runtime out of ad-hoc builds for that reason.
-  - Seen in CI: on GitHub's `macos-15` runner (macOS 15.7.9) the first build's check loads `cffi`'s backend,
-    `cryptography`'s Rust extension and keyring's macOS backend under the hardened runtime. So the failure
-    above did not occur there.
+  - Seen in CI, while ad-hoc builds carried the hardened runtime: on GitHub's `macos-15` runner (macOS
+    15.7.9) the first build's check loaded `cffi`'s backend, `cryptography`'s Rust extension and keyring's
+    macOS backend under it. So the failure above did not occur there.
   - `ci.yml`'s `macos-smoke` jobs run the same disk image, and that native-code check (`check_app.py host`),
     on macOS 26 (`macos-26`; GitHub's runner-images README, read 2026-11-01, gives that image macOS 26.6.2,
     the version of the report above) and on macOS 27 (`xcode-27`). Seen in CI (run 41407347108,
-    2026-11-02): on macOS 26.6.2 and on macOS 27.0.1 the check loads them all under the ad-hoc hardened
-    runtime, and the app launches and is driven there, so the abort above did not occur either. If a later
-    image aborts on library validation, the pin is set to `false`, and this paragraph records the run and
-    the reason.
+    2026-11-02): on macOS 26.6.2 and on macOS 27.0.1 the check loaded them all under the ad-hoc hardened
+    runtime, and the app launched and was driven there, so the abort above did not occur either.
+  - **CI did not show this.** GitHub's runners loaded under the ad-hoc hardened runtime what the Mac above
+    refused (the runs above; and run 42509782273 uploaded its disk image, which `macos-app` does only when
+    every check passed). Why they differ is not established. One guess, not checked: System Integrity
+    Protection, or macOS's own enforcement of code signatures (AMFI), is relaxed on the runner images. So
+    the `macos-app` and `macos-smoke` jobs print `csrutil status`, for System Integrity Protection's state
+    (what it prints on a runner is not yet seen), with the machine's details. That gates nothing. Until the
+    difference is explained, a check that passes on a runner does not show that a person's Mac loads the
+    same code.
   - **Library validation against a Team ID is exercised only on Developer ID-signed candidates.** Whether
     this bundle loads under it is not decided yet, until the first candidate runs. (Not chosen: a CI-only
     `disable-library-validation` entitlement on ad-hoc builds. It rests on that entitlement being honoured
@@ -1355,7 +1378,7 @@ action: the signing steps use Apple's own tools and `gh`, which the images ship.
 
 | Workflow | Trigger | What it produces |
 |---|---|---|
-| `ci.yml` | every pull request and push to `main` | Linux tests, the Swift library's tests on Linux, a macOS build signed ad hoc (with the hardened runtime, §7) with every check of §19, UI snapshots. No signing secret. No app is uploaded except on a manual run, and then ad-hoc signed only. |
+| `ci.yml` | every pull request and push to `main` | Linux tests, the Swift library's tests on Linux, a macOS build signed ad hoc (without the hardened runtime, §7) with every check of §19, UI snapshots. No signing secret. No app is uploaded except on a manual run, and then ad-hoc signed only. |
 | `macos-candidate.yml` | manual, on `main` or a `v*` tag, in environment `macos-release` | A signed, notarized candidate, uploaded only to a **draft** release that is never published, then checked by a separate job that holds no secret. Draft releases are visible only to people with write access. |
 | `release.yml` | a protected `v*` tag | The wheel on PyPI (environment `pypi`, as 0001), then the Mac jobs below, then one immutable GitHub Release. |
 
@@ -1502,7 +1525,7 @@ Connect API key, its id and issuer id, as environment secrets, never repository-
 
 Built today, by `ci.yml`'s `macos-app` job on `macos-15` (§18; `macos/README.md`, "What CI checks"), each
 check from `tools/macos/check_app.py`:
-- the Swift build, and a bundle assembled with the real pinned runtime, signed ad hoc with the hardened
+- the Swift build, and a bundle assembled with the real pinned runtime, signed ad hoc without the hardened
   runtime (§7; library validation against a Team ID is exercised only on signed candidates);
 - the bundle: no symbolic link; exactly the expected Mach-O files, each signed ad hoc by
   the build, not only by the linker, with its own identifier; the signature, again after every other check;
@@ -1590,8 +1613,11 @@ end-to-end test through the signed bundle, Keychain continuity between releases.
 check tries once, best effort, for Documents, and fails nothing), cannot show what a first-time user sees
 after a real browser download, and cannot show what the menu bar does when a person
 hides an icon. Everything else, macOS 27 included, runs on runners (the lifeline, Quit's drain and a
-force-quit's included, through M14's test). So a person runs, on macOS 26 and 27, only what needs a person or
-real hardware: the first-launch dialog after a Safari and a Chrome download; a first launch with no network;
+force-quit's included, through M14's test), except what macOS lets the bundle load: the runners loaded, under
+the ad-hoc hardened runtime, the extension a real Mac refused (§7). So a person runs, on macOS 26 and 27, only
+what needs a person or real hardware, or what a runner did not show: the bundled interpreter's import of
+`cryptography` and a pairing with a real code from Lucille, on the first build after any change to how it is
+signed; the first-launch dialog after a Safari and a Chrome download; a first launch with no network;
 adding Documents, an iCloud Drive folder and an external disk, and which name each prompt carries; the
 Keychain and Login Items prompts, if any; a lid close; dragging the next build over a **running** old app,
 recording the Finder's message, then the update flow of §16; the Finder's real Keep Both, a copy opened from
@@ -1800,8 +1826,8 @@ These join 0001's "Host invariants and their tests".
 | M3 | Nothing from outside the keyboard changes policy: a link can only deliver a code to `pair`, only while a Connect is pending | a Swift unit test on the handler's type; crafted URLs leave the policy digest unchanged |
 | M4 | From the Connect release, the host redeems only a code answering its own pending request | core tests: no nonce, wrong, reused, expired; each refused before `pairing.accept`, with no store write and no spawn |
 | M5 | The host's gate opens only on Lucille's number, typed; it never shows its own before | core tests: wrong entry, three wrong entries forget, right entry opens; `pair status` carries no digits before the gate opens |
-| M6 | Nothing in the environment changes what the bundled runtime loads | `check_app.py environment`: with `PYTHONPATH`, `PYTHONHOME`, `PYTHONSTARTUP`, a user site, `PYTHONUSERBASE` and the working folder each set to load a planted module, the runtime run with the app's flags loads none; for each, a control run without `-I` must load it, or the check fails. `PYTHONSTARTUP` is read only by an interactive interpreter, so no run the app makes (`-m lucille_host`) could load it even without `-I`; its control runs `-i`. With `PYTHONPYCACHEPREFIX` set, the runtime run with the app's flags reads `.pyc` files from no other tree; its control, without `-I`, names the prefix. No `.pth` file ships beyond the installed `RECORD` files, which `check_app.py record` compares with the wheels'. On the ad-hoc bundle (which carries the hardened runtime, §7) on macOS 15, 26 and 27, and again on every signed build in `macos-verify` |
-| M7 | Developer ID builds: hardened runtime, no entitlements, every Mach-O signed by the team | signing-job checks, on signed builds only: an ad-hoc build carries the hardened runtime (§7) but has no Team ID, so library validation against a Team ID is checked only on signed builds |
+| M6 | Nothing in the environment changes what the bundled runtime loads | `check_app.py environment`: with `PYTHONPATH`, `PYTHONHOME`, `PYTHONSTARTUP`, a user site, `PYTHONUSERBASE` and the working folder each set to load a planted module, the runtime run with the app's flags loads none; for each, a control run without `-I` must load it, or the check fails. `PYTHONSTARTUP` is read only by an interactive interpreter, so no run the app makes (`-m lucille_host`) could load it even without `-I`; its control runs `-i`. With `PYTHONPYCACHEPREFIX` set, the runtime run with the app's flags reads `.pyc` files from no other tree; its control, without `-I`, names the prefix. No `.pth` file ships beyond the installed `RECORD` files, which `check_app.py record` compares with the wheels'. On the ad-hoc bundle (signed without the hardened runtime, §7) on macOS 15, 26 and 27, and again on every signed build in `macos-verify`. That covers the Python variables and files above only: no check plants a `DYLD_*` variable, and without the hardened runtime dyld may honour one in the interpreter (from memory of Apple's hardened runtime documentation; not read in a source here and not tested). The runs the app starts get only `HOME`, `PATH`, `LANG`, `USER`, `LOGNAME` and `TMPDIR` (`HostCLI.swift`, `environment()`) |
+| M7 | Developer ID builds: hardened runtime, no entitlements, every Mach-O signed by the team | signing-job checks, on signed builds only: an ad-hoc build has neither the hardened runtime nor a Team ID (§7), so library validation against a Team ID is checked only on signed builds |
 | M8 | The bundle is never written at run time | `check_app.py readonly`, after `chmod -R a-w`: the host runs, nothing in the bundle changes, no `.pyc` appears or changes, and `codesign --verify --strict` passes after; the signature is checked again after every other check; the read-only end-to-end run once it exists. On the ad-hoc bundle on macOS 15, 26 and 27, and on every signed build |
 | M9 | Nothing runs as root, at install or at run time | no `.pkg`, no daemon (`macos_lint`); uid 0 refused (0001) |
 | M10 | The wheel inside is PyPI's; every file under `site-packages` is a file of a wheel's `RECORD`, except the named installer-written files, and the only `.pyc` there are the build's, one `checked-hash` file per `.py` a `RECORD` lists | the build guard, byte for byte before signing (`payload.record_problems`, also run on Linux); `check_app.py record` on the signed bundle, which holds each wheel `MANIFEST.json` names to `uv.lock` and the host wheel to the sha256 the wheel step output, and where each Mach-O file is compared with its wheel's after both signatures are removed, and that comparison is reported, not failed (§6); `check_app.py bytecode`, which compares each `.pyc` with what the bundled interpreter compiles; post-release checks; `verify_app.py` |
@@ -1847,7 +1873,7 @@ those writes itself first (`pause`, then `resume`).
 | Apple | trusted for Gatekeeper only; copy never says "verified" | Apple can revoke the certificate or a ticket |
 | The app's one opener sends the user somewhere they did not choose | a closed list of three places, whose URLs are written in one file, each its place's; one call, from a button's click; no text or request from Lucille, and no refusal of a request, offers a place (§20, M20); `check_app.py links` refuses Launch Services' and the Apple Event Manager's C calls | what `NSWorkspace` does with the URL, which is macOS's; the two pages' addresses, not yet seen on a Mac, may open another page or none; a hub that refuses the host's writes makes the app offer Date & Time Settings, since the clock's place follows the clock state `run` reports |
 | macOS prompts at a moment the user did not cause | `roots check` during setup; the inference, not yet tested on a Mac, that the app is the responsible process (§12) | a prompt in the interpreter's own name, or a folder whose grant does not reach the child (§12) |
-| Same-user malware | out of scope, as before; hardened runtime and library validation are defence in depth, never claimed | it can run the bundled interpreter and read the host's Keychain items, run verbs, and rewrite the log |
+| Same-user malware | out of scope, as before; on Developer ID builds only (§7), hardened runtime and library validation are defence in depth, never claimed | it can run the bundled interpreter and read the host's Keychain items, run verbs, and rewrite the log |
 
 ## 24. Windows and Linux
 
@@ -1889,8 +1915,9 @@ those writes itself first (`pause`, then `resume`).
   contains it (§13).
 - Whether notarization accepts Mach-O files under `Contents/Resources`, or they move to `Contents/Frameworks`
   and the interpreter to `Contents/Helpers` (§6).
-- Whether the bundle loads under library validation and the hardened runtime, which only a Developer
-  ID-signed candidate exercises (§7).
+- Whether the Developer ID-signed bundle loads under library validation and the hardened runtime, which
+  only a candidate exercises (§7). An ad-hoc build signed with the hardened runtime did not load
+  `cryptography`'s extension on a real Mac (§7).
 - Whether the interpreter needs `allow-unsigned-executable-memory` under the hardened runtime (§7).
 - Whether a first launch works with no network when only the disk image is notarized and stapled (§7).
 - Whether macOS holds the app responsible for its child's file access, which name a prompt carries, and

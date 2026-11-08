@@ -46,7 +46,8 @@ The bundle as built:
   function another way (through the Objective-C runtime, say) is not seen.
 - ``signature``: ``codesign --verify --deep --strict`` passes on the app, and ``codesign --verify
   --strict`` on each Mach-O file in it; each is signed ad hoc as ``bundle`` says, with the
-  hardened runtime exactly when the pins ask for it; nothing carries entitlements. Then the same
+  hardened runtime exactly when the pins ask for it (and, when they do not, with no
+  ``library-validation`` flag either); nothing carries entitlements. Then the same
   for the copy at ``/Applications/<name>.app``, once ``install`` has put it there. CI runs it again
   after every other check, so a run that wrote into either copy fails it.
 - ``wrapper``: on a writable copy of the app, the Terminal wrapper ``Resources/bin/lucille-host``
@@ -63,7 +64,8 @@ On the bundle made read-only (CI runs ``chmod -R a-w`` first):
 - ``host``: ``--version`` prints this checkout's version, through the wrapper too; ``ops list``
   works; a ``roots`` add, list and remove round trip works, and so does ``pause`` then ``resume``;
   a home folder is refused without ``--allow-home-or-root``; the dependencies' native code loads
-  under the hardened runtime, with the app's flags in force. HOME is a new empty folder, and
+  with the app's flags in force, under the hardened runtime only if the pins ask for it (ad hoc
+  builds are signed without it, decisions/0002 §7). HOME is a new empty folder, and
   PYTHONHOME and PYTHONPATH point nowhere, which isolated mode must ignore.
 - ``environment`` (M6): a sitecustomize, a usercustomize, a ``.pth`` file, a startup file and a
   shadowing ``lucille_host`` are planted where PYTHONPATH, PYTHONHOME, PYTHONSTARTUP, the user
@@ -935,8 +937,9 @@ def codesign_problems(text: str, *, identifier: str, hardened: bool | None) -> l
     CodeDirectory flags) by the build itself, not only by the linker (a wheel's extension and
     swiftc's output arrive ``linker-signed``, which also reads as ad hoc); have no Team ID; and
     carry ``identifier``. With ``hardened`` True or False, the hardened runtime flag must be there
-    or must not be; with None it is not looked at. Only whole lines that start with a key are
-    read, so a path that holds one in the ``Executable=`` line is not taken for it."""
+    or must not be; with False, the flag codesign names ``library-validation`` must not be there
+    either (decisions/0002 §7). With None, neither is looked at. Only whole lines that start with
+    a key are read, so a path that holds one in the ``Executable=`` line is not taken for it."""
     lines = text.splitlines()
 
     def value(key: str) -> str | None:
@@ -966,6 +969,8 @@ def codesign_problems(text: str, *, identifier: str, hardened: bool | None) -> l
         problems.append("it lacks the hardened runtime, which the pins ask for")
     if hardened is False and "runtime" in flags:
         problems.append("it carries the hardened runtime, which the pins do not ask for")
+    if hardened is False and "library-validation" in flags:
+        problems.append("it carries library validation, which the pins do not ask for")
     return problems
 
 
