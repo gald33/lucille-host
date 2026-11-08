@@ -287,19 +287,34 @@ enforces.
    every Swift file, the Python files and pins under `tools/macos/`, any plist, entitlements or strings
    file, and every workflow, and fails:
    - in Swift, on the names [decisions/0002](decisions/0002-macos-app.md) §20 lists and on other
-     ways to start a process, use the network, listen (a Mach or distributed-objects port included)
-     or read a URL that is not a file: `URLSession`, `NW*`, `WebKit`, XPC, sockets, streams,
-     `NSWorkspace`, `LSOpen*`, `NSUser*Task`, `fork`, `exec*`, `dlopen`, `/bin/sh` and the like,
-     every `URL(string:` or `URL.init(string:`, and `UserDefaults` and `SWITCHBOARD_`. It reads the
-     Swift three ways: the text with its comments, the code with its comments blanked (so
-     `connect/**/(` is still a call), and each string literal decoded (so `https:\u{2F}/` is still a
-     URL). One exception, in tests only: in a Swift file under a `Tests` folder, `#!/bin/sh` alone on
-     the first line of a multi-line string literal, the script the self-test writes and starts through
-     the app's child runner as a stand-in for the interpreter (decisions/0002 §20). Any other shell,
-     and `/bin/sh` anywhere else, is still a failure there;
+     ways to start a process, load code, use the network, listen (a Mach or distributed-objects port
+     included), read or make a URL that is not a file, open a URL, open, end, find, register, drive or
+     hand something to another application, or ask macOS for more rights: `URLSession`, `NW*`,
+     `WebKit`, XPC, sockets, streams, `LSOpen*`, `LSSetDefault*`, `LSRegister*`, `AESend*`,
+     `NSAppleEventDescriptor`, `openURL`, `Link(`, a Markdown link, `NSSharingService`,
+     `forceTerminate`, `requestAuthorization`, `NSUser*Task`, `fork`, `exec*`, `dlopen`, a bundle's
+     `load()`, `performClick`, `_silgen_name` and the like, `/bin/sh` and the like, `NSWorkspace` and
+     every `URL(string:` or `URL.init(string:` outside the one opener (below), and `UserDefaults` and
+     `SWITCHBOARD_`. It reads the Swift three ways: the text with its comments, the code with its
+     comments blanked (so `connect/**/(` is still a call), and each string literal decoded (so
+     `https:\u{2F}/` is still a URL). One exception, in tests only: in a Swift file under a `Tests`
+     folder, `#!/bin/sh` alone on the first line of a multi-line string literal, the script the
+     self-test writes and starts through the app's child runner as a stand-in for the interpreter
+     (decisions/0002 §20). Any other shell, and `/bin/sh` anywhere else, is still a failure there;
    - in Swift, on `Process` anywhere but `macos/App/HostCLI.swift`, and if that file does not write
      the bundled runtime's path, `Contents/Resources/runtime/bin/lucille-host-runtime`, and its
      arguments, `["-I", "-B", "-X", "utf8", "-m", "lucille_host"]`, outside its comments;
+   - in Swift, on anything in the app's one opener, `macos/App/SystemPlaces.swift`, but one call,
+     `NSWorkspace.shared.open(<a name>)`, of the URLs written there: the two System Settings pages in
+     the lint's `OPENABLE`, each once, and the Applications folder, in code that is the lint's
+     `OPEN_DESIGN` token for token, with its strings in the order of `OPEN_LITERALS`, so that each
+     place opens its own address (decisions/0002 §20); in any other Swift file, on a System Settings
+     address (`x-apple.systempreferences`), comments included, on the opener named other than in a
+     call, `SystemPlaces.open(`, on an extension of `URL` or of the opener's types or a `typealias`
+     naming one, and on a backtick in code, which can hide such a name; and on `Privacy_AllFiles`,
+     Full Disk Access, in any Swift file. That every call of the opener is a
+     button's action is `tests/test_macos_build.py`'s, not the lint's: the lint makes every call one it
+     can find by that text;
    - in Swift, on a read of the pasteboard or of what is dropped on the app (writing, for Copy
      Diagnostics, is allowed here; until Copy Diagnostics is built, `tests/test_macos_build.py` and
      `check_app.py links` refuse `NSPasteboard` altogether), and on an `http://`, `https://`, `ws://`,

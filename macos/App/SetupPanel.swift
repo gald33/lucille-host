@@ -31,6 +31,9 @@ final class SetupPanel: NSObject, NSWindowDelegate {
     var onClosed: (() -> Void)?
     var onAddFolder: (() -> Void)?
     var onRemoveFolder: ((Folder) -> Void)?
+    /// A folder's button that shows a place in macOS was clicked: Open Privacy Settings, under a
+    /// folder macOS's privacy protection refuses the host (`PlaceRules`).
+    var onOpenPlace: ((SystemPlace) -> Void)?
     /// A switch was clicked: the ability as the window shows it, and the position asked for.
     var onSwitch: ((Ability, Bool) -> Void)?
 
@@ -62,6 +65,8 @@ final class SetupPanel: NSObject, NSWindowDelegate {
     private var switches: [Switch] = []
     /// The folders the Folders page shows, in the order of their Remove buttons' tags.
     private var removable: [Folder] = []
+    /// The places the Folders page offers, in the order of their buttons' tags.
+    private var places: [SystemPlace] = []
 
     override init() {
         panel = NSPanel(
@@ -136,6 +141,7 @@ final class SetupPanel: NSObject, NSWindowDelegate {
         addChecked = nil
         switches = []
         removable = []
+        places = []
         let view: NSView
         switch page {
         case .addBack(let offer, let checked)?:
@@ -225,34 +231,57 @@ final class SetupPanel: NSObject, NSWindowDelegate {
     }
 
     /// One folder: the name Lucille knows it by, where it is, what `roots check` said of it if that
-    /// is anything but that the host can open it, and Remove.
+    /// is anything but that the host can open it, and Remove. Under a folder macOS's privacy
+    /// protection refuses the host, the button that shows where to allow it (`PlaceRules`).
     private func folderRow(_ folder: Folder, tag: Int) -> NSView {
         let row = NSView()
         let buttonRoom: CGFloat = 110
         let name = label("\u{201C}\(folder.alias)\u{201D}", width: width - 40 - buttonRoom)
         var lines = [folder.path]
+        var place: SystemPlace?
         let check = shown.checks.first(where: { $0.alias == folder.alias && $0.path == folder.path })
-        if let check, let said = SetupText.folderState(check.state) {
-            lines.append(said)
+        if let check {
+            if let said = SetupText.folderState(check.state) {
+                lines.append(said)
+            }
+            place = PlaceRules.place(for: check.state)
         }
         let detail = label(lines.joined(separator: "\n"), secondary: true, width: width - 40 - buttonRoom)
         let remove = NSButton(title: SetupText.removeButton, target: self, action: #selector(removePressed(_:)))
         remove.tag = tag
-        for view in [name, detail, remove] {
+        var views: [NSView] = [name, detail, remove]
+        var opener: NSButton?
+        if let place {
+            let button = NSButton(title: PlaceText.button(place), target: self, action: #selector(openPlacePressed(_:)))
+            button.tag = places.count
+            places.append(place)
+            views.append(button)
+            opener = button
+        }
+        for view in views {
             view.translatesAutoresizingMaskIntoConstraints = false
             row.addSubview(view)
         }
-        NSLayoutConstraint.activate([
+        var constraints: [NSLayoutConstraint] = [
             name.topAnchor.constraint(equalTo: row.topAnchor),
             name.leadingAnchor.constraint(equalTo: row.leadingAnchor),
             name.trailingAnchor.constraint(lessThanOrEqualTo: remove.leadingAnchor, constant: -12),
             detail.topAnchor.constraint(equalTo: name.bottomAnchor, constant: 4),
             detail.leadingAnchor.constraint(equalTo: row.leadingAnchor),
             detail.trailingAnchor.constraint(lessThanOrEqualTo: remove.leadingAnchor, constant: -12),
-            detail.bottomAnchor.constraint(equalTo: row.bottomAnchor),
             remove.trailingAnchor.constraint(equalTo: row.trailingAnchor),
             remove.centerYAnchor.constraint(equalTo: row.centerYAnchor),
-        ])
+        ]
+        if let opener {
+            constraints += [
+                opener.topAnchor.constraint(equalTo: detail.bottomAnchor, constant: 8),
+                opener.leadingAnchor.constraint(equalTo: row.leadingAnchor),
+                opener.bottomAnchor.constraint(equalTo: row.bottomAnchor),
+            ]
+        } else {
+            constraints.append(detail.bottomAnchor.constraint(equalTo: row.bottomAnchor))
+        }
+        NSLayoutConstraint.activate(constraints)
         return row
     }
 
@@ -439,6 +468,13 @@ final class SetupPanel: NSObject, NSWindowDelegate {
             return
         }
         onRemoveFolder?(removable[sender.tag])
+    }
+
+    @objc private func openPlacePressed(_ sender: NSButton) {
+        guard places.indices.contains(sender.tag) else {
+            return
+        }
+        onOpenPlace?(places[sender.tag])
     }
 
     @objc private func switchChanged(_ sender: NSButton) {

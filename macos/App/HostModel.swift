@@ -605,15 +605,27 @@ final class HostModel: ObservableObject {
         }
     }
 
+    /// A run that failed, in a note: its explanation, and, when the explanation offers a place in
+    /// macOS, that place's button first (decisions/0002 §20), which opens it. When macOS could not
+    /// open it, the note comes again with that said first, and OK alone.
     private func showFailure(_ explanation: Explanation, action: String) {
-        Alerts.shared.show {
+        let title = "\(HostText.appName) could not \(action)."
+        let text = explanation.message + (explanation.detail.map { "\n\nDetails: \($0)" } ?? "")
+        let place = explanation.place
+        Alerts.shared.show({
             let alert = NSAlert()
             alert.alertStyle = .warning
-            alert.messageText = "\(HostText.appName) could not \(action)."
-            alert.informativeText = explanation.message
-                + (explanation.detail.map { "\n\nDetails: \($0)" } ?? "")
+            alert.messageText = title
+            alert.informativeText = text
+            if let place {
+                alert.addButton(withTitle: PlaceText.button(place))
+            }
             alert.addButton(withTitle: "OK")
             return alert
-        }
+        }, done: { response in
+            if let place, response == .alertFirstButtonReturn, !SystemPlaces.open(place) {
+                Connection.shared.notOpened(place, title: title, text: text)
+            }
+        })
     }
 }

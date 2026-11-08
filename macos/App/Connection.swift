@@ -770,11 +770,19 @@ final class Connection: ObservableObject {
     }
 
     /// The line under Needs attention, or under Not connected, was chosen: say it in a note, with
-    /// what the user can do.
+    /// what the user can do. A clock that is off offers Open Date & Time Settings first, the place
+    /// `PlaceRules` gives the problem `run` reports, opened from this note's button (decisions/0002
+    /// §20).
     func showAttention() {
         let health = currentHealth()
         guard let text = ConnectionText.reason(health) else {
             return
+        }
+        let place: SystemPlace?
+        if case .needsAttention(let problem) = health {
+            place = PlaceRules.place(for: problem)
+        } else {
+            place = nil
         }
         var title = ConnectionText.needsAttention
         var body = text
@@ -807,6 +815,14 @@ final class Connection: ObservableObject {
         }
         let shownTitle = title
         let shownBody = body
+        if let place {
+            buttons = [PlaceText.button(place), ConnectionText.okButton]
+            actions = [{ [weak self] in
+                if !SystemPlaces.open(place) {
+                    self?.notOpened(place, title: shownTitle, text: shownBody)
+                }
+            }, {}]
+        }
         let shownButtons = buttons
         let shownDetails = details
         let shownActions = actions
@@ -828,6 +844,14 @@ final class Connection: ObservableObject {
                 shownActions[index]()
             }
         })
+    }
+
+    /// A place a note or Set Up's Folders page offered that macOS could not open (decisions/0002
+    /// §20): that said first, then the note's own words again, or the Folders page's for a folder
+    /// macOS blocks, which already say how to get there by hand; and OK alone.
+    func notOpened(_ place: SystemPlace, title: String, text: String) {
+        let note = ConnectionNote(title: title, text: PlaceText.couldNotOpen(place) + " " + text, detail: nil)
+        Alerts.shared.note(note, warning: true)
     }
 
     /// Try Again: read `status` again, and start `run` if it can.
@@ -1561,6 +1585,13 @@ final class Connection: ObservableObject {
         }
         setupPanel.onSwitch = { ability, on in
             HostModel.shared.setAbility(ability, on: on)
+        }
+        // A folder macOS's privacy protection refuses the host offers Open Privacy Settings under
+        // it, from that button's click (decisions/0002 §20).
+        setupPanel.onOpenPlace = { [weak self] place in
+            if !SystemPlaces.open(place) {
+                self?.notOpened(place, title: SetupText.folderBlocked, text: SetupText.folderAllowSteps)
+            }
         }
         HostModel.shared.onRead = { [weak self] in
             self?.setUpRead()

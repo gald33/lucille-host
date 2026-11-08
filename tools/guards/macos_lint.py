@@ -17,14 +17,27 @@ comments included; over the code with its comments blanked, so that a comment in
   ``InputStream`` and ``OutputStream``, ``getStreamsToHost``, ``DistributedNotificationCenter``,
   ``NSAppleScript``, ``posix_spawn``, ``system(``, ``/bin/sh``, ``/bin/zsh``, ``/bin/bash``,
   ``/usr/bin/env``, ``osascript``) and its C spelling ``CFNotificationCenterGetDistributedCenter``;
-  every other way to start a process (``NSTask``, ``fork``, ``exec*``, ``popen``, ``NSWorkspace``,
-  ``LSOpen*``, ``openApplication``, ``OSAScript``, ``NSUser*Task``, ``dlopen``, ``dlsym``,
-  ``launchPath``); every other way to use the network, to listen, or to read a URL that is not a
-  file (``URLRequest``, ``NSURLConnection``, ``NSURLDownload``, ``CF*Stream``, ``CFHTTP``,
-  ``NetService``, ``socket(``, ``bind(``, ``listen(``, ``connect(``, ``accept(``,
-  ``getaddrinfo``, ``gethostbyname``, ``URLComponents``, ``contentsOf:`` other than
-  ``append(contentsOf:`` and ``insert(contentsOf:``, and every ``URL(string:`` or
-  ``URL.init(string:``, with no exception); a Mach or distributed-objects port (``NSMachPort``,
+  other ways to start a process, to load code, or to open a URL, or to open, end, find,
+  register, drive or hand something to another application, or to ask macOS for more rights
+  (``NSTask``, ``fork``, ``exec*``, ``popen``, ``NSWorkspace`` outside :data:`OPEN_FILE`,
+  ``LSOpen*``, ``LSSetDefault*``, ``LSRegister*``, ``AESend*``, ``NSAppleEventDescriptor``,
+  ``openApplication``, ``openURL``, ``OpenURLAction``, ``Link(``, ``.link``, ``markdown:``, a
+  Markdown link inside a string literal (:data:`MARKDOWN_LINKS`), ``NSSharingService``,
+  ``ShareLink``, ``forceTerminate``, ``runningApplications(withBundleIdentifier``,
+  ``NSRunningApplication(processIdentifier``, ``requestAuthorization``,
+  ``FileManager(authorization:``, ``OSAScript``, ``NSUser*Task``, ``dlopen``, ``dlsym``,
+  ``.load()``, ``loadAndReturnError``, ``principalClass``, ``launchPath``); a button pressed by
+  code, not by a click (``performClick``), and a function reached by its symbol or put in
+  another's place (``_silgen_name``, ``_cdecl``, ``_dynamicReplacement``); other ways to use the
+  network, to listen, or to read or make a URL that is not a file (``URLRequest``,
+  ``NSURLConnection``, ``NSURLDownload``, ``CF*Stream``, ``CFHTTP``, ``NetService``, ``socket(``,
+  ``bind(``, ``listen(``, ``connect(``, ``accept(``, ``getaddrinfo``, ``gethostbyname``,
+  ``URLComponents``, ``contentsOf:`` other than ``append(contentsOf:`` and
+  ``insert(contentsOf:``, ``URL(dataRepresentation:``, ``URL(absoluteURLWithDataRepresentation:``,
+  ``CFURLCreateWithString``, ``CFURLCreateWithBytes``, ``CFURLCreateAbsoluteURLWithBytes``,
+  ``NSURL(scheme:``, an ``.init(string:`` whose type is left out, after a symbol or a keyword,
+  and every ``URL(string:`` or ``URL.init(string:`` outside :data:`OPEN_FILE`); a Mach or
+  distributed-objects port (``NSMachPort``,
   ``NSSocketPort``, ``NSMessagePort``, ``CFMessagePort*``, ``NSConnection``), which is a listener
   too; ``UserDefaults``, because the app keeps no settings of its own; and ``SWITCHBOARD_``,
   because the app passes the host no Switchboard setting. One exception, for tests only: in a
@@ -40,6 +53,30 @@ comments included; over the code with its comments blanked, so that a comment in
   Swift files but not that one is a finding, so moving the file without moving this constant
   fails. The change that adds the Swift package moves :data:`PROCESS_FILE` to the Kit file that
   starts the host; only one path is ever allowed.
+- [open] the app's one opener, which shows the user a place in macOS from a click (0002 §20), is
+  :data:`OPEN_FILE`, that exact path; no other file names the class it calls. Everywhere, no
+  ``Privacy_AllFiles``: the app never opens Full Disk Access. Outside :data:`OPEN_FILE`, no
+  ``x-apple.systempreferences``, in any case, comments included; and, over the code with comments
+  blanked (:data:`OPENER_NAMES`), the opener's type only in a call, ``SystemPlaces.open(``, so
+  that tests/test_macos_build.py finds every call by its text and reads where each one sits; no
+  ``extension`` of ``SystemPlaces``, ``SystemPlace``, ``URL``, ``NSURL``, ``Optional``,
+  ``Equatable`` or ``Sendable``, no ``typealias`` that names one of them, and no new
+  declaration of ``URL``, ``NSURL`` or ``SystemPlaces``, which could change what the opener's
+  code makes or opens; and no backtick, its strings included, since a backticked word is a name
+  these rules do not read (the app's code has none; a comment may). In
+  :data:`OPEN_FILE`, over its text with comments blanked unless said: ``NSWorkspace`` once in the
+  whole text, comments included, as ``NSWorkspace.shared.open(<a name>)``, and no
+  ``configuration:`` or ``withApplicationAt``; each ``URL(string:`` or ``URL.init(string:`` takes
+  one string literal and nothing else, whose value, decoded, is an entry of :data:`OPENABLE`, and
+  each entry is the value of exactly one of them; every other URL it makes is
+  ``URL(fileURLWithPath: "/Applications", isDirectory: true)``, once, with nothing taken from it
+  or added to it (no ``filePath:``, ``relativeTo:``, ``appending*`` or ``deleting*``); every
+  string literal in it, decoded, is an entry of :data:`OPENABLE` or ``/Applications``; its code
+  is :data:`OPEN_DESIGN`, token for token (:func:`design_tokens`: each one-line string literal one
+  token, white space aside), so that it has one function, one call, as its last statement, and no
+  URL kept from anything else (a property, another object, another overload) reaches the call;
+  and its strings are :data:`OPEN_LITERALS`, in that order, so that each place opens its own
+  address. A tree without :data:`OPEN_FILE` is clean: opening nothing is safe.
 - [pasteboard-read] no read of a pasteboard (:data:`PASTEBOARD_READS`): ``string(forType:``,
   ``data(forType:``, ``propertyList(forType:``, ``readObjects(``, ``pasteboardItems``,
   ``availableType(from:``, ``canReadObject(``, ``canReadItem(``, ``NSPasteboardReading``,
@@ -85,7 +122,7 @@ In what the app is, and how it is delivered:
   release changes this rule.
 - [daemon] no ``LaunchDaemon``, ``SMAppService.daemon``, ``.daemon(plistName:``, ``SMJobBless``,
   ``SMJobSubmit``, ``AuthorizationExecuteWithPrivileges`` or ``launchctl``, in the same places
-  (no handler rule). ``SMAppService.agent``, the login item's fallback, is allowed.
+  (no handler rule). ``SMAppService.agent`` is not used by the app (a build test refuses it).
 - [pkg] no installer package: no file or folder in the repository named ``*.pkg`` or ``*.mpkg``,
   and no ``.pkg``, ``.mpkg``, ``pkgbuild``, ``productbuild``, ``productsign`` or ``installer``
   with ``-pkg`` later on its line, in Swift, in a string constant of a Python file under
@@ -107,9 +144,18 @@ zero-width space, a Cyrillic letter); a function used without being called where
 lookup (``NSClassFromString``) or a selector named by a string; shell quoting inside a word of a
 workflow (``pkg'build'``); a bare ``/regex/`` literal, which it reads as code; whether the process
 file passes the runtime's path and flags to the ``Process`` it starts (only that both are written
-there, outside comments; the self-test passes another path on purpose); and anything outside the
-files listed above, such as a dependency's source or what a workflow downloads. It catches
-accidents, not a determined author (0002 §20).
+there, outside comments; the self-test passes another path on purpose); what
+``NSWorkspace.shared.open`` does with the URL it is given, and whether the opener is called only
+from a click (tests/test_macos_build.py reads each call, and each use of the closure Set Up's
+window calls it through); an action sent by code rather than by a click (``sendAction``,
+``perform``), which this lint does not refuse, since the app's windows send their own; an
+extension, in another file, of a protocol or a superclass of a type the opener's code names, other
+than those [open] refuses (``Hashable``, ``NSObject``), and a URL decoded from data (a
+``Decoder``); a way to open something that no name here spells;
+``SMAppService.openSystemSettingsLoginItems()``, the login item's own call, which opens System
+Settings with no URL and is not this rule's; and anything outside the files listed above, such as
+a dependency's source or what a workflow downloads. It catches accidents, not a determined author
+(0002 §20).
 """
 
 from __future__ import annotations
@@ -139,6 +185,19 @@ PROCESS_FILE: Final = "macos/App/HostCLI.swift"
 # tools/macos/build_app.py's RUNTIME_IN_APP and RUNTIME_FLAGS (tests/test_macos_build.py checks).
 RUNTIME_IN_APP: Final = "Contents/Resources/runtime/bin/lucille-host-runtime"
 RUNTIME_ARGV: Final = ("-I", "-B", "-X", "utf8", "-m", "lucille_host")
+# The app's one opener (decisions/0002 §20): the one Swift file that may name NSWorkspace and make a
+# URL from a string, to show the user a place in macOS from a click. It may open the two System
+# Settings pages here, and the Applications folder. The spellings are the best known for macOS 13
+# and later, not yet seen on a Mac: check_app.py places opens each and says what it shows, and its
+# SETTINGS_PANES holds the same two (tests/test_macos_build.py checks).
+OPEN_FILE: Final = "macos/App/SystemPlaces.swift"
+DATE_AND_TIME_PAGE: Final = "x-apple.systempreferences:com.apple.Date-Time-Settings.extension"
+FILES_AND_FOLDERS_PAGE: Final = (
+    "x-apple.systempreferences:com.apple.preference.security?Privacy_FilesAndFolders"
+)
+OPENABLE: Final[frozenset[str]] = frozenset({DATE_AND_TIME_PAGE, FILES_AND_FOLDERS_PAGE})
+# The one other place the opener shows, as a file URL.
+APPLICATIONS_FOLDER: Final = "/Applications"
 # The functions that render Info.plist, their file, and the pins they take values from.
 PLIST_SOURCE: Final = "tools/macos/build_app.py"
 PLIST_FUNCTIONS: Final = ("info_plist", "folder_usage")
@@ -172,6 +231,12 @@ _NETWORK = "uses the network"
 _SPAWN = "starts a process"
 _LISTEN = "is a listener"
 _SCRIPT = "runs a script"
+_OPEN_URL = "opens a URL"
+_FINDS_AN_APP = "finds another application to act on"
+_APPLE_EVENT = "drives another application with an Apple event"
+_SHARES = "hands what it shares to another application"
+_LOADS = "loads code"
+_URL_FROM_DATA = "makes a URL that is not a file"
 DENIED_SWIFT: Final = _patterns(
     # decisions/0002 §20.
     (r"URLSession", _NETWORK),
@@ -200,13 +265,42 @@ DENIED_SWIFT: Final = _patterns(
     (r"\bv?fork\s*\(", _SPAWN),
     (r"\bf?exec[lv]p?[eP]?\s*\(", _SPAWN),
     (r"\bpopen\s*\(", _SPAWN),
-    (r"NSWorkspace", "opens files, URLs or applications"),
     (r"\bLSOpen\w*", "opens files, URLs or applications"),
     (r"openApplication", _SPAWN),
+    # Other ways to open a URL: SwiftUI's, a link, and Markdown, whose links open what they name
+    # when clicked (a Markdown link inside a string literal is check_swift's: MARKDOWN_LINKS).
+    (r"openURL", _OPEN_URL),
+    (r"OpenURLAction", _OPEN_URL),
+    (r"\bLink\s*\(", _OPEN_URL),
+    (r"\.link\b", "makes a link, which opens a URL when it is clicked"),
+    (r"markdown\s*:", "reads Markdown, whose links open a URL when they are clicked"),
+    # Other ways to end, find, register or drive another application, to hand it something, or to
+    # act with more rights.
+    (r"forceTerminate", "ends another application"),
+    (r"runningApplications\s*\(\s*withBundleIdentifier", _FINDS_AN_APP),
+    (r"NSRunningApplication\s*\(\s*processIdentifier", _FINDS_AN_APP),
+    (r"\bLSSetDefault\w*", "makes an application the default for a URL scheme or a file type"),
+    (r"\bLSRegister\w*", "registers an application with Launch Services"),
+    (r"\bAESend\w*", _APPLE_EVENT),
+    (r"NSAppleEventDescriptor", _APPLE_EVENT),
+    (r"NSSharingService", _SHARES),
+    (r"\bShareLink\b", _SHARES),
+    (r"requestAuthorization", "asks macOS for more rights"),
+    (r"FileManager\s*\(\s*authorization\s*:", "acts on files with more rights"),
+    # A button pressed by code, not by a click; and a function reached by its symbol, or put in
+    # another's place, whatever name the code calls it by.
+    (r"performClick", "presses a button by code, not by a click"),
+    (r"\b_silgen_name\b", "reaches a function by its symbol"),
+    (r"\b_cdecl\b", "reaches a function by its symbol"),
+    (r"\b_dynamicReplacement\b", "puts a function in another's place"),
     (r"OSAScript", _SCRIPT),
     (r"NSUser\w*Task", "runs a script or a program"),
-    (r"\bdlopen\b", "loads code"),
-    (r"\bdlsym\b", "loads code"),
+    (r"\bdlopen\b", _LOADS),
+    (r"\bdlsym\b", _LOADS),
+    # A bundle's code, loaded.
+    (r"\.load\s*\(\s*\)", _LOADS),
+    (r"loadAndReturnError", _LOADS),
+    (r"principalClass", _LOADS),
     (r"launchPath", _SPAWN),
     # Other ways to use the network, to listen, or to read a URL that is not a file.
     (r"URLRequest", _NETWORK),
@@ -226,7 +320,17 @@ DENIED_SWIFT: Final = _patterns(
     (r"gethostbyname", _NETWORK),
     (r"URLComponents", "builds a URL that is not a file"),
     (r"(?<!append\()(?<!insert\()\bcontentsOf\s*:", "reads a URL, which may not be a file"),
-    (r"URL\s*(?:\.\s*init\s*)?\(\s*string\s*:", "makes a URL that is not a file"),
+    (r"URL\s*\(\s*(?:absoluteURLWithDataRepresentation|dataRepresentation)\s*:", _URL_FROM_DATA),
+    (r"\bCFURLCreate(?:WithString|WithBytes|AbsoluteURLWithBytes)\b", _URL_FROM_DATA),
+    (r"NSURL\s*\(\s*scheme\s*:", _URL_FROM_DATA),
+    # An initializer whose type is left out (`let url: URL? = .init(string: text)`, or after a
+    # keyword, `return .init(string: text)`); never a type's own, such as `CodeField(string:` or
+    # `NSAttributedString.init(string:`.
+    (
+        r"(?:(?<![\w\s])|(?<=\breturn)|(?<=\bin)|(?<=\btry)|(?<=\bawait)|(?<=\byield))"
+        r"\s*\.\s*init\s*\(\s*string\s*:",
+        "makes a URL that is not a file, unnamed",
+    ),
     # A Mach or distributed-objects port is a listener too.
     (r"\bNSMachPort\b", _LISTEN),
     (r"\bNSSocketPort\b", _LISTEN),
@@ -238,6 +342,97 @@ DENIED_SWIFT: Final = _patterns(
     (r"SWITCHBOARD_", "passes the host a Switchboard setting"),
 )
 _PROCESS: Final = _patterns((r"\bProcess\b", f"starts a process outside {PROCESS_FILE}"))
+# What only the opener may do: [swift-denylist] everywhere else, as before it was the opener's.
+_OPENERS: Final = _patterns(
+    (r"NSWorkspace", f"opens files, URLs or applications outside {OPEN_FILE}"),
+    (
+        r"URL\s*(?:\.\s*init\s*)?\(\s*string\s*:",
+        f"makes a URL that is not a file outside {OPEN_FILE}",
+    ),
+)
+# [open]: Full Disk Access everywhere; a System Settings page outside the opener.
+FULL_DISK_ACCESS: Final = _patterns(
+    (r"Privacy_AllFiles", "names Full Disk Access, which the app never opens")
+)
+SETTINGS_PAGES: Final = _patterns(
+    (r"(?i)x-apple\.systempreferences", f"names a System Settings page outside {OPEN_FILE}")
+)
+# [open] outside the opener, over code with its comments blanked: the opener's type only in a call,
+# so that a build test finds every call by its text; no extension, new name or new declaration of a
+# type the opener's code names, which could change what that code makes or opens; and no backtick,
+# which makes a name of any word, and so would hide one from these patterns.
+_OPENER_TYPES: Final = r"(?:SystemPlaces?|URL|NSURL|Optional|Equatable|Sendable)"
+OPENER_NAMES: Final = _patterns(
+    (
+        r"\bSystemPlaces\b(?!\.open\()",
+        f"names the opener other than in a call, SystemPlaces.open(, outside {OPEN_FILE}",
+    ),
+    (
+        r"\bextension\s+(?:\w+\s*\.\s*)?" + _OPENER_TYPES + r"\b",
+        f"extends a type the opener's code names, outside {OPEN_FILE}",
+    ),
+    (
+        r"\btypealias\b[^=]*=\s*[^\n]*\b" + _OPENER_TYPES + r"\b",
+        f"gives another name to a type the opener's code names, outside {OPEN_FILE}",
+    ),
+    (r"`", f"is a backtick, which can hide a name the opener's code uses, outside {OPEN_FILE}"),
+    (
+        r"\b(?:func|var|let|struct|class|enum|actor|protocol|typealias)\s+(?:URL|NSURL|SystemPlaces)\b",
+        f"declares again a name the opener's code uses, outside {OPEN_FILE}",
+    ),
+)
+# A Markdown link inside a string literal, decoded: SwiftUI's Text shows a literal's links, and
+# opens what they name when clicked.
+MARKDOWN_LINKS: Final = _patterns(
+    (r"\[[^\]\n]*\]\([^)\n]*\)", "is a Markdown link, which SwiftUI opens when it is clicked")
+)
+# The opener's one call, the URLs it may make, and what may not be asked of them.
+_OPEN_CALL = re.compile(r"NSWorkspace\s*\.\s*shared\s*\.\s*open\s*\(\s*[A-Za-z_]\w*\s*\)")
+_OPEN_ASKS: Final = _patterns(
+    (r"\bconfiguration\s*:", "opens with a configuration, which can start an application"),
+    (r"\bwithApplicationAt\b", "opens with another application"),
+    (r"\bfilePath\s*:", "makes a file URL that is not the Applications folder"),
+    (r"\brelativeTo\s*:", "makes a URL relative to another"),
+    (r"\bappending\w*", "adds to a URL"),
+    (r"\bdeleting\w*", "takes part of a URL away"),
+)
+_URL_FROM_STRING = re.compile(r"URL\s*(?:\.\s*init\s*)?\(\s*string\s*:\s*")
+_ANY_URL = re.compile(r"\bURL\s*(?:\.\s*init\s*)?\(")
+_APPLICATIONS_URL = re.compile(
+    r"URL\s*\(\s*fileURLWithPath\s*:\s*"
+    + re.escape(f'"{APPLICATIONS_FOLDER}"')
+    + r"\s*,\s*isDirectory\s*:\s*true\s*\)(?!\s*[.?!\[])"
+)
+_CLOSE_CALL = re.compile(r"\s*\)")
+# The opener's code as designed, token by token (:func:`design_tokens`: comments blanked, each
+# one-line string literal read as ``""``, white space aside), and the value of each of its strings,
+# in order. Any other code there is a finding, so that nothing but the places written there reaches
+# the one call: no second function, no URL kept from a property, another object or another file's
+# extension, and each place opens its own address. A change to the file changes these, in review.
+OPEN_DESIGN: Final = """\
+import AppKit
+@MainActor
+enum SystemPlaces {
+    static func open(_ place: SystemPlace) -> Bool {
+        let url: URL?
+        switch place {
+        case .dateAndTime:
+            url = URL(string: "")
+        case .filesAndFolders:
+            url = URL(string: "")
+        case .applicationsFolder:
+            url = URL(fileURLWithPath: "", isDirectory: true)
+        }
+        guard let url else {
+            return false
+        }
+        return NSWorkspace.shared.open(url)
+    }
+}
+"""
+OPEN_LITERALS: Final = (DATE_AND_TIME_PAGE, FILES_AND_FOLDERS_PAGE, APPLICATIONS_FOLDER)
+_ONE_LINE_LITERAL = re.compile(r'(#*)"(?:[^"\\\n]|\\.)*"\1')
+_TOKEN = re.compile(r'""|[A-Za-z_]\w*|\S')
 _RUNTIME_ARGV_LITERAL = re.compile(
     r"\[\s*" + r"\s*,\s*".join(re.escape(f'"{arg}"') for arg in RUNTIME_ARGV) + r"\s*,?\s*\]"
 )
@@ -609,13 +804,118 @@ def _blanked(text: str, spans: Iterable[tuple[int, int]]) -> str:
 
 
 def _swift_rule_findings(text: str, rel: str, first_line: int = 1) -> list[Violation]:
-    """The regex rules of :data:`SWIFT_RULES`, and [process] outside :data:`PROCESS_FILE`."""
+    """The regex rules of :data:`SWIFT_RULES`; [process] outside :data:`PROCESS_FILE`; and
+    [open]'s everywhere, with what only the opener may do refused outside :data:`OPEN_FILE`."""
     found: list[Violation] = []
     for rule, patterns in SWIFT_RULES:
         found += _regex_findings(text, rel, rule, patterns, first_line)
     if rel != PROCESS_FILE:
         found += _regex_findings(text, rel, "process", _PROCESS, first_line)
+    found += _regex_findings(text, rel, "open", FULL_DISK_ACCESS, first_line)
+    if rel != OPEN_FILE:
+        found += _regex_findings(text, rel, "swift-denylist", _OPENERS, first_line)
+        found += _regex_findings(text, rel, "open", SETTINGS_PAGES, first_line)
     return found
+
+
+def _opener_findings(text: str, scan: SwiftScan, rel: str) -> list[Violation]:
+    """[open] in :data:`OPEN_FILE`: one call that opens, of a closed list of places, each URL
+    made here from a literal (the module docstring says which)."""
+    found: list[Violation] = []
+    code = scan.code
+
+    def line_of(source: str, index: int) -> int:
+        return source.count("\n", 0, index) + 1
+
+    def finding(line: int, message: str) -> None:
+        found.append(Violation(rel, line, "open", message))
+
+    # One NSWorkspace in the whole text, comments included, and that one the call.
+    named = [match.start() for match in re.finditer("NSWorkspace", text)]
+    if not named:
+        finding(1, "the opener's one call, NSWorkspace.shared.open(<a name>), is not here")
+    for index in named[1:]:
+        finding(line_of(text, index), "NSWorkspace a second time: the opener has one call")
+    for match in re.finditer("NSWorkspace", code):
+        if _OPEN_CALL.match(code, match.start()) is None:
+            finding(
+                line_of(code, match.start()),
+                "NSWorkspace other than as NSWorkspace.shared.open(<a name>), its one call",
+            )
+    for pattern, why in _OPEN_ASKS:
+        for match in pattern.finditer(code):
+            finding(line_of(code, match.start()), f"{match[0]!r} {why}")
+    # Each URL from a string: one literal, an entry of OPENABLE, and nothing else.
+    scanner = _Scanner(code)
+    used: dict[str, int] = {}
+    made: set[int] = set()
+    for match in _URL_FROM_STRING.finditer(code):
+        line = line_of(code, match.start())
+        made.add(match.start())
+        at = match.end()
+        hashes = 0
+        while code.startswith("#", at + hashes):
+            hashes += 1
+        value: str | None = None
+        if code.startswith('"', at + hashes):
+            try:
+                at = scanner.string(at, hashes)
+                value = scanner.literals[-1][1]
+            except SwiftSyntaxError:
+                value = None
+        if value is None or _CLOSE_CALL.match(code, at) is None:
+            finding(line, "a URL made from something other than one string literal")
+        elif value not in OPENABLE:
+            finding(line, f"{value[:80]!r} is not a place the opener may open (OPENABLE)")
+        else:
+            used[value] = used.get(value, 0) + 1
+    for entry in sorted(OPENABLE):
+        if used.get(entry, 0) != 1:
+            count = used.get(entry, 0)
+            finding(1, f"{entry!r} must be opened by exactly one URL here, not {count}")
+    # The Applications folder, once; no other URL.
+    folder = list(_APPLICATIONS_URL.finditer(code))
+    made |= {match.start() for match in folder}
+    if len(folder) != 1 or code.count("fileURLWithPath") != 1:
+        finding(1, f'URL(fileURLWithPath: "{APPLICATIONS_FOLDER}", isDirectory: true) once, alone')
+    for match in _ANY_URL.finditer(code):
+        if match.start() not in made:
+            finding(line_of(code, match.start()), "a URL the opener may not make")
+    # No string but the places'.
+    for line, literal in scan.literals:
+        if literal not in OPENABLE and literal != APPLICATIONS_FOLDER:
+            finding(line, f"{literal[:80]!r} is a string the opener has no use for")
+    # The code is the design's, token for token, and its strings are the design's, in order: so
+    # each place opens its own address, and nothing else reaches the call.
+    tokens = design_tokens(code)
+    designed = [token for _, token in design_tokens(OPEN_DESIGN)]
+    for index, (line, token) in enumerate(tokens):
+        if index >= len(designed) or token != designed[index]:
+            wanted = repr(designed[index]) if index < len(designed) else "nothing more"
+            finding(line, f"{token!r} where the opener's design (OPEN_DESIGN) has {wanted}")
+            break
+    else:
+        if len(tokens) < len(designed):
+            finding(
+                tokens[-1][0] if tokens else 1,
+                f"the opener ends where its design (OPEN_DESIGN) goes on with "
+                f"{designed[len(tokens)]!r}",
+            )
+    lexer = _Scanner(text)
+    lexer.code_until(0, interpolation=False)
+    strings = tuple(value for _, value in lexer.literals)
+    if strings != OPEN_LITERALS:
+        said = ", ".join(repr(value[:80]) for value in strings)
+        finding(1, f"the opener's strings, in order, are not OPEN_LITERALS: ({said})")
+    return found
+
+
+def design_tokens(code: str) -> list[tuple[int, str]]:
+    """The tokens of Swift ``code`` whose comments are blanked, each with its line: each one-line
+    string literal is one ``""``, each name one token, and each other character but white space
+    one. :data:`OPEN_DESIGN` is read the same way."""
+    flat = _ONE_LINE_LITERAL.sub('""', code)
+    return [(flat.count("\n", 0, match.start()) + 1, match[0]) for match in _TOKEN.finditer(flat)]
 
 
 def check_swift(
@@ -637,10 +937,15 @@ def check_swift(
         spans, shebangs = allowed_test_shebangs(text, scan)
     found = _swift_rule_findings(_blanked(text, spans), rel)
     found += _swift_rule_findings(_blanked(scan.code, spans), rel)
+    if rel != OPEN_FILE:
+        found += _regex_findings(_blanked(scan.code, spans), rel, "open", OPENER_NAMES)
     for line, value in scan.literals:
         if line in shebangs and value.startswith(TEST_SHEBANG + "\n"):
             value = " " * len(TEST_SHEBANG) + value[len(TEST_SHEBANG) :]
         found += _swift_rule_findings(value, rel, line)
+        found += _regex_findings(value, rel, "swift-denylist", MARKDOWN_LINKS, line)
+    if rel == OPEN_FILE:
+        found += _opener_findings(text, scan, rel)
     if rel == PROCESS_FILE:
         if RUNTIME_IN_APP not in {value for _, value in scan.literals}:
             found.append(

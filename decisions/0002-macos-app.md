@@ -121,11 +121,30 @@ developing the app. Its builds stay ad hoc signed, for the repository owner's ow
   and the case of each letter as there, reached through no link. Any other copy (on its disk image or
   another disk, in a folder inside Applications, in the Applications folder in the home folder, anywhere
   else, or in Applications under another name, such as the Finder's Keep Both gives a second copy, "Capsule
-  2") says why it can't run and how to fix that, offers only **Quit**, and starts no host verb and no child:
+  2") says why it can't run and how to fix that, offers **Quit**, and starts no host verb and no child:
   every child goes through one place, `HostCLI.spawn`, which starts nothing until the app opens its latch,
-  with a token that only the judgement of that one path makes. A renamed copy is told to go to the Trash
-  only while another copy of Capsule is at `/Applications/Capsule.app`, a folder whose `Info.plist` gives
-  the same bundle identifier; with none there, it is told to be renamed Capsule.
+  with a token that only the judgement of that one path makes. Every such copy that judgement places
+  outside the Applications folder (on a disk image or another disk, in a folder inside Applications, in
+  the home folder's Applications, anywhere else) offers **Show Applications Folder** first, which shows
+  that folder in the Finder and quits; a renamed copy, in that folder already, offers Quit alone. A
+  renamed copy is told to go to the Trash only while another copy of Capsule is at
+  `/Applications/Capsule.app`, a folder whose `Info.plist` gives the same bundle identifier; with none
+  there, it is told to be renamed Capsule.
+- **The one opener** (§20). A note's button, or one under a folder on Set Up's Folders page, shows the
+  user a place in macOS, and only from that click: **Open Date & Time Settings** in the note behind the
+  line that says the Mac's clock is off; **Open Privacy Settings**, at Files & Folders, never Full Disk
+  Access, in the note that says macOS is blocking Capsule from a folder being added, and under a folder
+  `roots check` finds macOS refuses the host; and **Show Applications Folder**, then Quit, for every copy
+  the app judges not to be in the Applications folder. The places are a closed list, and one call in
+  `macos/App/SystemPlaces.swift` opens them; no text or request from Lucille, and no refusal of a request,
+  offers one (the clock's place follows the clock state `run` reports, which the hub's refusals of the
+  host's writes set), and the waiting page's sentence about the clock stays words only. When macOS
+  cannot open the place, the note comes again with "Capsule couldn't open System Settings." (or "your
+  Applications folder") first, and OK or Quit alone; for the button under a folder on Set Up's Folders
+  page, which had no note, a note says it first, then what that page says of the folder and how to allow
+  it by hand, with OK alone. What the two System Settings pages are called on each macOS, and that their
+  addresses open them, is not yet seen on a Mac: `check_app.py places` opens each and prints what it
+  shows.
 - **The update notice** (§16). When `run` says that Lucille asked for a newer release (`host_too_old`), the
   app says so once, however many requests say so, in one note under one key, which a later request does
   not bring back once it is closed: "Lucille needs Capsule X or newer", X the highest version asked for
@@ -164,9 +183,6 @@ first build also departs from this record in these ways, among others; `macos/RE
 made for the first build", says why for most of them:
 - the command line runs with `PATH=/var/empty`, but with `/` as its working directory, not the host's own
   state folder (§9);
-- a copy that is not at `/Applications/Capsule.app` offers only **Quit**, not **Show Applications Folder**
-  (§3.3): opening the Finder needs `NSWorkspace`, which the Mac lint and the build's checks keep out of the
-  app (§20), as for the clock below;
 - operations meant for testing are not listed at all, where §13 hides them behind "Show diagnostic
   operations"; `host.describe` is not listed either: while it is on, the menu says what it shares in the
   app's own words, where §13 shows it with its switch; and when the core suggests no alias the app can
@@ -193,8 +209,6 @@ made for the first build", says why for most of them:
   `forget` runs once `run` has drained, before the app replies (§9);
 - when no `state` arrives for 120 s, the app only says so; it neither restarts `run` nor closes the
   lifeline (§9);
-- the clock's fix is said in words, not offered as an **Open Date & Time Settings** button (§3.3), because
-  the Mac lint and the build's checks keep `NSWorkspace` out of the app (§20);
 - Activity says only the live `request` events in words. The host's log is shown as the host wrote it,
   behind a disclosure, under "As the host wrote it. Anything running as you can change this file.": the
   contract's `log_line` carries text only, which a shell shows as it is or not at all, and a typed history
@@ -227,8 +241,8 @@ made for the first build", says why for most of them:
   turned off is not offered back, since its
   Review and Turn On is not built (§13); on What Lucille may do it says so as a fact, and its switch is
   the menu's. Set Up lists `host.describe` with its switch and the core's words, as §13 has it, where
-  the menu does not. The Folders page says `denied_by_macos` and `missing` in words, with no Open
-  Privacy Settings or Choose Again button (§12);
+  the menu does not. The Folders page offers **Open Privacy Settings** under a folder whose check is
+  `denied_by_macos`, and says `missing` in words, with no Choose Again button (§12);
 - a run the app stopped waiting for is counted as stuck, and said to hold up every change to folders and
   abilities, only when its verb takes the host's settings lock: of the short runs, `ops enable` and
   `ops disable`, `roots add` but the alias suggestion, `roots remove` and `policy reset`
@@ -1194,7 +1208,9 @@ a policy aside, the previous folders and operations come back as unchecked boxes
   paths from the first release that has `files.search`, so shipping the binary later changes no definition hash
   and turns nothing off. This is why the app must live at exactly `/Applications/Capsule.app`: it refuses
   to run anywhere else and asks to be moved there. A copy anywhere else, or one renamed there, says why and
-  how to fix that, and offers Quit; it starts no host verb, makes no login-item call and opens nothing.
+  how to fix that, and offers Quit; it starts no host verb, makes no login-item call, and opens nothing
+  but, from its **Show Applications Folder** button, the Applications folder (any copy the app judges not
+  to be in it, §20).
   That path holds the app's name, so after that release the name cannot change without a catalog change
   (0001, "Upgrades": an enabled entry that changes turns off).
 
@@ -1502,13 +1518,26 @@ check from `tools/macos/check_app.py`:
 - a read-only copy of the bundle put at `/Applications/Capsule.app` and held to M8 there (`install`): the
   copy the placement check, the launch, the menu and the end-to-end check open, each refusing to run unless
   it is this build;
+- the System Settings pages the app's one opener may show (§20; `places`): the check, not the app, opens
+  each with `/usr/bin/open`, prints the names of System Settings' windows and takes a screenshot, then quits
+  System Settings by its name; it gates on the window's title, which is not yet seen on a Mac;
 - only that copy acts (§13; `placement`): first the control, that copy opened starts the host on the app's
   profile and the check sees it; then the build's own copy, and a copy named `Capsule 2.app` in
   `/Applications` with `/Applications/Capsule.app` there and then moved aside, each say why they can't run
-  and how to fix that, offer only Quit, start no host process of the app's profile for 10 s, change nothing
-  in its folder, and quit when Quit is pressed;
-- the menu driven through System Events, with screenshots kept as a CI artifact, last of all Reset
-  Settings… on a settings file the check makes unreadable and then puts back;
+  and how to fix that, start no host process of the app's profile for 10 s, and change nothing in its
+  folder. The renamed copy offers only Quit, and quits when Quit is pressed; the build's own copy offers
+  only Show Applications Folder and Quit, in either order (the check prints the order it reads, which is
+  not yet seen on a Mac), and Show Applications Folder quits it and shows a Finder window,
+  which the check prints and closes, and whose name, Applications, is not yet seen on a Mac, so that only
+  this job gates on it;
+- the menu driven through System Events, with screenshots kept as a CI artifact, the last checked step
+  Reset Settings… on a settings file the check makes unreadable and then puts back; then, best effort and
+  failing nothing, a folder added in Documents, which macOS protects: if macOS asks, the check reads the
+  question, answers Don't Allow (only where the question names the app or its interpreter and is the one
+  window of the process that draws it), presses Open Privacy Settings on the note that follows, prints what
+  System Settings shows, and takes the answer back; a question it does not answer it leaves on screen, and
+  says so. That part ends inside the ui step's limit, its clean-up included, so that it cannot time the
+  step out;
 - a snapshot of `~/Library` before the app runs and after, diffed against an allowlist (M12; §22 says what
   it cannot see);
 - the start-up time as shipped and with every `.pyc` removed (§6), and the unsigned app built twice and
@@ -1530,8 +1559,9 @@ check from `tools/macos/check_app.py`:
 
 And by its `macos-smoke` jobs on `macos-26` and `xcode-27`, on the same disk image: the disk image, the
 bundle, bytecode and signature checks, the wrapper, the read-only runs, M6, the Swift self-test that
-`macos-app` compiled, the probe, the copy in `/Applications` and the placement check, the launch, the menu,
-and the `~/Library` diff; not the end-to-end check,
+`macos-app` compiled, the probe, the copy in `/Applications`, the System Settings pages (recorded, not a
+gate, with `--record-only`: what each page is called there is not yet known), the placement check, the
+launch, the menu, and the `~/Library` diff; not the end-to-end check,
 which needs the suite's copy of the runtime (§18). There, a machine where System Events cannot
 drive the menu is recorded, not failed; `macos-app` fails it. Where it can, every driven step is checked
 as in `macos-app`, and one that fails fails the job. They skip the build and these checks, which
@@ -1556,8 +1586,9 @@ Planned:
 against a Team ID for the first time, notarization logs, Gatekeeper's view with quarantine, the
 end-to-end test through the signed bundle, Keychain continuity between releases.
 
-**On a Mac, by hand.** Runners cannot answer a privacy, Keychain or Login Items prompt, cannot show what a
-first-time user sees after a real browser download, and cannot show what the menu bar does when a person
+**On a Mac, by hand.** Runners may not be able to answer a privacy, Keychain or Login Items prompt (the menu
+check tries once, best effort, for Documents, and fails nothing), cannot show what a first-time user sees
+after a real browser download, and cannot show what the menu bar does when a person
 hides an icon. Everything else, macOS 27 included, runs on runners (the lifeline, Quit's drain and a
 force-quit's included, through M14's test). So a person runs, on macOS 26 and 27, only what needs a person or
 real hardware: the first-launch dialog after a Safari and a Chrome download; a first launch with no network;
@@ -1591,9 +1622,20 @@ in 10 minutes or less.
     `NSXPCListener`, `xpc_*`, `bootstrap_*`, `CFSocket`, `NSStream`, `InputStream`, `OutputStream`,
     `DistributedNotificationCenter` (or `CFNotificationCenterGetDistributedCenter`), `NSAppleScript`,
     `posix_spawn`, `system(`, `/bin/sh`, `/bin/zsh`, `/bin/bash`, `/usr/bin/env` or `osascript`; none of the
-    other ways to start a process or use the network that the first build's tests listed, nor `LSOpen*` or
-    any `NSUser*Task`; no `URL(string:` or `URL.init(string:` at all; no `UserDefaults`, since the app
-    keeps no settings of its own, and no `SWITCHBOARD_`;
+    other ways to start a process or use the network that the first build's tests listed, nor `LSOpen*`,
+    `LSSetDefault*`, `LSRegister*`, `AESend*`, `NSAppleEventDescriptor`, `forceTerminate`,
+    `runningApplications(withBundleIdentifier`, `NSRunningApplication(processIdentifier`,
+    `NSSharingService`, `ShareLink`, `requestAuthorization`, `FileManager(authorization:` or any
+    `NSUser*Task`; no way to open a URL that SwiftUI or a link gives (`openURL`, `OpenURLAction`, `Link(`,
+    a `.link` attribute, `markdown:`, or a Markdown link inside a string literal); no button pressed by
+    code (`performClick`), and no function reached by its symbol or put in another's place
+    (`_silgen_name`, `_cdecl`, `_dynamicReplacement`); no bundle's code loaded (`.load()`,
+    `loadAndReturnError`, `principalClass`, as `dlopen` and `dlsym`); no `NSWorkspace`, and no
+    `URL(string:` or `URL.init(string:`, outside the one opener below; no other URL made from data or text
+    (`URL(dataRepresentation:`, `URL(absoluteURLWithDataRepresentation:`, `CFURLCreateWithString`,
+    `CFURLCreateWithBytes`, `CFURLCreateAbsoluteURLWithBytes`, `NSURL(scheme:`), and no `.init(string:`
+    with its type left out, after a symbol or after `return`, `in`, `try`, `await` or `yield`; no
+    `UserDefaults`, since the app keeps no settings of its own, and no `SWITCHBOARD_`;
   - one exception to the shell names, for tests only, added with the pairing screen: in a Swift file under a
     `Tests` folder, `#!/bin/sh` alone on the first line of a multi-line string literal is not reported, where
     that literal is the only one that starts on its opening line, and that line's code, outside any comment,
@@ -1617,9 +1659,47 @@ in 10 minutes or less.
   - no read of a pasteboard, or of what is dropped on the app (the user pastes into a field, §11.3; writing,
     for Copy Diagnostics, is allowed by this rule). Until Copy Diagnostics is built, a build test and
     `check_app.py links` refuse `NSPasteboard` altogether; the change that adds it lifts both;
-  - no `http://`, `https://`, `ws://`, `wss://` or `ftp://` in Swift. `x-apple.systempreferences:` is not
-    allowed yet either: it would come through `URL(string:`, and the change that adds Open Privacy Settings
-    records that exception here;
+  - no `http://`, `https://`, `ws://`, `wss://` or `ftp://` in Swift;
+  - one exception for the app's one opener, added with Open Date & Time Settings, Open Privacy Settings and
+    Show Applications Folder: `macos/App/SystemPlaces.swift`, that exact path, may name `NSWorkspace` and
+    make a URL from a string, and no other file may (`[open]` and the denylist in the lint). It names
+    `NSWorkspace` once, comments included, in one call, `NSWorkspace.shared.open(<a name>)`, with no
+    `configuration:` and no `withApplicationAt`. Each `URL(string:` there takes one string literal and
+    nothing else, and the two literals are the two System Settings pages it may open, each once:
+    `x-apple.systempreferences:com.apple.Date-Time-Settings.extension` and
+    `x-apple.systempreferences:com.apple.preference.security?Privacy_FilesAndFolders` (`OPENABLE` in the
+    lint). Its one other URL is `URL(fileURLWithPath: "/Applications", isDirectory: true)`, with nothing
+    taken from it or added to it. It holds no other string. Its code, comments aside and each one-line
+    string read as one token, is the designed file's token for token (`OPEN_DESIGN`): one function,
+    `open(_ place: SystemPlace) -> Bool`, a `switch` that makes one URL for each place, one `guard`, and the
+    call as its last statement; so no second function, and no URL kept from a property, another object or
+    a member another file adds, reaches the call. Its strings are the design's in order (`OPEN_LITERALS`),
+    so that each place opens its own address and Open Date & Time Settings never opens Files & Folders.
+    The places are a closed list, `SystemPlace`, in `macos/App/PlaceRules.swift`, whose cases carry no
+    value, so that nothing read at run time can make an address or reach the call except as one of these
+    three cases; what the app sees only picks among them. Which problem offers which place is decided
+    there, from what the app itself sees: the clock state `run` reports (which the hub's refusals of the
+    host's writes set, spec/CLI.md), macOS's refusal of a folder, where this copy is, and the host's
+    `not_a_folder` for a folder the app itself was adding. No text or request from Lucille, and no
+    refusal of a request, offers one. Every call of the opener is in a button's action, a note's or Set
+    Up's: a build test reads each call by its text, and the lint holds every other file to naming the
+    opener only in such a call, `SystemPlaces.open(`, and to no `extension` of `SystemPlaces`,
+    `SystemPlace`, `URL`, `NSURL`, `Optional`, `Equatable` or `Sendable`, no `typealias` that names one of
+    them, and no new declaration of `URL`, `NSURL` or `SystemPlaces`, any of which could change what the
+    opener's code makes or opens; and to no backtick, its strings included, since a backticked word is a
+    name those rules do not read (the app's code has none). The closure Set Up's window calls for its
+    place buttons is called only by their action, and set once (a build test counts each use).
+    Everywhere else `x-apple.systempreferences` is refused, in any case, comments included; and
+    `Privacy_AllFiles`, Full Disk Access, is refused in every Swift file, the opener's included. A tree
+    without the opener is clean: opening nothing is safe. The two pages' spellings are the best known for
+    macOS 13 and later, not yet seen on a Mac: `check_app.py places` opens each, on macos-15 as a gate
+    and on macOS 26 and 27 as a record, and prints the windows System Settings shows, and its first run
+    settles them. `check_app.py
+    links` no longer refuses the `NSWorkspace` class among what the app imports, and now refuses Launch
+    Services' and the Apple Event Manager's C calls (`LSOpen*`, `LSSetDefault*`, `LSRegister*`,
+    `AESend*`) and the `NSAppleEventDescriptor` and `NSSharingService` classes. The login item's own call,
+    `SMAppService.openSystemSettingsLoginItems()` (§9), opens System Settings with no URL and is not this
+    exception's: it is the app's one other call that opens anything;
   - no phrase from `PRIVACY.md`'s must-not-claim list in the app's decoded Swift string literals (the
     self-test's aside), in the strings of the functions that render `Info.plist`, in the pins' `[app]`
     values, or in any plist or strings file. The allowlist for sentences that negate one ("That is not a
@@ -1637,7 +1717,9 @@ in 10 minutes or less.
     interpolation; a phrase, URL or name split across Swift literals joined with `+`; an invisible or
     look-alike character inside one; a function used without being called where it is named
     (`let make = socket`, then `make(...)`); a name built at run time, or an Objective-C runtime lookup;
-    or shell quoting inside a word of a workflow (`pkg'build'`).
+    an extension, in another file, of a type or protocol the opener's code names other than those it
+    refuses (`NSObject`, `Hashable`); a URL decoded from data; a way to open something that no name it
+    lists spells; or shell quoting inside a word of a workflow (`pkg'build'`).
 - **The workflow lint** has `macos-26` and `xcode-27`, and no longer the three `macos-14` labels, whose image
   GitHub retires on 2026-11-02. Since GitHub now keys a new macOS image by its Xcode version, the next macOS
   will most likely arrive under an `xcode-*` label, not as `macos-28` or as `macos-latest` moving (an
@@ -1732,6 +1814,7 @@ These join 0001's "Host invariants and their tests".
 | M17 | Every new pair starts from the fresh policy | pair, enable, forget, pair again: only `host.describe`, no folders |
 | M18 | The app never offers to widen access in answer to Lucille | review, and a UI snapshot of a `not_enabled` entry with no button: the pairing check's `p-activity-not-enabled.png`, where Activity's only button is its disclosure |
 | M19 | Text from Lucille is shown only in Activity, its path and operation in quotes and its folder only as a valid alias, and reaches no argument, menu line, button or note. The one exception is `host_too_old`'s `min_host_version`, which the app reads only as MAJOR.MINOR.PATCH digits (`HostObject.isMinHostVersion`, spec/PROTOCOL.md §10) and shows only in the update notice's title and in the menu's line that shows the notice again (§16) | `tests/test_macos_build.py`: only `HostJSON.swift`, which decodes a request's op, folder and path, and `RequestLog.swift`, which keeps them `fileprivate`, read them, and only the Activity panel shows `RequestText`'s words; `HostJSON.swift` decodes `host_too_old` only when `isMinHostVersion` holds; the self-test: its list of minimums not in that form (`checkJSON`), each dropped, and a path with a control, format, line or paragraph separator character, a quotation mark that opens or closes, or a quotation mark, apostrophe or prime of the fixed list `RequestText.quoteLookalikes` (which `tests/test_macos_build.py` makes again from Python's `unicodedata`), is not shown, and a long one is cut. The list is chosen by name, not by looks: a modifier letter double prime (U+02BA), a ditto mark (U+3003), a Hebrew gershayim (U+05F4) and the corner brackets are still shown |
+| M20 | The app's one opener opens only the three places §20 lists, each from a click: two System Settings pages and the Applications folder, never Full Disk Access, and none in answer to a text or request of Lucille's; the app's one other call that opens anything is the login item's `openSystemSettingsLoginItems()` (§9) | `macos_lint` (`[open]` and the denylist): in `macos/App/SystemPlaces.swift`, one call, in the designed code token for token, of the URLs written there, each place its own, and in every other file no call that opens, the opener named only in a call, and no extension of a type its code names; the denylist's other ways to open a URL or another application, which the lint lists and says what it cannot see; `tests/test_macos_build.py`: the places are a closed `SystemPlace`, each URL is its place's, every call of the opener is in a button's action and opens only from that button, and the files that decode or show Lucille's requests and the pairing (`HostJSON`, `RequestLog`, Activity, `Pairing` and its window, `Supervisor`) name none of the opener's types; the self-test (`checkPlaces`): which problem offers which place, and that no refusal of a request offers one; `check_app.py places`, which opens each System Settings page and reads its window (a gate on macOS 15, a record on 26 and 27); `placement`, which presses Show Applications Folder and reads the Finder's window; `ui`, best effort, which presses Open Privacy Settings where macOS asks about a folder in Documents |
 
 **What M12's check cannot see.** It is weaker than the invariant. It walks `~/Library` before the app is
 launched and after the menu has been driven, and fails only on a new, changed or removed path whose name
@@ -1762,6 +1845,7 @@ those writes itself first (`pause`, then `resume`).
 | A leaked Developer ID key or API key | environment secrets, used only in the signing job, deleted at its end; certificate revocation; notarization's audit trail | software signed under this project's name until revocation |
 | A Lucille page that links a different app | the link targets this repository's releases; README and About name the Team ID | a user who checks nothing |
 | Apple | trusted for Gatekeeper only; copy never says "verified" | Apple can revoke the certificate or a ticket |
+| The app's one opener sends the user somewhere they did not choose | a closed list of three places, whose URLs are written in one file, each its place's; one call, from a button's click; no text or request from Lucille, and no refusal of a request, offers a place (§20, M20); `check_app.py links` refuses Launch Services' and the Apple Event Manager's C calls | what `NSWorkspace` does with the URL, which is macOS's; the two pages' addresses, not yet seen on a Mac, may open another page or none; a hub that refuses the host's writes makes the app offer Date & Time Settings, since the clock's place follows the clock state `run` reports |
 | macOS prompts at a moment the user did not cause | `roots check` during setup; the inference, not yet tested on a Mac, that the app is the responsible process (§12) | a prompt in the interpreter's own name, or a folder whose grant does not reach the child (§12) |
 | Same-user malware | out of scope, as before; hardened runtime and library validation are defence in depth, never claimed | it can run the bundled interpreter and read the host's Keychain items, run verbs, and rewrite the log |
 

@@ -222,6 +222,13 @@ jobs:
       - name: "Check: a read-only copy in /Applications (M8)"
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         run: uv run --no-project python tools/macos/check_app.py install
+      # The System Settings pages the app's one opener may show, opened by the check, not the app,
+      # each read and screenshotted, then System Settings quit by its name (decisions/0002 §20).
+      # Its limit covers the check's own worst case for both pages (check_app.PLACES_PAGE_LIMIT).
+      - name: "Check: the System Settings pages the app may open"
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        timeout-minutes: 10
+        run: uv run --no-project python tools/macos/check_app.py places
       - name: "Check: a copy anywhere else, or renamed, says so and starts nothing"
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         timeout-minutes: 10
@@ -229,6 +236,8 @@ jobs:
       - name: "Check: the app launches and keeps running"
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         run: uv run --no-project python tools/macos/check_app.py launch
+      # Its limit is check_app.UI_STEP_LIMIT: the check's last, best-effort step ends inside it, its
+      # clean-up included, so that it can never time this step out.
       - name: "Check: the menu, driven as a user would"
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         timeout-minutes: 15
@@ -404,6 +413,13 @@ jobs:
       - name: "Check: a read-only copy in /Applications (M8)"
         if: ${{ !cancelled() && steps.unpacked.outcome == 'success' }}
         run: uv run --no-project python tools/macos/check_app.py install
+      # Recorded, not a gate: what each page is called on these macOS versions is not yet known, so
+      # neither what the check finds nor a time-out here fails the job.
+      - name: "Record: the System Settings pages the app may open"
+        if: ${{ !cancelled() && steps.unpacked.outcome == 'success' }}
+        continue-on-error: true
+        timeout-minutes: 10
+        run: uv run --no-project python tools/macos/check_app.py places --record-only
       # As ui, reading the note a misplaced copy shows where macOS allows it, and recording, not
       # failing, where it does not; the host processes and the profile folder are watched either way.
       - name: "Check: a copy anywhere else, or renamed, says so and starts nothing"
@@ -415,6 +431,7 @@ jobs:
         run: uv run --no-project python tools/macos/check_app.py launch
       # Not being able to drive the app through System Events on these images is recorded, not a
       # failure. Where it can, each driven step is checked as in macos-app, and one that fails fails.
+      # Its limit is check_app.UI_STEP_LIMIT, as in macos-app.
       - name: "Check: the menu, driven as a user would where macOS allows it"
         if: ${{ !cancelled() && steps.unpacked.outcome == 'success' }}
         timeout-minutes: 15

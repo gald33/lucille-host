@@ -1,8 +1,9 @@
 import Foundation
 
 /// Runs the app's code that draws nothing (`Alias`, `HostCLI`, `HostText`, `HostJSON`, `Pairing`,
-/// `Supervisor`, `ConnectionText`, `RequestLog`, `Placement`, `Setup`) without a screen: where a
-/// copy of the app may run, the host's golden fixtures through the JSON reader, Activity's request
+/// `Supervisor`, `ConnectionText`, `RequestLog`, `Placement`, `Setup`, `LoginRules`, `PlaceRules`)
+/// without a screen: where a copy of the app may run, the place in macOS each problem offers, the
+/// host's golden fixtures through the JSON reader, Activity's request
 /// log, the three state machines (pairing, `run`'s supervision and Set Up) and what Set Up offers
 /// to add back, the latch that keeps a misplaced copy from starting anything, fake
 /// children through the child runner, and, against a built app, the calls the menu makes, through
@@ -30,6 +31,7 @@ struct SelfTest {
         checkText(report)
         checkCodeRules(report)
         checkPlacement(home: options["home"], report)
+        checkPlaces(report)
         let fixtures = options["fixtures"].map { loadFixtures(at: $0, report) } ?? [:]
         if options["app"] != nil {
             report.expect(!fixtures.isEmpty, "the host's CLI fixtures are given with --fixtures")
@@ -1129,6 +1131,108 @@ extension SelfTest {
         } else {
             print("note: this disk tells case apart, so the running copy was not looked for in another case")
         }
+    }
+
+    // MARK: - checkPlaces
+
+    /// The rules of the app's one opener (`PlaceRules`, decisions/0002 §20): a clock that is off
+    /// offers Date & Time, macOS's privacy protection Files & Folders, a copy outside the
+    /// Applications folder that folder, and nothing else offers any place. No refusal of a
+    /// request does, in any activity, nor any other refusal of the app's own verbs. Then the
+    /// words of each place's button, and what a note says first when macOS could not open it.
+    static func checkPlaces(_ report: Report) {
+        let behind = PlaceRules.place(for: Problem.clock(skew: 420))
+        let unknown = PlaceRules.place(for: Problem.clock(skew: nil))
+        report.expect(behind == .dateAndTime && unknown == .dateAndTime,
+                      "a clock that is off offers Date & Time, whether or not the host says by how much")
+        let problems: [Problem] = [
+            .halted(.appBug), .halted(.keepsStopping), .notResponding, .policyInvalid, .policyStuck,
+            .hubUnreachable(since: nil), .hubUnreachable(since: Date(timeIntervalSince1970: 1_800_000_000)),
+            .readStuck, .leftConnection(because: "check_3"),
+        ]
+        for problem in problems {
+            report.expect(PlaceRules.place(for: problem) == nil, "\(problem) offers no place")
+        }
+
+        let protected = PlaceRules.place(for: FolderCheck.State.deniedByMacOS)
+        report.expect(protected == .filesAndFolders, "a folder macOS's privacy protection refuses the host offers Files & Folders")
+        let states: [FolderCheck.State] = [.ok, .denied, .missing, .error(errno: "EIO")]
+        for state in states {
+            report.expect(PlaceRules.place(for: state) == nil, "a folder whose check is \(state) offers no place")
+        }
+
+        let wheres: [Placement.Where] = [.diskImage, .insideApplications, .homeApplications, .elsewhere]
+        for found in wheres {
+            let offered = PlaceRules.place(for: Placement.notInApplications(found))
+            report.expect(offered == .applicationsFolder, "a copy refused as \(found) offers the Applications folder")
+        }
+        let placed = Placement.judge(bundlePath: "/Applications/Example.app", resolvedPath: "/Applications/Example.app",
+                                     appName: "Example", home: "/Users/someone", originalPresent: false)
+        report.expect(placed.isPlaced && PlaceRules.place(for: placed) == nil, "the placed copy offers no place")
+        for original in [false, true] {
+            let renamed = PlaceRules.place(for: Placement.renamed(copy: "Example 2", originalPresent: original))
+            report.expect(renamed == nil, "a renamed copy, in the Applications folder already, offers no place")
+        }
+
+        // The note of a run that failed: only a folder the host found none of while it was added,
+        // which the app can see or is refused too.
+        func hostError(_ code: String) -> HostError {
+            HostError(code: code, message: "the host's words", kind: nil)
+        }
+        let activities: [HostText.Activity] = [
+            .other, .addingFolder(.visible, alias: "taxes"), .addingFolder(.blocked, alias: "taxes"),
+            .addingFolder(.missing, alias: "taxes"),
+        ]
+        let notAFolder = hostError("not_a_folder")
+        let seen = PlaceRules.place(for: notAFolder, during: .addingFolder(.visible, alias: "taxes"))
+        let refusedToo = PlaceRules.place(for: notAFolder, during: .addingFolder(.blocked, alias: "taxes"))
+        report.expect(seen == .filesAndFolders && refusedToo == .filesAndFolders,
+                      "a folder the host found none of, which the app can see or is refused too, offers Files & Folders")
+        let gone = PlaceRules.place(for: notAFolder, during: .addingFolder(.missing, alias: "taxes"))
+        let elsewhere = PlaceRules.place(for: notAFolder, during: .other)
+        report.expect(gone == nil && elsewhere == nil,
+                      "a folder nobody can see, or one the host found none of outside adding it, offers no place")
+        var codes = Set(HostText.refusals.keys)
+        codes.formUnion(["alias_taken", "usage", "internal"])
+        codes.remove("not_a_folder")
+        for code in codes.sorted() {
+            let offered = activities.compactMap { PlaceRules.place(for: hostError(code), during: $0) }
+            report.expect(offered.isEmpty, "the refusal \(code) offers no place", "\(offered)")
+        }
+        var requestCodes = Set(RequestText.refused.keys)
+        requestCodes.formUnion(RequestText.failed.keys)
+        for code in requestCodes.sorted() {
+            let offered = activities.compactMap { PlaceRules.place(for: hostError(code), during: $0) }
+            report.expect(offered.isEmpty, "a request's \(code) offers no place", "\(offered)")
+        }
+
+        // Through HostText.explain, as HostModel shows a failed run.
+        func refused(_ code: String) -> CLIResult {
+            let object = "{\"v\":1,\"type\":\"error\",\"code\":\"\(code)\",\"message\":\"/Users/a/Documents/Taxes\"}"
+            return CLIResult(status: 1, stdout: object + "\n", stderr: "lucille-host: /Users/a/Documents/Taxes\n", timedOut: false)
+        }
+        let blocked = HostText.explain(refused("not_a_folder"), during: .addingFolder(.visible, alias: "taxes"))
+        report.expect(blocked.place == .filesAndFolders && blocked.message == HostText.blockedByMacOS,
+                      "the note that says macOS is blocking a folder offers Open Privacy Settings", "\(blocked)")
+        let alone = HostText.explain(refused("not_a_folder"))
+        let missing = HostText.explain(refused("not_a_folder"), during: .addingFolder(.missing, alias: "taxes"))
+        let invalid = HostText.explain(refused("policy_invalid"))
+        report.expect(alone.place == nil && missing.place == nil && invalid.place == nil,
+                      "a folder that is gone, and a settings file that can't be read, offer no place")
+
+        let date = PlaceText.button(.dateAndTime)
+        let privacy = PlaceText.button(.filesAndFolders)
+        let folder = PlaceText.button(.applicationsFolder)
+        report.expect(PlaceText.button(.dateAndTime) == "Open Date & Time Settings", "Date & Time's button", date)
+        report.expect(PlaceText.button(.filesAndFolders) == "Open Privacy Settings", "Files & Folders' button", privacy)
+        report.expect(PlaceText.button(.applicationsFolder) == "Show Applications Folder", "the Applications folder's button", folder)
+        let settings = PlaceText.couldNotOpen(.dateAndTime)
+        report.expect(settings == "\(HostText.appName) couldn't open System Settings."
+                          && PlaceText.couldNotOpen(.filesAndFolders) == settings,
+                      "when macOS could not open System Settings, the note says so first", settings)
+        let applications = PlaceText.couldNotOpen(.applicationsFolder)
+        report.expect(applications == "\(HostText.appName) couldn't open your Applications folder.",
+                      "when macOS could not open the Applications folder, the note says so first", applications)
     }
 
     // MARK: - checkJSON
