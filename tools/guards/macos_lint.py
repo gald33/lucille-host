@@ -21,8 +21,16 @@ comments included; over the code with its comments blanked, so that a comment in
   register, drive or hand something to another application, or to ask macOS for more rights
   (``NSTask``, ``fork``, ``exec*``, ``popen``, ``NSWorkspace`` outside :data:`OPEN_FILE`,
   ``LSOpen*``, ``LSSetDefault*``, ``LSRegister*``, ``AESend*``, ``NSAppleEventDescriptor``,
-  ``openApplication``, ``openURL``, ``OpenURLAction``, ``Link(``, ``.link``, ``markdown:``, a
-  Markdown link inside a string literal (:data:`MARKDOWN_LINKS`), ``NSSharingService``,
+  ``openApplication``, ``openURL``, ``OpenURLAction``, ``Link(``, ``.link``, a link attribute
+  by its own name (``NSLink``, ``LinkAttribute``) or an attribute named by a string
+  (``NSAttributedString.Key(``), links made of the text a view shows
+  (``isAutomaticLinkDetectionEnabled``, ``isAutomaticDataDetectionEnabled``,
+  ``enabledTextCheckingTypes``, ``checkText(in:``, ``checkTextInDocument``), rich text read from
+  data, whose links are links too (``html:``, ``rtf:``, ``rtfd:``, ``docFormat:``, ``withRTF:``,
+  ``readRTFD``, ``documentAttributes``, ``documentType``, ``DocumentReadingOptionKey``,
+  ``NSAttributedString(data:`` or ``(url:``), ``markdown:``, a key SwiftUI reads as Markdown
+  (``LocalizedStringKey``, ``LocalizedStringResource``, ``LocalizationValue``, ``Text(.init(``),
+  a Markdown link inside a string literal (:data:`MARKDOWN_LINKS`), ``NSSharingService``,
   ``ShareLink``, ``forceTerminate``, ``runningApplications(withBundleIdentifier``,
   ``NSRunningApplication(processIdentifier``, ``requestAuthorization``,
   ``FileManager(authorization:``, ``OSAScript``, ``NSUser*Task``, ``dlopen``, ``dlsym``,
@@ -32,18 +40,32 @@ comments included; over the code with its comments blanked, so that a comment in
   network, to listen, or to read or make a URL that is not a file (``URLRequest``,
   ``NSURLConnection``, ``NSURLDownload``, ``CF*Stream``, ``CFHTTP``, ``NetService``, ``socket(``,
   ``bind(``, ``listen(``, ``connect(``, ``accept(``, ``getaddrinfo``, ``gethostbyname``,
-  ``URLComponents``, ``contentsOf:`` other than ``append(contentsOf:`` and
+  ``URLComponents``, a URL found in text (``NSDataDetector``, ``NSTextChecking*``,
+  ``NSSpellChecker``), ``contentsOf:`` other than ``append(contentsOf:`` and
   ``insert(contentsOf:``, ``URL(dataRepresentation:``, ``URL(absoluteURLWithDataRepresentation:``,
   ``CFURLCreateWithString``, ``CFURLCreateWithBytes``, ``CFURLCreateAbsoluteURLWithBytes``,
   ``NSURL(scheme:``, an ``.init(string:`` whose type is left out, after a symbol or a keyword,
-  and every ``URL(string:`` or ``URL.init(string:`` outside :data:`OPEN_FILE`); a Mach or
-  distributed-objects port (``NSMachPort``,
-  ``NSSocketPort``, ``NSMessagePort``, ``CFMessagePort*``, ``NSConnection``), which is a listener
-  too; ``UserDefaults``, because the app keeps no settings of its own; and ``SWITCHBOARD_``,
-  because the app passes the host no Switchboard setting. One exception, for tests only: in a
-  Swift file under a ``Tests`` folder, :data:`TEST_SHEBANG` alone on the first line of a
-  multi-line string literal, the only literal on the line it opens, is not reported
-  (:func:`allowed_test_shebangs`). The self-test
+  and every ``URL(string:`` or ``URL.init(string:`` outside :data:`OPEN_FILE`, with every other
+  way there to URL's initializers that these rules spell (:data:`URL_INITIALIZERS`; the opener's
+  file is held to its design, below): ``NSURL`` at all, which the app's code does not use, since
+  its initializers, a subclass's and the pasteboard's make a URL from a string by names no rule
+  here lists; URL's type as a value or as a type, or called from inside parentheses, or a member
+  type of URL or of a type that holds it, which can be URL itself, NSURL or a parser of text
+  (``URL.self``, ``(URL).self``, ``(URL)(string:``, ``URL.Type``, ``URL.ValueType``,
+  ``URL.ReferenceType``, ``URL.ParseStrategy``, ``[URL].Element``, ``Optional<URL>.Wrapped``),
+  with the member type's name right after its dot or with white space on both sides of it, so
+  that a sentence that ends with "URL." is not one (Swift's lexer refuses white space after a
+  dot that has none before it); ``URL.init`` not called, which from a string is
+  ``init(string:)``; ``type(of:``, which for a URL is URL's own type; ``.self.init(string:``,
+  on any type taken as a value; a generic parameter, ``Self`` or an associated type made URL
+  (``where T == URL``, ``associatedtype A = URL``), whose name then reaches URL's initializers;
+  and a URL parsed or expanded from text (``strategy: .url``, ``URL(template:``)); a Mach or
+  distributed-objects port (``NSMachPort``, ``NSSocketPort``, ``NSMessagePort``,
+  ``CFMessagePort*``, ``NSConnection``), which is a listener too; ``UserDefaults``, because the
+  app keeps no settings of its own; and ``SWITCHBOARD_``, because the app passes the host no
+  Switchboard setting. One exception, for tests only: in a Swift file under a ``Tests`` folder,
+  :data:`TEST_SHEBANG` alone on the first line of a multi-line string literal, the only literal
+  on the line it opens, is not reported (:func:`allowed_test_shebangs`). The self-test
   writes such a string to a file and starts it through the app's own child runner, as a
   stand-in for the interpreter; nothing under ``Tests`` is in the app. Every other shell, and
   ``/bin/sh`` anywhere else in that file or in that script, is still reported.
@@ -149,9 +171,18 @@ there, outside comments; the self-test passes another path on purpose); what
 from a click (tests/test_macos_build.py reads each call, and each use of the closure Set Up's
 window calls it through); an action sent by code rather than by a click (``sendAction``,
 ``perform``), which this lint does not refuse, since the app's windows send their own; an
-extension, in another file, of a protocol or a superclass of a type the opener's code names, other
-than those [open] refuses (``Hashable``, ``NSObject``), and a URL decoded from data (a
-``Decoder``); a way to open something that no name here spells;
+extension, in another file, of a protocol or a superclass of a type the opener's code names
+(``Hashable``, ``NSObject``), other than those [open] refuses and one whose ``where`` makes
+``Self`` URL; a URL decoded from data by a ``Decoder`` or an unarchiver (``URL(from:``,
+``NSKeyedUnarchiver``, or a type of the app's own that holds one: ``URL.self`` and ``[URL].self``
+are refused); URL's type reached by a name these rules cannot tie to it, and then called
+(``C.Element(string:``, ``M.init(string:``): an associated type that a constraint makes URL
+(``C.Element``, where ``C: Collection<URL>``), or a type that code of the app's own returns or
+keeps as a value (``T.self``, in a generic function or type); the URL parse strategy, ``.url``,
+other than after ``strategy:``; with its type left out, an attribute named by a string
+(``.init(rawValue: name)``), rich text read from data (``.init(data:``) or a key that a view
+other than ``Text`` takes (``Toggle(.init(line), isOn: on)``); rich text read by ``read(from:``;
+a way to open something that no name here spells;
 ``SMAppService.openSystemSettingsLoginItems()``, the login item's own call, which opens System
 Settings with no URL and is not this rule's; and anything outside the files listed above, such as
 a dependency's source or what a workflow downloads. It catches accidents, not a determined author
@@ -237,6 +268,9 @@ _APPLE_EVENT = "drives another application with an Apple event"
 _SHARES = "hands what it shares to another application"
 _LOADS = "loads code"
 _URL_FROM_DATA = "makes a URL that is not a file"
+_LINK = "makes a link, which opens a URL when it is clicked"
+_RICH_TEXT = "reads rich text, whose links open a URL when they are clicked"
+_MARKDOWN_KEY = "makes a key SwiftUI reads as Markdown, whose links open a URL when clicked"
 DENIED_SWIFT: Final = _patterns(
     # decisions/0002 §20.
     (r"URLSession", _NETWORK),
@@ -268,12 +302,36 @@ DENIED_SWIFT: Final = _patterns(
     (r"\bLSOpen\w*", "opens files, URLs or applications"),
     (r"openApplication", _SPAWN),
     # Other ways to open a URL: SwiftUI's, a link, and Markdown, whose links open what they name
-    # when clicked (a Markdown link inside a string literal is check_swift's: MARKDOWN_LINKS).
+    # when clicked (a Markdown link inside a string literal is check_swift's: MARKDOWN_LINKS); a
+    # link attribute by its own name, or an attribute named by a string; links made of the text a
+    # view shows; rich text read from data, whose links are links too; and a key that SwiftUI reads
+    # as Markdown, made from text or with its type left out for Text.
     (r"openURL", _OPEN_URL),
     (r"OpenURLAction", _OPEN_URL),
     (r"\bLink\s*\(", _OPEN_URL),
-    (r"\.link\b", "makes a link, which opens a URL when it is clicked"),
+    (r"\.link\b", _LINK),
+    (r"\bNSLink\w*|\bLinkAttribute\b", _LINK),
+    (
+        r"\bNSAttributedString\s*\.\s*Key\s*(?:\.\s*init\s*)?\(",
+        "names an attribute by a string, which can be a link's",
+    ),
+    (
+        r"[aA]utomatic(?:Link|Data)Detection|\benabledTextCheckingTypes\b"
+        r"|\bcheckText\s*\(\s*in\s*:|\bcheckTextIn(?:Document|Selection)\b",
+        "makes links of the text a view shows, which open a URL when they are clicked",
+    ),
+    (
+        r"\b(?:html|rtfd?|docFormat|rtfdFileWrapper|withRTFD?)\s*:|\breadRTFD\b"
+        r"|\bdocumentAttributes\b|\b[dD]ocumentType\b|\bDocumentReadingOptionKey\b",
+        _RICH_TEXT,
+    ),
+    (
+        r"\b(?:NS\w*AttributedString|NSTextStorage)\s*(?:\.\s*init\s*)?\(\s*(?:data|url)\s*:",
+        _RICH_TEXT,
+    ),
     (r"markdown\s*:", "reads Markdown, whose links open a URL when they are clicked"),
+    (r"\bLocalized(?:StringKey|StringResource)\b|\bLocalizationValue\b", _MARKDOWN_KEY),
+    (r"\bText\s*\(\s*\.\s*init\s*\(", _MARKDOWN_KEY),
     # Other ways to end, find, register or drive another application, to hand it something, or to
     # act with more rights.
     (r"forceTerminate", "ends another application"),
@@ -319,6 +377,9 @@ DENIED_SWIFT: Final = _patterns(
     (r"getaddrinfo", _NETWORK),
     (r"gethostbyname", _NETWORK),
     (r"URLComponents", "builds a URL that is not a file"),
+    # A URL found in text, by a data detector or a text checker asked for links.
+    (r"\bNSDataDetector\b", "finds a URL that is not a file in text"),
+    (r"\bNSTextChecking\w*|\bNSSpellChecker\b", "checks text, which can find a URL in it"),
     (r"(?<!append\()(?<!insert\()\bcontentsOf\s*:", "reads a URL, which may not be a file"),
     (r"URL\s*\(\s*(?:absoluteURLWithDataRepresentation|dataRepresentation)\s*:", _URL_FROM_DATA),
     (r"\bCFURLCreate(?:WithString|WithBytes|AbsoluteURLWithBytes)\b", _URL_FROM_DATA),
@@ -348,6 +409,55 @@ _OPENERS: Final = _patterns(
     (
         r"URL\s*(?:\.\s*init\s*)?\(\s*string\s*:",
         f"makes a URL that is not a file outside {OPEN_FILE}",
+    ),
+)
+# Every other way to URL's or NSURL's initializers, [swift-denylist] outside the opener too, whose
+# own file its design holds: NSURL at all; URL's type as a value or a type, or called from inside
+# parentheses, or a member type of URL or of a type that holds it, which can be URL itself
+# (`URL.ValueType`, `[URL].Element`), NSURL (`URL.ReferenceType`) or a parser of text
+# (`URL.ParseStrategy`); URL's initializer not called; a value's type; init(string:) on a type
+# taken as a value; a generic parameter, Self or an associated type made URL; and a URL parsed or
+# expanded from text. A member type's name is right after its dot, or has white space on both
+# sides of the dot, so that a sentence that ends with "URL." is not one: Swift's lexer refuses
+# white space after a dot that has none before it.
+_MEMBER = r"(?:\s*\.(?:\s*self\b|[A-Z_]\w*)|\s+\.\s+[A-Z_]\w*)"
+_URL_TYPE = f"which can reach a URL made from a string, outside {OPEN_FILE}"
+_MADE_URL = f"whose initializers its name then reaches, outside {OPEN_FILE}"
+URL_INITIALIZERS: Final = _patterns(
+    (r"\bNSURL\b", f"is NSURL, whose initializers make a URL from a string, outside {OPEN_FILE}"),
+    (
+        r"\bURL\b(?:\s*[?!>\])])*" + _MEMBER,
+        f"takes URL's type, a member type of URL, or one of a type that holds it, {_URL_TYPE}",
+    ),
+    (
+        r"\bURL\s*[,:][^\n<>\[\]()]*[>\]](?:\s*[?!>\])])*" + _MEMBER,
+        f"takes URL's type, a member type of URL, or one of a type that holds it, {_URL_TYPE}",
+    ),
+    (
+        r"\bURL\s*\)[\s)]*\(\s*string\s*:",
+        f"calls URL's type in parentheses with a string, outside {OPEN_FILE}",
+    ),
+    (
+        r"\bURL[\s)]*\.\s*init\b(?!\s*\()",
+        f"is URL's initializer as a value, from a string init(string:), outside {OPEN_FILE}",
+    ),
+    (r"\btype\s*\(\s*of\s*:", f"takes a value's type, which for a URL is URL's own, {_URL_TYPE}"),
+    (
+        r"\.\s*self\s*\.\s*init\s*\(\s*string\s*:",
+        f"calls init(string:) on a type taken as a value, which can be URL, outside {OPEN_FILE}",
+    ),
+    (
+        r"==\s*(?:\w+\s*\.\s*)?URL\b(?!\s*[.(])|(?<![.\w])URL\s*==",
+        f"makes a generic parameter URL, {_MADE_URL}",
+    ),
+    (r"\bassociatedtype\b[^\n]*\bURL\b", f"makes an associated type URL, {_MADE_URL}"),
+    (
+        r"\bstrategy\s*:\s*\.\s*url\b",
+        f"parses a URL that is not a file from text, outside {OPEN_FILE}",
+    ),
+    (
+        r"\bURL\s*(?:\.\s*init\s*)?\(\s*template\s*:",
+        f"expands a URL that is not a file from text, outside {OPEN_FILE}",
     ),
 )
 # [open]: Full Disk Access everywhere; a System Settings page outside the opener.
@@ -805,7 +915,8 @@ def _blanked(text: str, spans: Iterable[tuple[int, int]]) -> str:
 
 def _swift_rule_findings(text: str, rel: str, first_line: int = 1) -> list[Violation]:
     """The regex rules of :data:`SWIFT_RULES`; [process] outside :data:`PROCESS_FILE`; and
-    [open]'s everywhere, with what only the opener may do refused outside :data:`OPEN_FILE`."""
+    [open]'s everywhere, with what only the opener may do, and :data:`URL_INITIALIZERS`, refused
+    outside :data:`OPEN_FILE`."""
     found: list[Violation] = []
     for rule, patterns in SWIFT_RULES:
         found += _regex_findings(text, rel, rule, patterns, first_line)
@@ -814,6 +925,7 @@ def _swift_rule_findings(text: str, rel: str, first_line: int = 1) -> list[Viola
     found += _regex_findings(text, rel, "open", FULL_DISK_ACCESS, first_line)
     if rel != OPEN_FILE:
         found += _regex_findings(text, rel, "swift-denylist", _OPENERS, first_line)
+        found += _regex_findings(text, rel, "swift-denylist", URL_INITIALIZERS, first_line)
         found += _regex_findings(text, rel, "open", SETTINGS_PAGES, first_line)
     return found
 
