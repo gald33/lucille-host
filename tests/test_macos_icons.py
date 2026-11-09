@@ -56,11 +56,11 @@ GLYPH_FILES = (
     ("MenuBarAttentionTemplate@2x.png", 36),
 )
 # AppIcon.icns, entry by entry: its type, its pixels, and the PNG it holds. The 16 pixel entry is
-# the hand-drawn master; the 16 point entry for Retina screens, ic11, is the 32 from app.svg.
+# the hand-drawn master; the 16 point entry for Retina screens, ic11, is the 32 from app.svg. There
+# is no icp6: its slot is 48 pixels (inferred; see below), and no PNG here is 48 pixels.
 ICNS_TABLE = (
     ("icp4", 16, "app-16.png"),
     ("icp5", 32, "app-32.png"),
-    ("icp6", 64, "app-64.png"),
     ("ic07", 128, "app-128.png"),
     ("ic08", 256, "app-256.png"),
     ("ic09", 512, "app-512.png"),
@@ -69,6 +69,50 @@ ICNS_TABLE = (
     ("ic12", 64, "app-64.png"),
     ("ic13", 256, "app-256.png"),
     ("ic14", 512, "app-512.png"),
+)
+# The slot macOS gives each type: its size in points and its scale, and the file ``iconutil -c
+# iconset`` names for it, icon_<P>x<P>.png, or icon_<P>x<P>@2x.png at scale 2. Its image is points
+# x scale pixels square.
+ICNS_SLOTS = {
+    "icp4": (16, 1),
+    "icp5": (32, 1),
+    "ic07": (128, 1),
+    "ic08": (256, 1),
+    "ic09": (512, 1),
+    "ic10": (512, 2),
+    "ic11": (16, 2),
+    "ic12": (32, 2),
+    "ic13": (128, 2),
+    "ic14": (256, 2),
+}
+ICONSET_NAMES = {
+    "icp4": "icon_16x16.png",
+    "icp5": "icon_32x32.png",
+    "ic07": "icon_128x128.png",
+    "ic08": "icon_256x256.png",
+    "ic09": "icon_512x512.png",
+    "ic10": "icon_512x512@2x.png",
+    "ic11": "icon_16x16@2x.png",
+    "ic12": "icon_32x32@2x.png",
+    "ic13": "icon_128x128@2x.png",
+    "ic14": "icon_256x256@2x.png",
+}
+# Seen: the files iconutil wrote from the icon file of PR 29's head, which held these ten types and
+# icp6 (CI run 42620168506: job macos-app on macOS 15.8.2, and the smoke jobs on 26.7.2 and 27.0.1
+# wrote the same), as its log lists them. The log names files, not types: which type gave which
+# name is inferred. icp6 gave icon_48x48.png (inferred; the grounds are in icons.ICNS_SLOTS).
+SEEN_IN_RUN_42620168506 = (
+    "icon_128x128.png",
+    "icon_128x128@2x.png",
+    "icon_16x16.png",
+    "icon_16x16@2x.png",
+    "icon_256x256.png",
+    "icon_256x256@2x.png",
+    "icon_32x32.png",
+    "icon_32x32@2x.png",
+    "icon_48x48.png",
+    "icon_512x512.png",
+    "icon_512x512@2x.png",
 )
 
 
@@ -237,13 +281,14 @@ def test_each_glyph_is_black_with_alpha_only_and_not_empty(name: str, size: int)
     assert icons.glyph_problems(name, data) == []
 
 
-def test_the_icon_file_has_eleven_entries_in_order_from_the_committed_pngs() -> None:
+def test_the_icon_file_has_ten_entries_in_order_from_the_committed_pngs() -> None:
     assert icons.APP_ICON == "AppIcon" and icons.ICNS_FILE == "AppIcon.icns"
     # Written out here, so that a change to ICNS_ENTRIES fails this test.
     assert icons.ICNS_ENTRIES == ICNS_TABLE
     data = icons.icns_bytes()
     assert data == icons.icns_bytes()
     entries = _icns_entries(data)
+    assert len(entries) == 10
     assert [kind.decode("ascii") for kind, _ in entries] == [kind for kind, _, _ in ICNS_TABLE]
     for (kind, pixels, source), (_, body) in zip(ICNS_TABLE, entries, strict=True):
         assert body == _source(source), kind
@@ -253,7 +298,9 @@ def test_the_icon_file_has_eleven_entries_in_order_from_the_committed_pngs() -> 
     assert by_kind["icp4"] == _source("app-16.png")
     assert [kind for kind, body in by_kind.items() if body == _source("app-16.png")] == ["icp4"]
     assert by_kind["icp5"] == by_kind["ic11"] == _source("app-32.png")
-    assert by_kind["icp6"] == by_kind["ic12"] == _source("app-64.png")
+    # The 64 pixel PNG is in one entry, ic12, the 32 point icon on a Retina screen.
+    assert [kind for kind, body in by_kind.items() if body == _source("app-64.png")] == ["ic12"]
+    assert "icp6" not in by_kind
     assert len(data) == 8 + sum(8 + len(body) for _, body in entries)
     # No table of contents and no version entry: nothing but the PNGs.
     assert b"TOC " not in {kind for kind, _ in entries} and b"icnV" not in dict(entries)
@@ -267,6 +314,101 @@ def test_the_icon_file_depends_on_the_pngs_alone(tmp_path: Path) -> None:
         path.chmod(0o600)
     assert icons.icns_bytes(copy) == icons.icns_bytes()
     assert icons.source_problems(copy) == []
+
+
+def test_each_entry_is_the_size_of_the_slot_macos_gives_its_type() -> None:
+    # Written out here, so that a change to ICNS_SLOTS fails this test.
+    assert icons.ICNS_SLOTS == ICNS_SLOTS
+    for kind, (points, scale) in ICNS_SLOTS.items():
+        assert icons.iconset_name(points, scale) == ICONSET_NAMES[kind], kind
+    # The ten names are ten that iconutil wrote in CI; the eleventh was icp6's.
+    assert sorted(ICONSET_NAMES.values()) == sorted(
+        set(SEEN_IN_RUN_42620168506) - {"icon_48x48.png"}
+    )
+    assert [kind for kind, _, _ in ICNS_TABLE] == list(ICNS_SLOTS)
+    for kind, pixels, _ in ICNS_TABLE:
+        points, scale = ICNS_SLOTS[kind]
+        assert pixels == points * scale, kind
+    # The files iconutil is to write: each entry's name, with the pixels its name says.
+    assert icons.iconset_files() == [
+        (ICONSET_NAMES[kind], pixels) for kind, pixels, _ in ICNS_TABLE
+    ]
+    assert icons.slot_problems() == []
+    assert "icp6" not in icons.ICNS_SLOTS
+
+
+_TEN = list(ICNS_TABLE)
+_SLOTS = dict(ICNS_SLOTS)
+# Each table the build refuses, with what it says. The build checks the table with the PNGs
+# (check_icon_sources), which it does before it writes anything.
+SLOT_FAULTS: list[tuple[str, list[tuple[str, int, str]], dict[str, tuple[int, int]], str]] = [
+    (
+        "icp6 back, with the 64 pixel PNG, in its 48 pixel slot",
+        [*_TEN[:2], ("icp6", 64, "app-64.png"), *_TEN[2:]],
+        {**_SLOTS, "icp6": (48, 1)},
+        "icp6 holds a 64 pixel image, but its slot, icon_48x48.png, is 48 pixels",
+    ),
+    (
+        "icp6 back, with no slot",
+        [*_TEN[:2], ("icp6", 64, "app-64.png"), *_TEN[2:]],
+        _SLOTS,
+        "icp6 has no slot in ICNS_SLOTS",
+    ),
+    (
+        "ic12 holding the 128 pixel PNG",
+        [("ic12", 128, "app-128.png") if kind == "ic12" else (kind, n, s) for kind, n, s in _TEN],
+        _SLOTS,
+        "ic12 holds a 128 pixel image, but its slot, icon_32x32@2x.png, is 64 pixels",
+    ),
+    (
+        "ic10 holding the 512 pixel PNG",
+        [("ic10", 512, "app-512.png") if kind == "ic10" else (kind, n, s) for kind, n, s in _TEN],
+        _SLOTS,
+        "ic10 holds a 512 pixel image, but its slot, icon_512x512@2x.png, is 1024 pixels",
+    ),
+    (
+        "a type twice",
+        [*_TEN, ("ic07", 128, "app-128.png")],
+        _SLOTS,
+        "ic07 is in ICNS_ENTRIES twice",
+    ),
+    (
+        "two types in one slot",
+        _TEN,
+        {**_SLOTS, "ic11": (32, 1)},
+        "icp5 and ic11 both fill icon_32x32.png",
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    ("entries", "slots", "said"),
+    [(e, s, said) for _, e, s, said in SLOT_FAULTS],
+    ids=[n for n, *_ in SLOT_FAULTS],
+)
+def test_an_entry_that_is_not_the_size_of_its_slot_is_refused(
+    monkeypatch: pytest.MonkeyPatch,
+    entries: list[tuple[str, int, str]],
+    slots: dict[str, tuple[int, int]],
+    said: str,
+) -> None:
+    monkeypatch.setattr(icons, "ICNS_ENTRIES", tuple(entries))
+    monkeypatch.setattr(icons, "ICNS_SLOTS", slots)
+    problems = icons.slot_problems()
+    assert any(said in problem for problem in problems), problems
+    problems = icons.source_problems()
+    assert any(said in problem for problem in problems), problems
+    with pytest.raises(build_app.BuildError) as refused:
+        build_app.check_icon_sources()
+    assert said in str(refused.value)
+
+
+def test_the_iconset_names_follow_iconutils_pattern() -> None:
+    assert icons.iconset_name(16, 1) == "icon_16x16.png"
+    assert icons.iconset_name(16, 2) == "icon_16x16@2x.png"
+    assert icons.iconset_name(512, 2) == "icon_512x512@2x.png"
+    with pytest.raises(ValueError, match="scale"):
+        icons.iconset_name(16, 3)
 
 
 def _entries() -> list[tuple[bytes, bytes]]:
@@ -441,6 +583,56 @@ def test_the_png_reader_refuses(name: str) -> None:
         assert said in str(raised.value)
     else:
         assert icons.png_header(data) == (2, 2)
+
+
+# --- The IHDR reader, for the PNGs iconutil writes ------------------------------------------------
+
+
+def test_the_ihdr_reader_reads_the_size_alone() -> None:
+    # iconutil writes PNGs of its own, which may hold what png_header refuses. The IHDR reader
+    # reads the signature and the IHDR chunk, with its CRC, and nothing after them.
+    for name, (data, _) in BAD_PNGS.items():
+        if name != "a bad signature":
+            assert icons.ihdr_size(data) == (2, 2), name
+    assert icons.ihdr_size(_png(48, 64, _rgba(48, 64, (0, 0, 0, 0)))) == (48, 64)
+    assert icons.ihdr_size(_source("app-1024.png")) == (1024, 1024)
+    # The signature and the 25 bytes of the IHDR chunk are enough.
+    assert icons.ihdr_size(GOOD_PNG[:33]) == (2, 2)
+
+
+def _ihdr_with(body: bytes, kind: bytes = b"IHDR") -> bytes:
+    return SIGNATURE + _chunk(kind, body) + _chunk(b"IEND", b"")
+
+
+def _bad_ihdr_crc(data: bytes) -> bytes:
+    at = data.index(b"IHDR") + 4
+    return data[:at] + bytes([data[at] ^ 1]) + data[at + 1 :]
+
+
+IHDR = struct.pack(">IIBBBBB", 2, 2, 8, 6, 0, 0, 0)
+BAD_IHDRS = {
+    "no bytes": (b"", "not a PNG: it does not start with the PNG signature"),
+    "a bad signature": (b"\x89PNG\r\n\x1a\x0b" + GOOD_PNG[8:], "does not start with the PNG"),
+    "text": (b"not a png at all, but long enough to hold an IHDR", "does not start with the PNG"),
+    "the signature alone": (SIGNATURE, "not a PNG: it ends before its IHDR chunk does"),
+    "IHDR cut short": (GOOD_PNG[:32], "not a PNG: it ends before its IHDR chunk does"),
+    "IDAT first": (_ihdr_with(IHDR, b"IDAT"), "not a PNG: its first chunk is not a 13 byte IHDR"),
+    "another chunk before IHDR": (
+        SIGNATURE + _chunk(b"CgBI", b"\x50\x00\x20\x02") + _chunk(b"IHDR", IHDR),
+        "not a PNG: its first chunk is not a 13 byte IHDR",
+    ),
+    "IHDR of 12 bytes": (_ihdr_with(IHDR[:12]), "its first chunk is not a 13 byte IHDR"),
+    "IHDR of 14 bytes": (_ihdr_with(IHDR + b"\0"), "its first chunk is not a 13 byte IHDR"),
+    "a bad IHDR CRC": (_bad_ihdr_crc(GOOD_PNG), "not a PNG: its IHDR chunk has a bad CRC"),
+}
+
+
+@pytest.mark.parametrize("name", sorted(BAD_IHDRS))
+def test_the_ihdr_reader_refuses(name: str) -> None:
+    data, said = BAD_IHDRS[name]
+    with pytest.raises(icons.IconError) as raised:
+        icons.ihdr_size(data)
+    assert said in str(raised.value)
 
 
 # --- The glyph rule ------------------------------------------------------------------------------

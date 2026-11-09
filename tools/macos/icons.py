@@ -9,8 +9,11 @@ The build renders nothing and runs no program to make them. It checks the PNGs
 ``AppIcon.icns`` has the layout of Apple's icon files: the four bytes ``icns``, the file's length,
 then one entry per image: its type, its length with its own 8 byte header, and a whole PNG file.
 This module writes no table of contents and no version entry, so the file depends on the PNGs
-alone. Whether macOS reads and draws each entry is seen only on a Mac: the ``bundle`` check has
-``iconutil`` read the file, and prints which files it writes.
+alone. Each entry type has a slot of its own, by the names ``iconutil`` gives its files
+(:data:`ICNS_SLOTS`), and each entry's PNG must be its slot's size (:func:`slot_problems`). How
+macOS reads the file is seen only on a Mac: the ``bundle`` check has ``iconutil`` read it into an
+iconset, and requires exactly the files the entries' slots name, each a PNG of its slot's size. No
+run has yet held ``iconutil``'s files to that rule. Whether macOS draws each entry is not seen.
 
 A menu bar glyph is a template image: every pixel black, only its alpha varying. Its name ends in
 ``Template``, which makes ``NSImage(named:)`` treat it as a template, and ``<name>@2x.png`` is the
@@ -37,13 +40,42 @@ ICNS_FILE: Final = f"{APP_ICON}.icns"
 RESOURCES: Final = "Contents/Resources"
 # The app icon's PNGs, ``app-<N>.png``, each N pixels square.
 APP_SIZES: Final = (16, 32, 64, 128, 256, 512, 1024)
-# AppIcon.icns, entry by entry: its type, its pixels, and the PNG it holds. The 16 pixel entry is
-# the hand-drawn master, app-16.svg's; every other PNG is app.svg's. ic11 to ic14 are the @2x
-# entries: ic11 is the 16 point icon on a Retina screen, 32 pixels.
+# The slot each entry type the build writes is read into: the icon's size in points, and its scale.
+# ``iconutil -c iconset`` names a slot's file icon_<P>x<P>.png, or icon_<P>x<P>@2x.png at scale 2
+# (:func:`iconset_name`). By its name the file is points x scale pixels square. That is inferred
+# from the names: no run has yet printed the size of a file iconutil wrote, and the next Mac run of
+# the bundle check is the first to read one.
+#
+# Seen in CI, run 42620168506: iconutil read an AppIcon.icns of these ten types and icp6 into
+# eleven files, the ten names these slots give and icon_48x48.png, with the same names and byte
+# counts in job macos-app (macOS 15.8.2) and in the smoke jobs (26.7.2 and 27.0.1). The log names
+# files, not types, so which type gave which name is inferred. By pixels alone, two types that held
+# one PNG fit each other's names: icon_32x32@2x.png fits icp6 and ic12 alike, since both held the
+# 64 pixel PNG. Two things point to ic12 for it, and so to icp6 for icon_48x48.png, a 48 pixel
+# slot by its name (decisions/0002 §6). Public lists of the types give ic11 to ic14 as the @2x
+# slots and icp6 as 48 pixels (relikd's icnsutil and Wikipedia's table; Pillow's reader takes icp6
+# as 64). And the byte counts fit: icon_16x16.png, which only icp4 fits, is twice its PNG, as
+# icon_32x32.png and icon_48x48.png are about twice theirs, while each other file is 1.2 to 1.6
+# times its PNG. That is why the build writes no icp6.
+ICNS_SLOTS: Final = {
+    "icp4": (16, 1),
+    "icp5": (32, 1),
+    "ic07": (128, 1),
+    "ic08": (256, 1),
+    "ic09": (512, 1),
+    "ic10": (512, 2),
+    "ic11": (16, 2),
+    "ic12": (32, 2),
+    "ic13": (128, 2),
+    "ic14": (256, 2),
+}
+# AppIcon.icns, entry by entry: its type, its pixels, which must be its slot's points x scale, and
+# the PNG it holds. The 16 pixel entry is the hand-drawn master, app-16.svg's; every other PNG is
+# app.svg's. ic11 to ic14 are the @2x entries: ic11 is the 16 point icon on a Retina screen,
+# 32 pixels, and ic12, the 32 point one, holds the 64 pixel PNG.
 ICNS_ENTRIES: Final = (
     ("icp4", 16, "app-16.png"),
     ("icp5", 32, "app-32.png"),
-    ("icp6", 64, "app-64.png"),
     ("ic07", 128, "app-128.png"),
     ("ic08", 256, "app-256.png"),
     ("ic09", 512, "app-512.png"),
@@ -131,6 +163,27 @@ def _read(data: bytes) -> tuple[int, int, list[bytes]]:
     return width, height, [body for kind, body in chunks if kind == b"IDAT"]
 
 
+def ihdr_size(data: bytes) -> tuple[int, int]:
+    """The width and height a PNG's IHDR chunk gives. Reads the PNG signature and the IHDR
+    chunk, which must come first, with its CRC, and nothing after them, so any other chunk, bit
+    depth or colour type is allowed: it is for the PNGs ``iconutil`` writes, which this module
+    did not write. Raises :class:`IconError` if ``data`` does not start that way."""
+    if data[:8] != PNG_SIGNATURE:
+        raise IconError("not a PNG: it does not start with the PNG signature")
+    end = 8 + 8 + _IHDR.size + 4
+    if len(data) < end:
+        raise IconError("not a PNG: it ends before its IHDR chunk does")
+    length, kind = struct.unpack(">I4s", data[8:16])
+    if kind != b"IHDR" or length != _IHDR.size:
+        raise IconError("not a PNG: its first chunk is not a 13 byte IHDR")
+    body = data[16 : 16 + _IHDR.size]
+    (crc,) = struct.unpack(">I", data[end - 4 : end])
+    if crc != zlib.crc32(kind + body):
+        raise IconError("not a PNG: its IHDR chunk has a bad CRC")
+    width, height = struct.unpack(">II", body[:8])
+    return width, height
+
+
 def png_header(data: bytes) -> tuple[int, int]:
     """The width and height of a PNG that is 8 bit RGBA, not interlaced, and holds only IHDR,
     IDAT and IEND, each with a good CRC, and nothing after IEND. It does not inflate the image
@@ -215,11 +268,61 @@ def glyph_problems(name: str, data: bytes) -> list[str]:
     return []
 
 
+def iconset_name(points: int, scale: int) -> str:
+    """The name ``iconutil -c iconset`` gives the file of a slot: ``icon_16x16.png`` for 16 points
+    at scale 1, ``icon_16x16@2x.png`` at scale 2."""
+    if scale not in (1, 2):
+        raise ValueError(f"an iconset slot has scale 1 or 2, not {scale}")
+    return f"icon_{points}x{points}{'@2x' if scale == 2 else ''}.png"
+
+
+def iconset_files() -> list[tuple[str, int]]:
+    """The files ``iconutil -c iconset`` is to write from ``AppIcon.icns``: for each entry of
+    :data:`ICNS_ENTRIES` whose type has a slot, in that order, the slot's file name and its
+    pixels, points x scale, which is what the name says (``icon_<N>x<N>.png`` is N pixels
+    square, ``icon_<N>x<N>@2x.png`` 2N)."""
+    files: list[tuple[str, int]] = []
+    for kind, _, _ in ICNS_ENTRIES:
+        if kind in ICNS_SLOTS:
+            points, scale = ICNS_SLOTS[kind]
+            files.append((iconset_name(points, scale), points * scale))
+    return files
+
+
+def slot_problems() -> list[str]:
+    """What is wrong with :data:`ICNS_ENTRIES` against :data:`ICNS_SLOTS`: each entry's type must
+    have a slot, its pixels must be the slot's points x scale, and no type and no slot may come
+    twice. :func:`icns_problems` holds each entry's PNG to its pixels."""
+    problems: list[str] = []
+    seen: set[str] = set()
+    filled: dict[str, str] = {}
+    for kind, pixels, _ in ICNS_ENTRIES:
+        if kind in seen:
+            problems.append(f"{kind} is in ICNS_ENTRIES twice")
+            continue
+        seen.add(kind)
+        if kind not in ICNS_SLOTS:
+            problems.append(f"{kind} has no slot in ICNS_SLOTS")
+            continue
+        points, scale = ICNS_SLOTS[kind]
+        name = iconset_name(points, scale)
+        if pixels != points * scale:
+            problems.append(
+                f"{kind} holds a {pixels} pixel image, but its slot, {name}, is "
+                f"{points * scale} pixels"
+            )
+        if name in filled:
+            problems.append(f"{filled[name]} and {kind} both fill {name}")
+        filled.setdefault(name, kind)
+    return problems
+
+
 def source_problems(folder: Path | None = None) -> list[str]:
-    """What is wrong with the PNGs the build reads in ``folder`` (``macos/Icons/``): each
+    """What is wrong with the PNGs the build reads in ``folder`` (``macos/Icons/``), and with the
+    table it packs them by: each entry must fit its slot (:func:`slot_problems`), each
     ``app-<N>.png`` must be N pixels square, and each glyph must pass :func:`glyph_problems`."""
     folder = _folder(folder)
-    problems: list[str] = []
+    problems = slot_problems()
     wanted = [(f"app-{size}.png", size) for size in APP_SIZES] + list(GLYPH_FILES)
     for name, pixels in wanted:
         try:
@@ -253,9 +356,9 @@ def icns_bytes(folder: Path | None = None) -> bytes:
 
 def icns_problems(data: bytes, folder: Path | None = None) -> list[str]:
     """What is wrong with an icon file: its magic and its length; entries that tile it exactly;
-    the types of :data:`ICNS_ENTRIES`, each once and in that order; each entry a PNG of its
-    type's size, with its source's bytes; and the whole file the one :func:`icns_bytes` writes
-    from ``folder``."""
+    the types of :data:`ICNS_ENTRIES`, each once and in that order; each entry a PNG of the pixels
+    its row gives, which :func:`slot_problems` holds to its slot, with its source's bytes; and the
+    whole file the one :func:`icns_bytes` writes from ``folder``."""
     folder = _folder(folder)
     problems: list[str] = []
     try:

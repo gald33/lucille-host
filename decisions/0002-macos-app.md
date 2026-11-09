@@ -616,14 +616,30 @@ ripgrep.
   Its SVG masters and the PNGs rendered from them are committed in `macos/Icons/`, and the PNGs are the
   source of truth: the build renders nothing. In pure Python (`tools/macos/icons.py`) it checks the PNGs
   when it checks the pins, before it checks for a Mac, packs seven of them into `Resources/AppIcon.icns`
-  (eleven entries, each a whole PNG, with no table of contents, so the file depends on the PNGs alone),
-  and copies the three menu bar glyphs and their `@2x` files beside it. `Info.plist` names the icon with
-  `CFBundleIconFile` alone: the app has no asset catalog, so `CFBundleIconName` would name an asset that
-  does not exist. The app loads the glyph with `NSImage(named:)`, and shows the SF Symbol it showed before
-  if the file is not there. It still has no Dock icon (`LSUIElement`). The build checks the icons again
-  before the tarball, and `check_app.py bundle` holds the signed app to them, has `iconutil` read the
-  icon file, and has AppKit load each glyph from the bundle by its name (§19). Whether macOS draws every
-  entry, and how the icons look, is not yet seen on a Mac.
+  (ten entries, each a whole PNG, with no table of contents, so the file depends on the PNGs alone),
+  and copies the three menu bar glyphs and their `@2x` files beside it. Each entry type has a slot of its
+  own, by the names `iconutil` gives its files: a size in points at 1x or 2x. Each entry's PNG must be
+  its slot's size, and the build refuses an entry that is not (`icons.ICNS_SLOTS`). `Info.plist` names
+  the icon with `CFBundleIconFile` alone: the app has no asset catalog, so `CFBundleIconName` would name
+  an asset that does not exist. The app loads the glyph with `NSImage(named:)`, and shows the SF Symbol
+  it showed before if the file is not there. It still has no Dock icon (`LSUIElement`). The build checks
+  the icons again before the tarball, and `check_app.py bundle` holds the signed app to them, has
+  `iconutil` read the icon file into exactly the ten files the entries' slots name, each a PNG of its
+  name's size, and has AppKit load each glyph from the bundle by its name (§19). Seen in CI, run
+  42620168506, in `macos-app` (macOS 15.8.2) and in the smoke jobs (26.7.2 and 27.0.1), when the file had
+  an eleventh entry, `icp6`, holding the 64 pixel PNG, and the check only printed what `iconutil` wrote:
+  on each, `iconutil` wrote the same eleven files, with the same byte counts, the ten above and
+  `icon_48x48.png`, by its name a 48 pixel slot (inferred; no size was printed). Its log names files, not
+  entries, so which entry gave which file is inferred. By pixels alone, two entries that held one PNG fit
+  each other's names: `icon_32x32@2x.png` fits `icp6` and `ic12` alike. Two things point to `ic12` for
+  it, and so to `icp6` for `icon_48x48.png`. Public lists of the types give `ic11` to `ic14` as the `@2x`
+  slots and `icp6` as 48 pixels (relikd's icnsutil, `IcnsType.py`, and Wikipedia's table for the format,
+  read 2026-11-09; Pillow's reader takes `icp6` as 64 pixels). And the byte counts fit: `icon_16x16.png`,
+  which only `icp4` fits, is twice its PNG (870 bytes from 435), as `icon_32x32.png` and `icon_48x48.png`
+  are about twice theirs (1.8 and 2.2 times), while each other file is 1.2 to 1.6 times its PNG. So the
+  build writes no `icp6`, and `app-64.png` is only the 32 point icon on a Retina screen (`ic12`). No run
+  has yet held `iconutil`'s files to the new rule, so the sizes it writes are not yet seen. How macOS
+  draws the icon, and how the icons look, is not yet seen.
 - **M10 and the signature.** `codesign` writes each Mach-O file's signature into the file, so after signing
   the two extension files no longer equal their wheels' bytes (seen in CI, run 41407347108, 2026-11-02:
   `record` found the two signed files differ from their wheels'). So M10 (§22) holds byte for byte before
@@ -1575,8 +1591,9 @@ check from `tools/macos/check_app.py`:
   runtime (§7; library validation against a Team ID is exercised only on signed candidates);
 - the bundle: no symbolic link; exactly the expected Mach-O files, each signed ad hoc by
   the build, not only by the linker, with its own identifier; the icons, which must be the files the build
-  makes from `macos/Icons/`, `iconutil`'s read of the icon file, and AppKit's load of each glyph from the
-  bundle by its name; the signature, again after every other check;
+  makes from `macos/Icons/`, `iconutil`'s read of the icon file into exactly the ten files its entries'
+  slots name, each a PNG of its name's size (a rule not yet run on a Mac, §6), and AppKit's load of each
+  glyph from the bundle by its name; the signature, again after every other check;
 - each `.pyc`: where the build writes one, `checked-hash`, and byte for byte the bundled interpreter's
   compile of the `.py` beside it; and the host's modules loaded from them (§6);
 - M10 on the signed bundle (§6), and M11: the version rule and `MANIFEST.json`;
