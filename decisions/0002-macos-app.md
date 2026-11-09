@@ -734,14 +734,16 @@ ripgrep.
     If the reason is right, a signed candidate's check of library validation on these runners would show
     nothing either (inferred); the run by hand in §19 covers it. Either way, a check that passes on a
     runner does not show that a person's Mac loads the same code.
-  - Seen on the same Mac without the hardened runtime: on 2026-11-09 the maintainer downloaded the disk
+  - Reported by the maintainer, on the same Mac without the hardened runtime (from the screenshots and the
+    Terminal output the maintainer shared in a working session; none of it is in a CI log or committed):
+    on 2026-11-09 the maintainer downloaded the disk
     image of `ci.yml` run 42531994220 (a manual run on `main` at 7f2d6dc, from pull request 24; the first
     disk image signed without it that a run uploaded) with a browser, and opened it with Open Anyway. In
     Terminal, the bundled interpreter, run as `lucille-host-runtime -I -B -c "import
     cryptography.hazmat.primitives.asymmetric.x25519; print('crypto ok')"`, printed "crypto ok". That module
     imports `cryptography.hazmat.bindings._rust` (read in the Linux wheel of cryptography 50.0.2, the
     version `uv.lock` pins; the macOS wheel's copy was not read, but on 2026-11-08 the same import stopped
-    at that extension), so the import loaded the extension dyld had refused before. On Linux that import
+    at that extension), so that the import loaded the extension dyld had refused before is inferred. On Linux that import
     also loads cffi's backend (measured), so that it did on the Mac is inferred. With that build, the app
     also paired with Lucille for the first time. The maintainer pasted a code from Lucille's Computers page,
     both screens showed the same SAS, and They Match was clicked on both. Lucille's Computers page then
@@ -1643,7 +1645,7 @@ force-quit's included, through M14's test), except what macOS lets the bundle lo
 the ad-hoc hardened runtime, the extension a real Mac refused (§7). So a person runs, on macOS 26 and 27, only
 what needs a person or real hardware, or what a runner did not show: the bundled interpreter's import of
 `cryptography` and a pairing with a real code from Lucille, on the first build after any change to how it is
-signed (both ran once, on 2026-11-09, on the maintainer's Mac with macOS 26.2, for the disk image of run
+signed (the maintainer reported both running once, on 2026-11-09, on their Mac with macOS 26.2, for the disk image of run
 42531994220, §7, and not yet on macOS 27); the first-launch dialog after a Safari and a Chrome download;
 a first launch with no network;
 adding Documents, an iCloud Drive folder and an external disk, and which name each prompt carries; the
@@ -1945,7 +1947,8 @@ those writes itself first (`pause`, then `resume`).
   and the interpreter to `Contents/Helpers` (§6).
 - Whether the Developer ID-signed bundle loads under library validation and the hardened runtime, which
   only a candidate exercises (§7). An ad-hoc build signed with the hardened runtime did not load
-  `cryptography`'s extension on a real Mac, and one signed without it did, on the same Mac (§7).
+  `cryptography`'s extension on a real Mac, and the maintainer reported one signed without it loading it,
+  on the same Mac (§7).
 - Whether the interpreter needs `allow-unsigned-executable-memory` under the hardened runtime (§7).
 - Whether a first launch works with no network when only the disk image is notarized and stapled (§7).
 - Whether macOS holds the app responsible for its child's file access, which name a prompt carries, and
