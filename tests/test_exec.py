@@ -27,7 +27,13 @@ def _python(code: str, *, timeout_s: float = 10, cwd: str = "/") -> _exec.Result
 
 
 def _alive(pid: int) -> bool:
-    """Whether a process exists and is not a zombie."""
+    """Whether a process exists and has not ended.
+
+    On Linux a process that has ended is still found by ``kill(pid, 0)`` until its parent has
+    reaped it, and its /proc status says so: ``Z`` (zombie) until the reap starts, then ``X``
+    (dead) while it is under way (straight away, if nothing waits for it; that case is from
+    memory of the kernel, not read here).
+    """
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
@@ -38,11 +44,26 @@ def _alive(pid: int) -> bool:
         except (FileNotFoundError, ProcessLookupError):
             # It ended between the two looks: its /proc entry is gone (ENOENT), or going (ESRCH).
             return False
-        return "\nState:\tZ" not in status
+        return "\nState:\tZ" not in status and "\nState:\tX" not in status
     shown = subprocess.run(
         ["/bin/ps", "-o", "stat=", "-p", str(pid)], capture_output=True, text=True, check=False
     )
     return bool(shown.stdout.strip()) and not shown.stdout.strip().startswith("Z")
+
+
+def _gone(pid: int, within_s: float = 5.0) -> bool:
+    """Whether a process ends within ``within_s`` seconds.
+
+    The answer is that of the look that saw it end, not of a new look after it: a killed process
+    is read as alive while it dies, then as ended, and a pid that is read as alive after that is
+    another process, or the same one in a state :func:`_alive` reads wrongly.
+    """
+    deadline = time.monotonic() + within_s
+    while _alive(pid):
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.05)
+    return True
 
 
 @pytest.mark.skipif(not sys.platform.startswith("linux"), reason="reads /proc")
@@ -58,6 +79,76 @@ def test_alive_is_false_for_a_process_that_ends_between_its_two_looks(
     assert _alive(os.getpid())
     monkeypatch.setattr(Path, "read_text", ended)
     assert not _alive(os.getpid())
+
+
+def _status_reads(monkeypatch: pytest.MonkeyPatch, *looks: str | type[OSError]) -> None:
+    """Make each read of a /proc status give the next of ``looks``, the last one from then on: a
+    state, written into this process's real status, or an error to raise."""
+    real = Path("/proc/self/status").read_text()
+    head, rest = real.split("\nState:\t", 1)
+    tail = rest.split("\n", 1)[1]
+    queue = list(looks)
+
+    def read_text(self: Path, *args: object, **kwargs: object) -> str:
+        look = queue.pop(0) if len(queue) > 1 else queue[0]
+        if isinstance(look, type):
+            raise look(2, os.strerror(2))
+        return f"{head}\nState:\t{look}\n{tail}"
+
+    monkeypatch.setattr(Path, "read_text", read_text)
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="reads /proc")
+@pytest.mark.parametrize(
+    ("state", "alive"),
+    [
+        ("R (running)", True),
+        ("S (sleeping)", True),
+        ("D (disk sleep)", True),
+        ("T (stopped)", True),
+        ("Z (zombie)", False),
+        ("X (dead)", False),
+    ],
+)
+def test_alive_reads_a_process_being_reaped_as_ended(
+    monkeypatch: pytest.MonkeyPatch, state: str, alive: bool
+) -> None:
+    """A process that has ended is a zombie (Z) until its parent reaps it, and dead (X) while the
+    reap is under way: kill(pid, 0) still finds it then, and its /proc status can still be read."""
+    _status_reads(monkeypatch, state)
+    assert _alive(os.getpid()) is alive
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="reads /proc")
+def test_gone_for_a_process_reaped_between_two_looks(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A killed process that is a zombie at one look, being reaped at the next, and then gone:
+    the looks every local reproduction of CI's failure (run 42531994220) saw, under a stand-in
+    reaper that reaps orphans promptly. With the fix the first look already ends the wait, so
+    this pins the sequence end to end; ``X`` itself is tested above."""
+    _status_reads(monkeypatch, "Z (zombie)", "X (dead)", FileNotFoundError)
+    assert _gone(os.getpid())
+
+
+def test_gone_answers_with_the_look_that_saw_the_end(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Once a look has seen the process end, that is the answer, and no later look is taken: what
+    a later look reads as alive is another process, or the same one in a state misread."""
+    # Still there, still there, ended; and "there" to any look after that.
+    verdicts = [True, True, False]
+    looks: list[bool] = []
+
+    def alive(pid: int) -> bool:
+        looks.append(verdicts[len(looks)] if len(looks) < len(verdicts) else True)
+        return looks[-1]
+
+    monkeypatch.setattr(sys.modules[__name__], "_alive", alive)
+    assert _gone(os.getpid())
+    assert looks == [True, True, False]
+
+
+def test_gone_is_false_for_a_process_that_does_not_end() -> None:
+    started = time.monotonic()
+    assert not _gone(os.getpid(), within_s=0.2)
+    assert time.monotonic() - started >= 0.2
 
 
 def test_exec_env_allowlist(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -227,11 +318,7 @@ def test_exec_timeout_kills_group(tmp_path: Path) -> None:
     assert result.ended == "timeout"
     assert result.exit_code == -9
     assert 1000 <= result.duration_ms < 10000
-    grandchild = int(pid_file.read_text())
-    deadline = time.monotonic() + 5
-    while _alive(grandchild) and time.monotonic() < deadline:
-        time.sleep(0.05)
-    assert not _alive(grandchild)
+    assert _gone(int(pid_file.read_text()))
 
 
 def test_exec_kills_what_the_child_leaves_in_its_group(tmp_path: Path) -> None:
@@ -244,11 +331,7 @@ def test_exec_kills_what_the_child_leaves_in_its_group(tmp_path: Path) -> None:
     )
     result = _python(code)
     assert result.ended == "exited" and result.exit_code == 0
-    orphan = int(pid_file.read_text())
-    deadline = time.monotonic() + 5
-    while _alive(orphan) and time.monotonic() < deadline:
-        time.sleep(0.05)
-    assert not _alive(orphan)
+    assert _gone(int(pid_file.read_text()))
 
 
 def _wait_for_pid(pid_file: Path) -> int:
@@ -266,13 +349,6 @@ SPAWNS_A_GRANDCHILD = (
     "open(sys.argv[1], 'w').write(str(child.pid))\n"
     "time.sleep(100)\n"
 )
-
-
-def _gone(pid: int) -> bool:
-    deadline = time.monotonic() + 5
-    while _alive(pid) and time.monotonic() < deadline:
-        time.sleep(0.05)
-    return not _alive(pid)
 
 
 def test_a_user_kill_takes_the_whole_group(tmp_path: Path) -> None:
