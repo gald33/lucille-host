@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" width="16" height="16">
+  <!-- Hand-hinted 16 px master: same mark snapped to whole pixels. The capsule spans x 2..14
+       (the 1024 master's 85% of the tile width), the seam sits at x 9..10, so the person's
+       half is no lighter than Lucille's even with the tongue counted. -->
+  <rect x="1" y="1.6" width="14" height="14" rx="3.2" fill="#000" fill-opacity="0.30"/>
+  <rect x="1" y="1" width="14" height="14" rx="3.2" fill="#f7f2eb"/>
+  <path fill="#151515" d="M9 5 H5 A3 3 0 0 0 5 11 H9 V10 H6 V6 H9 Z"/>
+  <path fill="#d9521f" d="M10 5 H11 A3 3 0 0 1 11 11 H10 V9 H7 V7 H10 Z"/>
+</svg>

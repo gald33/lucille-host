@@ -12,9 +12,9 @@ The app's name and identifiers are in ``tools/macos/pins.toml``; ``<name>`` belo
 built) and exactly one of ``--tag T`` (a build from a ``v*`` tag) or ``--build-number N`` (any
 other build; CI passes its run number). Before doing any work they check the pins, the version
 rule (:func:`bundle_versions`), the runtime archive's sha256 when ``--python-archive`` is given,
-and the host wheel's name and sha256; then that they run on an Apple silicon Mac with the pinned
-Xcode. ``assemble`` then writes, under ``--out`` (``build/macos/`` by default, which git
-ignores):
+and the host wheel's name and sha256, and the icons' PNGs in ``macos/Icons/``
+(:func:`icons.source_problems`); then that they run on an Apple silicon Mac with the pinned Xcode.
+``assemble`` then writes, under ``--out`` (``build/macos/`` by default, which git ignores):
 
 1. The Python runtime that the pins name, downloaded unless given, and refused unless its sha256
    is the pinned one, unpacked into ``<name>.app/Contents/Resources/runtime``.
@@ -30,10 +30,13 @@ ignores):
    same, byte for byte. The app runs the interpreter with ``-B``, so it writes none at run time.
 5. The menu bar app in ``macos/App/`` compiled with ``swiftc``; ``Info.plist`` (:func:`info_plist`);
    the wrapper ``Resources/bin/lucille-host`` for Terminal users; the licence texts in
-   ``Resources/licenses/``; and ``Resources/MANIFEST.json`` (:func:`manifest`).
+   ``Resources/licenses/``; the icons, ``Resources/AppIcon.icns`` packed from the committed PNGs
+   and the six menu bar glyphs copied beside it, with nothing rendered (:func:`icons.write_icons`);
+   and ``Resources/MANIFEST.json`` (:func:`manifest`).
 6. ``<name>-unsigned-macOS-arm64.tar.gz``, the unsigned app as a tarball whose bytes depend on the
    files alone (:func:`payload.write_tarball`), so that two builds can be compared. It is written
-   only after the bytecode's layout and M10, with the ``.pyc`` files admitted, are checked again.
+   only after the bytecode's layout, M10, with the ``.pyc`` files admitted, and the icons
+   (:func:`icons.bundle_problems`) are checked again.
 
 ``build`` runs ``assemble``, then signs every Mach-O file ad hoc in the order
 :func:`signing_plan` gives (the libraries deepest first, then the interpreter with its own
@@ -43,11 +46,12 @@ and builds ``<name>-<version>-<commit>-adhoc-macOS-arm64.dmg``, which holds the 
 the same bytes, a whole UDIF trailer and a passing ``hdiutil verify`` (:func:`make_dmg`). A
 signature macOS trusts needs a Developer ID and notarization, which this script does not do.
 
-``plan`` reads the pins, the build constraints, the prune list and the version, and writes the
-``Info.plist`` the app would get, without running any other program. ``toolchain`` checks that the
-pinned Xcode is installed and is the one ``xcodebuild`` runs, and with ``--github-env FILE``
-writes its ``DEVELOPER_DIR`` there for the later steps of a GitHub Actions job. ``compare`` prints
-whether two builds' unsigned tarballs are the same, as Markdown, and always exits 0.
+``plan`` reads the pins, the build constraints, the prune list, the version and the icons' PNGs,
+and writes the ``Info.plist`` the app would get, without running any other program. ``toolchain``
+checks that the pinned Xcode is installed and is the one ``xcodebuild`` runs, and with
+``--github-env FILE`` writes its ``DEVELOPER_DIR`` there for the later steps of a GitHub Actions
+job. ``compare`` prints whether two builds' unsigned tarballs are the same, as Markdown, and always
+exits 0.
 
 Exit codes: 0 done, 1 refused or failed, 2 usage error.
 """
@@ -78,7 +82,7 @@ from typing import Any, Final
 if __package__ in (None, ""):  # run as a script: make ``tools.macos`` importable
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from tools.macos import payload  # noqa: E402
+from tools.macos import icons, payload  # noqa: E402
 
 # This script and its pins live in tools/macos/; the app's Swift sources stay in macos/.
 TOOLS_DIR: Final = Path(__file__).resolve().parent
@@ -515,12 +519,15 @@ def folder_usage(app_name: str) -> str:
 def info_plist(pins: Pins, versions: BundleVersions) -> dict[str, Any]:
     """The app's Info.plist (0002 §6-§12): a menu bar app with no Dock icon, for Apple silicon on
     the pinned macOS or later, that macOS must not quit on its own, with the six folder usage
-    texts. MANIFEST.json, not this file, records the host's exact version."""
+    texts. Its icon is ``Resources/AppIcon.icns``, named by ``CFBundleIconFile`` alone: the app has
+    no asset catalog for ``CFBundleIconName`` to name an asset in. MANIFEST.json, not this file,
+    records the host's exact version."""
     usage = dict.fromkeys(FOLDER_USAGE_KEYS, folder_usage(pins.app_name))
     return {
         "CFBundleDevelopmentRegion": "en",
         "CFBundleDisplayName": pins.app_name,
         "CFBundleExecutable": pins.app_name,
+        "CFBundleIconFile": icons.APP_ICON,
         "CFBundleIdentifier": pins.bundle_id,
         "CFBundleInfoDictionaryVersion": "6.0",
         "CFBundleName": pins.app_name,
@@ -1575,14 +1582,25 @@ def make_dmg(app: Path, dmg: Path, volume: str, work: Path) -> None:
         print(f"could not remove {made}: {error}", flush=True)
 
 
+def check_icon_sources() -> None:
+    """Refuse to build unless the PNGs in ``macos/Icons/`` are the ones the build can use
+    (:func:`icons.source_problems`). The build renders nothing: it packs and copies these."""
+    problems = icons.source_problems()
+    if problems:
+        raise BuildError(
+            "the icons in macos/Icons are not ready to build from:\n  " + "\n  ".join(problems)
+        )
+
+
 def plan(out: Path, tag: str | None, build_number: str | None) -> None:
-    """Check the pins, the prune list and the version, write the Info.plist the app would get, and
-    say what ``build`` would do. Runs no other program. With neither ``tag`` nor
+    """Check the pins, the prune list, the version and the icons' PNGs, write the Info.plist the
+    app would get, and say what ``build`` would do. Runs no other program. With neither ``tag`` nor
     ``build_number``, the bundle version is a placeholder, 1."""
     pins = load_pins()
     constraints = load_build_constraints()
     prune = load_prune_list()
     version = host_version()
+    check_icon_sources()
     placeholder = tag is None and build_number is None
     versions = bundle_versions(version, tag, "1" if placeholder else build_number)
     out.mkdir(parents=True, exist_ok=True)
@@ -1603,6 +1621,12 @@ def plan(out: Path, tag: str | None, build_number: str | None) -> None:
     print(f"xcode             {pins.xcode} ({developer_dir(pins)})")
     print(f"signature         ad hoc, {hardened} the hardened runtime")
     print(f"build backend     {len(constraints)} wheels, by hash, from {BUILD_CONSTRAINTS.name}")
+    pngs = len({source for _, _, source in icons.ICNS_ENTRIES})
+    print(
+        f"app icon          {icons.ICNS_FILE}, {len(icons.ICNS_ENTRIES)} images from {pngs} PNGs "
+        "in macos/Icons"
+    )
+    print(f"menu bar icons    {len(icons.GLYPH_FILES)} template PNGs from macos/Icons")
     print(f"unsigned tarball  {out / unsigned_tarball_name(pins.app_name)}")
     print(f"disk image        {out}/{pins.app_name}-{version}-<commit>{DMG_SUFFIX}")
     print(f"Info.plist        written to {plist_path}")
@@ -1635,6 +1659,7 @@ def assemble(
     if archive is not None:
         check_sha256(archive, pins.sha256)
     check_host_wheel(host_wheel, host_sha256, version)
+    check_icon_sources()
     require_apple_silicon("assemble")
     toolchain = xcode_env(pins, os.environ)
     commit = _output(["git", "-C", str(REPO_ROOT), "rev-parse", "--short=12", "HEAD"])
@@ -1675,6 +1700,7 @@ def assemble(
     (contents / "PkgInfo").write_text("APPL????", encoding="ascii")
     write_wrapper(app)
     copy_licenses(app / LICENSES_IN_APP, assembly.site, runtime / STDLIB / "LICENSE.txt")
+    icons.write_icons(contents / "Resources")
     swiftc = _output(["xcrun", "swiftc", "--version"], env=toolchain).splitlines()[0]
     data = manifest(
         pins,
@@ -1687,8 +1713,9 @@ def assemble(
         removed=removed,
     )
     (app / MANIFEST_PATH).write_text(manifest_text(data), encoding="utf-8")
-    # Before the tarball: no link, the bytecode where the build wrote it, and M10 again, with the
-    # .pyc files the build wrote admitted by their names (compile_bytecode checked their bytes).
+    # Before the tarball: no link, the bytecode where the build wrote it, M10 again, with the
+    # .pyc files the build wrote admitted by their names (compile_bytecode checked their bytes),
+    # and the icons, which must be the committed files.
     problems = [f"symbolic link in the app: {link}" for link in symlinks_in(app)]
     problems += bytecode_layout_problems(app)
     problems += payload.record_problems(
@@ -1696,6 +1723,7 @@ def assemble(
         [wheel.path for wheel in assembly.wheels] + [assembly.host.path],
         bytecode_tag=BYTECODE_TAG,
     )
+    problems += icons.bundle_problems(app)
     if problems:
         raise BuildError("the app is not ready to sign:\n  " + "\n  ".join(problems))
     tarball = out / unsigned_tarball_name(pins.app_name)

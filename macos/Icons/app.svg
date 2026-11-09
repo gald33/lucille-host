@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <!-- Capsule: two fitted halves with a visible seam. The ink half (the person's Mac) is the
+       larger one and holds the socket; the orange half (Lucille) reaches across the seam only
+       through a short tongue that fits that socket. Geometry sits on a 32-unit grid (32 px per
+       unit) so the 32 px render lands on whole pixels. -->
+  <defs>
+    <linearGradient id="tile" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#fbf8f3"/>
+      <stop offset="1" stop-color="#f1e7dd"/>
+    </linearGradient>
+    <!-- depth comes from a lighter top edge on each half, not from a cast shadow -->
+    <linearGradient id="ink" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#3a3532"/>
+      <stop offset="0.12" stop-color="#2a2725"/>
+      <stop offset="1" stop-color="#151515"/>
+    </linearGradient>
+    <linearGradient id="orange" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#f27a47"/>
+      <stop offset="0.12" stop-color="#ea6533"/>
+      <stop offset="1" stop-color="#c8471d"/>
+    </linearGradient>
+    <filter id="shadow" x="-10%" y="-10%" width="120%" height="125%">
+      <feDropShadow dx="0" dy="10" stdDeviation="12" flood-color="#000" flood-opacity="0.28"/>
+    </filter>
+  </defs>
+  <rect x="100" y="100" width="824" height="824" rx="185" fill="url(#tile)" filter="url(#shadow)"/>
+  <!-- hairline just inside the tile edge, so the cream tile holds on a white window -->
+  <rect x="101" y="101" width="822" height="822" rx="184" fill="none" stroke="#151515" stroke-opacity="0.10" stroke-width="2"/>
+  <!-- the person's half: ink, the heavier of the two, with the socket -->
+  <path fill="url(#ink)" d="M576 352 H320 A160 160 0 0 0 320 672 H576 V608 H512 A64 64 0 0 1 448 544 V480 A64 64 0 0 1 512 416 H576 Z"/>
+  <!-- Lucille's half: orange, with a tongue that reaches only into the socket it is given -->
+  <path fill="url(#orange)" d="M608 352 H704 A160 160 0 0 1 704 672 H608 V576 H512 A32 32 0 0 1 480 544 V480 A32 32 0 0 1 512 448 H608 Z"/>
+</svg>

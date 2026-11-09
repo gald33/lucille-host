@@ -258,6 +258,7 @@ def test_plist_keys() -> None:
         "CFBundleDevelopmentRegion",
         "CFBundleDisplayName",
         "CFBundleExecutable",
+        "CFBundleIconFile",
         "CFBundleIdentifier",
         "CFBundleInfoDictionaryVersion",
         "CFBundleName",
@@ -278,6 +279,10 @@ def test_plist_keys() -> None:
     assert plist["CFBundleExecutable"] == plist["CFBundleName"] == pins.app_name
     # The app reads its name from this key (HostText.appName).
     assert plist["CFBundleDisplayName"] == pins.app_name
+    # The icon is Contents/Resources/AppIcon.icns. There is no asset catalog, so no
+    # CFBundleIconName, which would name an asset in one.
+    assert plist["CFBundleIconFile"] == "AppIcon" == build_app.icons.APP_ICON
+    assert "CFBundleIconName" not in plist
     assert plist["CFBundlePackageType"] == "APPL"
     assert plist["CFBundleShortVersionString"] == "0.1.0"
     assert plist["CFBundleVersion"] == "523"
@@ -463,6 +468,8 @@ def test_plan_writes_the_info_plist(tmp_path: Path, capsys: pytest.CaptureFixtur
     assert written == build_app.info_plist(build_app.load_pins(), versions)
     out = capsys.readouterr().out
     assert build_app.load_pins().sha256 in out and "placeholder" not in out
+    assert "app icon          AppIcon.icns, 11 images from 7 PNGs in macos/Icons" in out
+    assert "menu bar icons    6 template PNGs from macos/Icons" in out
     # Without a build number the bundle version is 1, and plan says it is a placeholder.
     assert build_app.main(["plan", "--out", str(tmp_path)]) == 0
     assert "placeholder" in capsys.readouterr().out
@@ -483,6 +490,52 @@ def test_build_refuses_off_a_mac(tmp_path: Path, capsys: pytest.CaptureFixture[s
     assert build_app.main(["toolchain", "--github-env", str(github_env)]) == 1
     assert "runs on an Apple silicon Mac" in capsys.readouterr().err
     assert not github_env.exists()
+
+
+def test_bad_icon_sources_are_refused_before_anything_is_written(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # The build reads the committed PNGs and renders nothing. It checks them with the pins, before
+    # it checks for a Mac, so the refusal is the same on any system, names the file, and comes
+    # before anything is written.
+    bad = tmp_path / "Icons"
+    shutil.copytree(build_app.icons.ICONS_DIR, bad)
+    (bad / "app-64.png").write_bytes((bad / "app-32.png").read_bytes())
+    monkeypatch.setattr(build_app.icons, "ICONS_DIR", bad)
+    wheel, digest = _host_wheel(tmp_path / "wheel")
+    for command in ("assemble", "build"):
+        out = tmp_path / f"out-{command}"
+        argv = [command, "--out", str(out), "--host-wheel", str(wheel)]
+        argv += ["--host-wheel-sha256", digest, "--build-number", "1"]
+        assert build_app.main(argv) == 1
+        err = capsys.readouterr().err
+        assert "app-64.png is 32x32 pixels, not 64x64" in err, err
+        assert "Apple silicon" not in err
+        assert not out.exists()
+    out = tmp_path / "out-plan"
+    assert build_app.main(["plan", "--out", str(out), "--build-number", "1"]) == 1
+    assert "app-64.png is 32x32 pixels, not 64x64" in capsys.readouterr().err
+    assert not out.exists()
+    # In assemble: the sources before the Mac check; the icons written after the licences; and
+    # the bundle's icons checked again, with the rest, before the tarball.
+    assemble = _python_function(
+        (build_app.TOOLS_DIR / "build_app.py").read_text(encoding="utf-8"), "assemble"
+    )
+    steps = (
+        "check_host_wheel(",
+        "check_icon_sources()",
+        "require_apple_silicon(",
+        "copy_licenses(",
+        'icons.write_icons(contents / "Resources")',
+        "icons.bundle_problems(app)",
+        "write_tarball(",
+    )
+    places = [assemble.find(step) for step in steps]
+    assert -1 not in places and places == sorted(places), dict(zip(steps, places, strict=True))
+    plan = _python_function(
+        (build_app.TOOLS_DIR / "build_app.py").read_text(encoding="utf-8"), "plan"
+    )
+    assert plan.index("check_icon_sources()") < plan.index("out.mkdir(")
 
 
 def test_macho_detection(tmp_path: Path) -> None:
@@ -783,6 +836,56 @@ def test_the_ui_check_looks_for_the_apps_own_words() -> None:
     # The note that refuses the whole disk.
     assert f'"{_named_in_swift(check_app.WHOLE_DISK_TITLE)}",' in text
     assert f'"{check_app.WHOLE_DISK_TEXT}\\(diskName), your startup disk: ' in text
+
+
+def test_the_menu_bar_icon_is_the_committed_glyph_with_the_symbol_behind_it() -> None:
+    # HostModel.swift draws, so the self-test cannot run it: its text is pinned instead. The
+    # glyph is a copy, so that its size and description are not set on the image NSImage caches;
+    # without the files, the icon is the SF Symbol it was before.
+    model = (build_app.SWIFT_DIR / "HostModel.swift").read_text(encoding="utf-8")
+    icon = _swift_function(
+        model, "    static func icon(paused: Bool, attention: Bool = false) -> NSImage {"
+    )
+    running, paused, attention = build_app.icons.GLYPHS
+    assert f'let glyph = attention ? "{attention}" : (paused ? "{paused}" : "{running}")' in icon
+    assert "if let found = NSImage(named: glyph)?.copy() as? NSImage {" in icon
+    points = build_app.icons.GLYPH_POINTS
+    assert f"found.size = NSSize(width: {points}, height: {points})" in icon
+    assert (
+        'let symbol = attention ? "exclamationmark.triangle" : (paused ? "pause.circle" : '
+        '"desktopcomputer")'
+    ) in icon
+    assert (
+        "image = NSImage(systemSymbolName: symbol, accessibilityDescription: name) ?? NSImage()"
+    ) in icon
+    # The description and the template flag are set after the branch, on the glyph and on the
+    # symbol alike: the function ends so.
+    assert icon.endswith(
+        "        }\n"
+        "        image.accessibilityDescription = name\n"
+        "        image.isTemplate = true\n"
+        "        return image\n"
+        "    }\n"
+    ), icon[-200:]
+    # No other Swift file loads an image by its name.
+    for path in [*SWIFT_FILES, build_app.MACOS_DIR / "Tests" / "SelfTest.swift"]:
+        found = path.read_text(encoding="utf-8").count("NSImage(named:")
+        assert found == (1 if path.name == "HostModel.swift" else 0), path.name
+    menu = (build_app.SWIFT_DIR / "MenuBarApp.swift").read_text(encoding="utf-8")
+    assert (
+        "Image(nsImage: HostModel.icon(paused: model.paused, attention: connection.needsAttention))"
+    ) in menu
+
+
+def test_the_welcome_note_describes_the_capsule() -> None:
+    text = (build_app.SWIFT_DIR / "HostText.swift").read_text(encoding="utf-8")
+    literal = text.split('    static let welcomeText = """\n', 1)[1].split('        """\n', 1)[0]
+    words = " ".join(re.sub(r"\\\n\s*", "", literal).split())
+    assert "small computer" not in words and "pause sign" not in words
+    assert (
+        "by the clock: a capsule in two halves, with a pause badge while Lucille is paused."
+        in words
+    )
 
 
 _BROAD_FLAG = '"--allow-home-or-root"'
