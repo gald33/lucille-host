@@ -668,7 +668,10 @@ def test_pair_status_refuses_a_sas_the_host_never_writes(cli: HostCli) -> None:
     cli.paired(lucille)
     here = _switchboard.open_link(cli.dirs, state.load_host_config(cli.dirs))
     shown = here.pairs.get(lucille.name).sas
-    said = "the pair cannot be used here (invalid_sas)"
+    said = (
+        "the pair cannot be used here (invalid_sas): the store holds a SAS of another shape, "
+        "which the host never shows"
+    )
     for sas in (
         "SAS is 1234-5678‮",
         "1234-5678‮",
