@@ -701,8 +701,10 @@ ripgrep.
     `site-packages/cryptography/hazmat/bindings/_rust.abi3.so`, as its code signature was "not valid for use
     in process: mapping process and mapped file (non-platform) have different Team IDs". In switchboard
     2.6.0's `pairing.py`, that `ImportError` leaves `AVAILABLE` false, and accepting a code then raises
-    "pairing needs the `cryptography` package" with no state, which the host reports as `answer_failed`,
-    "the code was not answered (error)" (`link.py`). The app's message matches that path; that its failure
+    "pairing needs the `cryptography` package" with no state, which the host of 8f50a9f reported as
+    `answer_failed`, "the code was not answered (error)" (`link.py`), and dropped the library's sentence. The
+    host now ends that message with it: "the code was not answered (error): pairing needs the `cryptography`
+    package". The app's message matches that path; that its failure
     took it is inferred from the message, not traced. That is the refusal the next point expected, so the
     pin is now `false`. Whether an ad-hoc build without the hardened runtime pairs on that Mac is not yet
     tested; the next ad-hoc build tried there settles it.

@@ -808,7 +808,9 @@ class Link:
             and sas[4] == "-"
             and all(digit in _SAS_DIGITS for digit in sas[:4] + sas[5:])
         ):
-            raise PairFailed("invalid_sas", f"pair {name}: the store holds a SAS of another shape")
+            raise PairFailed(
+                "invalid_sas", f"the store holds a SAS of another shape for pair {name}"
+            )
         return sas
 
     def kept(self, name: str) -> Kept | None:

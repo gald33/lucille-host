@@ -1377,7 +1377,7 @@ def test_every_failure_has_a_code(
         (
             _switchboard.PairFailed("aborted_here", "a sentence for people"),
             "pair_unusable",
-            "error: the pair cannot be used here (aborted_here)",
+            "error: the pair cannot be used here (aborted_here): a sentence for people",
         ),
         (
             _switchboard.HubError("the hub answered 503"),
@@ -1894,7 +1894,7 @@ def test_status_json_reports_a_pair_it_cannot_use(
         (
             _switchboard.PairFailed("aborted_here", "refused"),
             "pair_unusable",
-            "the pair cannot be used here (aborted_here)",
+            "the pair cannot be used here (aborted_here): refused",
         ),
     ):
 
@@ -1913,6 +1913,147 @@ def test_status_json_reports_a_pair_it_cannot_use(
     (status,) = assert_objects(w.ok("--json", "status"))
     assert status["pair"] == {"state": "several_pairs", "message": message}
     assert f"pair: error: {message}" in w.ok("status").out.splitlines()
+
+
+# What the pairing library says, with no state, when it cannot load `cryptography`
+# (sb pairing.py:297-299). A Mac whose dyld refused that package's extension got it on 2026-11-08
+# (decisions/0002 §7).
+NO_CRYPTOGRAPHY = "pairing needs the `cryptography` package"
+
+
+def test_a_refused_answer_keeps_the_library_sentence(
+    tmp_path: Path,
+    host_env: HostEnv,
+    stack: contextlib.ExitStack,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The library refuses the answer with no state: its sentence is the only reason there is, so
+    # the message keeps it, in JSON and on standard error alike.
+    said = f"the code was not answered (error): {NO_CRYPTOGRAPHY}"
+    for where, argv in (
+        ("json", ["--json", "pair", "--code-stdin"]),
+        ("text", ["pair", "--code-stdin"]),
+    ):
+        w = World(tmp_path / where, stack, capsys, monkeypatch, with_hub=True)
+        code = w.code()
+        with monkeypatch.context() as patch:
+            patch.setattr(pairing, "AVAILABLE", False)
+            ran = w.run(*argv, stdin=code + "\n")
+        assert ran.rc == 1, ran.err
+        assert ran.err.splitlines()[-1] == f"error: {said}", where
+        assert code not in ran.out + ran.err
+        if where == "json":
+            assert assert_objects(ran)[-1] == {
+                "v": 1,
+                "type": "error",
+                "code": "answer_failed",
+                "message": said,
+            }
+        # Nothing was answered: no pair is held, and no gate record is left.
+        assert not w.dirs.gate_file.exists()
+        (status,) = assert_objects(w.ok("--json", "status"))
+        assert status["pair"] == {"state": "none"}
+
+
+def test_a_refused_pair_keeps_the_library_sentence(
+    tmp_path: Path,
+    host_env: HostEnv,
+    stack: contextlib.ExitStack,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The same refusal at a resolve: `pair status` and `pair confirm` say the pair cannot be used,
+    # with the library's sentence, and keep the pair, which the refusal does not end.
+    w = World(tmp_path, stack, capsys, monkeypatch, with_hub=True)
+    w.interrupted()
+    (status,) = assert_objects(w.ok("--json", "status"))
+    said = f"pair {status['pair']['name']} cannot be used (error): {NO_CRYPTOGRAPHY}"
+    with monkeypatch.context() as patch:
+        patch.setattr(pairing, "AVAILABLE", False)
+        for verb in ("status", "confirm"):
+            ran = w.run("--json", "pair", verb)
+            assert ran.rc == 1 and assert_objects(ran) == [
+                {"v": 1, "type": "error", "code": "pair_unusable", "message": said}
+            ], verb
+            assert ran.err == f"error: {said}\n", verb
+            text = w.run("pair", verb)
+            assert (text.rc, text.err) == (1, f"error: {said}\n"), verb
+    (status,) = assert_objects(w.ok("--json", "status"))
+    assert status["pair"]["state"] == "waiting"
+
+
+def test_a_pair_record_the_library_refuses_is_said_in_its_words(
+    tmp_path: Path,
+    host_env: HostEnv,
+    stack: contextlib.ExitStack,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # With the pair in files, its file holds text that is not JSON: the library refuses the record
+    # with no state, and names the file. `status` says so in its `pair`, and `forget` and
+    # `pair status` in their `error`, each with the library's sentence.
+    w = World(tmp_path, stack, capsys, monkeypatch, with_hub=True)
+    _pair_file_damaged(w, folder=False)
+    record = w.dirs.store_files / f"{w.lucille.name}.json"
+    here = _switchboard.open_link(w.dirs, state.load_host_config(w.dirs))
+    with pytest.raises(pairing.PairingError) as raised:
+        here.pairs.get(w.lucille.name)
+    assert raised.value.state is None and str(record) in str(raised.value)
+    library = str(raised.value)
+    unusable = f"the pair cannot be used here (error): {library}"
+    (status,) = assert_objects(w.ok("--json", "status"))
+    assert status["pair"] == {"state": "unreadable", "code": "pair_unusable", "message": unusable}
+    assert f"pair: unreadable: {unusable}" in w.ok("status").out.splitlines()
+    for argv, said in (
+        (["forget"], unusable),
+        (["pair", "status"], f"pair {w.lucille.name} cannot be used (error): {library}"),
+    ):
+        ran = w.run("--json", *argv)
+        assert ran.rc == 1 and assert_objects(ran)[-1] == {
+            "v": 1,
+            "type": "error",
+            "code": "pair_unusable",
+            "message": said,
+        }, argv
+        assert ran.err.splitlines()[-1] == f"error: {said}", argv
+    # `run` says the same on standard error as it stops.
+    ran = w.run("run", "--json-events")
+    assert ran.rc == 20 and ran.err.splitlines()[-1] == f"error: {unusable}"
+    # Nothing was forgotten: the file is left as it is, for the user to move aside.
+    assert record.read_text() == "{nope"
+
+
+def test_a_strategy_from_the_pair_room_is_quoted_and_cut(
+    tmp_path: Path,
+    host_env: HostEnv,
+    stack: contextlib.ExitStack,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Lucille moves the pair on with a healing strategy this release does not know, longer than
+    # the host repeats. The library refuses the pair (`upgrade`) and quotes the strategy with repr
+    # (sb pairing.py:2136-2140): `pair status` and `run` keep the sentence, cut short.
+    w = World(tmp_path, stack, capsys, monkeypatch, with_hub=True)
+    w.paired(confirm=True)
+    strategy = "x\x1b[2J\u202ey" + "a" * 1000
+    real = pairing._side_value
+
+    def side(record: Any, **options: Any) -> dict[str, Any]:
+        return {**real(record, **options), "s": strategy}
+
+    with monkeypatch.context() as patch:
+        patch.setattr(pairing, "_side_value", side)
+        w.lucille.heal()
+    sentence = f"the other side moved this pair on with healing strategy {strategy!r}, which"
+    said = f"pair {w.lucille.name} cannot be used (upgrade): {sentence[:600]}"
+    ran = w.run("--json", "pair", "status")
+    assert ran.rc == 1 and assert_objects(ran) == [
+        {"v": 1, "type": "error", "code": "pair_unusable", "message": said}
+    ]
+    assert ran.err == f"error: {said}\n"
+    ran = w.run("run", "--json-events")
+    assert ran.rc == 20 and ran.err.splitlines()[-1] == f"error: {said}"
 
 
 def test_status_json_reports_a_keyring_that_cannot_be_read(

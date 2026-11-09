@@ -140,6 +140,14 @@ They are the same with `--json` as without it.
 
 - For `usage`, the `message` is always "the command line could not be parsed; standard error says why":
   the parser's own words, which can quote the command line, are on standard error only.
+- For `answer_failed` and `pair_unusable`, the `message` is the host's words, the pairing library's state in
+  parentheses (`error` when it gave none), then, when there is one, a colon and the library's sentence, which
+  says why (for `invalid_sas`, the host's own): ``the code was not answered (error): pairing needs the
+  `cryptography` package``. The state and the sentence are made safe as `pair_code`'s `note` is, and kept to
+  at most 32 and 600 characters. As read in switchboard 2.6.0, the library's sentence names at most the pair,
+  a time, the store or a file in it, and a value read there or in the pair room, and never the code, a token,
+  a key or the SAS. `status` gives a message of the same form in `pair.message` when its `code` is
+  `pair_unusable`.
 - An unexpected error (a bug) writes its traceback to standard error and an `error` object with `code`
   `internal`, and exits 1.
 

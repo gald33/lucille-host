@@ -17,6 +17,10 @@ What ``lucille-host pair`` and its sub-verbs do, made of the calls in ``_switchb
   with the handshake), a pairing that ran out of time, and a pair that Lucille ended each stop the
   wait. Whatever is left of the pair on this computer is forgotten, the gate's record is deleted,
   and the command says which it was (:func:`outcome`).
+- **A refusal that ends nothing** (``error``): the library refused the answer, or the pair, for
+  another reason, or for none it names. The command says so in its own words, with the library's
+  state and then the library's own sentence, which is often the only reason there is
+  (:func:`refusal`).
 - **The gate** (``gate.py``). Once the SAS has reached the host, ``pair`` shows it and asks for
   ``y`` if Lucille's page shows the same (:meth:`Session.show`, :meth:`Session.open_gate`).
   ``pair status`` reports ``none``, ``waiting``, ``sas_pending`` (showing the SAS again, with the
@@ -131,6 +135,7 @@ __all__ = [
     "has_unsafe",
     "open_session",
     "outcome",
+    "refusal",
     "sanitize",
 ]
 
@@ -151,6 +156,10 @@ BACKOFF_MOST: Final = 30.0
 LONG_POLL: Final = 25.0
 # The longest note shown.
 NOTE_LIMIT: Final = 200
+# The most of the pairing library's own sentence that a refusal repeats (:func:`refusal`).
+REFUSAL_LIMIT: Final = 600
+# The most of the pairing library's state that a refusal repeats. Its own are words of at most 16.
+STATE_LIMIT: Final = 32
 # The largest generation `status` reports: the largest integer every JSON reader keeps exactly.
 # Lucille's side can raise a pair's generation, and the pairing library takes any integer from 0.
 GENERATION_MOST: Final = 2**53 - 1
@@ -264,6 +273,27 @@ def sanitize(text: str, limit: int = NOTE_LIMIT) -> str:
 def has_unsafe(text: str) -> bool:
     """Whether ``text`` holds a character :func:`sanitize` would replace."""
     return _UNSAFE.search(text) is not None
+
+
+def refusal(words: str, exc: _switchboard.PairFailed) -> str:
+    """What the host says of a refusal of the pairing library's that ends nothing: its own
+    ``words``, the library's state, and then the library's own sentence, which says why. With no
+    state, that sentence is the only reason given: "pairing needs the `cryptography` package"
+    (sb ``pairing.py:297-299``).
+
+    The sentence is made safe as a note is, and cut to :data:`REFUSAL_LIMIT` characters: it can
+    quote what the other side wrote in the pair room (a healing strategy, sb
+    ``pairing.py:2136-2140``). As read in switchboard 2.6.0's ``pairing.py``, a sentence that
+    reaches here names at most the pair, a time, a value read in the pair room, the store or a file
+    in it, and a value read there. A file that is not UTF-8 is named with the first byte that is
+    not, which the library, writing ASCII, never writes. None quotes the code, the pair secret, a
+    token or the SAS. The host's own (:meth:`_switchboard.Link.sas`) names the pair only.
+
+    The state is made safe too, and cut to :data:`STATE_LIMIT`: the library's own are words, but
+    one it takes from a record of the store (sb ``pairing.py:2264-2265``) is whatever that holds."""
+    said = sanitize(str(exc), REFUSAL_LIMIT)
+    head = f"{words} ({sanitize(exc.state, STATE_LIMIT) or 'error'})"
+    return f"{head}: {said}" if said else head
 
 
 def outcome(switchboard_state: str) -> str:
@@ -647,7 +677,7 @@ class Session:
             except _switchboard.PairFailed as exc:
                 if outcome(exc.state) == "error":
                     raise Stopped(
-                        "error", f"pair {name} cannot be used ({exc.state})", code="pair_unusable"
+                        "error", refusal(f"pair {name} cannot be used", exc), code="pair_unusable"
                     ) from None
                 raise self._end(name, exc.state) from None
 
@@ -708,7 +738,7 @@ class Session:
                 word = outcome(exc.state)
                 if word == "error":
                     raise Stopped(
-                        "error", f"the code was not answered ({exc.state})", code="answer_failed"
+                        "error", refusal("the code was not answered", exc), code="answer_failed"
                     ) from None
                 self.link.forget(code.name)
                 raise Stopped(word, f"{_STOPPED_MESSAGES[word]} ({exc.state})") from None

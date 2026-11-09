@@ -221,6 +221,30 @@ def test_sanitize_replaces_every_unsafe_character() -> None:
     assert link.sanitize("x" * 300) == "x" * 200
 
 
+def test_a_refusal_shows_the_library_sentence_made_safe() -> None:
+    # The library's sentence follows the host's words and the library's state. It can quote what
+    # the other side wrote (a healing strategy read in the pair room, sb pairing.py:2136-2140),
+    # with repr, which escapes a control but bounds no length: the sentence is cut short.
+    strategy = "x\x1b[2J\u202ey" + "a" * 1000
+    sentence = f"the other side moved this pair on with healing strategy {strategy!r}, which"
+    said = link.refusal("pair p cannot be used", _switchboard.PairFailed("upgrade", sentence))
+    head = "pair p cannot be used (upgrade): "
+    assert said == head + sentence[: link.REFUSAL_LIMIT]
+    assert "'x\\x1b[2J\\u202ey" in said and not link.has_unsafe(said)
+    # A sentence or a state the library read from a record of the store is whatever the record
+    # holds (sb pairing.py:2264-2265): each is made safe as a pair's note is.
+    refused = _switchboard.PairFailed("odd\x1b[2J\x00" + "s" * 100, "m\x1b[2J\u202en\x00")
+    assert link.refusal("h", refused) == f"h (odd [2J {'s' * 24}): m [2J n"
+    refused = _switchboard.PairFailed("\x00", "m")
+    assert link.refusal("h", refused) == "h (error): m"
+    # A refusal that says nothing more gives the host's words and the state alone.
+    for blank in ("", " \x1b "):
+        refused = _switchboard.PairFailed("error", blank)
+        assert link.refusal("the code was not answered", refused) == (
+            "the code was not answered (error)"
+        )
+
+
 def test_pair_refuses_while_held(cli: HostCli, tmp_path: Path) -> None:
     first = cli.lucille()
     cli.interrupted(first.start())

@@ -1455,7 +1455,7 @@ def _failure(exc: BaseException) -> tuple[str, str, str, dict[str, str]]:
     if isinstance(exc, link.Stopped):
         return f"{exc.state}: {exc}", exc.code, str(exc), {}
     if isinstance(exc, _switchboard.PairFailed):
-        said = f"the pair cannot be used here ({exc.state})"
+        said = link.refusal("the pair cannot be used here", exc)
         return f"error: {said}", "pair_unusable", said, {}
     if isinstance(exc, _switchboard.HubError):
         said = f"{exc}; try again"
