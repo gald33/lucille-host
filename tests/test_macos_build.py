@@ -468,7 +468,11 @@ def test_plan_writes_the_info_plist(tmp_path: Path, capsys: pytest.CaptureFixtur
     assert written == build_app.info_plist(build_app.load_pins(), versions)
     out = capsys.readouterr().out
     assert build_app.load_pins().sha256 in out and "placeholder" not in out
-    assert "app icon          AppIcon.icns, 10 images from 7 PNGs in macos/Icons" in out
+    # Ten images, one per slot, in twelve entries: the 16 and 32 pixel images are each 24-bit RGB
+    # and a mask.
+    assert (
+        "app icon          AppIcon.icns, 10 images in 12 entries from 7 PNGs in macos/Icons" in out
+    )
     assert "menu bar icons    6 template PNGs from macos/Icons" in out
     # Without a build number the bundle version is 1, and plan says it is a placeholder.
     assert build_app.main(["plan", "--out", str(tmp_path)]) == 0

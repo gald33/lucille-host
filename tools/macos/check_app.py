@@ -18,18 +18,25 @@ The bundle as built:
   hoc by this build, not merely by the linker, with no Team ID and the identifier
   ``build_app.signing_identifier`` gave it (:func:`codesign_problems`). The icons are the ones
   the build makes from this checkout's ``macos/Icons/`` (``icons.bundle_problems``):
-  ``Info.plist`` names ``AppIcon``; ``AppIcon.icns`` holds its ten PNGs in order, each of its
-  size, and is byte for byte the file the build writes; and the six menu bar glyphs are the
+  ``Info.plist`` names ``AppIcon``; ``AppIcon.icns`` holds its twelve entries in order, eight
+  PNGs, each of its size, and the 16 and 32 pixel images, each as packed 24-bit RGB and an 8-bit
+  mask (``is32`` and ``s8mk``, ``il32`` and ``l8mk``) that read back to exactly their PNG's
+  pixels, and is byte for byte the file the build writes; and the six menu bar glyphs are the
   committed files, black with alpha only. Then ``iconutil``, macOS's own reader, must read
   ``AppIcon.icns`` into an iconset of exactly the ten files the entries' slots name, each a PNG
   whose IHDR gives the pixels its name says (:func:`check_icon_reader`); what it says, and each
-  file with that size, are printed. Last, AppKit must load each glyph from the bundle by its name,
-  18 points square from two files, of 18 and 36 pixels (:func:`check_glyph_loader`). Both ran in
-  CI in run 42620168506, in macos-app (macOS 15.8.2) and in the smoke jobs (26.7.2 and 27.0.1),
-  when the iconutil step printed its files and checked none of them: on each, iconutil wrote the
-  same eleven, icon_48x48.png among them, from an entry the build no longer writes (inferred;
-  ``icons.ICNS_SLOTS``), and AppKit found each glyph as 18 points from 18 and 36 pixels. No run
-  has yet held iconutil's files to the names and sizes above.
+  file with that size, are printed. That it names the file of ``is32`` and ``s8mk``
+  ``icon_16x16.png``, and that of ``il32`` and ``l8mk`` ``icon_32x32.png``, is inferred: no run
+  has yet read those types, and this check fails, naming the file, if it does not. Last, AppKit
+  must load each glyph from the bundle by its name, 18 points square from two files, of 18 and 36
+  pixels (:func:`check_glyph_loader`). Both ran in CI in run 42620168506, in macos-app (macOS
+  15.8.2) and in the smoke jobs (26.7.2 and 27.0.1), when the iconutil step printed its files and
+  checked none of them: on each, iconutil wrote the same eleven, icon_48x48.png among them, from
+  an entry the build no longer writes (inferred; ``icons.ICNS_SLOTS``), and AppKit found each
+  glyph as 18 points from 18 and 36 pixels. In run 42636263428 (PR 30, head 8d3949d), in the same
+  three jobs, iconutil wrote exactly the ten names above, each a PNG of its name's size, and the
+  step passed. That run's file still held PNG icp4 and icp5, so no run has yet read the RGB and
+  mask types.
 - ``bytecode``: the bundle holds one checked-hash ``.pyc`` beside each ``.py`` of the runtime's
   library, and no other bytecode (``build_app.bytecode_layout_problems``); the bundled interpreter,
   running the build's own program, finds each one byte for byte what it compiles from its ``.py``
@@ -1155,8 +1162,11 @@ def check_icon_reader(app: Path, checker: Checker) -> None:
     Seen in CI, run 42620168506, in macos-app (macOS 15.8.2) and in the smoke jobs (26.7.2 and
     27.0.1): iconutil read the icon file of that run, which held an icp6 entry too, into the same
     eleven files on each, the ten this check now wants and icon_48x48.png, and said nothing. That
-    run's step printed the names and byte counts and passed; it did not check them. No run has yet
-    printed the size an IHDR of iconutil's gives, so the sizes it writes are not yet seen."""
+    run's step printed the names and byte counts and passed; it did not check them. In run
+    42636263428 (PR 30, head 8d3949d), in the same three jobs, iconutil wrote exactly the ten
+    files, each with the IHDR size its name gives, and this check passed. Both runs' files held PNG
+    icp4 and icp5 where is32 and s8mk, and il32 and l8mk, are now; that iconutil gives those the
+    same two names, icon_16x16.png and icon_32x32.png, is inferred."""
     rel = f"{icons.RESOURCES}/{icons.ICNS_FILE}"
     wanted = icons.iconset_files()
     what = (

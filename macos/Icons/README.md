@@ -35,15 +35,27 @@ The PNGs are the source of truth. The build renders nothing: `tools/macos/icons.
 packs seven of them into `AppIcon.icns`, and copies the six glyphs beside it in `Contents/Resources`.
 Nothing in the build or in CI runs `render.js`.
 
-`AppIcon.icns` holds ten images, one for each of the ten slots its entry types are read into, by the
-names `iconutil` gives its files: 16, 32, 128, 256 and 512 points, each at 1x and at 2x for a Retina
-screen. Each image is its slot's points times its scale in pixels, and the build refuses one that is not.
+`AppIcon.icns` holds ten images, in twelve entries, one for each of the ten slots its entry types are
+read into, by the names `iconutil` gives its files: 16, 32, 128, 256 and 512 points, each at 1x and at
+2x for a Retina screen. Each image is its slot's points times its scale in pixels, and the build refuses
+one that is not.
 The 16 pixel image comes from `app-16.png`, the hand-drawn master. Every other size comes from `app.svg`,
 so the 16 point icon on a Retina screen, 32 pixels, is the large master's. The large master's capsule
 sits on a grid of 32 pixels per unit at 1024, so at 32 pixels the capsule lands on whole pixels.
 
+Eight of the ten images are whole PNGs. The 16 and 32 pixel images, the 16 and 32 point icons at 1x,
+are not. Each is two entries made from its PNG's pixels: 24-bit RGB, packed with the format's
+run-length scheme (`is32`, `il32`), and an 8-bit mask that holds the alpha (`s8mk`, `l8mk`). So the
+hand-drawn 16 is in `is32` and `s8mk`. A public note on the format reports that macOS 10.15.7 and later
+draw PNG data in `icp4` (16 pixels), `icp5` (32) and `icp6` scrambled when the file is an app's icon,
+and a missing small size too, from a larger PNG scaled down, and gives this RGB and mask as one way
+round it (Wikipedia, "Apple Icon Image format", "Known issues", item 3, read 2026-11-09). That it draws
+well on macOS 15, 26 and 27 is not seen. The same note reports that on a non-Retina monitor macOS uses
+the non-Retina 16 point icon, which is `is32` and `s8mk` here. That it uses `il32` and `l8mk` there for
+32 points, and the `@2x` PNGs (`ic11`, `ic12`) on a Retina screen, is inferred.
+
 `app-64.png` is the 32 point icon on a Retina screen, and nothing else. The build once also put it in an
-eleventh entry, of type `icp6`. In CI (run 42620168506, on macOS 15, 26 and 27 alike), `iconutil` read
+entry of type `icp6`. In CI (run 42620168506, on macOS 15, 26 and 27 alike), `iconutil` read
 that file into eleven files: the ten slots above, and `icon_48x48.png`, by its name a 48 pixel slot
 (inferred; its size was not printed). Its log names files, not entry types, so that `icp6` gave
 `icon_48x48.png` is inferred too: public lists of the types give `icp6` as 48 pixels and `ic12` as the
@@ -81,13 +93,17 @@ or the wrong size. New bytes that keep the rules pass, and the app's icon change
 the `.DS_Store` the Finder may write here, so it does not count. Each PNG must be 8-bit RGBA, not
 interlaced, with only the chunks IHDR, IDAT and IEND, and the size its name says. Every pixel of a glyph
 must be black, with only its alpha varying, and no glyph may be empty. The tests also hold the layout of
-`AppIcon.icns`, which PNG each of its images comes from, and that each image is the size of its slot. The
-build refuses these files unless they pass the same rules, and the `bundle` check of
+`AppIcon.icns`, which PNG each of its images comes from, that each image is the size of its slot, and
+that the 16 and 32 pixel images read back from their RGB and mask entries to exactly their PNGs'
+pixels. The build refuses these files unless they pass the same rules, and the `bundle` check of
 `tools/macos/check_app.py` holds the built app to them. On a Mac, that check also has `iconutil` read
-`AppIcon.icns` into exactly the ten files of its slots, each a PNG of the size its name says, and has
+`AppIcon.icns` into exactly the ten files of its slots, each a PNG of the size its name says (that it
+names the RGB entries' files `icon_16x16.png` and `icon_32x32.png` is inferred), and has
 AppKit load each glyph from the built app by its name, as two files of 18 and 36 pixels. Both ran in CI
 in run 42620168506, on macos-15 and in the smoke jobs on macOS 26 and 27, before `iconutil`'s files were
-checked. No run has yet held `iconutil`'s files to their names and sizes.
+checked. In run 42636263428 (PR 30), on the same three, `iconutil` wrote exactly the ten files, each a
+PNG of its name's size, from a file that still held PNG `icp4` and `icp5`; no run has yet read `is32` or
+`il32`.
 
 ## Not done
 

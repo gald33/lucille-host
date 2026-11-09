@@ -616,10 +616,11 @@ ripgrep.
   Its SVG masters and the PNGs rendered from them are committed in `macos/Icons/`, and the PNGs are the
   source of truth: the build renders nothing. In pure Python (`tools/macos/icons.py`) it checks the PNGs
   when it checks the pins, before it checks for a Mac, packs seven of them into `Resources/AppIcon.icns`
-  (ten entries, each a whole PNG, with no table of contents, so the file depends on the PNGs alone),
-  and copies the three menu bar glyphs and their `@2x` files beside it. Each entry type has a slot of its
-  own, by the names `iconutil` gives its files: a size in points at 1x or 2x. Each entry's PNG must be
-  its slot's size, and the build refuses an entry that is not (`icons.ICNS_SLOTS`). `Info.plist` names
+  (twelve entries with no table of contents, so the file depends on the PNGs alone: eight whole PNGs,
+  and the 16 and 32 pixel images each as 24-bit RGB and an 8-bit mask, below), and copies the three
+  menu bar glyphs and their `@2x` files beside it. Each entry type but a mask has a slot of its own, by
+  the names `iconutil` gives its files: a size in points at 1x or 2x. Each entry's image must be its
+  slot's size, and the build refuses an entry that is not (`icons.ICNS_SLOTS`). `Info.plist` names
   the icon with `CFBundleIconFile` alone: the app has no asset catalog, so `CFBundleIconName` would name
   an asset that does not exist. The app loads the glyph with `NSImage(named:)`, and shows the SF Symbol
   it showed before if the file is not there. It still has no Dock icon (`LSUIElement`). The build checks
@@ -637,9 +638,43 @@ ripgrep.
   read 2026-11-09; Pillow's reader takes `icp6` as 64 pixels). And the byte counts fit: `icon_16x16.png`,
   which only `icp4` fits, is twice its PNG (870 bytes from 435), as `icon_32x32.png` and `icon_48x48.png`
   are about twice theirs (1.8 and 2.2 times), while each other file is 1.2 to 1.6 times its PNG. So the
-  build writes no `icp6`, and `app-64.png` is only the 32 point icon on a Retina screen (`ic12`). No run
-  has yet held `iconutil`'s files to the new rule, so the sizes it writes are not yet seen. How macOS
-  draws the icon, and how the icons look, is not yet seen.
+  build writes no `icp6`, and `app-64.png` is only the 32 point icon on a Retina screen (`ic12`). Seen
+  in CI, run 42636263428 (PR 30, head 8d3949d), in the same three jobs: `iconutil` wrote exactly the ten
+  files, each with the IHDR size its name gives, from a file that still held PNG `icp4` and `icp5`. How
+  macOS draws the icon, and how the icons look, is not yet seen.
+- **The 16 and 32 point icons at 1x are not PNGs.** A public note on the format reports that macOS
+  10.15.7 (likely earlier) and later draw PNG and JPEG 2000 data in `icp4` (16 pixels), `icp5` (32) and
+  `icp6` completely scrambled when the file is an app's icon, though well in a standalone icon file;
+  that the same happens if the small sizes are left out and macOS scales a larger PNG down; and that the
+  fix is ARGB in `ic04` and `ic05` (macOS 11 and later; it also reports a bug in packed ARGB) or the old
+  24-bit RGB with an 8-bit mask (Wikipedia, "Apple Icon Image format", "Known issues", items 2 and 3,
+  read 2026-11-09). It reports too that on a non-Retina monitor macOS uses the non-Retina 16 point icon,
+  so the fault shows there even when the 16 point icon at 2x is given. That the 32 point icon works the
+  same way, and that a Retina screen uses the `@2x` entries, which the article's type table gives as
+  `ic11` and `ic12`, is inferred. So, in place of PNG `icp4` and `icp5` (the run above), the build
+  writes `is32` and `s8mk` from `app-16.png`, so the hand-drawn master is now in those two, and `il32`
+  and `l8mk` from `app-32.png`. The RGB entry holds the red of every pixel, then the green, then the
+  blue, each channel packed on its own with the format's run-length scheme, with no header; the mask
+  entry holds each pixel's alpha, one byte each, not packed (the same article's type table, its sections
+  on RGB and mask data, and on compression; it reports that unpacked RGB does not show on macOS 11). The
+  colour is the PNG's, not multiplied by its alpha. The article does not say which; that macOS reads it
+  so is inferred, from source read 2026-11-09, none of it macOS drawing an entry: Pillow's reader puts
+  the mask in as the alpha of the RGB it read; relikd's icnsutil and the Rust `icns` crate write the
+  colour as it is; and the IconFamily class's code, as kept in UliKit, undoes `NSBitmapImageRep`'s
+  premultiplication before it hands 32-bit icon data (for `it32`) to Apple's `SetIconFamilyData`. A mask
+  fills no slot. It comes directly after its RGB entry, and must be of its pixels and from its PNG; the
+  16 and 32 point slots at 1x must be filled, and by RGB, never a PNG (`icons.ICNS_MASKS`,
+  `icons.RGB_SLOTS`, `icons.slot_problems`). The build and the `bundle` check hold each RGB and mask
+  entry to exactly its PNG's pixels, with a reader in `icons.py` that refuses packed data that ends
+  early, runs past its channel or has bytes left over. The build also writes no packed RGB that other
+  readers would read wrongly (seen in their source): none as long as unpacked RGB, which Pillow's reader
+  takes for unpacked, and none that starts with four zero bytes, which libicns and the Rust `icns` crate
+  skip in any 24-bit RGB entry, as `it32`'s header. What macOS does with either is not known. That the
+  report holds on macOS 15, 26 and 27 is not seen, and neither is how these entries look. That
+  `iconutil` names the file of `is32` and `s8mk` `icon_16x16.png`, and that of `il32` and `l8mk`
+  `icon_32x32.png`, as it named those of `icp4` and `icp5`, is inferred: the `bundle` check of the next
+  Mac run is the first to read them, and fails, naming the file, if it does not. The check still wants
+  the same ten files.
 - **M10 and the signature.** `codesign` writes each Mach-O file's signature into the file, so after signing
   the two extension files no longer equal their wheels' bytes (seen in CI, run 41407347108, 2026-11-02:
   `record` found the two signed files differ from their wheels'). So M10 (§22) holds byte for byte before
@@ -1591,9 +1626,11 @@ check from `tools/macos/check_app.py`:
   runtime (§7; library validation against a Team ID is exercised only on signed candidates);
 - the bundle: no symbolic link; exactly the expected Mach-O files, each signed ad hoc by
   the build, not only by the linker, with its own identifier; the icons, which must be the files the build
-  makes from `macos/Icons/`, `iconutil`'s read of the icon file into exactly the ten files its entries'
-  slots name, each a PNG of its name's size (a rule not yet run on a Mac, §6), and AppKit's load of each
-  glyph from the bundle by its name; the signature, again after every other check;
+  makes from `macos/Icons/`, the 16 and 32 pixel images as 24-bit RGB and a mask that read back to
+  their PNGs' pixels, `iconutil`'s read of the icon file into exactly the ten files its entries' slots
+  name, each a PNG of its name's size (a rule not yet run on a Mac, nor on a file with those types, §6),
+  and AppKit's load of each glyph from the bundle by its name; the signature, again after every other
+  check;
 - each `.pyc`: where the build writes one, `checked-hash`, and byte for byte the bundled interpreter's
   compile of the `.py` beside it; and the host's modules loaded from them (§6);
 - M10 on the signed bundle (§6), and M11: the version rule and `MANIFEST.json`;
@@ -1692,7 +1729,9 @@ recording the Finder's message, then the update flow of §16; the Finder's real 
 the disk image, and a copy opened from Downloads after a browser download (App Translocation), recording
 what each copy says and that it starts nothing; hiding the menu-bar icon; how the app icon and the
 menu-bar glyph look, on a Retina and a non-Retina screen, in a light and a dark menu bar, on macOS 26 and
-27; the app beside a
+27, the app icon at 16 and 32 points on a non-Retina screen among them, where macOS is reported to use
+the 1x 16 point icon, here the RGB and mask entries, and is inferred to use the 1x 32 point one (§6);
+the app beside a
 `pipx` install; and deleting the app instead of Remove, recording what Login Items & Extensions lists
 afterwards. With Open at Login on: a real login, recording that the app opens at it and the notice macOS
 shows; then the item turned off in System Settings, recording which state macOS then gives, and the next
