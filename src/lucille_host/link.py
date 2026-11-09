@@ -19,8 +19,9 @@ What ``lucille-host pair`` and its sub-verbs do, made of the calls in ``_switchb
   and the command says which it was (:func:`outcome`).
 - **A refusal that ends nothing** (``error``): the library refused the answer, or the pair, for
   another reason, or for none it names. The command says so in its own words, with the library's
-  state and then the library's own sentence, which is often the only reason there is
-  (:func:`refusal`).
+  state, and then why, in the host's words for the library's sentence: the host repeats no text of
+  the library's, which can name the file holding the pair secret or quote what the other side
+  wrote (:func:`refusal`).
 - **The gate** (``gate.py``). Once the SAS has reached the host, ``pair`` shows it and asks for
   ``y`` if Lucille's page shows the same (:meth:`Session.show`, :meth:`Session.open_gate`).
   ``pair status`` reports ``none``, ``waiting``, ``sas_pending`` (showing the SAS again, with the
@@ -156,10 +157,6 @@ BACKOFF_MOST: Final = 30.0
 LONG_POLL: Final = 25.0
 # The longest note shown.
 NOTE_LIMIT: Final = 200
-# The most of the pairing library's own sentence that a refusal repeats (:func:`refusal`).
-REFUSAL_LIMIT: Final = 600
-# The most of the pairing library's state that a refusal repeats. Its own are words of at most 16.
-STATE_LIMIT: Final = 32
 # The largest generation `status` reports: the largest integer every JSON reader keeps exactly.
 # Lucille's side can raise a pair's generation, and the pairing library takes any integer from 0.
 GENERATION_MOST: Final = 2**53 - 1
@@ -179,6 +176,160 @@ LEAKED: Final = frozenset({"already_redeemed", "aborted", "superseded"})
 PAIR_AGAIN: Final = frozenset({"expired", "never_confirmed", "unsent", "wrong_hub"})
 # Its states for a pair that was ended: by Lucille, or on this computer by another command.
 ENDED: Final = frozenset({"ended", "ended_by_peer"})
+# Its states for a refusal that ends nothing, as switchboard 2.6.0's ``pairing.py`` raises them,
+# with ``error`` for none and the host's own ``invalid_sas`` (:meth:`_switchboard.Link.sas`).
+UNENDING: Final = frozenset(
+    {
+        "error",
+        "store",
+        "disabled",
+        "unconfirmed",
+        "name_taken",
+        "tampered",
+        "upgrade",
+        "pending",
+        "unreachable",
+        "conflict",
+        "invalid_sas",
+    }
+)
+# Every state a refusal repeats (:func:`refusal`). Any other, which a record of the store can hold
+# (sb ``pairing.py:2264-2265``), is said as ``error``.
+STATES: Final = LEAKED | PAIR_AGAIN | ENDED | {"unknown"} | UNENDING
+
+# What a refusal says in place of a sentence of the library's the host has no words for.
+UNREPEATED: Final = "the pairing library refused it for a reason this host does not repeat"
+
+# The parts of the library's sentences that vary, each bounded (:data:`_REFUSALS`): a pair name as
+# the library allows one; a file of the file store, which is the folder ``pairs`` of the host's
+# state folder (``paths.py``), or a file in its ``pending`` or ``voided`` folder, taken as any
+# absolute path with no control character that ends in a folder named ``pairs``; where the store
+# keeps a record or an unfinished pairing (a file, or the keyring item, as
+# ``_switchboard.KeyringPairs`` names it); Python's words for a file that is not JSON; a value the
+# library shows with ``repr`` (``None``, ``True``, ``False``, a number, or a short word); a name it
+# refuses, so shown; and Python's words for the fields a record is missing. The table is compiled
+# with ``re.ASCII``, so a digit is one of 0 to 9.
+_NAME = r"[a-z0-9][a-z0-9-]{0,31}"
+_FOLDER = r"(?:/[^/\x00-\x1f\x7f-\x9f]{1,255}){1,64}/pairs"
+_FILE = rf"{_FOLDER}/{_NAME}\.json"
+_OTHER_FILE = rf"{_FOLDER}/(?:pending|voided)/{_NAME}\.json"
+_RECORD = rf"(?:{_FILE}|pair '{_NAME}' in the keyring)"
+_PENDING = rf"(?:{_FOLDER}/pending/{_NAME}\.json|pairing '{_NAME}' in the keyring)"
+_NOT_JSON = (
+    r"(?:[A-Z][A-Za-z ',:\\]{0,60}: line \d{1,9} column \d{1,9} \(char \d{1,9}\)"
+    r"|'[a-z0-9_-]{1,20}' codec can't decode "
+    r"(?:byte 0x[0-9a-f]{2} in position \d{1,9}|bytes in position \d{1,9}-\d{1,9})"
+    r": [a-z0-9 ()]{1,40})"
+)
+_SCALAR = r"(?:None|True|False|-?\d{1,20}(?:\.\d{1,20})?)"
+_WORD = rf"(?:{_SCALAR}|'[a-z0-9_.-]{{0,32}}')"
+_ODD_NAME = rf"(?:{_SCALAR}|'[A-Za-z0-9 _.-]{{0,40}}')"
+_FIELD = r"'[a-z_]{1,32}'"
+_MISSING = (
+    rf"[A-Za-z]{{1,32}}\.__init__\(\) missing \d{{1,2}} required positional "
+    rf"arguments?: {_FIELD}(?:, {_FIELD})*(?:,? and {_FIELD})?"
+)
+_KEPT = "it holds a pair secret, so it is not overwritten — move it aside"
+# Each sentence of switchboard 2.6.0's that a refusal ending nothing can carry to the host, and
+# that somebody could meet, as a pattern the whole sentence must match, with the host's words for
+# it (spec/CLI.md section 5), which name no path, code, token, key or SAS, and repeat nothing the
+# other side wrote. Beside each is where sb ``pairing.py`` raises it. A sentence left out is one no
+# host call reaches through the host's verbs (a name taken, a pairing the host never starts, an
+# environment it never reads), or one made of what a record of the store holds (a verdict's).
+_REFUSALS: Final = tuple(
+    (re.compile(pattern, re.ASCII), words)
+    for pattern, words in (
+        # :299, accept and resolve, when `cryptography` did not load.
+        (
+            re.escape("pairing needs the `cryptography` package"),
+            "this computer could not load the encryption library pairing needs (`cryptography`)",
+        ),
+        # :938, a file of the file store that is not JSON.
+        (
+            rf"{_FILE} is not valid JSON \({_NOT_JSON}\); {_KEPT}",
+            "the pair's file in the host's store folder is not valid JSON; it holds the pair "
+            "secret, so it is left as it is: move it aside",
+        ),
+        (
+            rf"{_OTHER_FILE} is not valid JSON \({_NOT_JSON}\); {_KEPT}",
+            "a file the pairing library keeps in the host's store folder is not valid JSON; it is "
+            "left as it is: move it aside",
+        ),
+        # :729, :731, :740, :742, the pair's record, read from the store.
+        (
+            rf"{_RECORD} is not a pair record",
+            "the pair's record in the host's store is damaged: it is not a pair record",
+        ),
+        (
+            rf"{_RECORD} is pairing protocol {_SCALAR}; this release speaks 1\. Upgrade "
+            r"agent-switchboard rather than editing it\.",
+            "the pair's record in the host's store is for a pairing protocol this release does "
+            "not speak",
+        ),
+        (
+            rf"{_RECORD} is missing a field \({_MISSING}\)",
+            "the pair's record in the host's store is missing a field",
+        ),
+        (
+            rf"{_RECORD} names role {_WORD} / strategy {_WORD}, which this release does not know "
+            r"— upgrade\.",
+            "the pair's record in the host's store names a role or a healing strategy this "
+            "release does not know",
+        ),
+        # :787, :792, an unfinished pairing, read from the store. The host never starts one.
+        (
+            rf"{_PENDING} is (?:not a protocol 1 pending handshake|missing a field \({_MISSING}\))",
+            "an unfinished pairing in the host's store is damaged",
+        ),
+        # :375, a name the record holds; :442, its work room's number.
+        (
+            rf"{_ODD_NAME} is not a usable pair name: use lowercase letters, digits and dashes, "
+            r"starting with a letter or digit, at most 32 characters\.",
+            "the pair's record in the host's store holds a name pairing does not allow",
+        ),
+        (
+            rf"invalid work-room generation {_WORD}",
+            "the pair's record in the host's store holds a work-room number that cannot be used",
+        ),
+        # :340, accept, a code whose handshake key is not one.
+        (
+            re.escape(
+                "the other side's handshake key is not a usable X25519 key — the answer was "
+                "tampered with or written by something that is not a switchboard client. Nothing "
+                "was paired."
+            ),
+            "the code's handshake key cannot be used: the code was tampered with, or was not "
+            "made by a pairing library",
+        ),
+        # :2124, :2131 (`tampered`), :2136 (`upgrade`), a resolve, from the pair room's records.
+        # The library checks the strategy in both sides' records, this computer's own included,
+        # so the words for `upgrade` say nothing of who moved the pair on.
+        (
+            re.escape(
+                "the pair room holds a record this pair's key cannot open — the hub is serving "
+                "something it was not given. Nothing was changed."
+            )
+            + r"|the pair room's (?:initiator|responder) record is not what was written there "
+            r"— refusing it as tampering\.",
+            "the pair room holds a record that is not what either side wrote: the hub is serving "
+            "something it was not given, and nothing was changed",
+        ),
+        (
+            rf"the other side moved this pair on with healing strategy {_WORD}, which this "
+            r"release does not know\. Upgrade agent-switchboard here before using the pair "
+            r"again\.",
+            "the pair was moved on with a healing strategy this release does not know: update "
+            "the host before using the pair again",
+        ),
+        # The host's own: `invalid_sas` (_switchboard.Link.sas) and `disabled`
+        # (_switchboard.KeyringPairs.require).
+        (
+            rf"pair {_NAME}: the store holds a SAS of another shape",
+            "the store holds a SAS of another shape, which the host never shows",
+        ),
+        (re.escape("this profile keeps no pairs"), "this profile keeps no pairs"),
+    )
+)
 
 # Shown in place of: C0 and C1 controls, DEL, unpaired surrogates, line and paragraph separators,
 # and the controls that reorder text (bidirectional marks, embeddings, overrides and isolates).
@@ -277,23 +428,28 @@ def has_unsafe(text: str) -> bool:
 
 def refusal(words: str, exc: _switchboard.PairFailed) -> str:
     """What the host says of a refusal of the pairing library's that ends nothing: its own
-    ``words``, the library's state, and then the library's own sentence, which says why. With no
-    state, that sentence is the only reason given: "pairing needs the `cryptography` package"
-    (sb ``pairing.py:297-299``).
+    ``words``, the library's state, and then why, in the host's words. With no state, the
+    library's sentence is the only reason it gives: "pairing needs the `cryptography` package"
+    (sb ``pairing.py:297-299``), which the host says as "this computer could not load the
+    encryption library pairing needs (`cryptography`)".
 
-    The sentence is made safe as a note is, and cut to :data:`REFUSAL_LIMIT` characters: it can
-    quote what the other side wrote in the pair room (a healing strategy, sb
-    ``pairing.py:2136-2140``). As read in switchboard 2.6.0's ``pairing.py``, a sentence that
-    reaches here names at most the pair, a time, a value read in the pair room, the store or a file
-    in it, and a value read there. A file that is not UTF-8 is named with the first byte that is
-    not, which the library, writing ASCII, never writes. None quotes the code, the pair secret, a
-    token or the SAS. The host's own (:meth:`_switchboard.Link.sas`) names the pair only.
-
-    The state is made safe too, and cut to :data:`STATE_LIMIT`: the library's own are words, but
-    one it takes from a record of the store (sb ``pairing.py:2264-2265``) is whatever that holds."""
-    said = sanitize(str(exc), REFUSAL_LIMIT)
-    head = f"{words} ({sanitize(exc.state, STATE_LIMIT) or 'error'})"
-    return f"{head}: {said}" if said else head
+    No text of the library's is repeated. Its sentence can name the file that holds the pair
+    secret (sb ``pairing.py:938``), and quote what the other side wrote in the pair room (a
+    healing strategy, sb ``pairing.py:2136-2140``) or what a record of the store holds; and what a
+    later 2.6 release says is not known here. So the sentence is matched whole against
+    :data:`_REFUSALS`, each of whose variable parts is bounded, and stands for that entry's words;
+    any other gives :data:`UNREPEATED`. The state is repeated only when it is one of
+    :data:`STATES`, the library's own words, and is ``error`` otherwise: one the library takes from
+    a record of the store (sb ``pairing.py:2264-2265``) is whatever that holds. A refusal with no
+    sentence gives the host's words and the state alone. :func:`sanitize` is not used: it would
+    make the text safe to show, not safe to repeat."""
+    word = exc.state if isinstance(exc.state, str) and exc.state in STATES else "error"
+    head = f"{words} ({word})"
+    sentence = str(exc)
+    if not sentence.strip():
+        return head
+    said = next((own for pattern, own in _REFUSALS if pattern.fullmatch(sentence)), UNREPEATED)
+    return f"{head}: {said}"
 
 
 def outcome(switchboard_state: str) -> str:

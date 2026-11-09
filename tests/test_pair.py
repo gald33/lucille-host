@@ -13,6 +13,7 @@ import io
 import json
 import os
 import queue
+import random
 import re
 import select
 import termios
@@ -24,6 +25,7 @@ from typing import Any
 
 import httpx
 import pytest
+from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
 from keyring.backends.fail import Keyring as FailKeyring
 from switchboard import client, pairing
 from switchboard.testing import hub
@@ -221,28 +223,461 @@ def test_sanitize_replaces_every_unsafe_character() -> None:
     assert link.sanitize("x" * 300) == "x" * 200
 
 
-def test_a_refusal_shows_the_library_sentence_made_safe() -> None:
-    # The library's sentence follows the host's words and the library's state. It can quote what
-    # the other side wrote (a healing strategy read in the pair room, sb pairing.py:2136-2140),
-    # with repr, which escapes a control but bounds no length: the sentence is cut short.
-    strategy = "x\x1b[2J\u202ey" + "a" * 1000
-    sentence = f"the other side moved this pair on with healing strategy {strategy!r}, which"
-    said = link.refusal("pair p cannot be used", _switchboard.PairFailed("upgrade", sentence))
-    head = "pair p cannot be used (upgrade): "
-    assert said == head + sentence[: link.REFUSAL_LIMIT]
-    assert "'x\\x1b[2J\\u202ey" in said and not link.has_unsafe(said)
-    # A sentence or a state the library read from a record of the store is whatever the record
-    # holds (sb pairing.py:2264-2265): each is made safe as a pair's note is.
-    refused = _switchboard.PairFailed("odd\x1b[2J\x00" + "s" * 100, "m\x1b[2J\u202en\x00")
-    assert link.refusal("h", refused) == f"h (odd [2J {'s' * 24}): m [2J n"
-    refused = _switchboard.PairFailed("\x00", "m")
-    assert link.refusal("h", refused) == "h (error): m"
-    # A refusal that says nothing more gives the host's words and the state alone.
-    for blank in ("", " \x1b "):
+# What the host says in place of each sentence of switchboard 2.6.0's that a refusal ending nothing
+# can carry (link.refusal), and in place of any other. Written out here, not read from link.py, so
+# that a change to one of them is a change to this test too.
+NO_CRYPTOGRAPHY = (
+    "this computer could not load the encryption library pairing needs (`cryptography`)"
+)
+FILE_NOT_JSON = (
+    "the pair's file in the host's store folder is not valid JSON; it holds the pair secret, so "
+    "it is left as it is: move it aside"
+)
+OTHER_FILE_NOT_JSON = (
+    "a file the pairing library keeps in the host's store folder is not valid JSON; it is left "
+    "as it is: move it aside"
+)
+NOT_A_RECORD = "the pair's record in the host's store is damaged: it is not a pair record"
+OTHER_PROTOCOL = (
+    "the pair's record in the host's store is for a pairing protocol this release does not speak"
+)
+MISSING_FIELD = "the pair's record in the host's store is missing a field"
+UNKNOWN_ROLE = (
+    "the pair's record in the host's store names a role or a healing strategy this release does "
+    "not know"
+)
+BAD_PENDING = "an unfinished pairing in the host's store is damaged"
+BAD_NAME = "the pair's record in the host's store holds a name pairing does not allow"
+BAD_GENERATION = (
+    "the pair's record in the host's store holds a work-room number that cannot be used"
+)
+BAD_KEY = (
+    "the code's handshake key cannot be used: the code was tampered with, or was not made by a "
+    "pairing library"
+)
+TAMPERED = (
+    "the pair room holds a record that is not what either side wrote: the hub is serving "
+    "something it was not given, and nothing was changed"
+)
+UPGRADE = (
+    "the pair was moved on with a healing strategy this release does not know: update the host "
+    "before using the pair again"
+)
+ODD_SAS = "the store holds a SAS of another shape, which the host never shows"
+NO_PAIRS = "this profile keeps no pairs"
+UNREPEATED = "the pairing library refused it for a reason this host does not repeat"
+HOST_WORDS = frozenset(
+    {
+        NO_CRYPTOGRAPHY,
+        FILE_NOT_JSON,
+        OTHER_FILE_NOT_JSON,
+        NOT_A_RECORD,
+        OTHER_PROTOCOL,
+        MISSING_FIELD,
+        UNKNOWN_ROLE,
+        BAD_PENDING,
+        BAD_NAME,
+        BAD_GENERATION,
+        BAD_KEY,
+        TAMPERED,
+        UPGRADE,
+        ODD_SAS,
+        NO_PAIRS,
+        UNREPEATED,
+    }
+)
+# The library's own state words, and the host's `invalid_sas`, which a refusal repeats.
+STATE_WORDS = frozenset(
+    {
+        "error",
+        "store",
+        "disabled",
+        "unconfirmed",
+        "name_taken",
+        "tampered",
+        "upgrade",
+        "pending",
+        "unreachable",
+        "conflict",
+        "invalid_sas",
+        "already_redeemed",
+        "aborted",
+        "superseded",
+        "expired",
+        "never_confirmed",
+        "unsent",
+        "wrong_hub",
+        "ended",
+        "ended_by_peer",
+        "unknown",
+    }
+)
+
+MAC_STORE = "/Users/x/Library/Application Support/lucille-host/default/state/pairs"
+LINUX_STORE = "/home/x/.local/state/lucille-host/default/pairs"
+NOT_OVERWRITTEN = "it holds a pair secret, so it is not overwritten — move it aside"
+# Each sentence of switchboard 2.6.0's that the host has words for, as the library writes it, with
+# its variable parts filled in as a host call can meet them (pairing.py, at the line given).
+LIBRARY_SENTENCES = (
+    # :299, accept and resolve, with `cryptography` not loaded.
+    ("pairing needs the `cryptography` package", NO_CRYPTOGRAPHY),
+    # :938, the file store's record of the pair, or another of its files, that is not JSON.
+    (
+        f"{MAC_STORE}/pair-ab12cd.json is not valid JSON (Expecting property name enclosed in "
+        f"double quotes: line 1 column 2 (char 1)); {NOT_OVERWRITTEN}",
+        FILE_NOT_JSON,
+    ),
+    (
+        f"{LINUX_STORE}/p.json is not valid JSON ('utf-8' codec can't decode byte 0xff in "
+        f"position 0: invalid start byte); {NOT_OVERWRITTEN}",
+        FILE_NOT_JSON,
+    ),
+    (
+        f"{LINUX_STORE}/p.json is not valid JSON ('utf-8' codec can't decode bytes in position "
+        f"4-5: unexpected end of data); {NOT_OVERWRITTEN}",
+        FILE_NOT_JSON,
+    ),
+    (
+        f"{MAC_STORE}/pending/p.json is not valid JSON ('ascii' codec can't decode byte 0xc3 in "
+        f"position 3: ordinal not in range(128)); {NOT_OVERWRITTEN}",
+        OTHER_FILE_NOT_JSON,
+    ),
+    (
+        f"{LINUX_STORE}/voided/p-2.json is not valid JSON (Extra data: line 1 column 3 (char 2)); "
+        f"{NOT_OVERWRITTEN}",
+        OTHER_FILE_NOT_JSON,
+    ),
+    # :729, :731, :740, :742, a record read from the keyring item or a file of the file store.
+    ("pair 'pair-ab12cd' in the keyring is not a pair record", NOT_A_RECORD),
+    (f"{MAC_STORE}/pair-ab12cd.json is not a pair record", NOT_A_RECORD),
+    (
+        "pair 'p' in the keyring is pairing protocol 2; this release speaks 1. Upgrade "
+        "agent-switchboard rather than editing it.",
+        OTHER_PROTOCOL,
+    ),
+    (
+        f"{LINUX_STORE}/p.json is pairing protocol None; this release speaks 1. Upgrade "
+        "agent-switchboard rather than editing it.",
+        OTHER_PROTOCOL,
+    ),
+    (
+        "pair 'p' in the keyring is missing a field (PairRecord.__init__() missing 1 required "
+        "positional argument: 'secret')",
+        MISSING_FIELD,
+    ),
+    (
+        f"{MAC_STORE}/p.json is missing a field (PairRecord.__init__() missing 3 required "
+        "positional arguments: 'role', 'secret', and 'transcript')",
+        MISSING_FIELD,
+    ),
+    (
+        "pair 'p' in the keyring names role 'boss' / strategy 'derive', which this release does "
+        "not know — upgrade.",
+        UNKNOWN_ROLE,
+    ),
+    # :787, :792, an unfinished pairing (the host never starts one).
+    ("pairing 'p' in the keyring is not a protocol 1 pending handshake", BAD_PENDING),
+    (
+        f"{LINUX_STORE}/pending/p.json is missing a field (PendingHandshake.__init__() missing 1 "
+        "required positional argument: 'secret')",
+        BAD_PENDING,
+    ),
+    # :375, the name in a record of the store.
+    (
+        "'Pair A' is not a usable pair name: use lowercase letters, digits and dashes, starting "
+        "with a letter or digit, at most 32 characters.",
+        BAD_NAME,
+    ),
+    # :442, the generation in a record of the store.
+    ("invalid work-room generation '7'", BAD_GENERATION),
+    ("invalid work-room generation -1", BAD_GENERATION),
+    # :340, accept, with a code whose handshake key is a low-order point.
+    (
+        "the other side's handshake key is not a usable X25519 key — the answer was tampered with "
+        "or written by something that is not a switchboard client. Nothing was paired.",
+        BAD_KEY,
+    ),
+    # :2124, :2131, :2136, a resolve that read the pair room.
+    (
+        "the pair room holds a record this pair's key cannot open — the hub is serving something "
+        "it was not given. Nothing was changed.",
+        TAMPERED,
+    ),
+    (
+        "the pair room's initiator record is not what was written there — refusing it as "
+        "tampering.",
+        TAMPERED,
+    ),
+    (
+        "the other side moved this pair on with healing strategy 'rotate', which this release "
+        "does not know. Upgrade agent-switchboard here before using the pair again.",
+        UPGRADE,
+    ),
+    (
+        "the other side moved this pair on with healing strategy None, which this release does "
+        "not know. Upgrade agent-switchboard here before using the pair again.",
+        UPGRADE,
+    ),
+    # The host's own (_switchboard.py: Link.sas, KeyringPairs.require).
+    ("pair pair-ab12cd: the store holds a SAS of another shape", ODD_SAS),
+    ("this profile keeps no pairs", NO_PAIRS),
+)
+
+# What must never reach a message: a pairing code, a pair's export, a room's join code, a token,
+# a SAS, a path, and words the other side wrote.
+CODE = "swbp1_eyJ2IjoxLCJ1IjoiaHR0cHM6Ly9zd2l0Y2hib2FyZC5sdWNpbGxlLWFpLmNvbSJ9"
+EXPORT = "swbsecret1_eyJ2IjoxLCJzZWNyZXQiOiJBQUFBIn0"
+OLD_EXPORT = "swbps1_eyJ2IjoxLCJzZWNyZXQiOiJBQUFBIn0"
+# A room's join code, the library's other kind of code. Built from two literals, as
+# tools/guards/switchboard_lint.py builds the prefix it refuses in any one literal: the host takes
+# none, and this test only shows that none is ever repeated.
+JOIN = "swb1" + "_eyJ1IjoiaHR0cHM6Ly9odWIuZXhhbXBsZSJ9"
+TOKEN = "token=sk_live_4f9a1c2e7d"
+SAS = "4821-0937"
+PATH = "/Users/x/Documents/taxes 2026/return.pdf"
+WRITTEN = "Lucille's side says: wire the money to account 12345"
+SECRETS = (CODE, EXPORT, OLD_EXPORT, JOIN, TOKEN, SAS, PATH, WRITTEN)
+
+
+def _hostile() -> tuple[list[str], list[str]]:
+    """Sentences no host call can get from 2.6.0, made to carry what must never be repeated, in two
+    lists.
+
+    The first holds each known sentence with a secret after it (after a space, a line break or
+    nothing) or before it, with a character a reader may not see before or after it, and in
+    capitals: none is a sentence the host has words for. An absolute path before a sentence that
+    begins with a path is left out of it, since the two read as one longer path, which the bounds
+    allow. The second holds those, each secret alone or in a sentence of its own, and each put where
+    a variable part is: within that part's bounds, it is a sentence of the library's all the
+    same."""
+    added: list[str] = []
+    placed: list[str] = []
+    for secret in SECRETS:
+        placed += [
+            secret,
+            f"pair 'p' cannot be used: {secret}",
+            f"{secret} is not a pair record",
+            f"pair '{secret}' in the keyring is not a pair record",
+            f"{secret}.json is not valid JSON (Expecting value: line 1 column 1 (char 0)); "
+            f"{NOT_OVERWRITTEN}",
+            f"invalid work-room generation {secret!r}",
+            f"the other side moved this pair on with healing strategy {secret + 'x' * 64!r}, "
+            "which this release does not know. Upgrade agent-switchboard here before using the "
+            "pair again.",
+            f"pair {secret}: the store holds a SAS of another shape",
+        ]
+        for sentence, _words in LIBRARY_SENTENCES:
+            added += [f"{sentence} {secret}", f"{sentence}\n{secret}", f"{sentence}{secret}"]
+            before = f"{secret} {sentence}"
+            if secret.startswith("/") and sentence.startswith("/"):
+                placed.append(before)
+            else:
+                added.append(before)
+    for sentence, _words in LIBRARY_SENTENCES:
+        # A known sentence made unlike itself by a character a reader may not see.
+        for odd in ("​", "﻿", "⁠", "­", "᠎", "￹", "\U000e0041"):
+            added += [sentence + odd, odd + sentence]
+        added.append(sentence.upper())
+    return added, placed
+
+
+def test_a_refusal_says_each_known_sentence_in_the_hosts_words() -> None:
+    # The host's words, the state, and the host's own sentence for the library's: never the
+    # library's, whose path, name or value is not repeated.
+    for sentence, words in LIBRARY_SENTENCES:
+        refused = _switchboard.PairFailed("error", sentence)
+        assert link.refusal("pair p cannot be used", refused) == (
+            f"pair p cannot be used (error): {words}"
+        ), sentence
+        for part in re.findall(r"/[^ ]+|'[^']*'", sentence):
+            assert part not in words, (part, sentence)
+
+
+def test_a_refusal_repeats_no_text_of_the_library() -> None:
+    # A sentence the host has no words for, however close to one it is, is never repeated: the
+    # host says it does not repeat it.
+    added, placed = _hostile()
+    assert len(added) > 1000 and len(placed) > 50
+    for sentence in added:
+        said = link.refusal("the code was not answered", _switchboard.PairFailed("error", sentence))
+        assert said == f"the code was not answered (error): {UNREPEATED}", sentence
+    for sentence in placed:
+        said = link.refusal("the code was not answered", _switchboard.PairFailed("error", sentence))
+        assert said in {
+            f"the code was not answered (error): {UNREPEATED}",
+            # A secret put in a variable part within its bounds is a sentence of the library's
+            # all the same, said in the host's words, which hold none of it.
+            *(f"the code was not answered (error): {words}" for words in HOST_WORDS),
+        }, sentence
+        assert not any(secret in said for secret in SECRETS), sentence
+    # Each variable part past its bounds: a file outside the store folder, or not absolute, or
+    # with a line break, a control or a name of over 255 characters in its path; a name the
+    # library does not allow; a protocol that is not a number; a work room or a strategy that is
+    # not a short word; a reason a file is not JSON that is not Python's; a number written in
+    # digits other than 0 to 9.
+    for sentence in (
+        f"pairing needs the `cryptography` package {CODE}",
+        f"{MAC_STORE}/p.json is not a pair record. {TOKEN}",
+        SAS,
+        PATH,
+        f"pair 'p' in the keyring is pairing protocol {EXPORT!r}; this release speaks 1. "
+        "Upgrade agent-switchboard rather than editing it.",
+        "/Users/x/Documents/p.json is not a pair record",
+        "pairs/p.json is not a pair record",
+        f"{CODE}/pairs/p.json is not a pair record",
+        "/Users/x\n/pairs/p.json is not a pair record",
+        "/Users/x\x1b[2J/pairs/p.json is not a pair record",
+        f"/Users/{'x' * 256}/pairs/p.json is not a pair record",
+        f"{MAC_STORE}/P.json is not a pair record",
+        "pair 'P' in the keyring is not a pair record",
+        "pair 'p' in the keyring is pairing protocol '2'; this release speaks 1. Upgrade "
+        "agent-switchboard rather than editing it.",
+        "invalid work-room generation 'Seven'",
+        f"invalid work-room generation '{'7' * 33}'",
+        f"the other side moved this pair on with healing strategy '{'r' * 33}', which this "
+        "release does not know. Upgrade agent-switchboard here before using the pair again.",
+        f"{MAC_STORE}/p.json is not valid JSON ({TOKEN}); {NOT_OVERWRITTEN}",
+        "pair P: the store holds a SAS of another shape",
+        "invalid work-room generation \u0663",
+        f"{MAC_STORE}/p.json is not valid JSON (Expecting value: line \u0661 column 1 (char 0)); "
+        f"{NOT_OVERWRITTEN}",
+    ):
+        assert link.refusal("h", _switchboard.PairFailed("error", sentence)) == (
+            f"h (error): {UNREPEATED}"
+        ), sentence
+
+
+def test_a_refusal_repeats_only_the_librarys_own_states() -> None:
+    for word in sorted(STATE_WORDS):
+        refused = _switchboard.PairFailed(word, "pairing needs the `cryptography` package")
+        assert link.refusal("h", refused) == f"h ({word}): {NO_CRYPTOGRAPHY}", word
+    # A state the library read from a record of the store is whatever the record holds
+    # (sb pairing.py:2264-2265): any but the library's own words is said as `error`.
+    for odd in ("", "odd", "Expired", "expired ", "aborted\x1b[2J", CODE, SAS, "x" * 100):
+        refused = _switchboard.PairFailed(odd, "this profile keeps no pairs")
+        assert link.refusal("h", refused) == f"h (error): {NO_PAIRS}", odd
+
+
+def test_a_refusal_with_no_sentence_gives_the_state_alone() -> None:
+    for blank in ("", " ", "\n"):
         refused = _switchboard.PairFailed("error", blank)
         assert link.refusal("the code was not answered", refused) == (
             "the code was not answered (error)"
         )
+    # A sentence of nothing but a character a terminal does not show is not blank: it is one the
+    # host has no words for.
+    refused = _switchboard.PairFailed("error", "\x1b")
+    assert link.refusal("h", refused) == f"h (error): {UNREPEATED}"
+
+
+def test_whatever_the_library_says_a_refusal_is_one_of_the_hosts_sentences() -> None:
+    # Sentences made at random from pieces of the known ones, secrets and characters a terminal
+    # treats specially: each refusal is the host's words, one of its states and one of its
+    # sentences, and holds no secret.
+    chance = random.Random(20261109)
+    pieces = [sentence for sentence, _words in LIBRARY_SENTENCES]
+    pieces += [part for sentence in pieces for part in re.split(r"(\W)", sentence) if part]
+    pieces += list(SECRETS) + ["\x1b[2J", "‮", "‍", "\n", "\x00", "'", "(", ")", " "]
+    states = sorted(STATE_WORDS) + ["", "odd", CODE, "\x1b[2J"]
+    for _ in range(3000):
+        sentence = "".join(chance.choice(pieces) for _ in range(chance.randint(0, 6)))
+        state = chance.choice(states)
+        said = link.refusal("h", _switchboard.PairFailed(state, sentence))
+        head, _, rest = said.partition(": ")
+        assert head in {f"h ({word})" for word in STATE_WORDS}, (state, sentence)
+        assert rest in HOST_WORDS or (said == head and not sentence.strip()), (state, sentence)
+        assert not any(secret in said for secret in SECRETS), (state, sentence)
+
+
+def test_the_library_says_each_sentence_the_host_has_words_for(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Each sentence, as the release of switchboard installed here writes it, reached the way a host
+    # call reaches it: the host has words for every one, so a release that words one differently
+    # is found here rather than said as one the host does not repeat.
+    def said(call: Any, *args: Any) -> str:
+        with pytest.raises(pairing.PairingError) as raised:
+            call(*args)
+        return link.refusal("h", _switchboard._failed(raised.value))
+
+    with monkeypatch.context() as patch:
+        patch.setattr(pairing, "AVAILABLE", False)
+        assert said(pairing.handshake_room, b"s" * 32) == f"h (error): {NO_CRYPTOGRAPHY}"
+    # The file store, in the host's own folder for it (`<state>/pairs`).
+    folder = tmp_path / "state" / "pairs"
+    files = _switchboard.FilePairs(pairing.PairStore(folder, env={}))
+    (folder / "pending").mkdir(parents=True)
+    (folder / "voided").mkdir()
+    (folder / "p.json").write_text("{nope")
+    assert said(files.get, "p") == f"h (error): {FILE_NOT_JSON}"
+    (folder / "p.json").write_bytes(b"\xff")
+    assert said(files.get, "p") == f"h (error): {FILE_NOT_JSON}"
+    (folder / "pending" / "p.json").write_text("[")
+    assert said(files.pending, "p") == f"h (error): {OTHER_FILE_NOT_JSON}"
+    (folder / "voided" / "p.json").write_text("")
+    assert said(files.verdict, "p") == f"h (error): {OTHER_FILE_NOT_JSON}"
+    good = pairing.PairRecord(
+        name="p", role=pairing.RESPONDER, secret="c2VjcmV0", transcript="dGg", url="https://x"
+    ).to_json()
+    records: list[tuple[Any, str]] = [
+        ([], NOT_A_RECORD),
+        ({**good, "v": 2}, OTHER_PROTOCOL),
+        ({"v": 1}, MISSING_FIELD),
+        ({**good, "role": "boss"}, UNKNOWN_ROLE),
+        ({**good, "strategy": "rotate"}, UNKNOWN_ROLE),
+        ({**good, "name": "Pair A"}, BAD_NAME),
+    ]
+    for data, words in records:
+        (folder / "p.json").write_text(json.dumps(data))
+        assert said(files.get, "p") == f"h (error): {words}", data
+    for data in ([], {"v": 1}):
+        (folder / "pending" / "p.json").write_text(json.dumps(data))
+        assert said(files.pending, "p") == f"h (error): {BAD_PENDING}", data
+
+    # The keyring item, whose records the host names `pair '<name>' in the keyring`.
+    class Item:
+        def __init__(self) -> None:
+            self.doc: dict[str, Any] = {"pairs": {"records": {}, "pending": {}, "verdicts": {}}}
+
+        def read(self) -> dict[str, Any]:
+            return self.doc
+
+    item = Item()
+    keyring = _switchboard.KeyringPairs(item)  # type: ignore[arg-type]
+    for data, words in records:
+        item.doc["pairs"]["records"]["p"] = data
+        assert said(keyring.get, "p") == f"h (error): {words}", data
+    for data in ([], {"v": 1}):
+        item.doc["pairs"]["pending"]["p"] = data
+        assert said(keyring.pending, "p") == f"h (error): {BAD_PENDING}", data
+    keyring.enabled = False
+    assert said(keyring.require) == f"h (disabled): {NO_PAIRS}"
+    # A generation of the record that is not one.
+    for generation in ("7", -1, True, 1.5):
+        found = said(pairing.work_room, b"s" * 32, generation)
+        assert found == f"h (error): {BAD_GENERATION}", generation
+    # A code whose handshake key is a low-order point, answered.
+    mine = X25519PrivateKey.generate()
+    assert said(pairing._exchange, mine, b"\x00" * 32) == f"h (error): {BAD_KEY}"
+    # The pair room's records, read by a resolve.
+    side = pairing._side_value(pairing.PairRecord(**good), now=1.0)
+    key = pairing.SIDE_PREFIX + pairing.RESPONDER
+    for entry, state_word, words in (
+        ({"key": key, "unreadable": True}, "tampered", TAMPERED),
+        ({"key": key, "value": {**side, "role": pairing.INITIATOR}}, "tampered", TAMPERED),
+        ({"key": key, "value": {**side, "s": "rotate"}}, "upgrade", UPGRADE),
+        ({"key": key, "value": {**side, "s": None}}, "upgrade", UPGRADE),
+    ):
+        assert said(pairing._read_sides, [entry]) == f"h ({state_word}): {words}", entry
+
+
+def test_spec_gives_every_sentence_a_refusal_can_end_with() -> None:
+    # spec/CLI.md section 5 lists what the host says in place of the library's sentence: the
+    # sentences of link.py's table, and the one for any other, which are this test's.
+    assert {words for _pattern, words in link._REFUSALS} | {link.UNREPEATED} == HOST_WORDS
+    text = " ".join((Path(__file__).parents[1] / "spec" / "CLI.md").read_text().split())
+    for words in sorted(HOST_WORDS):
+        assert f"| {words} |" in text, words
 
 
 def test_pair_refuses_while_held(cli: HostCli, tmp_path: Path) -> None:

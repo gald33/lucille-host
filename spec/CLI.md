@@ -141,13 +141,34 @@ They are the same with `--json` as without it.
 - For `usage`, the `message` is always "the command line could not be parsed; standard error says why":
   the parser's own words, which can quote the command line, are on standard error only.
 - For `answer_failed` and `pair_unusable`, the `message` is the host's words, the pairing library's state in
-  parentheses (`error` when it gave none), then, when there is one, a colon and the library's sentence, which
-  says why (for `invalid_sas`, the host's own): ``the code was not answered (error): pairing needs the
-  `cryptography` package``. The state and the sentence are made safe as `pair_code`'s `note` is, and kept to
-  at most 32 and 600 characters. As read in switchboard 2.6.0, the library's sentence names at most the pair,
-  a time, the store or a file in it, and a value read there or in the pair room, and never the code, a token,
-  a key or the SAS. `status` gives a message of the same form in `pair.message` when its `code` is
-  `pair_unusable`.
+  parentheses, then a colon and why, in the host's words: ``the code was not answered (error): this computer
+  could not load the encryption library pairing needs (`cryptography`)``. The host repeats no text of the
+  library's: the library's sentence can name the file that holds the pair secret, or quote what the other
+  side wrote. The state is one of the library's own words (or the host's `invalid_sas`), and `error` for none
+  or any other. The reason is one of the sentences below, each standing for one sentence of switchboard
+  2.6.0's, which must match it whole, its variable parts (an absolute path ending in a folder named `pairs`,
+  a pair name, a short value) bounded; any other sentence of the library's, a sentence of a later release
+  included, gives the last. A refusal with no sentence ends after the state. `status` gives a message of the
+  same form in `pair.message` when its `code` is `pair_unusable`.
+
+  | The library refused because | Why, as the host says it |
+  |---|---|
+  | `cryptography` did not load | this computer could not load the encryption library pairing needs (`cryptography`) |
+  | the pair's file of the file store is not JSON | the pair's file in the host's store folder is not valid JSON; it holds the pair secret, so it is left as it is: move it aside |
+  | another of its files is not JSON | a file the pairing library keeps in the host's store folder is not valid JSON; it is left as it is: move it aside |
+  | the pair's record is not a record | the pair's record in the host's store is damaged: it is not a pair record |
+  | the record is of another protocol | the pair's record in the host's store is for a pairing protocol this release does not speak |
+  | the record lacks a field | the pair's record in the host's store is missing a field |
+  | the record names a role or strategy it does not know | the pair's record in the host's store names a role or a healing strategy this release does not know |
+  | an unfinished pairing in the store is damaged | an unfinished pairing in the host's store is damaged |
+  | the record's name is not one it allows | the pair's record in the host's store holds a name pairing does not allow |
+  | the record's work-room number cannot be used | the pair's record in the host's store holds a work-room number that cannot be used |
+  | the code's handshake key is a low-order point | the code's handshake key cannot be used: the code was tampered with, or was not made by a pairing library |
+  | the pair room holds a record neither side wrote (`tampered`) | the pair room holds a record that is not what either side wrote: the hub is serving something it was not given, and nothing was changed |
+  | a record in the pair room names a healing strategy it does not know (`upgrade`) | the pair was moved on with a healing strategy this release does not know: update the host before using the pair again |
+  | the host's store holds a SAS of another shape (`invalid_sas`, the host's own) | the store holds a SAS of another shape, which the host never shows |
+  | the profile keeps no pairs (`disabled`, the host's own) | this profile keeps no pairs |
+  | anything else | the pairing library refused it for a reason this host does not repeat |
 - An unexpected error (a bug) writes its traceback to standard error and an `error` object with `code`
   `internal`, and exits 1.
 
