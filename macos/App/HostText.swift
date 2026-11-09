@@ -190,8 +190,8 @@ enum HostText {
     static let welcomeText = """
         \(appPurpose)
 
-        Click its icon near the top right of your screen, by the clock: a small computer, or a \
-        pause sign while Lucille is paused. Everything \(appName) does is in that menu.
+        Click its icon near the top right of your screen, by the clock: a capsule in two halves, \
+        with a pause badge while Lucille is paused. Everything \(appName) does is in that menu.
 
         If you can't see the icon, your menu bar may be too full. Quit another app that has an \
         icon there, and it will show.

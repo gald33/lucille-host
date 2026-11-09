@@ -17,13 +17,16 @@ import hashlib
 import io
 import json
 import os
+import plistlib
 import re
 import shlex
 import shutil
 import stat
+import struct
 import subprocess
 import sys
 import zipfile
+import zlib
 from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
@@ -893,6 +896,130 @@ def test_the_signature_check_holds_every_signed_file_to_the_pin(
         check_app.check_signature(app, checker)
         assert len(checker.failures) == 1, path
         assert checker.failures[0].startswith(f"{path.relative_to(app.parent)} is signed ad hoc")
+
+
+def _grey_glyph() -> bytes:
+    """An 18 pixel PNG, every pixel grey: not a template image."""
+
+    def chunk(kind: bytes, body: bytes) -> bytes:
+        crc = struct.pack(">I", zlib.crc32(kind + body))
+        return struct.pack(">I", len(body)) + kind + body + crc
+
+    rows = b"".join(b"\0" + bytes((128, 128, 128, 255)) * 18 for _ in range(18))
+    header = struct.pack(">IIBBBBB", 18, 18, 8, 6, 0, 0, 0)
+    body = chunk(b"IHDR", header) + chunk(b"IDAT", zlib.compress(rows)) + chunk(b"IEND", b"")
+    return b"\x89PNG\r\n\x1a\n" + body
+
+
+ICON_FAULTS = [
+    None,
+    "a grey glyph pixel",
+    "iconutil refuses",
+    "iconutil writes nothing",
+    "AppKit finds no glyph",
+    "AppKit finds no @2x file",
+]
+
+
+@pytest.mark.parametrize("fault", ICON_FAULTS)
+def test_the_bundle_check_holds_the_icons_and_has_macos_read_them(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    fault: str | None,
+) -> None:
+    # With codesign, iconutil and osascript stubbed, a bundle the build would make passes. A glyph
+    # that is not a template, an icon file iconutil refuses or reads into no file, and a glyph
+    # AppKit does not load from the bundle as two files, of 18 and 36 pixels, are one failure each.
+    app = tmp_path / f"{PINS.app_name}.app"
+    for rel in EXPECTED_MACHO:
+        (app / rel).parent.mkdir(parents=True, exist_ok=True)
+        (app / rel).write_bytes(b"\xcf\xfa\xed\xfe" + bytes(28))
+    plist = build_app.info_plist(PINS, build_app.BundleVersions("0.1.0", "1"))
+    (app / "Contents" / "Info.plist").write_bytes(plistlib.dumps(plist))
+    resources = app / "Contents" / "Resources"
+    check_app.icons.write_icons(resources)
+    if fault == "a grey glyph pixel":
+        (resources / "MenuBarTemplate.png").write_bytes(_grey_glyph())
+    ran: list[list[str]] = []
+
+    def run(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        if argv[:3] == ["codesign", "--display", "--verbose=2"]:
+            named = f"Identifier={check_app.expected_identifier(app, Path(argv[-1]), PINS)}"
+            text = _codesign_plain().replace(f"Identifier={PINS.runtime_id}", named)
+            return subprocess.CompletedProcess(argv, 0, "", text)
+        ran.append(argv)
+        if argv[0] == "iconutil":
+            iconset = Path(argv[4])
+            iconset.mkdir()
+            if fault != "iconutil writes nothing":
+                png = (resources / "MenuBarTemplate.png").read_bytes()
+                (iconset / "icon_16x16.png").write_bytes(png)
+            code = 1 if fault == "iconutil refuses" else 0
+            said = "iconutil: said this" if code else "iconutil: a warning on success"
+            return subprocess.CompletedProcess(argv, code, "", said)
+        assert argv[0] == "osascript", argv
+        lines = check_app.glyph_loader_lines()
+        if fault == "AppKit finds no glyph":
+            lines[1] = "MenuBarPausedTemplate none"
+        elif fault == "AppKit finds no @2x file":
+            lines[2] = "MenuBarAttentionTemplate 18x18 18x18"
+        return subprocess.CompletedProcess(argv, 0, "\n".join(lines) + "\n", "")
+
+    monkeypatch.setattr("subprocess.run", run)
+    checker = check_app.Checker()
+    check_app.check_bundle(app, checker)
+    shown = capsys.readouterr().out
+    assert [argv[0] for argv in ran] == ["iconutil", "osascript"]
+    argv = ran[0]
+    assert argv[:4] == ["iconutil", "-c", "iconset", "-o"]
+    assert argv[4].endswith("/AppIcon.iconset") and not argv[4].startswith(str(app))
+    assert argv[5:] == [str(resources / "AppIcon.icns")]
+    # What iconutil said is printed whether or not it passed, so a warning is not lost.
+    said = (
+        "iconutil: said this" if fault == "iconutil refuses" else "iconutil: a warning on success"
+    )
+    assert said in shown
+    argv = ran[1]
+    assert argv[:5] == ["osascript", "-l", "JavaScript", "-e", check_app.GLYPH_LOADER]
+    assert argv[5:] == [str(app), *check_app.icons.GLYPHS]
+    assert "MenuBarTemplate 18x18 18x18,36x36" in shown
+    failed = {
+        None: None,
+        "a grey glyph pixel": "the app icon and the menu bar glyphs are",
+        "iconutil refuses": "iconutil, macOS's own reader, reads",
+        "iconutil writes nothing": "iconutil, macOS's own reader, reads",
+        "AppKit finds no glyph": "AppKit loads each menu bar glyph from the bundle",
+        "AppKit finds no @2x file": "AppKit loads each menu bar glyph from the bundle",
+    }[fault]
+    if failed is None:
+        assert checker.failures == []
+    else:
+        assert len(checker.failures) == 1, checker.failures
+        assert checker.failures[0].startswith(failed), checker.failures
+
+
+def test_the_glyph_loader_asks_appkit_what_the_app_asks() -> None:
+    # The script cannot run here, so its text is pinned: the bundle at the path it is given, each
+    # glyph by its name through NSBundle's imageForResource:, and each representation's pixels.
+    script = check_app.GLYPH_LOADER
+    assert script.startswith("ObjC.import('AppKit');\nfunction run(argv) {\n")
+    for part in (
+        "$.NSBundle.bundleWithPath(argv[0])",
+        "argv.slice(1).map(",
+        "bundle.imageForResource(name)",
+        "image.isNil()",
+        "image.representations",
+        "rep.pixelsWide + 'x' + rep.pixelsHigh",
+        "image.size.width + 'x' + image.size.height",
+        "pixels.sort().join(',')",
+    ):
+        assert part in script, part
+    assert check_app.glyph_loader_lines() == [
+        "MenuBarTemplate 18x18 18x18,36x36",
+        "MenuBarPausedTemplate 18x18 18x18,36x36",
+        "MenuBarAttentionTemplate 18x18 18x18,36x36",
+    ]
 
 
 def test_the_checks_run_the_host_with_the_apps_flags(tmp_path: Path) -> None:

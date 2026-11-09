@@ -16,7 +16,15 @@ The bundle as built:
 - ``bundle``: no symbolic link in the bundle; its Mach-O files are exactly the expected five
   (:data:`RUNTIME_MACHO` and the app's executable); the app and every one of them is signed ad
   hoc by this build, not merely by the linker, with no Team ID and the identifier
-  ``build_app.signing_identifier`` gave it (:func:`codesign_problems`).
+  ``build_app.signing_identifier`` gave it (:func:`codesign_problems`). The icons are the ones
+  the build makes from this checkout's ``macos/Icons/`` (``icons.bundle_problems``):
+  ``Info.plist`` names ``AppIcon``; ``AppIcon.icns`` holds its eleven PNGs in order, each of its
+  size, and is byte for byte the file the build writes; and the six menu bar glyphs are the
+  committed files, black with alpha only. Then ``iconutil``, macOS's own reader, must read
+  ``AppIcon.icns`` into an iconset of at least one file (:func:`check_icon_reader`); what it says
+  and which files it writes are printed, not checked. Last, AppKit must load each glyph from the
+  bundle by its name, 18 points square from two files, of 18 and 36 pixels
+  (:func:`check_glyph_loader`). Neither has yet run on a Mac.
 - ``bytecode``: the bundle holds one checked-hash ``.pyc`` beside each ``.py`` of the runtime's
   library, and no other bytecode (``build_app.bytecode_layout_problems``); the bundled interpreter,
   running the build's own program, finds each one byte for byte what it compiles from its ``.py``
@@ -245,7 +253,7 @@ from typing import Any, Final
 if __package__ in (None, ""):  # run as a script: make ``tools.macos`` importable
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from tools.macos import build_app, payload  # noqa: E402
+from tools.macos import build_app, icons, payload  # noqa: E402
 
 TESTS_DIR: Final = build_app.MACOS_DIR / "Tests"
 ALIAS_VECTORS: Final = TESTS_DIR / "alias-vectors.json"
@@ -1028,6 +1036,97 @@ def check_bundle(app: Path, checker: Checker) -> None:
             f"{path.relative_to(app.parent)}: signed ad hoc by this build as {identifier}, "
             "with no Team ID",
             "\n".join([*problems, _shown(done)]),
+        )
+    problems = icons.bundle_problems(app)
+    checker.expect(
+        not problems,
+        "the app icon and the menu bar glyphs are the ones the build makes from macos/Icons",
+        "\n".join(problems),
+    )
+    check_icon_reader(app, checker)
+    check_glyph_loader(app, checker)
+
+
+# The menu bar glyphs as AppKit loads them from the built bundle, by name, with NSBundle's
+# imageForResource:. That is the search NSImage(named:) makes in the app's own bundle
+# (inference). Run with osascript's JavaScript, which needs no compiler. For each name it writes
+# one line: the name, the image's size in points, and its representations' sizes in pixels,
+# sorted; or the name and "none". Not yet run on a Mac.
+GLYPH_LOADER: Final = """\
+ObjC.import('AppKit');
+function run(argv) {
+  const bundle = $.NSBundle.bundleWithPath(argv[0]);
+  if (bundle.isNil()) return 'no bundle at ' + argv[0];
+  return argv.slice(1).map((name) => {
+    const image = bundle.imageForResource(name);
+    if (image.isNil()) return name + ' none';
+    const reps = image.representations;
+    const pixels = [];
+    for (let i = 0; i < reps.count; i++) {
+      const rep = reps.objectAtIndex(i);
+      pixels.push(rep.pixelsWide + 'x' + rep.pixelsHigh);
+    }
+    return [name, image.size.width + 'x' + image.size.height, pixels.sort().join(',')].join(' ');
+  }).join('\\n');
+}
+"""
+
+
+def glyph_loader_lines() -> list[str]:
+    """What :data:`GLYPH_LOADER` must write for the app's glyphs: each one 18 points square, from
+    two representations, its file of 18 pixels and its ``@2x`` file of 36."""
+    one, two = icons.GLYPH_POINTS, 2 * icons.GLYPH_POINTS
+    return [f"{glyph} {one}x{one} {one}x{one},{two}x{two}" for glyph in icons.GLYPHS]
+
+
+def check_glyph_loader(app: Path, checker: Checker) -> None:
+    """Have AppKit load each menu bar glyph from the built bundle by its name
+    (:data:`GLYPH_LOADER`), print what it found, and require :func:`glyph_loader_lines`. Where
+    the app cannot find a glyph it shows the SF Symbol instead, so without this step every other
+    check would pass."""
+    what = "AppKit loads each menu bar glyph from the bundle: 18 points, from 18 and 36 pixels"
+    argv = ["osascript", "-l", "JavaScript", "-e", GLYPH_LOADER, str(app), *icons.GLYPHS]
+    try:
+        done = subprocess.run(argv, capture_output=True, text=True, check=False, timeout=60)
+    except (OSError, subprocess.TimeoutExpired) as error:
+        checker.expect(False, what, str(error))
+        return
+    found = done.stdout.splitlines()
+    print("AppKit found:", flush=True)
+    for line in found:
+        print(f"  {line}", flush=True)
+    wanted = glyph_loader_lines()
+    checker.expect(
+        done.returncode == 0 and found == wanted,
+        what,
+        "\n".join([_shown(done), "wanted:", *wanted]),
+    )
+
+
+def check_icon_reader(app: Path, checker: Checker) -> None:
+    """Have ``iconutil`` read the app's icon file into an iconset in a new temporary folder, and
+    print what it said and what it wrote. It must exit 0 and write at least one file. Which files
+    it writes is printed, not checked: no run has shown them yet, for the ``icp4``, ``icp5`` and
+    ``icp6`` entries above all."""
+    rel = f"{icons.RESOURCES}/{icons.ICNS_FILE}"
+    what = f"iconutil, macOS's own reader, reads {rel}"
+    with tempfile.TemporaryDirectory() as temp:
+        iconset = Path(temp) / f"{icons.APP_ICON}.iconset"
+        argv = ["iconutil", "-c", "iconset", "-o", str(iconset), str(app / rel)]
+        try:
+            done = subprocess.run(argv, capture_output=True, text=True, check=False, timeout=60)
+        except (OSError, subprocess.TimeoutExpired) as error:
+            checker.expect(False, what, str(error))
+            return
+        written = sorted(iconset.iterdir()) if iconset.is_dir() else []
+        print(f"iconutil: {_shown(done)}", flush=True)
+        print(f"iconutil wrote {len(written)} files:", flush=True)
+        for path in written:
+            print(f"  {path.name} ({path.stat().st_size} bytes)", flush=True)
+        checker.expect(
+            done.returncode == 0 and bool(written),
+            what,
+            f"it exited {done.returncode} and wrote {len(written)} files",
         )
 
 
