@@ -1740,9 +1740,10 @@ def test_hdiutil_takes_waits_and_a_timeout(monkeypatch: pytest.MonkeyPatch) -> N
 # ---------------------------------------------------------------------------------------------
 # The disk image. make_dmg hands on a verified copy of the file `hdiutil create` wrote, never that
 # file. In 3 of 81 CI builds (2026-10-29 to 2026-11-09), hdiutil refused that file ("Resource
-# temporarily unavailable") from the first `verify` until the job ended, while a diskimages-helper
-# the job had started was still alive. That the helper held a lock on that one file, which a copy
-# does not carry, is inferred, not seen. These tests hold files under real flock(2) locks, from
+# temporarily unavailable") on every try the job made. The logs show a diskimages-helper still
+# alive at the job's cleanup; that it was alive during the tries, and that the job's create started
+# it, is inferred. That the helper held a lock on that one file, which a copy does not carry, is
+# inferred, not seen. These tests hold files under real flock(2) locks, from
 # real processes: on Linux against stand-ins for ditto and hdiutil, and on a Mac against both.
 
 _HOLD_PROGRAM = """\
