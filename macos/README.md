@@ -10,9 +10,10 @@ command line and files.
 This folder holds the Swift sources of a first, small version of Capsule; the scripts that build and check
 it are in [`tools/macos/`](../tools/macos/). It is not a release and it is not ready for anyone who is not
 developing it. It is meant to connect this Mac to Lucille: you paste the code Lucille's page shows, then
-compare the number the app shows with the one on Lucille's page. So far that has worked only in CI: the
-one try on a real Mac, on 2026-11-08, failed ([Signing](#signing)), and a build without the hardened
-runtime is not yet tried there. While it is open, it keeps the host running.
+compare the number the app shows with the one on Lucille's page. Outside CI, the maintainer reported it
+working once: on their own Mac, on 2026-11-09, with the disk image of run 42531994220 ([Signing](#signing)). The
+try before it there, on 2026-11-08, with a build signed with the hardened runtime, failed. While it is
+open, it keeps the host running.
 This way of connecting is only for the repository owner's own Mac, because anyone can make a code that
 passes the host's checks ([decisions/0002](../decisions/0002-macos-app.md) §11.1). Builds stay ad hoc
 signed, for that Mac. The disk image is not notarized, so macOS refuses to open it normally (see [The
@@ -680,9 +681,10 @@ disk image of the build before it, if there was one, and `check_app.py dmg` woul
 `build/macos/work/` holds the build's scratch files.
 
 In 3 of 81 CI builds (2026-10-29 to 2026-11-09), `hdiutil` refused to open the file `create` had just
-written ("Resource temporarily unavailable") on every try the job made, while a `diskimages-helper` the
-job had started was still running. That is why the build verifies a copy. That the helper held a lock on
-that one file, which a copy does not carry, is inferred, not seen.
+written ("Resource temporarily unavailable") on every try the job made. That is why the build verifies a
+copy. The logs show a `diskimages-helper` still running at the job's cleanup. That it was running during
+those tries, and that the job's `create` started it, is inferred. That the helper held a lock on that one
+file, which a copy does not carry, is inferred, not seen.
 
 After `create`, the build prints whether another process holds a `flock(2)` lock on the file. When one
 does, it also prints what `ps`, `lsof`, `hdiutil info`, `hdiutil verify -debug` and the disk-image log
@@ -820,7 +822,11 @@ Ad hoc builds used to have the hardened runtime. On a real Mac (2026-11-08, macO
 refused cryptography's extension ("different Team IDs"), and the app failed to pair; that the refusal
 caused the failure is inferred from the app's error. GitHub's runners had loaded the same extension, so
 CI did not show this. [decisions/0002](../decisions/0002-macos-app.md) §7 has the run and the error.
-Whether an ad hoc build without the hardened runtime pairs on that Mac is not yet tested.
+The maintainer reported that on 2026-11-09, on the same Mac, the disk image of run 42531994220, the first
+one without the hardened runtime that a run uploaded, loaded the extension and paired with Lucille (not
+in a CI log). On the runners,
+`csrutil status` says System Integrity Protection is disabled (run 42522633104). That this is why they
+loaded what that Mac refused is likely, but inferred (decisions/0002 §7).
 
 CI checks the following on every build:
 
@@ -888,11 +894,17 @@ that finds a problem fails its job. On `xcode-27` alone, a failed job does not f
 
 CI adds its folders under the home folder, outside the folders macOS protects, but for the `ui` check's
 best-effort folder in Documents, and it connects through a test harness with a hub of its own. These
-need a Mac and a person, and none has been done yet:
+need a Mac and a person. Where the maintainer reported one done, in whole or in part, on their Mac on
+2026-11-09, it says so; none of those reports is in a CI log:
 
 - **Whether a person's Mac loads the native code of an ad hoc build without the hardened runtime, and
-  pairs.** The runners loaded, under the hardened runtime, the extension a real Mac then refused
-  ([Signing](#signing)), so a passing `host` or `pairing` check does not show it.
+  pairs.** The maintainer reported it once, for cryptography: on their Mac on 2026-11-09, the disk image of run
+  42531994220 imported cryptography's x25519 module, and paired ([Signing](#signing)). On Linux that
+  import loads cffi's backend too (measured), so that it loaded there is inferred. That keyring's macOS
+  backend loaded, for the pairing, is inferred too (see the Keychain, below). Neither was recorded. The
+  runners loaded, under the hardened runtime, the extension a real Mac then refused, so a passing `host`
+  or `pairing` check does not show it. It is to be run again on the first build after any change to
+  signing.
 - **A folder in Documents, Desktop or Downloads.** Whether macOS asks at all after the Open panel,
   whether its question names Capsule rather than `lucille-host-runtime` and shows Capsule's sentence on
   what it is for, and whether the folder is added after Allow. After Don't Allow, whether the app says
@@ -905,14 +917,22 @@ need a Mac and a person, and none has been done yet:
 - **The app's own `pair --code-stdin` reaching the number against a hub.** In CI, a pasted text reaches
   the host on standard input, and the compare page, They Match, `run` and Disconnect run end to end with
   the harness answering the code. The app never passes `--hub`, so it reaches only Lucille's own hub.
-- **The Keychain.** CI's harness keeps the connection in a file (`--store-file`). Keeping it in the
-  Keychain, and what macOS asks about it on each new ad hoc build, is untested.
+  The maintainer reported it running once, on their Mac on 2026-11-09: the maintainer pasted a code from Lucille's
+  Computers page, both screens showed the same number, and They Match was clicked on both. Lucille's
+  page then showed the computer Connected.
+- **The Keychain.** CI's harness keeps the connection in a file (`--store-file`). The app passes no
+  `--store-file`, so the pairing of 2026-11-09 kept its connection in the Keychain; that is inferred from
+  the code, not seen. What macOS asked about it then, if anything, was not recorded. What macOS asks
+  about it on each new ad hoc build is untested.
 - **Paste on macOS 26 and 27,** and whether macOS shows a paste alert there. The `macos-app` job pastes
   on macOS 15; the smoke jobs reach the code window on macOS 26 and 27 only where System Events can drive
-  the app there. Paste through the Control-click menu is not driven in CI either.
+  the app there. Paste through the Control-click menu is not driven in CI either. The maintainer reported a
+  paste on macOS 26.2 working on 2026-11-09, on their Mac (above). Whether macOS showed a paste alert, and how the
+  code was pasted, were not recorded.
 - **They Match's click time.** CI presses They Match through accessibility, which carries no event,
   so the app takes the time of the press as now. That a real click made before the number was drawn
-  is refused is checked in the self-test only.
+  is refused is checked in the self-test only. The maintainer reported a real click, made after the number
+  was shown, accepted once, on their Mac on 2026-11-09 (above).
 - **They Differ, then a relaunch.** That They Match stays off after They Differ holds only while
   Capsule stays open; what the window shows after a relaunch, when turning the connection down
   failed, is checked in the self-test's flow only.
@@ -922,7 +942,10 @@ need a Mac and a person, and none has been done yet:
 - **Log out, restart and shut down.** The 20-second step, how the app tells them from a plain quit, and
   that sudden and automatic termination stay off are checked in the self-test's supervisor only (see
   [Testing log out by hand](#testing-log-out-by-hand)).
-- **A real Lucille, sleep and wake, and closing the lid.**
+- **Work from a real Lucille, sleep and wake, and closing the lid.** The maintainer reported pairing
+  with a real Lucille once (above), and that the menu then said "Connected, waiting for Lucille": Lucille offers a computer no work
+  room until it has a job for it, and makes no such job yet (Lucille policy as of 2026-11-09; not proven
+  by this repository).
 - **That no child the app starts holds `run`'s lifeline, in every order children start in.** The
   self-test shows it for one order. The one lock around every start is the argument for the rest.
 - **Activity, beyond the requests CI sends.** Its words for `path_outside_root` and `host_too_old`, for a
@@ -1003,7 +1026,10 @@ need a Mac and a person, and none has been done yet:
   the menu holds Settings while connected and not after Disconnect, but does not open it or choose Open
   at Login, so as to send no key press it cannot place, and Reset Settings… from it is checked as source
   text only. If the pairing check stops before Disconnect, the runner's login item stays registered:
-  only the app can take `mainApp` away, and the runner is thrown away after the job.
+  only the app can take `mainApp` away, and the runner is thrown away after the job. The
+  maintainer reported that on 2026-11-09 the Settings menu showed Open at Login ticked. The menu ticks it only
+  while macOS says the login item is enabled (`Connection.swift`), so macOS said so there; that is
+  inferred from the code, not seen in a log. A real login, and macOS's notice, were not recorded.
 - **A run left behind.** CI makes no process outlive SIGKILL (that takes a stalled network drive, which
   CI does not set up), so that only a run of a verb that takes the settings lock is counted as stuck is
   checked through the rule and the count the self-test runs (`HostCLI.takesPolicyLock`,

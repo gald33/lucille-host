@@ -704,8 +704,7 @@ ripgrep.
     "pairing needs the `cryptography` package" with no state, which the host reports as `answer_failed`,
     "the code was not answered (error)" (`link.py`). The app's message matches that path; that its failure
     took it is inferred from the message, not traced. That is the refusal the next point expected, so the
-    pin is now `false`. Whether an ad-hoc build without the hardened runtime pairs on that Mac is not yet
-    tested; the next ad-hoc build tried there settles it.
+    pin is now `false`.
   - Why it was first expected to fail: under the hardened runtime, library validation lets a process load
     only code "signed by Apple or signed with the same Team ID as the main executable" (Apple, "Disable
     Library Validation Entitlement"). An ad-hoc signature has no Team ID, and a reported ad-hoc,
@@ -723,12 +722,37 @@ ripgrep.
     runtime, and the app launched and was driven there, so the abort above did not occur either.
   - **CI did not show this.** GitHub's runners loaded under the ad-hoc hardened runtime what the Mac above
     refused (the runs above; and run 42509782273 uploaded its disk image, which `macos-app` does only when
-    every check passed). Why they differ is not established. One guess, not checked: System Integrity
-    Protection, or macOS's own enforcement of code signatures (AMFI), is relaxed on the runner images. So
-    the `macos-app` and `macos-smoke` jobs print `csrutil status`, for System Integrity Protection's state
-    (what it prints on a runner is not yet seen), with the machine's details. That gates nothing. Until the
-    difference is explained, a check that passes on a runner does not show that a person's Mac loads the
-    same code.
+    every check passed). The likeliest reason is that System Integrity Protection is off on the runners;
+    that is an inference. The `macos-app` and `macos-smoke` jobs print `csrutil status`, for its state,
+    with the machine's details. That gates nothing. Seen in CI (run 42522633104, pull request 24's own
+    run, the first to print it): "System Integrity Protection status: disabled." on all three runners,
+    `macos-15` (macOS 15.8.2), `macos-26` (26.7.2) and `xcode-27` (27.0.1). It was not printed in the
+    earlier runs that loaded the extension under the hardened runtime, so that it was off then too is
+    inferred. That library validation is not enforced while it is off is also inferred: no source read
+    here says so, and it is not tested. Whether macOS's own enforcement of code signatures (AMFI) is
+    relaxed there too was not read. Nor was System Integrity Protection's state on the maintainer's Mac.
+    If the reason is right, a signed candidate's check of library validation on these runners would show
+    nothing either (inferred); the run by hand in §19 covers it. Either way, a check that passes on a
+    runner does not show that a person's Mac loads the same code.
+  - Reported by the maintainer, on the same Mac without the hardened runtime (from the screenshots and the
+    Terminal output the maintainer shared in a working session; none of it is in a CI log or committed):
+    on 2026-11-09 the maintainer downloaded the disk
+    image of `ci.yml` run 42531994220 (a manual run on `main` at 7f2d6dc, from pull request 24; the first
+    disk image signed without it that a run uploaded) with a browser, and opened it with Open Anyway. In
+    Terminal, the bundled interpreter, run as `lucille-host-runtime -I -B -c "import
+    cryptography.hazmat.primitives.asymmetric.x25519; print('crypto ok')"`, printed "crypto ok". That module
+    imports `cryptography.hazmat.bindings._rust` (read in the Linux wheel of cryptography 50.0.2, the
+    version `uv.lock` pins; the macOS wheel's copy was not read, but on 2026-11-08 the same import stopped
+    at that extension), so that the import loaded the extension dyld had refused before is inferred. On Linux that import
+    also loads cffi's backend (measured), so that it did on the Mac is inferred. With that build, the app
+    also paired with Lucille for the first time. The maintainer pasted a code from Lucille's Computers page,
+    both screens showed the same SAS, and They Match was clicked on both. Lucille's Computers page then
+    showed the computer Connected, and the app's menu said "Connected, waiting for Lucille". That is
+    expected: Lucille offers a computer no work room until it has a job for it, and does not make such jobs
+    yet (Lucille policy as of 2026-11-09; not proven by this repository). The app passes no `--store-file`,
+    so the pairing kept its connection in the Keychain, through keyring's macOS backend; that is inferred
+    from the code, not seen. So without the hardened runtime, the import and a pairing worked on that Mac.
+    That the 2026-11-08 pairing failed on the import fits this, but is still inferred, not traced.
   - **Library validation against a Team ID is exercised only on Developer ID-signed candidates.** Whether
     this bundle loads under it is not decided yet, until the first candidate runs. (Not chosen: a CI-only
     `disable-library-validation` entitlement on ad-hoc builds. It rests on that entitlement being honoured
@@ -1609,7 +1633,8 @@ Planned:
   runner has.
 
 **On the signed build** (§18), on macOS 15, 26 and 27 (`xcode-27`): signing checks, library validation
-against a Team ID for the first time, notarization logs, Gatekeeper's view with quarantine, the
+against a Team ID for the first time (on a runner that may show nothing, §7, inferred; the run by hand
+below settles it), notarization logs, Gatekeeper's view with quarantine, the
 end-to-end test through the signed bundle, Keychain continuity between releases.
 
 **On a Mac, by hand.** Runners may not be able to answer a privacy, Keychain or Login Items prompt (the menu
@@ -1620,7 +1645,9 @@ force-quit's included, through M14's test), except what macOS lets the bundle lo
 the ad-hoc hardened runtime, the extension a real Mac refused (§7). So a person runs, on macOS 26 and 27, only
 what needs a person or real hardware, or what a runner did not show: the bundled interpreter's import of
 `cryptography` and a pairing with a real code from Lucille, on the first build after any change to how it is
-signed; the first-launch dialog after a Safari and a Chrome download; a first launch with no network;
+signed (the maintainer reported both running once, on 2026-11-09, on their Mac with macOS 26.2, for the disk image of run
+42531994220, §7, and not yet on macOS 27); the first-launch dialog after a Safari and a Chrome download;
+a first launch with no network;
 adding Documents, an iCloud Drive folder and an external disk, and which name each prompt carries; the
 Keychain and Login Items prompts, if any; a lid close; dragging the next build over a **running** old app,
 recording the Finder's message, then the update flow of §16; the Finder's real Keep Both, a copy opened from
@@ -1920,7 +1947,8 @@ those writes itself first (`pause`, then `resume`).
   and the interpreter to `Contents/Helpers` (§6).
 - Whether the Developer ID-signed bundle loads under library validation and the hardened runtime, which
   only a candidate exercises (§7). An ad-hoc build signed with the hardened runtime did not load
-  `cryptography`'s extension on a real Mac (§7).
+  `cryptography`'s extension on a real Mac, and the maintainer reported one signed without it loading it,
+  on the same Mac (§7).
 - Whether the interpreter needs `allow-unsigned-executable-memory` under the hardened runtime (§7).
 - Whether a first launch works with no network when only the disk image is notarized and stapled (§7).
 - Whether macOS holds the app responsible for its child's file access, which name a prompt carries, and
