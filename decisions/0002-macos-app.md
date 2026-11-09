@@ -48,7 +48,8 @@ developing the app. Its builds stay ad hoc signed, for the repository owner's ow
   then the host's wheel, built from the checkout, all by hash. Then the bundled interpreter writes a
   `checked-hash` `.pyc` beside every `.py` of the runtime, and a second run of it checks each one byte for
   byte (§6). Beside the runtime are the wrapper `Resources/bin/lucille-host` for Terminal users, the licence
-  texts in `Resources/licenses/`, and `Resources/MANIFEST.json` (§6).
+  texts in `Resources/licenses/`, the app icon `Resources/AppIcon.icns` with the menu bar icon's template
+  PNGs beside it, and `Resources/MANIFEST.json` (§6).
 - **The app drives the host only through its command line**, as
   `lucille-host-runtime -I -B -X utf8 -m lucille_host --profile mac-app <verb>`, with an argv and a fixed
   environment (`PATH=/var/empty`). It runs every verb on its own profile, `mac-app` (§9); builds before it
@@ -427,6 +428,8 @@ Capsule.app/Contents/
   Resources/
     MANIFEST.json                      versions; sha256 of the runtime tarball, of every wheel installed,
                                        of the release wheel; the commit
+    AppIcon.icns                       the app icon, packed from the PNGs in macos/Icons
+    MenuBar*Template.png, *@2x.png     the menu bar icon: three template glyphs, at 18 and 36 pixels
     bin/lucille-host                   a three-line sh wrapper for Terminal users (a resource)
     runtime/                           python-build-standalone CPython 3.13, pinned, pruned
       bin/lucille-host-runtime         the interpreter, renamed
@@ -608,6 +611,19 @@ ripgrep.
 - **`Resources/licenses/`** holds one folder per distribution: `CPython/LICENSE.txt`, from the runtime, and
   each installed distribution's licence files from its `*.dist-info` folder. The build refuses a
   distribution that ships none.
+- **The icons.** The maintainer chose the icon on 2026-11-09: a capsule of two fitted halves with a visible
+  seam, the person's ink half holding a socket and Lucille's orange half reaching into it with a tongue.
+  Its SVG masters and the PNGs rendered from them are committed in `macos/Icons/`, and the PNGs are the
+  source of truth: the build renders nothing. In pure Python (`tools/macos/icons.py`) it checks the PNGs
+  when it checks the pins, before it checks for a Mac, packs seven of them into `Resources/AppIcon.icns`
+  (eleven entries, each a whole PNG, with no table of contents, so the file depends on the PNGs alone),
+  and copies the three menu bar glyphs and their `@2x` files beside it. `Info.plist` names the icon with
+  `CFBundleIconFile` alone: the app has no asset catalog, so `CFBundleIconName` would name an asset that
+  does not exist. The app loads the glyph with `NSImage(named:)`, and shows the SF Symbol it showed before
+  if the file is not there. It still has no Dock icon (`LSUIElement`). The build checks the icons again
+  before the tarball, and `check_app.py bundle` holds the signed app to them, has `iconutil` read the
+  icon file, and has AppKit load each glyph from the bundle by its name (§19). Whether macOS draws every
+  entry, and how the icons look, is not yet seen on a Mac.
 - **M10 and the signature.** `codesign` writes each Mach-O file's signature into the file, so after signing
   the two extension files no longer equal their wheels' bytes (seen in CI, run 41407347108, 2026-11-02:
   `record` found the two signed files differ from their wheels'). So M10 (§22) holds byte for byte before
@@ -1555,7 +1571,9 @@ check from `tools/macos/check_app.py`:
 - the Swift build, and a bundle assembled with the real pinned runtime, signed ad hoc without the hardened
   runtime (§7; library validation against a Team ID is exercised only on signed candidates);
 - the bundle: no symbolic link; exactly the expected Mach-O files, each signed ad hoc by
-  the build, not only by the linker, with its own identifier; the signature, again after every other check;
+  the build, not only by the linker, with its own identifier; the icons, which must be the files the build
+  makes from `macos/Icons/`, `iconutil`'s read of the icon file, and AppKit's load of each glyph from the
+  bundle by its name; the signature, again after every other check;
 - each `.pyc`: where the build writes one, `checked-hash`, and byte for byte the bundled interpreter's
   compile of the `.py` beside it; and the host's modules loaded from them (§6);
 - M10 on the signed bundle (§6), and M11: the version rule and `MANIFEST.json`;
@@ -1652,7 +1670,9 @@ adding Documents, an iCloud Drive folder and an external disk, and which name ea
 Keychain and Login Items prompts, if any; a lid close; dragging the next build over a **running** old app,
 recording the Finder's message, then the update flow of §16; the Finder's real Keep Both, a copy opened from
 the disk image, and a copy opened from Downloads after a browser download (App Translocation), recording
-what each copy says and that it starts nothing; hiding the menu-bar icon; the app beside a
+what each copy says and that it starts nothing; hiding the menu-bar icon; how the app icon and the
+menu-bar glyph look, on a Retina and a non-Retina screen, in a light and a dark menu bar, on macOS 26 and
+27; the app beside a
 `pipx` install; and deleting the app instead of Remove, recording what Login Items & Extensions lists
 afterwards. With Open at Login on: a real login, recording that the app opens at it and the notice macOS
 shows; then the item turned off in System Settings, recording which state macOS then gives, and the next

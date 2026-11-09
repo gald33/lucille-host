@@ -462,6 +462,8 @@ CLEAN_SWIFT = [
     "let info = ProcessInfo.processInfo.environment",
     "kill(process.processIdentifier, SIGKILL)",
     'let image = NSImage(systemSymbolName: "folder", accessibilityDescription: nil)',
+    # The menu bar glyph, an image in the app's own bundle, loaded by its name.
+    'let image = NSImage(named: "MenuBarTemplate")?.copy() as? NSImage',
     "view.append(contentsOf: scalars)",
     "view.insert(contentsOf: scalars, at: 0)",
     "Binding(get: { ability.isOn }, set: { model.setAbility(ability, on: $0) })",

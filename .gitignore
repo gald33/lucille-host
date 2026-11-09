@@ -17,3 +17,6 @@ venv/
 # Swift Package Manager: build products, object files and links, and Xcode's package state
 .build/
 .swiftpm/
+
+# The Finder's folder settings, which it may write into a folder a person opens on a Mac
+.DS_Store

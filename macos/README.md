@@ -58,6 +58,11 @@ build is, and what is planned after it.
   works too.
 - `Contents/Resources/licenses/`, the licence texts of the Python runtime and of every installed
   distribution, one folder each.
+- `Contents/Resources/AppIcon.icns`, the app icon, which `Info.plist` names (`CFBundleIconFile`), and
+  beside it the menu bar icon, three pairs of template PNGs: `MenuBarTemplate`, `MenuBarPausedTemplate`
+  and `MenuBarAttentionTemplate`, each at 18 and 36 pixels (`@2x`). The build makes them from the PNGs
+  committed in [`Icons/`](Icons/) and renders nothing: it packs seven of them into the icon file and
+  copies the six glyphs (see [Icons/README.md](Icons/README.md)). The app still has no Dock icon.
 - `Contents/Resources/MANIFEST.json`, which records what went into the app: its name, identifiers and
   version strings; the commit, the build number or tag, the Xcode version and the `swiftc` version; the
   host's exact version and its wheel's name and sha256; the runtime's file name, URL and sha256, and what
@@ -106,8 +111,12 @@ Login](#open-at-login)). Once the note about the menu bar is closed, or at once 
 says so if the host is paused, and only **Resume** resumes it. Then it picks up a connection left half
 made: it opens the pairing window again, or says why that connection ended.
 
-The menu bar item is named "Capsule", or "Capsule, paused", for VoiceOver. While something needs
-attention, the icon is a warning sign; the name stays the same.
+The menu bar item is named "Capsule", or "Capsule, paused", for VoiceOver. Its icon is the capsule from
+the app icon, as a template image, which macOS is meant to draw in the menu bar's own colour (not yet
+seen on a Mac). While Lucille is paused, a pause badge sits at its lower right. While something needs
+attention, a badge with an exclamation mark sits at its upper right; the name stays the same. No glyph
+has both badges: while something needs attention, the exclamation mark takes the pause badge's place,
+and the item's name and the menu still say paused.
 
 The `Info.plist` holds the same sentences under each of the six keys macOS reads before it asks about
 Documents, Desktop, Downloads, removable and network volumes, and file providers. macOS is meant to show
@@ -864,7 +873,7 @@ that finds a problem fails its job. On `xcode-27` alone, a failed job does not f
 
 | Check | Where | What it shows |
 |---|---|---|
-| `bundle` | both | No symbolic link in the bundle. Its Mach-O files are exactly the expected five: the app's executable, the interpreter, `lib-dynload`'s `_dbm`, and the two wheel extensions. The app and each of them is signed ad hoc by the build, not only by the linker, with no Team ID and the identifier the build gave it. |
+| `bundle` | both | No symbolic link in the bundle. Its Mach-O files are exactly the expected five: the app's executable, the interpreter, `lib-dynload`'s `_dbm`, and the two wheel extensions. The app and each of them is signed ad hoc by the build, not only by the linker, with no Team ID and the identifier the build gave it. The icons are the ones the build makes from this checkout's `Icons/`: `Info.plist` names `AppIcon`; `AppIcon.icns` holds its eleven PNGs in order, each of its size, and is byte for byte the file the build writes; and the six menu bar glyphs are the committed files, black with alpha only. Then `iconutil`, macOS's own reader, must read `AppIcon.icns` into an iconset of at least one file; what it says and which files it writes are printed, not checked. Last, AppKit, through `osascript`'s JavaScript, must load each glyph from the bundle by its name with `NSBundle`'s `imageForResource:`, the search the app's `NSImage(named:)` makes (inference): 18 points square, from two files, of 18 and 36 pixels. Neither step has yet run on a Mac. |
 | `bytecode` | both | Each `.py` of the runtime's library has one `checked-hash` `.pyc` beside it, in `__pycache__`, and the bundle holds no other bytecode. The bundled interpreter then runs the build's own program: each `.pyc` has its magic number and its `.py`'s source hash, and is byte for byte what it compiles from that `.py`; a run that does not end as the program ends, an exception say, fails too, and so does one that counts no `.py` file. Last, `--version`, run as the app runs it with `-v`, loads its modules in the bundle from their `.pyc` and compiles none from source. It writes nothing beside the app, so it is meant to be run on a copy you downloaded too; that is not yet tried on a Mac ([The disk image from CI](#the-disk-image-from-ci)). |
 | `record` | `macos-app` | Each wheel `MANIFEST.json` names is one `uv.lock` pins (name, version, file, URL and sha256), and the host wheel's sha256 is the one the wheel step output. Each, the host's included, is found again and hashed; the installed distributions are exactly those; every file in `site-packages` is byte for byte a file of its wheel, apart from the installer's own files in each `*.dist-info` folder and the `.pyc` files the build writes, one beside each `.py` a `RECORD` lists (`bytecode` checks what they hold). Each Mach-O file is compared with its wheel's after `codesign --remove-signature` on a copy of each, and that comparison is reported in the job summary, not failed: SAME, or DIFFERENT with both sizes, or, where codesign fails on either copy, which copy and what it said, with nothing compared. |
 | `version` | `macos-app` | `Info.plist`'s two version strings follow the version rule, and `MANIFEST.json`, the bundled host's `--version` and the pins agree with them. |
@@ -1036,6 +1045,14 @@ need a Mac and a person. Where the maintainer reported one done, in whole or in 
   `HostCLI.lockHolders`) and the wiring the build tests read, not with a live stuck run.
 - **VoiceOver.** Whether it reads the menu bar item as "Capsule", and "Capsule, paused".
 - **A full menu bar, or one beside a notch,** where macOS hides the icon.
+- **How the icons look.** The app icon in the Finder, on the disk image, in the app's notes, in Login
+  Items and in macOS's own questions; whether macOS 26 and 27 draw it inside a tile of their own; and
+  the menu bar glyph at 1x and at 2x, in a light and a dark menu bar. Where it can drive the app, the
+  `ui` check takes a screenshot of the screen, `1-menu-bar.png`, that should show the glyph; nothing
+  reads what it shows. The `bundle` check has AppKit load the glyphs from the bundle, but the running
+  app's own lookup is not checked. `iconutil` reads `AppIcon.icns` in `bundle`, and which files it
+  writes is printed, not checked, so whether macOS reads every entry is not yet seen. macOS may also
+  keep showing an earlier icon for a while, from its own cache.
 
 These two need no person, only a CI run in which it happens:
 
@@ -1143,7 +1160,7 @@ a downloaded, quarantined copy run from Terminal is not yet tested on a Mac.
 - **A Welcome window and a main window.** The design has a Welcome window that leads through
   connecting, choosing a folder and turning on an ability, and a main window with the status, folders,
   abilities, activity and settings. This build has the menu, and a note that says where it is.
-- An app icon.
+- **A dark or tinted app icon.** The icon's tile is cream in every appearance.
 
 ## Choices made for the first build
 
@@ -1198,8 +1215,6 @@ build; the design may change it.
 - **The Open panel opens where macOS chooses**, not in Documents.
 - **What macOS may ask is said in the name dialog**, just before the run that makes macOS ask, not in a
   screen before the Open panel.
-- **The pause icon replaces the app's icon**, a pause sign in place of the computer, where the design adds
-  a pause badge to the app's icon.
 - **Pausing shows no note.** The design confirms Pause with "Paused. Lucille's requests will be turned
   away until you resume."; this build says so in the menu, under the status line, while paused.
 - **A name in a script macOS cannot write in Latin letters gives `folder`**, and on a system whose

@@ -388,13 +388,26 @@ final class HostModel: ObservableObject {
         onRead?()
     }
 
-    /// The menu bar icon. Its accessibility description is the menu bar item's title, which
-    /// VoiceOver reads: the app's name, and whether Lucille is paused. While something needs the
-    /// user, it is a warning sign, so the user sees it without opening the menu.
+    /// The menu bar icon: the capsule, a template glyph from the app's own Resources
+    /// (macos/Icons). While Lucille is paused it has a pause badge; while something needs the user,
+    /// an exclamation-mark badge, so the user sees it without opening the menu. There is no glyph
+    /// with both: while something needs the user, the exclamation-mark badge takes the pause
+    /// badge's place, and the item's name and the menu still say paused. The glyph is a copy, so
+    /// that its size and description are not set on the image macOS caches by its name. Without
+    /// the files, it is the SF Symbol for the same state. Its accessibility description is the
+    /// menu bar item's title, which VoiceOver reads: the app's name, and whether Lucille is paused.
     static func icon(paused: Bool, attention: Bool = false) -> NSImage {
         let name = HostText.statusItemName(paused: paused)
+        let glyph = attention ? "MenuBarAttentionTemplate" : (paused ? "MenuBarPausedTemplate" : "MenuBarTemplate")
         let symbol = attention ? "exclamationmark.triangle" : (paused ? "pause.circle" : "desktopcomputer")
-        let image = NSImage(systemSymbolName: symbol, accessibilityDescription: name) ?? NSImage()
+        let image: NSImage
+        if let found = NSImage(named: glyph)?.copy() as? NSImage {
+            found.size = NSSize(width: 18, height: 18)
+            image = found
+        } else {
+            image = NSImage(systemSymbolName: symbol, accessibilityDescription: name) ?? NSImage()
+        }
+        image.accessibilityDescription = name
         image.isTemplate = true
         return image
     }
