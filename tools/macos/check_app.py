@@ -231,6 +231,8 @@ Moving the bytes between jobs (the smoke jobs build nothing):
 from __future__ import annotations
 
 import argparse
+import bisect
+import concurrent.futures
 import contextlib
 import csv
 import fnmatch
@@ -247,6 +249,7 @@ import statistics
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import traceback
 import zipfile
@@ -2698,24 +2701,51 @@ def check_suite(app: Path, out: Path, copy_to: Path, checker: Checker) -> None:
 
 
 def _running(name: str) -> list[str]:
-    done = subprocess.run(["pgrep", "-x", name], capture_output=True, text=True, check=False)
-    return done.stdout.split()
+    """The pids of the processes named exactly ``name``, by ``pgrep -x`` (:func:`_pgrep`): one
+    that could not read the process table raises :class:`ListerBlind`, and is never read as
+    nothing running."""
+    return [str(pid) for pid in _pgrep(["-x", name])]
+
+
+def _running_now(name: str) -> list[str] | None:
+    """:func:`_running`, or None, with a note of why, where pgrep could not say."""
+    try:
+        return _running(name)
+    except ListerBlind as exc:
+        print(f"note: pgrep could not say whether {name} runs: {exc}", flush=True)
+        return None
+
+
+def _may_run(name: str) -> bool:
+    """Whether ``name`` runs, or might: where pgrep could not say, the check stops it as if it ran,
+    and then waits for a reading that it does not."""
+    pids = _running_now(name)
+    return pids is None or bool(pids)
 
 
 def _wait_until(test: Callable[[], bool], seconds: float) -> bool:
+    """Whether ``test`` holds within ``seconds``, asked every half second and once more at the
+    end. A test whose lister was blind (:class:`ListerBlind`) has not held."""
     deadline = time.monotonic() + seconds
     while time.monotonic() < deadline:
-        if test():
+        if _holds(test):
             return True
         time.sleep(0.5)
-    return test()
+    return _holds(test)
+
+
+def _holds(test: Callable[[], bool]) -> bool:
+    try:
+        return bool(test())
+    except ListerBlind:
+        return False
 
 
 def _stop_earlier_copies(checker: Checker, name: str) -> bool:
     """Stop a copy of the app that is still running, with SIGTERM. One that does not stop fails the
     check, and is then killed: ``open`` would otherwise hand the next step that old copy, whose
     output goes nowhere the check reads."""
-    if not _running(name):
+    if not _may_run(name):
         return True
     subprocess.run(["pkill", "-TERM", "-x", name], check=False)
     stopped = _wait_until(lambda: not _running(name), 15)
@@ -2870,7 +2900,7 @@ def check_launch(app: Path, checker: Checker) -> None:
     started = _wait_until(lambda: bool(_running(name)), 15)
     checker.expect(started, f"a process named {name!r} is running")
     time.sleep(10)
-    pids = _running(name)
+    pids = _running_now(name)
     alive = checker.expect(bool(pids), f"it is still running 10 seconds later (pid {pids})")
     if alive:
         subprocess.run(["pkill", "-TERM", "-x", name], check=False)
@@ -3022,6 +3052,60 @@ RENAMED_ALONE: Final = (
     f"Quit {APP_NAME}. In the Finder, rename {RENAMED_COPY} to {APP_NAME}, then open it again."
 )
 REFUSAL_WATCH: Final = 10
+# How the placement check looks for a host process on the app's profile (macos/README.md,
+# placement). Two listers read the process table, pgrep -f and ps, each on a thread of its own and
+# POLL_PAUSE seconds after its last call ended, so that one held never holds back the other. One
+# that fails, writes on standard error, gives something that is not its list, or takes longer than
+# LISTER_LIMIT seconds is blind, never "none". A lister reads the table somewhere between the start
+# and the end of its call, so a stretch with no reading runs from one reading's start to the next
+# one's end. A watch may say that nothing ran only if no such stretch is longer than
+# SHORTEST_BURST seconds. That is a heuristic, not a bound: at launch the app runs three host verbs
+# back to back (--version, ops list, roots list: App/HostModel.swift), which together span about
+# 0.36 s or more, from --version's fastest start-up of 121 ms on macos-15 (inferred for the other
+# verbs and images); the moments between the verbs, when no host process runs, are not counted.
+LISTER_LIMIT: Final = 5
+SHORTEST_BURST: Final = 0.35
+POLL_PAUSE: Final = 0.05
+# What the listers match: the host's processes on the app's profile, as pgrep -f matches them; a
+# running copy of the app, wherever it is and whatever its bundle is called. How a watch names the
+# two listers, and what ps also reports in a watch: a child of a running copy of the app, whatever
+# its command line shows.
+PROFILE_PROCESS: Final = f"lucille_host --profile {APP_PROFILE} "
+APP_EXECUTABLE: Final = re.compile(rf"\.app/Contents/MacOS/{re.escape(APP_NAME)}(?:\s|$)")
+LISTERS: Final = ("pgrep", "ps")
+CHILD: Final = "ps, a child of the app"
+LISTER_PROGRAMS: Final = ("/bin/ps", "/usr/bin/pgrep")
+# The control's gate: the copy in /Applications, opened, starts a host process that a lister
+# matches by PROFILE_PROCESS within CONTROL_GATE seconds of the watch's start; a child of the app
+# whose command line does not match is recorded, and does not count. Not lengthened while the cause
+# of the failures in macos/README.md (placement) is open. The rest is for the record only: with no
+# host process seen CONTROL_SNAPSHOT_AT seconds after the open, a snapshot of the screen and the
+# app; after a failed gate, the watch goes on to CONTROL_DIAGNOSIS seconds and the unified log is
+# saved; after a passing one, it goes on up to CONTROL_AFTER seconds more, until both listers have
+# seen a host process and the app has written STATUS_READ_MARKER. The app writes it on standard
+# error once its first status read has ended: with no pair, where the read leads to the login
+# item's removal (App/Supervisor.swift, statusRead; App/Connection.swift, .pairGone); with a
+# confirmed one, where it checks the login item (App/Connection.swift, checkLoginItemAtLaunch).
+CONTROL_GATE: Final = 30
+CONTROL_SNAPSHOT_AT: Final = 5
+CONTROL_DIAGNOSIS: Final = 60
+CONTROL_AFTER: Final = 5
+STATUS_READ_MARKER: Final = "login item: "
+# The time limit of each of the control's diagnostics, of its snapshot as a whole, and of the
+# unified log; how much of the log is kept, and of which processes.
+DIAGNOSIS_LIMIT: Final = 30
+SNAPSHOT_LIMIT: Final = 3 * DIAGNOSIS_LIMIT + 10
+CONTROL_LOG_LIMIT: Final = 90
+CONTROL_LOG_LINES: Final = 300
+CONTROL_LOG_PROCESSES: Final = (
+    APP_NAME,
+    Path(build_app.INTERPRETER).name,
+    "syspolicyd",
+    "amfid",
+    "XprotectService",
+    "sysmond",
+    "runningboardd",
+)
 # Lucille asking for a newer release than this one (decisions/0002 §16), as in
 # App/ConnectionText.swift: the minimum the pairing check asks for, which a development build is
 # older than (spec/PROTOCOL.md section 10), a higher one, asked for while the notice is up, and a
@@ -4316,7 +4400,7 @@ def _quit_by_name(name: str) -> bool:
     """Quit the application named ``name`` (System Settings), if it runs: SIGTERM, then SIGKILL
     if it still runs 15 seconds later. No key is sent, since a key goes to whichever window has
     the focus. True when nothing ran, or SIGTERM ended it."""
-    if not _running(name):
+    if not _may_run(name):
         return True
     subprocess.run(["pkill", "-TERM", "-x", name], check=False)
     if _wait_until(lambda: not _running(name), 15):
@@ -4644,7 +4728,7 @@ def _drive_documents_prompt(python: Path, screens: Path, deadline: float | None 
     if not made:
         print(f"note: the Documents step could not make {folder}: {said}", flush=True)
         return
-    settings_ran = bool(_running(SYSTEM_SETTINGS))
+    settings_ran = _may_run(SYSTEM_SETTINGS)
     added = False
     asked_once = False
     closed = False
@@ -4918,58 +5002,382 @@ def _folder_state(folder: Path) -> tuple[bool, dict[str, tuple[int, int, int]]]:
     return folder.exists(), file_listing(folder)
 
 
-def _profile_processes_seen(seconds: float, *, first: bool) -> set[int]:
-    """The host's processes on the app's profile seen in ``seconds``, asked every tenth of a
-    second: a short verb may end within one. With ``first``, only until one is seen."""
-    seen: set[int] = set()
-    deadline = time.monotonic() + seconds
-    while True:
-        seen.update(_profile_processes())
-        if (first and seen) or time.monotonic() >= deadline:
-            return seen
-        time.sleep(0.1)
+class ListerBlind(Exception):
+    """A lister could not say what runs: it failed, wrote on standard error, gave something that
+    is not its list, or did not answer within :data:`LISTER_LIMIT` seconds. Never read as none."""
+
+
+def _pgrep(args: Sequence[str]) -> list[int]:
+    """``pgrep`` with ``args``: exit 0 with the pids it found, exit 1 with none. Apple's pgrep asks
+    sysmond for the process table and exits 3 when that fails (adv_cmds' pkill.c: "Cannot get
+    process list"); that, any other exit, anything on standard error, an answer that is not pids,
+    or no answer in time raises :class:`ListerBlind`."""
+    try:
+        done = subprocess.run(
+            ["pgrep", *args],
+            capture_output=True,
+            text=True,
+            errors="replace",
+            timeout=LISTER_LIMIT,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        raise ListerBlind(f"pgrep did not answer in {LISTER_LIMIT} s") from None
+    except OSError as exc:
+        raise ListerBlind(f"pgrep could not start: {exc}") from None
+    pids = done.stdout.split()
+    if (
+        done.returncode not in (0, 1)
+        or done.stderr.strip()
+        or (done.returncode == 0) != bool(pids)
+        or not all(pid.isdigit() for pid in pids)
+    ):
+        raise ListerBlind(
+            f"pgrep exited {done.returncode}, with {done.stdout.strip()[:200]!r} "
+            f"and {done.stderr.strip()[:200]!r}"
+        )
+    return [int(pid) for pid in pids]
+
+
+def _profile_processes() -> list[int]:
+    """The host's processes on the app's profile, whoever started them, by ``pgrep -f``
+    (:func:`_pgrep`). Where sysmond gives no arguments for a process, Apple's pgrep matches its name
+    instead and may exit 1, saying nothing (pkill.c): a reading of none by pgrep alone can be
+    wrong, which :func:`_ps_profile` is there for."""
+    return _pgrep(["-f", PROFILE_PROCESS])
+
+
+def _ps_profile() -> tuple[list[int], list[tuple[int, str]]]:
+    """The same by ``ps``, which is believed not to ask sysmond (inferred, not checked: the
+    control prints which of the two links libsysmon). Returns the host's processes on the app's
+    profile, matched as pgrep matches them (a pgrep never counts), and every child of a running
+    copy of the app, whatever its command line says, with its state and command line: a child
+    still in exec may show none. Anything but exit 0 with a line it can read for each process
+    raises :class:`ListerBlind`."""
+    try:
+        done = subprocess.run(
+            ["ps", "-axww", "-o", "pid=,ppid=,stat=,command="],
+            capture_output=True,
+            text=True,
+            errors="replace",
+            timeout=LISTER_LIMIT,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        raise ListerBlind(f"ps did not answer in {LISTER_LIMIT} s") from None
+    except OSError as exc:
+        raise ListerBlind(f"ps could not start: {exc}") from None
+    if done.returncode != 0 or done.stderr.strip() or not done.stdout.strip():
+        raise ListerBlind(f"ps exited {done.returncode}, with {done.stderr.strip()[:200]!r}")
+    rows: list[tuple[int, int, str, str]] = []
+    for line in done.stdout.splitlines():
+        parts = line.split(None, 3)
+        if not parts:
+            continue
+        if len(parts) < 3 or not parts[0].isdigit() or not parts[1].isdigit():
+            raise ListerBlind(f"ps gave a line it could not read: {line[:200]!r}")
+        rows.append((int(parts[0]), int(parts[1]), parts[2], parts[3] if len(parts) == 4 else ""))
+    apps = {pid for pid, _, _, command in rows if APP_EXECUTABLE.search(command)}
+    hosts = [
+        pid
+        for pid, _, _, command in rows
+        if re.search(PROFILE_PROCESS, command)
+        and command.split(None, 1)[0].rsplit("/", 1)[-1] != "pgrep"
+    ]
+    children = [
+        (pid, f"{state} {command}"[:200]) for pid, parent, state, command in rows if parent in apps
+    ]
+    return hosts, children
+
+
+@dataclass(frozen=True)
+class _Reading:
+    """One call of one lister (:func:`_read`): which one, when the call started and ended, the
+    host processes on the app's profile it saw (None where it was blind, and then why), and, for
+    ps, each child of a running copy of the app, with its state and command line."""
+
+    lister: str
+    started: float
+    ended: float
+    hosts: frozenset[int] | None
+    children: tuple[tuple[int, str], ...] = ()
+    error: str = ""
+
+
+def _read(lister: str) -> _Reading:
+    """One call of ``lister``, one of :data:`LISTERS`; a blind one is a reading of nothing."""
+    started = time.monotonic()
+    try:
+        if lister == "pgrep":
+            hosts, children = _profile_processes(), []
+        else:
+            hosts, children = _ps_profile()
+    except ListerBlind as exc:
+        return _Reading(lister, started, time.monotonic(), None, (), str(exc))
+    return _Reading(lister, started, time.monotonic(), frozenset(hosts), tuple(children))
+
+
+def _look() -> tuple[_Reading, ...]:
+    """Both listers once, one after the other, for a one-off answer, where no gap is measured."""
+    return tuple(_read(lister) for lister in LISTERS)
+
+
+def _hosts_in(readings: Iterable[_Reading]) -> set[int]:
+    """The host processes on the app's profile that any of ``readings`` saw."""
+    return {pid for reading in readings for pid in reading.hosts or ()}
+
+
+def _no_profile_process() -> bool:
+    """Whether a lister read the process table and no lister saw a host process of the app's
+    profile: a blind lister is never taken for none. A child of the app does not count here: the
+    waits that ask this stop the app first."""
+    readings = _look()
+    return any(reading.hosts is not None for reading in readings) and not _hosts_in(readings)
+
+
+def _profile_processes_said() -> str:
+    """What each lister sees of the app's profile now, for a check's detail."""
+    readings = _look()
+    return "; ".join(
+        f"{reading.lister}: "
+        + ("blind, " + reading.error if reading.hosts is None else f"{sorted(reading.hosts)}")
+        for reading in readings
+    )
+
+
+@dataclass
+class _Watch:
+    """What a watch of the app's profile saw (:func:`_watch_profile`), reading by reading: the host
+    processes that either lister matched, the children of a running copy that ps saw, when each
+    lister first saw one, and where the check could not see. In seconds: ``began`` is when the
+    watch started and ``ended`` when it stopped, and every time the watch reports counts from
+    ``since``."""
+
+    began: float
+    since: float
+    ended: float = 0.0
+    readings: list[_Reading] = field(default_factory=list)
+    hosts: set[int] = field(default_factory=set)
+    children: dict[int, str] = field(default_factory=dict)
+    first: dict[str, float] = field(default_factory=dict)
+    first_child: str = ""
+    status_read: float | None = None
+
+    def add(self, reading: _Reading) -> None:
+        self.readings.append(reading)
+        self.ended = max(self.ended, reading.ended)
+        if reading.hosts:
+            self.hosts |= reading.hosts
+            self.first.setdefault(reading.lister, reading.started - self.since)
+        if reading.children and CHILD not in self.first:
+            self.first[CHILD] = reading.started - self.since
+            pid, said = reading.children[0]
+            self.first_child = f"{pid} {said}"
+        for pid, said in reading.children:
+            self.children.setdefault(pid, said)
+
+    @property
+    def seen(self) -> set[int]:
+        """The host processes either lister matched, and the children of the app ps saw."""
+        return self.hosts | set(self.children)
+
+    @property
+    def first_host(self) -> float | None:
+        """When a lister first matched a host process, or None."""
+        return min((self.first[lister] for lister in LISTERS if lister in self.first), default=None)
+
+    def read_by(self, lister: str) -> bool:
+        """Whether ``lister`` read the process table at least once."""
+        return any(r.lister == lister and r.hosts is not None for r in self.readings)
+
+    def errors(self) -> list[tuple[float, str]]:
+        """When a lister was blind, and why."""
+        return [(r.started, r.error) for r in self.readings if r.hosts is None]
+
+    def _stretches(self) -> list[tuple[float, float]]:
+        """The longest stretch from the watch's start, and from each reading's start, in which no
+        reading both started and ended: a lister reads the table somewhere within its call, so
+        nothing proves that the table was read in such a stretch."""
+        read = sorted((r.started, r.ended) for r in self.readings if r.hosts is not None)
+        starts = [start for start, _ in read]
+        earliest = [self.ended] * (len(read) + 1)
+        for i in range(len(read) - 1, -1, -1):
+            earliest[i] = min(read[i][1], earliest[i + 1])
+        found: list[tuple[float, float]] = []
+        # From the watch's start, a reading that starts with it counts; from a reading's start,
+        # only one that starts later.
+        anchors = [(self.began, bisect.bisect_left(starts, self.began))]
+        anchors += [(start, bisect.bisect_right(starts, start)) for start in sorted(set(starts))]
+        for start, later in anchors:
+            end = earliest[later]
+            if end > start:
+                found.append((start, end))
+        return found
+
+    @property
+    def longest_gap(self) -> float:
+        return max((end - start for start, end in self._stretches()), default=0.0)
+
+    def blind(self) -> list[tuple[float, float, str]]:
+        """Each stretch longer than :data:`SHORTEST_BURST` with no reading in it, overlapping ones
+        joined (the whole watch, if no lister read at all): from and to, counted from ``since``,
+        and why."""
+        read = any(r.hosts is not None for r in self.readings)
+        long = sorted(
+            (start, end)
+            for start, end in self._stretches()
+            if not read or end - start > SHORTEST_BURST
+        )
+        joined: list[list[float]] = []
+        for start, end in long:
+            if joined and start <= joined[-1][1]:
+                joined[-1][1] = max(joined[-1][1], end)
+            else:
+                joined.append([start, end])
+        found: list[tuple[float, float, str]] = []
+        for start, end in joined:
+            why = sorted({error for at, error in self.errors() if start <= at <= end})
+            said = "; ".join(why) or f"no reading for {end - start:.2f} s"
+            found.append((start - self.since, end - self.since, said))
+        return found
+
+    def summary(self) -> str:
+        errors = sorted({error for _, error in self.errors()})
+        calls = "; ".join(
+            f"{sum(r.lister == lister for r in self.readings)} {lister}" for lister in LISTERS
+        )
+        firsts = "; ".join(
+            f"{lister} at {self.first[lister]:.2f} s" if lister in self.first else f"{lister} never"
+            for lister in (*LISTERS, CHILD)
+        )
+        longest = max((r.ended - r.started for r in self.readings), default=0.0)
+        said = (
+            f"lister calls ({calls}) in {self.ended - self.began:.1f} s from "
+            f"{self.began - self.since:.2f} s; longest call {longest:.2f} s; longest gap between "
+            f"readings {self.longest_gap:.2f} s; lister errors {len(self.errors())}"
+            + (f" ({'; '.join(errors[:3])})" if errors else "")
+            + f"; first seen by {firsts}"
+        )
+        if self.first_child:
+            said += f"; the first child of the app: {self.first_child!r}"
+        if self.status_read is not None:
+            said += f"; the app's first status read had ended by {self.status_read:.2f} s"
+        return said
+
+
+def _lister_pool() -> concurrent.futures.Executor:
+    """The threads the listers run on, one each."""
+    return concurrent.futures.ThreadPoolExecutor(
+        max_workers=len(LISTERS), thread_name_prefix="lister"
+    )
+
+
+def _watch_profile(
+    seconds: float,
+    *,
+    stop: Callable[[_Watch], bool] | None = None,
+    each: Callable[[_Watch], None] | None = None,
+    watch: _Watch | None = None,
+    since: float | None = None,
+) -> _Watch:
+    """Read the process table with both listers, each on a thread of its own and called again
+    :data:`POLL_PAUSE` seconds after its last call ended, so that one held never holds back the
+    other, until ``seconds`` after the watch's start or until ``stop`` says so; ``each`` runs after
+    every reading. With ``watch``, go on with it; ``since`` is what a new watch counts its times
+    from (its start by default). A call still running when the watch stops is not waited for."""
+    if watch is None:
+        began = time.monotonic()
+        watch = _Watch(began=began, since=began if since is None else since)
+    deadline = watch.began + seconds
+    pool = _lister_pool()
+    pending: dict[str, concurrent.futures.Future[_Reading]] = {}
+    ready = dict.fromkeys(LISTERS, time.monotonic())
+    try:
+        while True:
+            for lister in LISTERS:
+                if lister not in pending and time.monotonic() >= ready[lister]:
+                    pending[lister] = pool.submit(_read, lister)
+            now = time.monotonic()
+            pause = max(
+                0.0,
+                min([POLL_PAUSE, *(ready[name] - now for name in LISTERS if name not in pending)]),
+            )
+            if pending:
+                concurrent.futures.wait(
+                    list(pending.values()),
+                    timeout=pause,
+                    return_when=concurrent.futures.FIRST_COMPLETED,
+                )
+            else:
+                time.sleep(pause)
+            for lister, future in list(pending.items()):
+                if future.done():
+                    del pending[lister]
+                    reading = future.result()
+                    watch.add(reading)
+                    ready[lister] = reading.ended + POLL_PAUSE
+                    if each is not None:
+                        each(watch)
+            if (stop is not None and stop(watch)) or time.monotonic() >= deadline:
+                watch.ended = max(watch.ended, time.monotonic())
+                return watch
+    finally:
+        pool.shutdown(wait=False, cancel_futures=True)
 
 
 def _stop_the_app(checker: Checker, what: str) -> None:
     """Stop the running copy of the app with SIGTERM, if one runs, and wait for the host's
     processes on its profile to end."""
-    if _running(APP_NAME):
+    if _may_run(APP_NAME):
         subprocess.run(["pkill", "-TERM", "-x", APP_NAME], check=False)
         checker.expect(_wait_until(lambda: not _running(APP_NAME), 15), f"{what} stops on SIGTERM")
     checker.expect(
-        _wait_until(lambda: not _profile_processes(), 30),
+        _wait_until(_no_profile_process, 30),
         "no host process of the app's profile runs",
-        f"{_profile_processes()}",
+        _profile_processes_said(),
     )
 
 
-def _placement_control(checker: Checker, screens: Path, require_driven: bool) -> bool:
+def _placement_control(checker: Checker, work: Path, require_driven: bool) -> bool:
     """The control: the copy at :func:`installed_app_path`, opened, starts the host on the app's
-    profile, which :func:`_profile_processes` sees, and says where its menu is, not where it
-    should be; while the profile holds a confirmed pair, it says neither (decisions/0002, What is
-    built today). Without it, seeing no host process later would prove nothing. Whether System
-    Events can drive the app here; with ``require_driven``, not being able to is a failure."""
+    profile, which a lister matches by its command line (:func:`_watch_control`), and says where
+    its menu is, not where it should be; while the profile holds a confirmed pair, it says neither
+    (decisions/0002, What is built today). Without it, seeing no host process later would prove
+    nothing. The app's standard output and error go to ``control-app-stdout.txt`` and
+    ``control-app-stderr.txt`` in ``work``. Whether System Events can drive the app here; with
+    ``require_driven``, not being able to is a failure."""
     installed = installed_app_path()
+    screens = work / "screens"
+    screens.mkdir(parents=True, exist_ok=True)
     _stop_earlier_copies(checker, APP_NAME)
     checker.expect(
-        _wait_until(lambda: not _profile_processes(), 30),
+        _wait_until(_no_profile_process, 30),
         "no host process of the app's profile runs before the control",
-        f"{_profile_processes()}",
+        _profile_processes_said(),
     )
+    print(_lister_libraries(), flush=True)
     paired = _pair_state(python_in(installed)) == "confirmed"
     print(f"the app's profile holds a confirmed pair: {paired}", flush=True)
     before = _folder_state(_profile_folder())
-    done = subprocess.run(["open", str(installed)], capture_output=True, text=True, check=False)
+    out_log = work / "control-app-stdout.txt"
+    err_log = work / "control-app-stderr.txt"
+    for log in (out_log, err_log):
+        log.write_text("", encoding="utf-8")
+    opened, opened_wall = time.monotonic(), time.time()
+    done = subprocess.run(
+        ["open", "--stdout", str(out_log), "--stderr", str(err_log), str(installed)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
     checker.expect(
         done.returncode == 0 and _wait_until(lambda: bool(_running(APP_NAME)), 15),
         f"the control: open starts the copy at {installed}",
         _shown(done),
     )
-    seen = _profile_processes_seen(30, first=True)
+    gated, detail = _watch_control(work, err_log, opened, opened_wall)
     checker.expect(
-        bool(seen),
-        "the control: it starts the host on the app's profile, and the check sees it",
-        "no host process of the app's profile was seen in 30 s",
+        gated, "the control: it starts the host on the app's profile, and the check sees it", detail
     )
     time.sleep(3)
     driven = _can_drive()
@@ -4988,7 +5396,279 @@ def _placement_control(checker: Checker, screens: Path, require_driven: bool) ->
     _stop_the_app(checker, "the copy in Applications")
     changed = _folder_state(_profile_folder()) != before
     print(f"the copy in Applications changed the app's profile folder: {changed}")
+    for log in (out_log, err_log):
+        print(f"the control's {log.stem.removeprefix('control-app-')}: {_text_of(log)[-5000:]!r}")
     return driven
+
+
+def _text_of(path: Path) -> str:
+    """What ``path`` holds, or nothing if it cannot be read."""
+    try:
+        return path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+
+
+def _watch_control(
+    work: Path, err_log: Path, opened: float, opened_wall: float
+) -> tuple[bool, str]:
+    """The control's watch, with its times counted from the open (macos/README.md, placement).
+    The gate: a host process on the app's profile, matched by either lister, seen within
+    :data:`CONTROL_GATE` seconds of the watch's start. A child of the app whose command line does
+    not match is recorded, with when it was first seen, and does not pass the gate. Seen, the
+    watch goes on up to :data:`CONTROL_AFTER` seconds more, until both listers have seen one and
+    the app has written :data:`STATUS_READ_MARKER` in ``err_log``, prints when each did, and adds
+    a note for a lister that never saw one or was blind. With no host process seen
+    :data:`CONTROL_SNAPSHOT_AT` seconds after the open, child or not, it takes
+    :func:`_control_snapshot` on a thread of its own, without pausing the listers. With none seen
+    at the gate, it watches on to :data:`CONTROL_DIAGNOSIS` seconds, saves the unified log
+    (:func:`_save_control_log`), and its detail ends with the case (:func:`_control_case`).
+    Returns whether the gate held, and the detail for when it did not."""
+    snapshot: list[threading.Thread] = []
+
+    def each(watch: _Watch) -> None:
+        now = time.monotonic() - watch.since
+        if watch.status_read is None and STATUS_READ_MARKER in _text_of(err_log):
+            watch.status_read = now
+        if not watch.hosts and not snapshot and now >= CONTROL_SNAPSHOT_AT:
+            print(
+                f"note: no host process seen {now:.2f} s after the open: the control takes its "
+                "snapshot",
+                flush=True,
+            )
+            thread = threading.Thread(
+                target=_control_snapshot, args=(work, work / "screens"), daemon=True
+            )
+            thread.start()
+            snapshot.append(thread)
+
+    watch = _watch_profile(
+        CONTROL_GATE, stop=lambda found: bool(found.hosts), each=each, since=opened
+    )
+    gated = bool(watch.hosts)
+    if gated:
+        until = time.monotonic() + CONTROL_AFTER
+
+        def recorded(found: _Watch) -> bool:
+            listers = all(lister in found.first for lister in LISTERS)
+            return (listers and found.status_read is not None) or time.monotonic() >= until
+
+        _watch_profile(CONTROL_GATE + CONTROL_AFTER, stop=recorded, each=each, watch=watch)
+    else:
+        _watch_profile(
+            CONTROL_DIAGNOSIS,
+            stop=lambda found: bool(found.hosts) and found.status_read is not None,
+            each=each,
+            watch=watch,
+        )
+    for thread in snapshot:
+        thread.join(SNAPSHOT_LIMIT)
+        if thread.is_alive():
+            print("note: the control's snapshot had not finished; the check goes on", flush=True)
+    if gated:
+        print(f"the control's watch: {watch.summary()}", flush=True)
+        for note in _control_notes(watch):
+            print(f"note: the control passed, but {note}", flush=True)
+        return True, ""
+    lines = [
+        f"no host process of the app's profile was seen in {CONTROL_GATE} s",
+        f"the control's watch: {watch.summary()}",
+        *(f"the check was blind from {a:.2f} s to {b:.2f} s: {why}" for a, b, why in watch.blind()),
+        _save_control_log(work / "control-log.txt", opened_wall),
+        f"the case: {_control_case(watch)}",
+    ]
+    return False, "\n".join(lines)
+
+
+def _control_notes(watch: _Watch) -> list[str]:
+    """Of a control that passed: each lister that never saw a host process, or was blind, by the
+    end of its watch. A log search for these can show from passing runs whether one lister misses
+    what the other sees (macos/README.md, placement)."""
+    notes = [
+        f"{lister} never saw a host process" for lister in LISTERS if lister not in watch.first
+    ]
+    for lister in LISTERS:
+        blind = [r.error for r in watch.readings if r.lister == lister and r.hosts is None]
+        if blind:
+            notes.append(f"{lister} was blind {len(blind)} times, first: {blind[0]}")
+    return notes
+
+
+def _control_case(watch: _Watch) -> str:
+    """Which cause a failed control fits, which the job logs alone could not tell apart
+    (macos/README.md, placement). In order: a child of the app was seen inside the gate, but no
+    host process the gate matches (a spawn held in exec, or a host whose command line the
+    pattern does not match, which a status read ended inside the gate would point to); the app's
+    first status read had ended inside the gate, but no reading saw a host process (the listers
+    missed one); the first host process, or the end of the first status read, came only after the
+    gate (its start was held, in the app or in macOS); or none of these by the end of the watch.
+    What each case points to is inferred from the app's code. The times count from the open, and
+    the gate's end is :data:`CONTROL_GATE` seconds after the watch's start."""
+    gate = watch.began - watch.since + CONTROL_GATE
+    found, read, child = watch.first_host, watch.status_read, watch.first.get(CHILD)
+    by = f"by {watch.ended - watch.since:.1f} s"
+    seen = "no host process the gate matches " + (by if found is None else f"until {found:.1f} s")
+    status = (
+        f"; the app's first status read had not ended {by}"
+        if read is None
+        else f"; the app's first status read had ended by {read:.1f} s"
+    )
+    if child is not None and child < gate:
+        return f"a child of the app from {child:.1f} s ({watch.first_child!r}), but {seen}{status}"
+    if read is not None and read < gate:
+        return (
+            f"the app's first status read had ended by {read:.1f} s, inside the "
+            f"{CONTROL_GATE} s gate (it wrote {STATUS_READ_MARKER.strip()!r}), but no reading saw "
+            f"a host process" + (f" {by}" if found is None else f" until {found:.1f} s")
+        )
+    if found is not None:
+        ended = "" if read is None else f"; the app's first status read had ended by {read:.1f} s"
+        missed = (
+            ", before any reading saw a host process, so a reading missed one too"
+            if read is not None and read < found
+            else ""
+        )
+        return (
+            f"the first host process appeared at {found:.1f} s, after the {CONTROL_GATE} s gate"
+            + ended
+            + missed
+        )
+    if read is not None:
+        return (
+            f"the app's first status read ended only at {read:.1f} s, after the {CONTROL_GATE} s "
+            f"gate, and no reading saw a host process {by}"
+        )
+    return f"no host process and no status read {by}"
+
+
+def _control_snapshot(work: Path, screens: Path) -> None:
+    """With no host process seen :data:`CONTROL_SNAPSHOT_AT` seconds after the control's open:
+    the screen, ``0-placement-control-5s.png`` (the welcome note would mean the app's first status
+    read has ended; "Waiting for Capsule's helper program", which shows 3 s into a status read,
+    that the read is held; neither, that the app has not got that far: inferred from
+    App/Connection.swift); the app's processes and their children, with where each waits
+    (``control-ps.txt``); and a one-second sample of the app (``control-sample.txt``). Each part
+    has a time limit, and none raises: what stopped one is printed."""
+    apps: list[int] = []
+
+    def processes() -> None:
+        apps.extend(_save_app_processes(work / "control-ps.txt"))
+
+    def sample() -> None:
+        if not apps:
+            print("note: the control's snapshot found no running copy of the app to sample")
+        for pid in apps[:1]:
+            done = subprocess.run(
+                ["sample", str(pid), "1", "-file", str(work / "control-sample.txt")],
+                capture_output=True,
+                text=True,
+                errors="replace",
+                timeout=DIAGNOSIS_LIMIT,
+                check=False,
+            )
+            said = "saved" if done.returncode == 0 else _shown(done)
+            print(f"the control's sample of {pid}: {said}", flush=True)
+
+    for what, part in (
+        ("take its screenshot", lambda: _screenshot(screens / "0-placement-control-5s.png")),
+        ("list the app's processes", processes),
+        ("sample the app", sample),
+    ):
+        try:
+            part()
+        except Exception as exc:  # each on its own: what stopped it is printed
+            print(f"note: the control's snapshot could not {what}: {exc!r}", flush=True)
+
+
+def _save_app_processes(path: Path) -> list[int]:
+    """Every running copy of the app and its children, from ``ps``, with where each waits and for
+    how long it has run, into ``path``. Returns the copies' pids."""
+    done = subprocess.run(
+        ["ps", "-axww", "-o", "pid,ppid,stat,wchan,etime,comm,command"],
+        capture_output=True,
+        text=True,
+        errors="replace",
+        timeout=DIAGNOSIS_LIMIT,
+        check=False,
+    )
+    lines = done.stdout.splitlines()
+    rows = [(line, line.split(None, 2)) for line in lines[1:]]
+    ids = [(line, parts) for line, parts in rows if len(parts) >= 2 and parts[0].isdigit()]
+    apps = {int(parts[0]) for line, parts in ids if APP_EXECUTABLE.search(line)}
+    kept = lines[:1] + [
+        line
+        for line, parts in ids
+        if int(parts[0]) in apps or (parts[1].isdigit() and int(parts[1]) in apps)
+    ]
+    text = "\n".join(kept) + "\n" + ("" if done.returncode == 0 else _shown(done) + "\n")
+    path.write_text(text, encoding="utf-8")
+    print(f"the app's processes and their children:\n{text}", flush=True)
+    return sorted(apps)
+
+
+def _save_control_log(path: Path, opened_wall: float) -> str:
+    """The unified log of the app, its interpreter and the parts of macOS that start, check or
+    list processes, from just before the control's open, its last :data:`CONTROL_LOG_LINES` lines
+    into ``path``. Never raises; returns what it did."""
+    start = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(opened_wall - 5))
+    predicate = " OR ".join(f'process == "{name}"' for name in CONTROL_LOG_PROCESSES)
+    shown = ["log", "show", "--start", start, "--style", "compact", "--info", "--predicate"]
+    try:
+        done = subprocess.run(
+            [*shown, predicate],
+            capture_output=True,
+            text=True,
+            errors="replace",
+            timeout=CONTROL_LOG_LIMIT,
+            check=False,
+        )
+        lines = done.stdout.splitlines()[-CONTROL_LOG_LINES:]
+        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    except (OSError, subprocess.SubprocessError) as exc:
+        return f"the unified log was not saved: {exc!r}"
+    said = f"the unified log since {start}, its last {len(lines)} lines, is in {path.name}"
+    if done.returncode == 0:
+        return said
+    return f"{said}; log exited {done.returncode}: {done.stderr.strip()[-300:]!r}"
+
+
+def _lister_libraries() -> str:
+    """Recorded, not a gate: whether each of :data:`LISTER_PROGRAMS` links libsysmon, by
+    ``otool -L``. Never raises."""
+    try:
+        done = subprocess.run(
+            ["otool", "-L", *LISTER_PROGRAMS],
+            capture_output=True,
+            text=True,
+            errors="replace",
+            timeout=DIAGNOSIS_LIMIT,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return f"recorded, not a gate: otool -L could not read the listers: {exc!r}"
+    if done.returncode != 0:
+        return f"recorded, not a gate: otool -L could not read the listers: {_shown(done)}"
+    return _read_lister_libraries(done.stdout)
+
+
+def _read_lister_libraries(text: str) -> str:
+    """Of ``otool -L``'s output, whether each of :data:`LISTER_PROGRAMS` links libsysmon, in any
+    of its architectures."""
+    links: dict[str, bool] = {}
+    current: str | None = None
+    for line in text.splitlines():
+        if line and not line[0].isspace() and line.rstrip().endswith(":"):
+            current = line.rstrip()[:-1].split(" (architecture ")[0]
+            links.setdefault(current, False)
+        elif current is not None and "libsysmon" in line:
+            links[current] = True
+    said = "; ".join(
+        f"{program} was not listed"
+        if program not in links
+        else f"{program} {'links' if links[program] else 'does not link'} libsysmon"
+        for program in LISTER_PROGRAMS
+    )
+    return f"recorded, not a gate: of the check's two listers, by otool -L, {said}"
 
 
 def _refusing_copy(
@@ -5003,13 +5683,17 @@ def _refusing_copy(
     require_driven: bool = False,
 ) -> None:
     """Open ``copy``, which is not the copy at /Applications/<name>.app, with no other copy of
-    the app running. For :data:`REFUSAL_WATCH` seconds it starts no host process on the app's
-    profile and changes nothing in the profile's folder; it says ``words``, a title and a sentence
-    of its note, which offers only Quit, and Quit quits it. With ``shows_folder``, for a copy the
-    app judges not to be in the Applications folder, the note offers only Show Applications Folder
-    and Quit, in either order, which is printed as read, and Show Applications Folder shows that
-    folder and quits it (:func:`_shows_applications_folder`). A button is pressed only once the
-    check has read it on the note. Screenshots ``0-placement-*``."""
+    the app running. For :data:`REFUSAL_WATCH` seconds from the watch's start it starts no host
+    process on the app's profile, nor any child, as both listers see it (:func:`_watch_profile`),
+    which is said only if ps read the process table at least once (pgrep alone can read none
+    where there is one: :func:`_profile_processes`) and no stretch of more than
+    :data:`SHORTEST_BURST` seconds went without a reading; and it changes nothing in the profile's
+    folder; it says ``words``, a title and a sentence of its note, which
+    offers only Quit, and Quit quits it. With ``shows_folder``, for a copy the app judges not to be
+    in the Applications folder, the note offers only Show Applications Folder and Quit, in either
+    order, which is printed as read, and Show Applications Folder shows that folder and quits it
+    (:func:`_shows_applications_folder`). A button is pressed only once the check has read it on
+    the note. Screenshots ``0-placement-*``."""
     _stop_the_app(checker, "a copy of the app")
     folder = _profile_folder()
     before = _folder_state(folder)
@@ -5020,11 +5704,27 @@ def _refusing_copy(
         _shown(done),
     ):
         return
-    seen = _profile_processes_seen(REFUSAL_WATCH, first=False)
+    watch = _watch_profile(REFUSAL_WATCH)
+    print(f"{label}: the watch of the app's profile: {watch.summary()}", flush=True)
+    blind = [
+        f"the check was blind from {a:.2f} s to {b:.2f} s: {why}" for a, b, why in watch.blind()
+    ]
+    if not watch.read_by("ps"):
+        blind.append(
+            "ps never read the process table, and pgrep alone can read none where there is one"
+        )
+    seeing = checker.expect(
+        not blind,
+        f"the check could see for all {REFUSAL_WATCH} s: ps read the process table, and no "
+        f"stretch of more than {SHORTEST_BURST} s went without a reading",
+        "\n".join(blind),
+    )
+    running = _running_now(APP_NAME)
     checker.expect(
-        not seen and bool(_running(APP_NAME)),
+        seeing and not watch.seen and bool(running),
         f"for {REFUSAL_WATCH} s it runs, and starts no host process of the app's profile",
-        f"seen: {sorted(seen)}; still running: {_running(APP_NAME)}; now: {_profile_processes()}",
+        f"seen: {sorted(watch.seen)}; still running: {running}; now: "
+        f"{_profile_processes_said()}" + ("" if seeing else "; not claimed: the check was blind"),
     )
     checker.expect(
         _folder_state(folder) == before,
@@ -5137,7 +5837,7 @@ def check_places(checker: Checker, work: Path, record_only: bool = False) -> Non
     Mac, and macos-15 gates them. At worst, each page takes :data:`PLACES_PAGE_LIMIT` seconds."""
     screens = work / "screens"
     screens.mkdir(parents=True, exist_ok=True)
-    if _running(SYSTEM_SETTINGS):
+    if _running_now(SYSTEM_SETTINGS):
         print(
             f"note: {SYSTEM_SETTINGS} was running before the places check, which quits it now",
             flush=True,
@@ -5208,7 +5908,7 @@ def check_placement(app: Path, checker: Checker, work: Path, require_driven: boo
         installed.is_dir(), f"{installed} is there", "check_app.py install puts it there"
     ):
         return
-    driven = _placement_control(checker, screens, require_driven)
+    driven = _placement_control(checker, work, require_driven)
     words = (PLACEMENT_TITLE, PLACEMENT_ELSEWHERE)
     outside = dict(shows_folder=True, require_driven=require_driven)
     _refusing_copy(app, checker, screens, "elsewhere", words, driven, **outside)
@@ -5326,17 +6026,6 @@ def _sleeping(run: int) -> bool:
         ["pgrep", "-P", str(run), "-f", "^/bin/sleep "], capture_output=True, text=True, check=False
     )
     return bool(done.stdout.split())
-
-
-def _profile_processes() -> list[int]:
-    """The host's processes on the app's profile, whoever started them."""
-    done = subprocess.run(
-        ["pgrep", "-f", f"lucille_host --profile {APP_PROFILE} "],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    return [int(pid) for pid in done.stdout.split()]
 
 
 def _close_pairing_window() -> tuple[bool, str]:
@@ -5483,7 +6172,7 @@ class _PairingCheck:
         return ends
 
     def app_pid(self) -> int | None:
-        pids = _running(APP_NAME)
+        pids = _running_now(APP_NAME) or []
         return int(pids[0]) if len(pids) == 1 else None
 
     def stderr_now(self) -> str:
@@ -5638,9 +6327,9 @@ class _PairingCheck:
         is one, is set aside; then the hub and Lucille."""
         _stop_earlier_copies(self.checker, APP_NAME)
         self.need(
-            _wait_until(lambda: not _profile_processes(), 90),
+            _wait_until(_no_profile_process, 90),
             "no host process of the app's profile runs",
-            f"{_profile_processes()}",
+            _profile_processes_said(),
         )
         _set_pasteboard("")
         if self.profile.exists():
@@ -6492,13 +7181,13 @@ class _PairingCheck:
     def tidy(self) -> None:
         """Stop the app, the host's processes and the hub; forget whatever pair is left; put the
         profile back as it was; and check that nothing was written into the bundle."""
-        if _running(APP_NAME):
+        if _may_run(APP_NAME):
             subprocess.run(["pkill", "-TERM", "-x", APP_NAME], check=False)
             self.checker.expect(
                 _wait_until(lambda: not _running(APP_NAME), 15), "the app stops on SIGTERM"
             )
-        if self.owns_profile and not _wait_until(lambda: not _profile_processes(), 90):
-            left = _profile_processes()
+        if self.owns_profile and not _wait_until(_no_profile_process, 90):
+            left = sorted(_hosts_in(_look()))
             print(f"note: host processes of the app's profile still ran, and were killed: {left}")
             for pid in left:
                 with contextlib.suppress(ProcessLookupError):

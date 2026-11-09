@@ -7,6 +7,7 @@ steps tests/test_ci_workflow.py reads.
 
 from __future__ import annotations
 
+import concurrent.futures
 import contextlib
 import dataclasses
 import errno
@@ -21,6 +22,7 @@ import signal
 import struct
 import subprocess
 import sys
+import threading
 import time
 import types
 import warnings
@@ -6620,7 +6622,7 @@ def test_the_placement_control_expects_the_note_only_while_unpaired(
     assert said.count(f"the app's profile holds a confirmed pair: {paired}\n") == 1
     control = _python_function(_CHECK_APP.read_text(encoding="utf-8"), "_placement_control")
     asked = control.index('paired = _pair_state(python_in(installed)) == "confirmed"')
-    assert asked < control.index('subprocess.run(["open", str(installed)]')
+    assert asked < control.index('["open", "--stdout", str(out_log), "--stderr", str(err_log)')
 
 
 @pytest.mark.parametrize("paired", [False, True])
@@ -8112,10 +8114,11 @@ def test_the_placement_check_sees_its_control_before_it_reads_a_refusal() -> Non
     assert check.index("RENAMED_ALONE") < check.index("finally:") < check.rindex("make_writable(")
     assert '"ditto"' in check and "RENAMED_COPY" in check and "PLACEMENT_ELSEWHERE" in check
     control = _python_function(source, "_placement_control")
-    assert "installed_app_path()" in control and "_profile_processes()" in control
+    assert "installed_app_path()" in control and "_watch_control(" in control
+    assert "_watch_profile(" in _python_function(source, "_watch_control")
     refusing = _python_function(source, "_refusing_copy")
     for name in (
-        "_profile_processes()",
+        "_watch_profile(",
         "_profile_folder()",
         "REFUSAL_WATCH",
         "QUIT_BUTTON",
@@ -8134,8 +8137,9 @@ def _placement_world(
 ) -> tuple[Path, list[str]]:
     """What the placement check sees of a copy it opens, made up: once ``open`` has run, a host
     process of the app's profile runs (``starts``) and a file appears in the profile's folder
-    (``writes``), or not. The app runs once opened; nothing waits; a host process is looked for
-    for a fifth of a second at most. Returns the profile's folder and what was opened."""
+    (``writes``), or not. The app runs once opened; nothing waits; the control looks for a host
+    process for a fifth of a second at most, and its snapshot, unified log and the listers'
+    libraries are stand-ins. Returns the profile's folder and what was opened."""
     profile = tmp_path / "profile"
     profile.mkdir()
     (profile / "state").mkdir()
@@ -8143,23 +8147,32 @@ def _placement_world(
 
     def run(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
         if argv[0] == "open":
-            opened.append(str(argv[1]))
+            opened.append(str(argv[-1]))
             if writes:
                 (profile / "state" / "written").write_text("x", encoding="utf-8")
         return subprocess.CompletedProcess(argv, 0, "", "")
 
-    looked = check_app._profile_processes_seen
     monkeypatch.setattr("subprocess.run", run)
     monkeypatch.setattr(check_app, "_profile_folder", lambda: profile)
     monkeypatch.setattr(check_app, "_running", lambda name: [99] if opened else [])
     monkeypatch.setattr(
         check_app, "_profile_processes", lambda: [4242] if opened and starts else []
     )
+    # raising=False: so that these tests also run against a check without the second lister.
+    monkeypatch.setattr(check_app, "_ps_profile", lambda: ([], []), raising=False)
+    monkeypatch.setattr(check_app, "_lister_pool", _NowPool, raising=False)
+    for name, seconds in (
+        ("CONTROL_GATE", 0.2),
+        ("CONTROL_AFTER", 0.1),
+        ("CONTROL_SNAPSHOT_AT", 0.1),
+        ("CONTROL_DIAGNOSIS", 0.3),
+    ):
+        monkeypatch.setattr(check_app, name, seconds, raising=False)
+    monkeypatch.setattr(check_app, "_control_snapshot", lambda work, screens: None, raising=False)
     monkeypatch.setattr(
-        check_app,
-        "_profile_processes_seen",
-        lambda seconds, *, first: looked(min(seconds, 0.2), first=first),
+        check_app, "_save_control_log", lambda path, opened: "a stand-in", raising=False
     )
+    monkeypatch.setattr(check_app, "_lister_libraries", lambda: "a stand-in", raising=False)
     monkeypatch.setattr(check_app, "_wait_until", lambda test, seconds: test())
     monkeypatch.setattr(check_app, "_stop_the_app", lambda checker, what: None)
     monkeypatch.setattr(check_app, "_stop_earlier_copies", lambda checker, name: True)
@@ -8205,6 +8218,956 @@ def test_the_placement_control_fails_unless_the_installed_copy_starts_the_host(
     assert bool(checker.failures) != starts, checker.failures
     if not starts:
         assert any("the control: it starts the host" in what for what in checker.failures)
+
+
+# --- check_app.py placement: two listers, a watch that knows when it was blind, and the control's
+# record of what it saw
+
+
+def _done(
+    argv: list[str], code: int, out: str = "", err: str = ""
+) -> subprocess.CompletedProcess[str]:
+    return subprocess.CompletedProcess(argv, code, out, err)
+
+
+# A host process on the app's profile, and a running copy of the app, as ps -o command shows them.
+_HOST_COMMAND = (
+    f"/Applications/{check_app.APP_NAME}.app/Contents/Resources/runtime/bin/lucille-host-runtime"
+    f" -I -B -X utf8 -m lucille_host --profile {check_app.APP_PROFILE} --json status"
+)
+_APP_COMMAND = f"/Applications/{check_app.APP_NAME}.app/Contents/MacOS/{check_app.APP_NAME}"
+
+# How pgrep answers: (exit, stdout, stderr, the pids it means, or None where it is blind).
+_PGREP_ANSWERS = [
+    (0, "4242\n4343\n", "", [4242, 4343]),
+    (1, "", "", []),
+    # Apple's pgrep, when its request to sysmond fails (pkill.c).
+    (3, "", "pgrep: sysmon request failed with error: sysmond service not found\n", None),
+    (3, "", "", None),
+    (2, "", "", None),
+    (1, "", "pgrep: cannot read the process table\n", None),
+    (0, "4242\n", "a warning\n", None),
+    (0, "", "", None),
+    (0, "4242\nnot-a-pid\n", "", None),
+]
+
+
+@pytest.mark.parametrize(("code", "out", "err", "pids"), _PGREP_ANSWERS)
+def test_the_profile_lister_never_reads_a_failed_pgrep_as_none(
+    monkeypatch: pytest.MonkeyPatch, code: int, out: str, err: str, pids: list[int] | None
+) -> None:
+    # pgrep exits 0 with the pids it found and 1 with none. Any other exit, anything on standard
+    # error, or an answer that is not pids, means it could not read the process table: the lister
+    # is blind, never empty, and it has a time limit.
+    calls: list[tuple[list[str], dict[str, Any]]] = []
+
+    def run(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        calls.append((argv, kwargs))
+        return _done(argv, code, out, err)
+
+    monkeypatch.setattr("subprocess.run", run)
+    if pids is None:
+        with pytest.raises(check_app.ListerBlind):
+            check_app._profile_processes()
+    else:
+        assert check_app._profile_processes() == pids
+    [(argv, kwargs)] = calls
+    assert argv == ["pgrep", "-f", f"lucille_host --profile {check_app.APP_PROFILE} "]
+    assert kwargs.get("timeout") == 5 and kwargs.get("errors") == "replace"
+
+
+@pytest.mark.parametrize(("code", "out", "err", "pids"), _PGREP_ANSWERS)
+def test_the_check_never_reads_a_failed_pgrep_as_the_app_not_running(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    code: int,
+    out: str,
+    err: str,
+    pids: list[int] | None,
+) -> None:
+    # The pgrep -x that says whether the app runs follows the same rule. Where it is blind, a
+    # wait for the app to stop, or to start, has not held; the check stops the app as if it ran;
+    # and what the check prints says so.
+    calls: list[tuple[list[str], dict[str, Any]]] = []
+
+    def run(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        calls.append((argv, kwargs))
+        return _done(argv, code, out, err)
+
+    monkeypatch.setattr("subprocess.run", run)
+    monkeypatch.setattr(check_app.time, "sleep", lambda seconds: None)
+    name = check_app.APP_NAME
+    if pids is None:
+        with pytest.raises(check_app.ListerBlind):
+            check_app._running(name)
+        assert check_app._running_now(name) is None
+        assert check_app._may_run(name) is True
+        assert "pgrep could not say whether" in capsys.readouterr().out
+        assert check_app._wait_until(lambda: not check_app._running(name), 0) is False
+        assert check_app._wait_until(lambda: bool(check_app._running(name)), 0) is False
+    else:
+        assert check_app._running(name) == [str(pid) for pid in pids]
+        assert check_app._may_run(name) is bool(pids)
+        assert check_app._wait_until(lambda: not check_app._running(name), 0) is not pids
+    argv, kwargs = calls[0]
+    assert argv == ["pgrep", "-x", name]
+    assert kwargs.get("timeout") == 5
+
+
+def test_the_check_stops_the_app_where_pgrep_cannot_say_whether_it_runs(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # pgrep fails once, then reads none: the check sends SIGTERM anyway, and says that the copy
+    # stopped only once a pgrep has read that nothing of that name runs.
+    answers = iter([_done([], 3, "", "pgrep: sysmon request failed\n")] + [_done([], 1)] * 10)
+    ran: list[list[str]] = []
+
+    def run(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        ran.append(argv)
+        return next(answers) if argv[:2] == ["pgrep", "-x"] else _done(argv, 0)
+
+    monkeypatch.setattr("subprocess.run", run)
+    monkeypatch.setattr(check_app.time, "sleep", lambda seconds: None)
+    checker = check_app.Checker()
+    assert check_app._stop_earlier_copies(checker, check_app.APP_NAME) is True
+    assert ["pkill", "-TERM", "-x", check_app.APP_NAME] in ran
+    assert checker.failures == []
+    assert "pgrep could not say whether" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("lister", ["pgrep", "ps"])
+@pytest.mark.parametrize("raised", ["timeout", "missing"])
+def test_a_lister_that_does_not_answer_in_time_is_blind(
+    monkeypatch: pytest.MonkeyPatch, lister: str, raised: str
+) -> None:
+    def run(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        assert argv[0] == lister and kwargs.get("timeout") == 5, (argv, kwargs)
+        if raised == "timeout":
+            raise subprocess.TimeoutExpired(argv, kwargs["timeout"])
+        raise FileNotFoundError(argv[0])
+
+    monkeypatch.setattr("subprocess.run", run)
+    with pytest.raises(check_app.ListerBlind, match=lister):
+        if lister == "pgrep":
+            check_app._profile_processes()
+        else:
+            check_app._ps_profile()
+
+
+def test_the_ps_lister_sees_the_profile_and_every_child_of_a_running_copy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The second lister reads ps, not pgrep: the host's processes on the app's profile, matched as
+    # pgrep matches them, and every child of a running copy of the app, wherever that copy is and
+    # whatever its argv says (a child still in exec may show none), with its state and command
+    # line. Its own pgrep is never one, nor a host on another profile.
+    rows = [
+        "    1     0 Ss   /sbin/launchd",
+        f"   99     1 S    {_APP_COMMAND}",
+        "  100    99 U    (lucille-host-ru)",
+        f"  101     1 S    {_HOST_COMMAND}",
+        f"  102    77 S    /usr/bin/pgrep -f lucille_host --profile {check_app.APP_PROFILE} ",
+        "  103     1 S    /x/python -m lucille_host --profile other --json status",
+        f"  104    98 S    /x/{check_app.RENAMED_COPY}.app/Contents/MacOS/{check_app.APP_NAME}",
+        "  105   104 S    /bin/sleep 5",
+        "  106     1 Z    ",
+        "  107   101 S    /bin/sleep 9",
+    ]
+    calls: list[tuple[list[str], dict[str, Any]]] = []
+
+    def run(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        calls.append((argv, kwargs))
+        return _done(argv, 0, "\n".join(rows) + "\n")
+
+    monkeypatch.setattr("subprocess.run", run)
+    assert check_app._ps_profile() == (
+        [101],
+        [(100, "U (lucille-host-ru)"), (105, "S /bin/sleep 5")],
+    )
+    [(argv, kwargs)] = calls
+    assert argv == ["ps", "-axww", "-o", "pid=,ppid=,stat=,command="]
+    assert kwargs.get("timeout") == 5 and kwargs.get("errors") == "replace"
+
+
+@pytest.mark.parametrize(
+    ("code", "out", "err"),
+    [
+        (1, "", ""),
+        (0, "", ""),
+        (0, f"   99     1 S    {_APP_COMMAND}\n", "ps: a warning\n"),
+        (0, f"   99     1 S    {_APP_COMMAND}\n  x  y  z\n", ""),
+    ],
+)
+def test_the_ps_lister_is_blind_when_ps_fails_or_says_what_it_cannot_read(
+    monkeypatch: pytest.MonkeyPatch, code: int, out: str, err: str
+) -> None:
+    monkeypatch.setattr("subprocess.run", lambda argv, **kwargs: _done(argv, code, out, err))
+    with pytest.raises(check_app.ListerBlind, match="ps"):
+        check_app._ps_profile()
+
+
+def test_what_the_listers_and_diagnostics_read_need_not_be_utf8(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # A process's command line can hold any bytes. Stand-ins for ps, pgrep and log, first on
+    # PATH, each write a byte that is not UTF-8, and the check runs them as it runs the real
+    # ones: none raises, and each reads what it can.
+    bin_ = tmp_path / "bin"
+    bin_.mkdir()
+    app = f"{check_app.APP_NAME}.app/Contents/MacOS/{check_app.APP_NAME}"
+    scripts = {
+        "ps": (
+            'case "$3" in *wchan*) printf "  PID  PPID STAT WCHAN ELAPSED COMMAND\\n";; esac\n'
+            f'printf "   99     1 S    /x/\\377/{app}\\n  100    99 S    /bin/sleep \\377\\n"\n'
+        ),
+        "pgrep": 'printf "4242\\n"\n',
+        "log": 'printf "a line \\377\\n"\n',
+    }
+    for name, body in scripts.items():
+        script = bin_ / name
+        script.write_text("#!/bin/sh\n" + body, encoding="utf-8")
+        script.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{bin_}{os.pathsep}{os.environ.get('PATH', '')}")
+    assert check_app._ps_profile() == ([], [(100, "S /bin/sleep \ufffd")])
+    assert check_app._profile_processes() == [4242]
+    assert check_app._save_app_processes(tmp_path / "control-ps.txt") == [99]
+    said = check_app._save_control_log(tmp_path / "control-log.txt", time.time())
+    assert "is in control-log.txt" in said, said
+    assert "\ufffd" in (tmp_path / "control-log.txt").read_text(encoding="utf-8")
+    capsys.readouterr()
+
+
+@pytest.mark.parametrize(
+    ("pgrep", "ps", "none"),
+    [
+        ([], ([], []), True),
+        ("blind", ([], []), True),
+        ([], "blind", True),
+        ("blind", "blind", False),
+        ([4242], "blind", False),
+        ("blind", ([4242], []), False),
+        ([], ([], [(100, "S /bin/sleep 5")]), True),
+    ],
+)
+def test_no_host_process_is_said_only_after_a_lister_read_the_table(
+    monkeypatch: pytest.MonkeyPatch, pgrep: Any, ps: Any, none: bool
+) -> None:
+    # The waits for no host process of the app's profile ("before the control", after a copy
+    # stops) take a reading of none from either lister, never a blind one; a child of the app is
+    # not a host process for them (the app is stopped first).
+    def answer(given: Any) -> Callable[[], Any]:
+        def lister() -> Any:
+            if given == "blind":
+                raise check_app.ListerBlind("could not read")
+            return given
+
+        return lister
+
+    monkeypatch.setattr(check_app, "_profile_processes", answer(pgrep))
+    monkeypatch.setattr(check_app, "_ps_profile", answer(ps))
+    assert check_app._no_profile_process() is none
+    said = check_app._profile_processes_said()
+    assert ("could not read" in said) == ("blind" in (pgrep, ps)), said
+
+
+def _reading(start: float, end: float, read: bool, error: str = "", lister: str = "pgrep") -> Any:
+    return check_app._Reading(
+        lister, start, end, frozenset() if read else None, (), "" if read else error
+    )
+
+
+def _watched(*readings: Any, began: float = 0.0, ended: float | None = None) -> Any:
+    watch = check_app._Watch(began=began, since=began)
+    for reading in readings:
+        watch.add(reading)
+    if ended is not None:
+        watch.ended = ended
+    return watch
+
+
+def test_a_watch_is_blind_where_no_lister_read_for_longer_than_the_shortest_burst() -> None:
+    # Readings at 0 and 0.1 s, then two calls that failed, then one at 1.05 s: from the second
+    # reading's start, 0.1 s, to the third's end, 1.1 s, the check could not see, and a burst of
+    # host processes could have come and gone in it.
+    watch = _watched(
+        _reading(0.0, 0.05, True),
+        _reading(0.1, 0.15, True, lister="ps"),
+        _reading(0.2, 0.6, False, "pgrep did not answer in 5 s"),
+        _reading(0.65, 1.0, False, "ps exited 1", lister="ps"),
+        _reading(1.05, 1.1, True),
+    )
+    assert len(watch.readings) == 5 and watch.errors() == [
+        (0.2, "pgrep did not answer in 5 s"),
+        (0.65, "ps exited 1"),
+    ]
+    assert watch.longest_gap == pytest.approx(1.0)
+    [(start, end, why)] = watch.blind()
+    assert (start, end) == pytest.approx((0.1, 1.1))
+    assert "pgrep did not answer in 5 s" in why and "ps exited 1" in why
+    assert watch.read_by("pgrep") and watch.read_by("ps")
+    # No reading at all is blind from the watch's start to its end, however short.
+    never = _watched(_reading(0.0, 0.05, False, "pgrep exited 3"))
+    assert [(a, b) for a, b, _ in never.blind()] == [pytest.approx((0.0, 0.05))]
+    assert not never.read_by("pgrep")
+    # Readings 0.1 s long, starting 0.25 s apart: from one's start to the next one's end is
+    # 0.35 s, within the bound, and so is the stretch after the last one's start.
+    fine = _watched(*(_reading(t, t + 0.1, True) for t in (0.0, 0.25, 0.5, 0.75)), ended=1.0)
+    assert fine.blind() == [] and fine.longest_gap == pytest.approx(0.35)
+
+
+def test_a_stretch_runs_from_one_readings_start_to_the_next_ones_end() -> None:
+    # A lister reads the table somewhere within its call. Calls that start 0.31 s apart, the
+    # second slow, leave 0.57 s in which nothing proves a read; the watch says so.
+    slow = _watched(_reading(0.0, 0.01, True), _reading(0.31, 0.57, True), ended=0.6)
+    [(start, end, why)] = slow.blind()
+    assert (start, end) == pytest.approx((0.0, 0.57))
+    assert why == "no reading for 0.57 s"
+    # Two listers' calls that overlap count together: a reading inside the stretch closes it.
+    both = _watched(
+        _reading(0.0, 0.3, True),
+        _reading(0.05, 0.1, True, lister="ps"),
+        _reading(0.3, 0.6, True),
+        _reading(0.15, 0.2, True, lister="ps"),
+        _reading(0.4, 0.45, True, lister="ps"),
+        ended=0.62,
+    )
+    assert both.blind() == [] and both.longest_gap == pytest.approx(0.3)
+    # A watch that starts, or ends, with a long stretch with no reading is blind there: the
+    # stretch before the first reading's end, and the stretch after the last one's start.
+    start = _watched(_reading(0.5, 0.55, True), _reading(0.6, 0.65, True), ended=0.7)
+    assert [(a, b) for a, b, _ in start.blind()] == [pytest.approx((0.0, 0.55))]
+    end = _watched(_reading(0.0, 0.05, True), _reading(0.1, 0.15, True), ended=0.6)
+    assert [(a, b) for a, b, _ in end.blind()] == [pytest.approx((0.1, 0.6))]
+
+
+def test_the_two_listers_run_at_once_so_one_held_never_holds_back_the_other(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Real threads and real time: pgrep is held for a second at each call; ps answers at once.
+    # In half a second ps reads again and again, and the watch ends on time, not waiting for
+    # pgrep.
+    def held() -> list[int]:
+        time.sleep(1.0)
+        return []
+
+    monkeypatch.setattr(check_app, "_profile_processes", held)
+    monkeypatch.setattr(check_app, "_ps_profile", lambda: ([], []))
+    # The stand-in worlds replace this pool with one that runs each call at once.
+    assert "pool = _lister_pool()" in _python_function(
+        _CHECK_APP.read_text(encoding="utf-8"), "_watch_profile"
+    )
+    started = time.monotonic()
+    watch = check_app._watch_profile(0.5)
+    took = time.monotonic() - started
+    assert took < 0.9, took
+    assert not watch.read_by("pgrep")
+    assert sum(r.lister == "ps" for r in watch.readings) >= 4, watch.readings
+
+
+class _NowPool:
+    """The listers' threads, made up: each call runs at once, here, so that a made-up clock moves
+    in a known order."""
+
+    def submit(self, call: Callable[..., Any], *args: Any) -> concurrent.futures.Future[Any]:
+        future: concurrent.futures.Future[Any] = concurrent.futures.Future()
+        try:
+            future.set_result(call(*args))
+        except Exception as exc:
+            future.set_exception(exc)
+        return future
+
+    def shutdown(self, wait: bool = True, *, cancel_futures: bool = False) -> None:
+        return None
+
+
+class _Clock:
+    """Time in a stand-in world: it moves only when the code under test sleeps, or when a
+    stand-in lister takes its time."""
+
+    def __init__(self) -> None:
+        self.now = 1000.0
+
+    def monotonic(self) -> float:
+        return self.now
+
+    def sleep(self, seconds: float) -> None:
+        self.now += max(seconds, 0.0)
+
+
+@dataclasses.dataclass
+class _ListerWorld:
+    """The process table as the placement check's two listers read it, made up. ``pgrep(t)`` and
+    ``ps(t)`` give (exit, stdout, stderr) ``t`` seconds after ``open`` ran (None before), and each
+    call takes ``took`` seconds (``ps_took`` for ps, where given). Asking whether the app runs
+    takes ``asking`` seconds, so the open and the watch's start differ. Once ``open`` was given a
+    file for the app's standard error, the app writes its login item line there ``marker_at``
+    seconds after the open. The control's snapshots are counted, and when its unified log was
+    asked for is recorded."""
+
+    pgrep: Callable[[float | None], tuple[int, str, str]]
+    ps: Callable[[float | None], tuple[int, str, str]]
+    took: float = 0.02
+    ps_took: float | None = None
+    asking: float = 0.25
+    marker_at: float | None = None
+    clock: _Clock = dataclasses.field(default_factory=_Clock)
+    opened: list[list[str]] = dataclasses.field(default_factory=list)
+    opened_at: float | None = None
+    err: Path | None = None
+    marked: bool = False
+    snapshots: list[Path] = dataclasses.field(default_factory=list)
+    logs: list[float | None] = dataclasses.field(default_factory=list)
+
+    def since_open(self) -> float | None:
+        return None if self.opened_at is None else self.clock.now - self.opened_at
+
+    def running(self, name: str) -> list[str]:
+        self.clock.now += self.asking
+        return ["99"] if self.opened else []
+
+    def run(self, argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        if argv[0] == "open":
+            self.opened.append(list(argv))
+            self.opened_at = self.clock.now
+            if "--stderr" in argv:
+                self.err = Path(argv[argv.index("--stderr") + 1])
+            return _done(argv, 0)
+        if argv[0] in ("pgrep", "ps"):
+            at = self.since_open()
+            took = self.ps_took if argv[0] == "ps" and self.ps_took is not None else self.took
+            self.clock.now += took
+            if (
+                self.err is not None
+                and self.marker_at is not None
+                and at is not None
+                and at >= self.marker_at
+                and not self.marked
+            ):
+                with self.err.open("a", encoding="utf-8") as file:
+                    file.write("login item: notFound\n")
+                self.marked = True
+            return _done(argv, *(self.pgrep if argv[0] == "pgrep" else self.ps)(at))
+        return _done(argv, 0)
+
+
+def _in_lister_world(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, world: _ListerWorld) -> Path:
+    """Run the placement check's control or a refusing copy in ``world``: nothing is driven, the
+    app's profile is a folder of its own, and the copy in /Applications is under ``tmp_path``."""
+    installed = tmp_path / "Applications" / f"{check_app.APP_NAME}.app"
+    profile = tmp_path / "profile"
+    (profile / "state").mkdir(parents=True)
+    monkeypatch.setattr("subprocess.run", world.run)
+    monkeypatch.setattr(check_app.time, "monotonic", world.clock.monotonic)
+    monkeypatch.setattr(check_app.time, "sleep", world.clock.sleep)
+    monkeypatch.setattr(check_app, "_lister_pool", _NowPool, raising=False)
+    monkeypatch.setattr(check_app, "installed_app_path", lambda: installed)
+    monkeypatch.setattr(check_app, "_profile_folder", lambda: profile)
+    monkeypatch.setattr(check_app, "_running", world.running)
+    monkeypatch.setattr(check_app, "_pair_state", lambda python: "none")
+    monkeypatch.setattr(check_app, "_stop_the_app", lambda checker, what: None)
+    monkeypatch.setattr(check_app, "_stop_earlier_copies", lambda checker, name: True)
+    monkeypatch.setattr(check_app, "_screenshot", lambda path: None)
+    monkeypatch.setattr(check_app, "_can_drive", lambda: False)
+
+    def snapshot(work: Path, screens: Path) -> None:
+        # On its own thread, it takes a moment of real time: the control waits for it.
+        threading.Event().wait(0.05)
+        world.snapshots.append(work)
+
+    monkeypatch.setattr(check_app, "_control_snapshot", snapshot, raising=False)
+
+    def save_log(path: Path, opened: float) -> str:
+        world.logs.append(world.since_open())
+        return f"{path.name}: a stand-in"
+
+    monkeypatch.setattr(check_app, "_save_control_log", save_log, raising=False)
+    monkeypatch.setattr(
+        check_app, "_lister_libraries", lambda: "the listers: stand-in", raising=False
+    )
+    return installed
+
+
+def _none(at: float | None) -> tuple[int, str, str]:
+    return 1, "", ""
+
+
+def _ps_none(at: float | None) -> tuple[int, str, str]:
+    return 0, f"   99     1 S    {_APP_COMMAND}\n" if at is not None else "    1     0 Ss   x\n", ""
+
+
+def _blind_while(
+    blind: Callable[[float], bool], lister: Callable[[float | None], tuple[int, str, str]]
+) -> Callable[[float | None], tuple[int, str, str]]:
+    def answer(at: float | None) -> tuple[int, str, str]:
+        if at is not None and blind(at):
+            return 3, "", "sysmon request failed\n"
+        return lister(at)
+
+    return answer
+
+
+def _host_from(when: float) -> Callable[[float | None], tuple[int, str, str]]:
+    def pgrep(at: float | None) -> tuple[int, str, str]:
+        return (0, "4242\n", "") if at is not None and at >= when else (1, "", "")
+
+    return pgrep
+
+
+def _ps_with(*rows: tuple[float, float, str]) -> Callable[[float | None], tuple[int, str, str]]:
+    """ps, with each row in its list from ``when`` to ``until`` seconds after the open."""
+
+    def ps(at: float | None) -> tuple[int, str, str]:
+        code, out, err = _ps_none(at)
+        for when, until, row in rows:
+            if at is not None and when <= at < until:
+                out += row + "\n"
+        return code, out, err
+
+    return ps
+
+
+_PS_HOST_ROW = f" 4242    99 S    {_HOST_COMMAND}"
+
+
+def _ps_host_from(when: float) -> Callable[[float | None], tuple[int, str, str]]:
+    return _ps_with((when, 1e9, _PS_HOST_ROW))
+
+
+def _refusing_in(world: _ListerWorld, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Any:
+    _in_lister_world(tmp_path, monkeypatch, world)
+    checker = check_app.Checker()
+    copy = tmp_path / "out" / f"{check_app.APP_NAME}.app"
+    words = (check_app.PLACEMENT_TITLE, check_app.PLACEMENT_ELSEWHERE)
+    check_app._refusing_copy(copy, checker, tmp_path, "elsewhere", words, False)
+    return checker
+
+
+def test_a_refusing_copy_fails_when_both_listers_are_blind(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # pgrep's request to sysmond fails and ps fails too: the check saw nothing because it could
+    # not look, so it may not say that the copy started nothing.
+    world = _ListerWorld(
+        pgrep=lambda at: (3, "", "pgrep: sysmon request failed\n"),
+        ps=lambda at: (1, "", "ps: no\n"),
+    )
+    checker = _refusing_in(world, tmp_path, monkeypatch)
+    said = capsys.readouterr().out
+    assert any("could see" in what for what in checker.failures), checker.failures
+    assert any("starts no host process" in what for what in checker.failures), checker.failures
+    assert "the check was blind from 0.00 s to 10.0" in said, said
+    assert "sysmon request failed" in said and "ps never read the process table" in said, said
+
+
+def test_a_refusing_copy_passes_when_ps_reads_though_pgrep_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # pgrep fails throughout and ps reads the table at every call: the copy's ten seconds are
+    # covered by ps, and the run says how often pgrep failed.
+    world = _ListerWorld(pgrep=lambda at: (3, "", "pgrep: sysmon request failed\n"), ps=_ps_none)
+    checker = _refusing_in(world, tmp_path, monkeypatch)
+    said = capsys.readouterr().out
+    assert checker.failures == [], checker.failures
+    errors = re.search(r"lister errors (\d+)", said)
+    assert errors and int(errors.group(1)) > 50, said
+    assert "sysmon request failed" in said
+
+
+def test_a_refusing_copy_fails_when_only_pgrep_reads(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # ps fails throughout and pgrep reads none at every call: pgrep alone can read none where a
+    # host process runs (pkill.c falls back to a process's name), so the check may not say that
+    # the copy started nothing.
+    world = _ListerWorld(pgrep=_none, ps=lambda at: (1, "", "ps: no\n"))
+    checker = _refusing_in(world, tmp_path, monkeypatch)
+    said = capsys.readouterr().out
+    assert any("could see" in what for what in checker.failures), checker.failures
+    assert "ps never read the process table" in said, said
+    assert "the check was blind from" not in said, said
+
+
+def test_a_refusing_copy_fails_when_its_readings_are_too_far_apart(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Each lister takes half a second: three back-to-back host verbs could start and end between
+    # two readings.
+    world = _ListerWorld(pgrep=_none, ps=_ps_none, took=0.5)
+    checker = _refusing_in(world, tmp_path, monkeypatch)
+    said = capsys.readouterr().out
+    assert any("could see" in what for what in checker.failures), checker.failures
+    assert "the check was blind from" in said, said
+    assert re.search(r"longest gap between readings 1\.\d\d s", said), said
+
+
+def test_a_refusing_copy_fails_when_slow_calls_leave_a_stretch_unread(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # pgrep is blind throughout and each ps call takes 0.2 s: ps's calls start 0.25 s apart, but
+    # from one's start to the next one's end is 0.45 s, in which nothing proves a read.
+    world = _ListerWorld(
+        pgrep=lambda at: (3, "", "pgrep: sysmon request failed\n"), ps=_ps_none, ps_took=0.2
+    )
+    checker = _refusing_in(world, tmp_path, monkeypatch)
+    said = capsys.readouterr().out
+    assert any("could see" in what for what in checker.failures), checker.failures
+    assert re.search(r"longest gap between readings 0\.4\d s", said), said
+
+
+@pytest.mark.parametrize(
+    ("blind", "stretch"),
+    [
+        (lambda at: at < 3.0, r"blind from 0\.00 s to 2\.\d\d s"),
+        (lambda at: at >= 7.0, r"blind from 6\.\d\d s to 10\.\d\d s"),
+    ],
+)
+def test_a_refusing_copy_fails_when_it_was_blind_at_the_start_or_the_end_of_its_watch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    blind: Callable[[float], bool],
+    stretch: str,
+) -> None:
+    # Both listers are blind for the first seconds of the watch, when a refusing copy's launch
+    # burst would come, or for its last seconds: either way the check names the stretch.
+    world = _ListerWorld(pgrep=_blind_while(blind, _none), ps=_blind_while(blind, _ps_none))
+    checker = _refusing_in(world, tmp_path, monkeypatch)
+    said = capsys.readouterr().out
+    assert any("could see" in what for what in checker.failures), checker.failures
+    assert re.search(stretch, said), said
+
+
+def test_a_refusing_copy_fails_when_ps_sees_a_child_of_the_app(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A child of the refusing copy, whatever its command line, is something it started.
+    world = _ListerWorld(pgrep=_none, ps=_ps_with((2.0, 2.5, " 5555    99 U    (lucille-host-ru)")))
+    checker = _refusing_in(world, tmp_path, monkeypatch)
+    assert checker.failures == [
+        f"for {check_app.REFUSAL_WATCH} s it runs, and starts no host process of the app's profile"
+    ]
+
+
+def test_a_refusing_copy_prints_how_its_watch_went(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    world = _ListerWorld(pgrep=_none, ps=_ps_none)
+    checker = _refusing_in(world, tmp_path, monkeypatch)
+    said = capsys.readouterr().out
+    assert checker.failures == [], checker.failures
+    line = next(line for line in said.splitlines() if "lister calls" in line)
+    assert "elsewhere" in line and "lister errors 0" in line, line
+    assert re.search(r"lister calls \(\d{3} pgrep; \d{3} ps\) in 10\.0 s from 0\.00 s", line), line
+    assert re.search(r"longest call 0\.02 s; longest gap between readings 0\.0[4-9] s", line), line
+
+
+def _control_in(
+    world: _ListerWorld, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> tuple[Any, Path]:
+    installed = _in_lister_world(tmp_path, monkeypatch, world)
+    checker = check_app.Checker()
+    check_app._placement_control(checker, tmp_path, False)
+    return checker, installed
+
+
+def _case(said: str) -> str:
+    return next(line for line in said.splitlines() if line.startswith("the case: "))
+
+
+@pytest.mark.parametrize("marker_at", [1.0, None])
+def test_a_failed_control_says_whether_the_app_had_read_its_status(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    marker_at: float | None,
+) -> None:
+    # Neither lister ever sees a host process. With the app's login item line at 1 s, its first
+    # status read had ended inside the gate, so a host process ran that no reading saw; without
+    # it, nothing by the end of the watch, 60 s after its start. Either way the gate fails, at
+    # 5 s the check took its snapshot, and after the failure it saved the unified log; the app's
+    # standard error went to a file it read.
+    world = _ListerWorld(pgrep=_none, ps=_ps_none, marker_at=marker_at)
+    checker, installed = _control_in(world, tmp_path, monkeypatch)
+    said = capsys.readouterr().out
+    assert any("the control: it starts the host" in what for what in checker.failures)
+    assert "no host process of the app's profile was seen in 30 s" in said
+    case = _case(said)
+    if marker_at is None:
+        assert re.search(r"no host process and no status read by 60\.\d s", case), case
+    else:
+        assert re.search(
+            r"first status read had ended by 1\.\d s, inside the 30 s gate .*, but no reading saw "
+            r"a host process by 60\.\d s",
+            case,
+        ), case
+    [argv] = world.opened
+    assert argv[0] == "open" and argv[-1] == str(installed)
+    assert argv[argv.index("--stdout") + 1] == str(tmp_path / "control-app-stdout.txt")
+    assert argv[argv.index("--stderr") + 1] == str(tmp_path / "control-app-stderr.txt")
+    assert world.snapshots == [tmp_path]
+    assert re.search(r"no host process seen 5\.[01]\d s after the open", said), said
+    [log] = world.logs
+    # The watch's 60 s count from its start, a quarter of a second after the open.
+    assert log is not None and 60.2 <= log < 61, world.logs
+
+
+def test_a_failed_control_says_when_the_host_came_after_the_gate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # The first host process appears 30.5 s after the open, past the gate, which ends 30 s after
+    # the watch's start: the gate still fails, and the check, watching on, says when it came.
+    world = _ListerWorld(pgrep=_host_from(30.5), ps=_ps_host_from(30.5), marker_at=32.0)
+    checker, _ = _control_in(world, tmp_path, monkeypatch)
+    said = capsys.readouterr().out
+    assert any("the control: it starts the host" in what for what in checker.failures)
+    case = _case(said)
+    assert re.search(r"the first host process appeared at 30\.\d s, after the 30 s gate", case)
+    assert "missed" not in case, case
+    assert len(world.snapshots) == 1 and len(world.logs) == 1
+
+
+def test_a_failed_control_names_a_late_start_though_a_reading_also_missed_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Nothing until after the gate; then the app's status read ends at 30.6 s, and the first
+    # reading that sees a host process is at 31.0 s. The start came after the gate: that is the
+    # case, and the missed reading is said too.
+    world = _ListerWorld(pgrep=_host_from(31.0), ps=_ps_host_from(31.0), marker_at=30.6)
+    checker, _ = _control_in(world, tmp_path, monkeypatch)
+    case = _case(capsys.readouterr().out)
+    assert re.search(r"the first host process appeared at 31\.\d s, after the 30 s gate", case)
+    assert re.search(r"status read had ended by 30\.\d s, before any reading saw", case), case
+    assert "inside the 30 s gate" not in case, case
+
+
+def test_a_failed_control_says_the_status_read_came_before_the_first_sighting(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # The app's status read had ended by 1 s, and a host process is first seen only at 40 s: the
+    # listers missed the first ones, which is the case it names, not a late start.
+    world = _ListerWorld(pgrep=_host_from(40.0), ps=_ps_host_from(40.0), marker_at=1.0)
+    checker, _ = _control_in(world, tmp_path, monkeypatch)
+    said = capsys.readouterr().out
+    assert any("the control: it starts the host" in what for what in checker.failures)
+    case = _case(said)
+    assert re.search(
+        r"status read had ended by 1\.\d s, inside the 30 s gate .*no reading saw a host "
+        r"process until 40\.",
+        case,
+    ), case
+    assert "after the 30 s gate" not in case, case
+
+
+def test_the_control_fails_on_a_child_of_the_app_that_is_not_the_host_on_its_profile(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # The app starts its host on another profile: a child of the app, which neither lister's
+    # pattern matches. The control proves the pattern matches the app's real host, so it fails,
+    # and says what it saw.
+    wrong = _HOST_COMMAND.replace(f"--profile {check_app.APP_PROFILE} ", "--profile default ")
+    world = _ListerWorld(
+        pgrep=_none, ps=_ps_with((0.3, 1e9, f" 5555    99 S    {wrong}")), marker_at=1.5
+    )
+    checker, _ = _control_in(world, tmp_path, monkeypatch)
+    said = capsys.readouterr().out
+    assert any("the control: it starts the host" in what for what in checker.failures)
+    case = _case(said)
+    assert re.search(r"a child of the app from 0\.\d s \('5555 S .*--profile default", case), case
+    assert re.search(r"no host process the gate matches by 60\.\d s", case), case
+    assert re.search(r"status read had ended by 1\.\d s", case), case
+
+
+def test_a_failed_control_names_a_child_held_before_the_host_appears(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # A child of the app whose command line ps cannot read yet, from 0.4 s, and the host on the
+    # app's profile only from 30.5 s, past the gate: a spawn held in exec. The control fails,
+    # takes its snapshot and the unified log, and names that case.
+    ps = _ps_with((0.4, 30.5, " 5555    99 U    (lucille-host-ru)"), (30.5, 1e9, _PS_HOST_ROW))
+    world = _ListerWorld(pgrep=_host_from(30.5), ps=ps, marker_at=32.0)
+    checker, _ = _control_in(world, tmp_path, monkeypatch)
+    said = capsys.readouterr().out
+    assert any("the control: it starts the host" in what for what in checker.failures)
+    assert len(world.snapshots) == 1 and len(world.logs) == 1
+    case = _case(said)
+    assert re.search(
+        r"a child of the app from 0\.\d s \('5555 U \(lucille-host-ru\)'\), but no host process "
+        r"the gate matches until 30\.\d s; the app's first status read had ended by 32\.\d s",
+        case,
+    ), case
+    assert re.search(r"the first child of the app: '5555 U \(lucille-host-ru\)'", said), said
+
+
+def test_the_control_passes_on_either_lister_and_says_which_saw_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Only ps sees the host's status, from 0.4 s after the open: the control passes, says pgrep
+    # never saw it, and leaves a note a log search finds.
+    world = _ListerWorld(pgrep=_none, ps=_ps_host_from(0.4), marker_at=1.5)
+    checker, _ = _control_in(world, tmp_path, monkeypatch)
+    said = capsys.readouterr().out
+    assert checker.failures == [], checker.failures
+    line = next(line for line in said.splitlines() if "the control's watch" in line)
+    assert "pgrep never" in line and re.search(r"ps at 0\.4\d s", line), line
+    assert re.search(r"status read had ended by 1\.[56]\d s", line), line
+    assert "note: the control passed, but pgrep never saw a host process" in said, said
+    assert world.snapshots == [] and world.logs == []
+
+
+def test_a_passing_control_notes_a_lister_that_was_blind(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # pgrep is blind for the first second and then sees the host, as ps does from the start.
+    world = _ListerWorld(
+        pgrep=_blind_while(lambda at: at < 1.0, _host_from(0.4)),
+        ps=_ps_host_from(0.4),
+        marker_at=1.5,
+    )
+    checker, _ = _control_in(world, tmp_path, monkeypatch)
+    said = capsys.readouterr().out
+    assert checker.failures == [], checker.failures
+    assert re.search(
+        r"note: the control passed, but pgrep was blind \d+ times, first: pgrep exited 3", said
+    ), said
+    assert "never saw" not in said, said
+
+
+def test_a_passing_control_records_both_listers_and_the_status_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Times count from the open, not from the watch's start a quarter of a second later.
+    world = _ListerWorld(pgrep=_host_from(0.4), ps=_ps_host_from(0.4), marker_at=1.5)
+    checker, _ = _control_in(world, tmp_path, monkeypatch)
+    said = capsys.readouterr().out
+    assert checker.failures == [], checker.failures
+    line = next(line for line in said.splitlines() if "the control's watch" in line)
+    assert re.search(r"from 0\.2\d s;", line), line
+    # The host on the app's profile is a child of the app too, and ps says so.
+    assert re.search(r"pgrep at 0\.4\d s; ps at 0\.4\d s; ps, a child of the app at 0\.4\d s", line)
+    assert "the first child of the app: '4242 S " in line, line
+    assert "lister errors 0" in line and "status read had ended by 1." in line, line
+    assert world.snapshots == [] and world.logs == []
+    assert "the listers: stand-in" in said and "note: the control passed" not in said
+
+
+def test_the_control_keeps_its_gate_and_opens_the_copy_with_its_output_kept() -> None:
+    # The gate stays at 30 s and a refusing copy's watch at 10; the snapshot at 5 s and the watch
+    # to 60 s are for the record. The control's open keeps the app's standard output and error,
+    # and its gate takes only a host process the listers match, never a bare child of the app.
+    source = _CHECK_APP.read_text(encoding="utf-8")
+    control = _python_function(source, "_placement_control")
+    assert '"--stdout"' in control and '"--stderr"' in control
+    watch = _python_function(source, "_watch_control")
+    assert "stop=lambda found: bool(found.hosts)" in watch and "bool(watch.hosts)" in watch
+    assert "found.seen" not in watch and "watch.seen" not in watch
+    assert check_app.CONTROL_GATE == 30 and check_app.REFUSAL_WATCH == 10
+    assert check_app.CONTROL_SNAPSHOT_AT == 5 and check_app.CONTROL_DIAGNOSIS == 60
+    assert check_app.SHORTEST_BURST == 0.35 and check_app.LISTER_LIMIT == 5
+    assert check_app.POLL_PAUSE < check_app.SHORTEST_BURST
+
+
+@pytest.mark.parametrize("failure", ["timeout", "missing", "exit"])
+def test_the_controls_diagnostics_have_time_limits_and_never_raise(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    failure: str,
+) -> None:
+    # The screenshot, the app's processes, the sample, the unified log and the listers' libraries
+    # each run with a time limit; whichever fails, the check goes on and says what stopped it.
+    calls: list[tuple[list[str], dict[str, Any]]] = []
+
+    def run(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        calls.append((argv, kwargs))
+        if argv[0] == "ps":
+            return _done(
+                argv,
+                0,
+                f"  PID  PPID STAT WCHAN ELAPSED COMMAND\n   99     1 S - 00:05 {_APP_COMMAND}\n",
+            )
+        if failure == "timeout":
+            raise subprocess.TimeoutExpired(argv, kwargs.get("timeout") or 0)
+        if failure == "missing":
+            raise FileNotFoundError(argv[0])
+        return _done(argv, 1, "", "no")
+
+    monkeypatch.setattr("subprocess.run", run)
+    screens = tmp_path / "screens"
+    screens.mkdir()
+    check_app._control_snapshot(tmp_path, screens)
+    opened = time.time()
+    said = check_app._save_control_log(tmp_path / "control-log.txt", opened)
+    libraries = check_app._lister_libraries()
+    assert isinstance(said, str) and isinstance(libraries, str)
+    ran = [argv[0] for argv, _ in calls]
+    for program in ("screencapture", "ps", "sample", "log", "otool"):
+        assert program in ran, ran
+    for argv, kwargs in calls:
+        assert kwargs.get("timeout"), argv
+    assert ["sample", "99", "1", "-file", str(tmp_path / "control-sample.txt")] in [
+        argv for argv, _ in calls
+    ]
+    assert (tmp_path / "control-ps.txt").read_text(encoding="utf-8").count(_APP_COMMAND) == 1
+    # The unified log, from five seconds before the open, of the app, its interpreter and the
+    # parts of macOS named.
+    [log] = [argv for argv, _ in calls if argv[0] == "log"]
+    start = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(opened - 5))
+    assert log[:-1] == [
+        "log",
+        "show",
+        "--start",
+        start,
+        "--style",
+        "compact",
+        "--info",
+        "--predicate",
+    ]
+    assert log[-1] == " OR ".join(
+        f'process == "{name}"' for name in check_app.CONTROL_LOG_PROCESSES
+    )
+    capsys.readouterr()
+
+
+def test_the_pairing_checks_tidy_kills_the_host_processes_still_running(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Host processes of the app's profile that outlive the wait are killed, whichever lister
+    # saw them, so that none holds the profile's lock for the checks after it.
+    pairing = object.__new__(check_app._PairingCheck)
+    pairing.checker = check_app.Checker()
+    pairing.owns_profile = True
+    pairing.url = ""
+    pairing.profile = tmp_path / "profile"
+    pairing.children = []
+    pairing.set_aside = None
+    pairing.folder = tmp_path / "folder"
+    pairing.app = tmp_path / f"{check_app.APP_NAME}.app"
+    pairing.logs = []
+    seen = (
+        check_app._Reading("pgrep", 0.0, 0.0, frozenset({4242})),
+        check_app._Reading("ps", 0.0, 0.0, frozenset({4242, 4343})),
+    )
+    killed: list[tuple[int, int]] = []
+    monkeypatch.setattr(check_app, "_may_run", lambda name: False)
+    monkeypatch.setattr(check_app, "_wait_until", lambda test, seconds: False)
+    monkeypatch.setattr(check_app, "_look", lambda: seen)
+    monkeypatch.setattr("os.kill", lambda pid, sent: killed.append((pid, sent)))
+    monkeypatch.setattr(check_app, "_set_pasteboard", lambda text: None)
+    monkeypatch.setattr("subprocess.run", lambda argv, **kwargs: _done(argv, 0))
+    pairing.tidy()
+    assert killed == [(4242, signal.SIGKILL), (4343, signal.SIGKILL)]
+    assert "still ran, and were killed: [4242, 4343]" in capsys.readouterr().out
+
+
+def test_the_listers_libraries_are_read_from_otool() -> None:
+    said = check_app._read_lister_libraries(
+        "/bin/ps:\n\t/usr/lib/libSystem.B.dylib (compatibility version 1.0.0)\n"
+        "/usr/bin/pgrep (architecture arm64e):\n\t/usr/lib/libsysmon.dylib (compatibility)\n"
+        "\t/usr/lib/libSystem.B.dylib (compatibility version 1.0.0)\n"
+    )
+    assert "/bin/ps does not link libsysmon" in said
+    assert "/usr/bin/pgrep links libsysmon" in said
+    assert "was not listed" in check_app._read_lister_libraries("/bin/ps:\n")
 
 
 @pytest.mark.parametrize("require_driven", [False, True])

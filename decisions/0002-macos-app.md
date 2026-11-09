@@ -1610,14 +1610,19 @@ check from `tools/macos/check_app.py`:
   each with `/usr/bin/open`, prints the names of System Settings' windows and takes a screenshot, then quits
   System Settings by its name; it gates on the window's title, which is not yet seen on a Mac;
 - only that copy acts (§13; `placement`): first the control, that copy opened starts the host on the app's
-  profile and the check sees it; then the build's own copy, and a copy named `Capsule 2.app` in
-  `/Applications` with `/Applications/Capsule.app` there and then moved aside, each say why they can't run
-  and how to fix that, start no host process of the app's profile for 10 s, and change nothing in its
-  folder. The renamed copy offers only Quit, and quits when Quit is pressed; the build's own copy offers
-  only Show Applications Folder and Quit, in either order (the check prints the order it reads, which is
-  not yet seen on a Mac), and Show Applications Folder quits it and shows a Finder window,
-  which the check prints and closes, and whose name, Applications, is not yet seen on a Mac, so that only
-  this job gates on it;
+  profile and the check sees it within 30 s: a host process whose command line `pgrep -f` or `ps`
+  matches, not merely a child of the app; then the build's own copy, and a copy named `Capsule 2.app` in
+  `/Applications` with `/Applications/Capsule.app` there and then moved aside, each say why they can't
+  run and how to fix that, start no host process of the app's profile, nor any child, for 10 s, and
+  change nothing in its folder. The check says that nothing started only if `ps` read the process table
+  and no stretch of more than 0.35 s (a heuristic) went without a reading, counted from the start of one
+  lister's call to the end of the next one's, from the watch's first call on; a lister that fails is
+  blind, never "none". When the control fails, it records what tells a missed host process from a held
+  one (macos/README.md, `placement`). The renamed copy offers only Quit, and quits when Quit is pressed;
+  the build's own copy offers only Show Applications Folder and Quit, in either order (the check prints
+  the order it reads, which is not yet seen on a Mac), and Show Applications Folder quits it and shows a
+  Finder window, which the check prints and closes, and whose name, Applications, is not yet seen on a
+  Mac, so that only this job gates on it;
 - the menu driven through System Events, with screenshots kept as a CI artifact, the last checked step
   Reset Settings… on a settings file the check makes unreadable and then puts back; then, best effort and
   failing nothing, a folder added in Documents, which macOS protects: if macOS asks, the check reads the
