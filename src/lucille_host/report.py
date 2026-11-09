@@ -276,7 +276,7 @@ def unreadable(exc: BaseException) -> tuple[str, str] | None:
     if isinstance(exc, store.StoreError):
         return "store_error", exc.strerror or str(exc)
     if isinstance(exc, _switchboard.PairFailed):
-        return "pair_unusable", f"the pair cannot be used here ({exc.state})"
+        return "pair_unusable", link.refusal("the pair cannot be used here", exc)
     return None
 
 
