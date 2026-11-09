@@ -18,13 +18,18 @@ The bundle as built:
   hoc by this build, not merely by the linker, with no Team ID and the identifier
   ``build_app.signing_identifier`` gave it (:func:`codesign_problems`). The icons are the ones
   the build makes from this checkout's ``macos/Icons/`` (``icons.bundle_problems``):
-  ``Info.plist`` names ``AppIcon``; ``AppIcon.icns`` holds its eleven PNGs in order, each of its
+  ``Info.plist`` names ``AppIcon``; ``AppIcon.icns`` holds its ten PNGs in order, each of its
   size, and is byte for byte the file the build writes; and the six menu bar glyphs are the
   committed files, black with alpha only. Then ``iconutil``, macOS's own reader, must read
-  ``AppIcon.icns`` into an iconset of at least one file (:func:`check_icon_reader`); what it says
-  and which files it writes are printed, not checked. Last, AppKit must load each glyph from the
-  bundle by its name, 18 points square from two files, of 18 and 36 pixels
-  (:func:`check_glyph_loader`). Neither has yet run on a Mac.
+  ``AppIcon.icns`` into an iconset of exactly the ten files the entries' slots name, each a PNG
+  whose IHDR gives the pixels its name says (:func:`check_icon_reader`); what it says, and each
+  file with that size, are printed. Last, AppKit must load each glyph from the bundle by its name,
+  18 points square from two files, of 18 and 36 pixels (:func:`check_glyph_loader`). Both ran in
+  CI in run 42620168506, in macos-app (macOS 15.8.2) and in the smoke jobs (26.7.2 and 27.0.1),
+  when the iconutil step printed its files and checked none of them: on each, iconutil wrote the
+  same eleven, icon_48x48.png among them, from an entry the build no longer writes (inferred;
+  ``icons.ICNS_SLOTS``), and AppKit found each glyph as 18 points from 18 and 36 pixels. No run
+  has yet held iconutil's files to the names and sizes above.
 - ``bytecode``: the bundle holds one checked-hash ``.pyc`` beside each ``.py`` of the runtime's
   library, and no other bytecode (``build_app.bytecode_layout_problems``); the bundled interpreter,
   running the build's own program, finds each one byte for byte what it compiles from its ``.py``
@@ -1051,7 +1056,8 @@ def check_bundle(app: Path, checker: Checker) -> None:
 # imageForResource:. That is the search NSImage(named:) makes in the app's own bundle
 # (inference). Run with osascript's JavaScript, which needs no compiler. For each name it writes
 # one line: the name, the image's size in points, and its representations' sizes in pixels,
-# sorted; or the name and "none". Not yet run on a Mac.
+# sorted; or the name and "none". Seen in CI, run 42620168506, in macos-app and in both smoke jobs:
+# each glyph's line was "<name> 18x18 18x18,36x36".
 GLYPH_LOADER: Final = """\
 ObjC.import('AppKit');
 function run(argv) {
@@ -1103,13 +1109,60 @@ def check_glyph_loader(app: Path, checker: Checker) -> None:
     )
 
 
+def iconset_problems(found: Mapping[str, bytes | None]) -> list[str]:
+    """What is wrong with the files ``iconutil`` wrote, by name, each with its bytes, or None if
+    it could not be read: they must be exactly the files of ``icons.iconset_files()``, and each a
+    PNG whose IHDR gives the pixels its name says (``icons.ihdr_size``). One problem per file,
+    each naming it, in the order of the names."""
+    wanted = dict(icons.iconset_files())
+    problems: list[str] = []
+    for name in sorted(set(wanted) | set(found)):
+        data = found.get(name)
+        if name not in found:
+            problems.append(f"{name} is missing: iconutil did not write it")
+        elif name not in wanted:
+            problems.append(f"{name} was written, but no entry of {icons.ICNS_FILE} names it")
+        elif data is None:
+            problems.append(f"{name} cannot be read")
+        else:
+            try:
+                width, height = icons.ihdr_size(data)
+            except icons.IconError as error:
+                problems.append(f"{name}: {error}")
+                continue
+            pixels = wanted[name]
+            if (width, height) != (pixels, pixels):
+                problems.append(f"{name} is {width}x{height} pixels, not {pixels}x{pixels}")
+    return problems
+
+
+def _iconset_line(name: str, data: bytes) -> str:
+    """How a file iconutil wrote is printed: its name, the size its IHDR gives, or why it has
+    none, and its length."""
+    try:
+        width, height = icons.ihdr_size(data)
+    except icons.IconError as error:
+        return f"  {name} {error} ({len(data)} bytes)"
+    return f"  {name} {width}x{height} ({len(data)} bytes)"
+
+
 def check_icon_reader(app: Path, checker: Checker) -> None:
     """Have ``iconutil`` read the app's icon file into an iconset in a new temporary folder, and
-    print what it said and what it wrote. It must exit 0 and write at least one file. Which files
-    it writes is printed, not checked: no run has shown them yet, for the ``icp4``, ``icp5`` and
-    ``icp6`` entries above all."""
+    print what it said, whether or not it passed, and each file it wrote, with the size its IHDR
+    gives. It must exit 0, and the files must then pass :func:`iconset_problems`: exactly the
+    files the entries' slots name, each a PNG of its name's size.
+
+    Seen in CI, run 42620168506, in macos-app (macOS 15.8.2) and in the smoke jobs (26.7.2 and
+    27.0.1): iconutil read the icon file of that run, which held an icp6 entry too, into the same
+    eleven files on each, the ten this check now wants and icon_48x48.png, and said nothing. That
+    run's step printed the names and byte counts and passed; it did not check them. No run has yet
+    printed the size an IHDR of iconutil's gives, so the sizes it writes are not yet seen."""
     rel = f"{icons.RESOURCES}/{icons.ICNS_FILE}"
-    what = f"iconutil, macOS's own reader, reads {rel}"
+    wanted = icons.iconset_files()
+    what = (
+        f"iconutil, macOS's own reader, reads {rel} into the {len(wanted)} files its entries "
+        "name, each a PNG of its name's size"
+    )
     with tempfile.TemporaryDirectory() as temp:
         iconset = Path(temp) / f"{icons.APP_ICON}.iconset"
         argv = ["iconutil", "-c", "iconset", "-o", str(iconset), str(app / rel)]
@@ -1121,13 +1174,21 @@ def check_icon_reader(app: Path, checker: Checker) -> None:
         written = sorted(iconset.iterdir()) if iconset.is_dir() else []
         print(f"iconutil: {_shown(done)}", flush=True)
         print(f"iconutil wrote {len(written)} files:", flush=True)
+        found: dict[str, bytes | None] = {}
         for path in written:
-            print(f"  {path.name} ({path.stat().st_size} bytes)", flush=True)
-        checker.expect(
-            done.returncode == 0 and bool(written),
-            what,
-            f"it exited {done.returncode} and wrote {len(written)} files",
-        )
+            try:
+                data = path.read_bytes()
+            except OSError as error:
+                found[path.name] = None
+                print(f"  {path.name} cannot be read: {error}", flush=True)
+                continue
+            found[path.name] = data
+            print(_iconset_line(path.name, data), flush=True)
+        if done.returncode != 0:
+            checker.expect(False, what, f"it exited {done.returncode}")
+            return
+        problems = iconset_problems(found)
+        checker.expect(not problems, what, "\n".join(problems))
 
 
 # The lines ``python -v`` writes when the importer has a module's code: from a ``.pyc``, whose

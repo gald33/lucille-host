@@ -35,10 +35,20 @@ The PNGs are the source of truth. The build renders nothing: `tools/macos/icons.
 packs seven of them into `AppIcon.icns`, and copies the six glyphs beside it in `Contents/Resources`.
 Nothing in the build or in CI runs `render.js`.
 
-`AppIcon.icns` holds eleven images. The 16 pixel image comes from `app-16.png`, the hand-drawn master.
-Every other size comes from `app.svg`, so the 16 point icon on a Retina screen, 32 pixels, is the large
-master's. The large master's capsule sits on a grid of 32 pixels per unit at 1024, so at 32 pixels the
-capsule lands on whole pixels.
+`AppIcon.icns` holds ten images, one for each of the ten slots its entry types are read into, by the
+names `iconutil` gives its files: 16, 32, 128, 256 and 512 points, each at 1x and at 2x for a Retina
+screen. Each image is its slot's points times its scale in pixels, and the build refuses one that is not.
+The 16 pixel image comes from `app-16.png`, the hand-drawn master. Every other size comes from `app.svg`,
+so the 16 point icon on a Retina screen, 32 pixels, is the large master's. The large master's capsule
+sits on a grid of 32 pixels per unit at 1024, so at 32 pixels the capsule lands on whole pixels.
+
+`app-64.png` is the 32 point icon on a Retina screen, and nothing else. The build once also put it in an
+eleventh entry, of type `icp6`. In CI (run 42620168506, on macOS 15, 26 and 27 alike), `iconutil` read
+that file into eleven files: the ten slots above, and `icon_48x48.png`, by its name a 48 pixel slot
+(inferred; its size was not printed). Its log names files, not entry types, so that `icp6` gave
+`icon_48x48.png` is inferred too: public lists of the types give `icp6` as 48 pixels and `ic12` as the
+32 point icon at 2x, and the byte counts in the log fit that
+([decisions/0002](../../decisions/0002-macos-app.md) §6).
 
 The app shows the menu bar icon with `NSImage(named:)`. A name that ends in `Template` makes macOS treat
 the image as a template, and macOS loads the `@2x` file for a Retina screen.
@@ -71,10 +81,13 @@ or the wrong size. New bytes that keep the rules pass, and the app's icon change
 the `.DS_Store` the Finder may write here, so it does not count. Each PNG must be 8-bit RGBA, not
 interlaced, with only the chunks IHDR, IDAT and IEND, and the size its name says. Every pixel of a glyph
 must be black, with only its alpha varying, and no glyph may be empty. The tests also hold the layout of
-`AppIcon.icns` and which PNG each of its images comes from. The build refuses these files unless they pass
-the same rules, and the `bundle` check of `tools/macos/check_app.py` holds the built app to them. On a
-Mac, that check also has `iconutil` read `AppIcon.icns`, and AppKit load each glyph from the built app by
-its name, as two files of 18 and 36 pixels. Neither has yet run on a Mac.
+`AppIcon.icns`, which PNG each of its images comes from, and that each image is the size of its slot. The
+build refuses these files unless they pass the same rules, and the `bundle` check of
+`tools/macos/check_app.py` holds the built app to them. On a Mac, that check also has `iconutil` read
+`AppIcon.icns` into exactly the ten files of its slots, each a PNG of the size its name says, and has
+AppKit load each glyph from the built app by its name, as two files of 18 and 36 pixels. Both ran in CI
+in run 42620168506, on macos-15 and in the smoke jobs on macOS 26 and 27, before `iconutil`'s files were
+checked. No run has yet held `iconutil`'s files to their names and sizes.
 
 ## Not done
 

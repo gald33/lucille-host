@@ -13,6 +13,7 @@ from __future__ import annotations
 import contextlib
 import copy
 import dataclasses
+import functools
 import hashlib
 import io
 import json
@@ -898,30 +899,122 @@ def test_the_signature_check_holds_every_signed_file_to_the_pin(
         assert checker.failures[0].startswith(f"{path.relative_to(app.parent)} is signed ad hoc")
 
 
+def _png_chunk(kind: bytes, body: bytes) -> bytes:
+    crc = struct.pack(">I", zlib.crc32(kind + body))
+    return struct.pack(">I", len(body)) + kind + body + crc
+
+
 def _grey_glyph() -> bytes:
     """An 18 pixel PNG, every pixel grey: not a template image."""
-
-    def chunk(kind: bytes, body: bytes) -> bytes:
-        crc = struct.pack(">I", zlib.crc32(kind + body))
-        return struct.pack(">I", len(body)) + kind + body + crc
-
     rows = b"".join(b"\0" + bytes((128, 128, 128, 255)) * 18 for _ in range(18))
     header = struct.pack(">IIBBBBB", 18, 18, 8, 6, 0, 0, 0)
-    body = chunk(b"IHDR", header) + chunk(b"IDAT", zlib.compress(rows)) + chunk(b"IEND", b"")
+    body = (
+        _png_chunk(b"IHDR", header)
+        + _png_chunk(b"IDAT", zlib.compress(rows))
+        + _png_chunk(b"IEND", b"")
+    )
     return b"\x89PNG\r\n\x1a\n" + body
 
 
-ICON_FAULTS = [
-    None,
-    "a grey glyph pixel",
-    "iconutil refuses",
-    "iconutil writes nothing",
-    "AppKit finds no glyph",
-    "AppKit finds no @2x file",
-]
+# The files iconutil is to write from AppIcon.icns, each with the pixels its name says. These are
+# ten of the eleven names it wrote in CI from the icon file of PR 29's head (run 42620168506, in
+# macos-app and in both smoke jobs). The eleventh, icon_48x48.png, came from the icp6 entry the
+# build no longer writes (inferred: ic12 is the 32 point @2x type, which leaves icp6; see
+# icons.ICNS_SLOTS).
+ICONSET = {
+    "icon_16x16.png": 16,
+    "icon_16x16@2x.png": 32,
+    "icon_32x32.png": 32,
+    "icon_32x32@2x.png": 64,
+    "icon_128x128.png": 128,
+    "icon_128x128@2x.png": 256,
+    "icon_256x256.png": 256,
+    "icon_256x256@2x.png": 512,
+    "icon_512x512.png": 512,
+    "icon_512x512@2x.png": 1024,
+}
 
 
-@pytest.mark.parametrize("fault", ICON_FAULTS)
+@functools.cache
+def _iconutil_png(width: int, height: int | None = None) -> bytes:
+    """A whole PNG, clear, ``width`` wide and ``height`` (or ``width``) high, with an sRGB chunk
+    before its image data: a chunk icons.png_header refuses, and the iconutil step must not."""
+    height = width if height is None else height
+    rows = (b"\0" + bytes(4 * width)) * height
+    header = struct.pack(">IIBBBBB", width, height, 8, 6, 0, 0, 0)
+    body = (
+        _png_chunk(b"IHDR", header)
+        + _png_chunk(b"sRGB", b"\0")
+        + _png_chunk(b"IDAT", zlib.compress(rows))
+        + _png_chunk(b"IEND", b"")
+    )
+    return b"\x89PNG\r\n\x1a\n" + body
+
+
+def _iconset(fault: str | None) -> dict[str, bytes | None]:
+    """What the iconutil stub writes for ``fault``: each file's bytes, or None for a folder."""
+    files: dict[str, bytes | None] = {
+        name: _iconutil_png(pixels) for name, pixels in ICONSET.items()
+    }
+    if fault == "iconutil writes nothing":
+        files = {}
+    elif fault == "iconutil writes icon_48x48.png too":
+        files["icon_48x48.png"] = _iconutil_png(64)
+    elif fault == "iconutil leaves out icon_32x32@2x.png":
+        del files["icon_32x32@2x.png"]
+    elif fault == "icon_32x32@2x.png is 48 pixels":
+        files["icon_32x32@2x.png"] = _iconutil_png(48)
+    elif fault == "icon_16x16@2x.png is 32 by 16 pixels":
+        files["icon_16x16@2x.png"] = _iconutil_png(32, 16)
+    elif fault == "icon_128x128.png is not a PNG":
+        files["icon_128x128.png"] = b"\xff\xd8\xff\xe0 a JPEG, say, and long enough for an IHDR"
+    elif fault == "icon_256x256.png is a folder":
+        files["icon_256x256.png"] = None
+    elif fault == "iconutil writes .DS_Store too":
+        files[".DS_Store"] = b"\0\0\0\1Bud1" + bytes(32)
+    return files
+
+
+# Each fault, with the step it fails and what the failure says, naming the file.
+ICON_FAULTS: dict[str | None, tuple[str, str] | None] = {
+    None: None,
+    "a grey glyph pixel": ("the app icon and the menu bar glyphs are", "has a pixel that is not"),
+    "iconutil refuses": ("iconutil, macOS's own reader, reads", "it exited 1"),
+    "iconutil writes nothing": ("iconutil, macOS's own reader, reads", "icon_16x16.png is missing"),
+    "iconutil writes icon_48x48.png too": (
+        "iconutil, macOS's own reader, reads",
+        "icon_48x48.png was written, but no entry of AppIcon.icns names it",
+    ),
+    "iconutil leaves out icon_32x32@2x.png": (
+        "iconutil, macOS's own reader, reads",
+        "icon_32x32@2x.png is missing",
+    ),
+    "icon_32x32@2x.png is 48 pixels": (
+        "iconutil, macOS's own reader, reads",
+        "icon_32x32@2x.png is 48x48 pixels, not 64x64",
+    ),
+    "icon_16x16@2x.png is 32 by 16 pixels": (
+        "iconutil, macOS's own reader, reads",
+        "icon_16x16@2x.png is 32x16 pixels, not 32x32",
+    ),
+    "icon_128x128.png is not a PNG": (
+        "iconutil, macOS's own reader, reads",
+        "icon_128x128.png: not a PNG",
+    ),
+    "icon_256x256.png is a folder": (
+        "iconutil, macOS's own reader, reads",
+        "icon_256x256.png cannot be read",
+    ),
+    "iconutil writes .DS_Store too": (
+        "iconutil, macOS's own reader, reads",
+        ".DS_Store was written, but no entry of AppIcon.icns names it",
+    ),
+    "AppKit finds no glyph": ("AppKit loads each menu bar glyph from the bundle", "none"),
+    "AppKit finds no @2x file": ("AppKit loads each menu bar glyph from the bundle", "18x18 18x18"),
+}
+
+
+@pytest.mark.parametrize("fault", list(ICON_FAULTS))
 def test_the_bundle_check_holds_the_icons_and_has_macos_read_them(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -929,8 +1022,10 @@ def test_the_bundle_check_holds_the_icons_and_has_macos_read_them(
     fault: str | None,
 ) -> None:
     # With codesign, iconutil and osascript stubbed, a bundle the build would make passes. A glyph
-    # that is not a template, an icon file iconutil refuses or reads into no file, and a glyph
-    # AppKit does not load from the bundle as two files, of 18 and 36 pixels, are one failure each.
+    # that is not a template; an icon file iconutil refuses, or reads into other files than the
+    # ten its entries name, hidden ones too, or into a file that cannot be read or is not a PNG of
+    # the size its name says; and a glyph AppKit does not load from the bundle as two files, of 18
+    # and 36 pixels, are one failure each.
     app = tmp_path / f"{PINS.app_name}.app"
     for rel in EXPECTED_MACHO:
         (app / rel).parent.mkdir(parents=True, exist_ok=True)
@@ -942,6 +1037,7 @@ def test_the_bundle_check_holds_the_icons_and_has_macos_read_them(
     if fault == "a grey glyph pixel":
         (resources / "MenuBarTemplate.png").write_bytes(_grey_glyph())
     ran: list[list[str]] = []
+    wrote = _iconset(fault)
 
     def run(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
         if argv[:3] == ["codesign", "--display", "--verbose=2"]:
@@ -952,9 +1048,11 @@ def test_the_bundle_check_holds_the_icons_and_has_macos_read_them(
         if argv[0] == "iconutil":
             iconset = Path(argv[4])
             iconset.mkdir()
-            if fault != "iconutil writes nothing":
-                png = (resources / "MenuBarTemplate.png").read_bytes()
-                (iconset / "icon_16x16.png").write_bytes(png)
+            for name, data in wrote.items():
+                if data is None:
+                    (iconset / name).mkdir()
+                else:
+                    (iconset / name).write_bytes(data)
             code = 1 if fault == "iconutil refuses" else 0
             said = "iconutil: said this" if code else "iconutil: a warning on success"
             return subprocess.CompletedProcess(argv, code, "", said)
@@ -980,23 +1078,64 @@ def test_the_bundle_check_holds_the_icons_and_has_macos_read_them(
         "iconutil: said this" if fault == "iconutil refuses" else "iconutil: a warning on success"
     )
     assert said in shown
+    # Each file iconutil wrote is printed with the size its IHDR gives, or why it has none, and a
+    # file that cannot be read with why not.
+    assert f"iconutil wrote {len(wrote)} files:" in shown
+    for name, data in wrote.items():
+        if data is None:
+            assert f"\n  {name} cannot be read: " in shown, name
+        elif data.startswith(b"\x89PNG\r\n\x1a\n"):
+            width, height = struct.unpack(">II", data[16:24])
+            assert f"\n  {name} {width}x{height} ({len(data)} bytes)\n" in shown, name
+        else:
+            assert f"\n  {name} not a PNG: " in shown, name
     argv = ran[1]
     assert argv[:5] == ["osascript", "-l", "JavaScript", "-e", check_app.GLYPH_LOADER]
     assert argv[5:] == [str(app), *check_app.icons.GLYPHS]
     assert "MenuBarTemplate 18x18 18x18,36x36" in shown
-    failed = {
-        None: None,
-        "a grey glyph pixel": "the app icon and the menu bar glyphs are",
-        "iconutil refuses": "iconutil, macOS's own reader, reads",
-        "iconutil writes nothing": "iconutil, macOS's own reader, reads",
-        "AppKit finds no glyph": "AppKit loads each menu bar glyph from the bundle",
-        "AppKit finds no @2x file": "AppKit loads each menu bar glyph from the bundle",
-    }[fault]
+    failed = ICON_FAULTS[fault]
     if failed is None:
         assert checker.failures == []
+        assert "FAIL" not in shown
+        assert "ok: iconutil, macOS's own reader, reads Contents/Resources/AppIcon.icns" in shown
     else:
+        step, detail = failed
         assert len(checker.failures) == 1, checker.failures
-        assert checker.failures[0].startswith(failed), checker.failures
+        assert checker.failures[0].startswith(step), checker.failures
+        # The failure's detail, printed under it, names the file.
+        assert detail in shown.split("FAIL: ", 1)[1], shown
+
+
+def test_the_iconset_check_names_every_file_that_is_wrong() -> None:
+    # The files the check expects are the ones icons.py's entries name, each of its name's size.
+    assert dict(check_app.icons.iconset_files()) == ICONSET
+    good = {name: _iconutil_png(pixels) for name, pixels in ICONSET.items()}
+    assert check_app.iconset_problems(good) == []
+    # What iconutil wrote in run 42620168506: these ten and icon_48x48.png. That file's pixels
+    # were not printed; 64 is what its entry, icp6, held (inferred).
+    seen = {**good, "icon_48x48.png": _iconutil_png(64)}
+    assert check_app.iconset_problems(seen) == [
+        "icon_48x48.png was written, but no entry of AppIcon.icns names it"
+    ]
+    # Every problem is reported, not only the first, each naming its file, in the order of the
+    # names, as the files are printed.
+    bad = dict(good)
+    del bad["icon_16x16.png"]
+    bad["icon_32x32.png"] = _iconutil_png(64)
+    bad["icon_512x512@2x.png"] = b"not a PNG"
+    bad["icon_64x64.png"] = _iconutil_png(64)
+    bad["icon_32x32@2x.png"] = _iconutil_png(64)[:30]
+    assert check_app.iconset_problems(bad) == [
+        "icon_16x16.png is missing: iconutil did not write it",
+        "icon_32x32.png is 64x64 pixels, not 32x32",
+        "icon_32x32@2x.png: not a PNG: it ends before its IHDR chunk does",
+        "icon_512x512@2x.png: not a PNG: it does not start with the PNG signature",
+        "icon_64x64.png was written, but no entry of AppIcon.icns names it",
+    ]
+    # A file the step could not read (None) is named as such, not as missing.
+    assert check_app.iconset_problems({**good, "icon_16x16.png": None}) == [
+        "icon_16x16.png cannot be read"
+    ]
 
 
 def test_the_glyph_loader_asks_appkit_what_the_app_asks() -> None:
