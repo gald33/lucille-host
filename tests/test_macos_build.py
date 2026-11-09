@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import contextlib
 import dataclasses
+import errno
 import hashlib
 import json
 import os
@@ -17,11 +18,14 @@ import re
 import shlex
 import shutil
 import signal
+import struct
 import subprocess
 import sys
 import time
 import types
-from collections.abc import Callable, Mapping, Sequence
+import warnings
+import zlib
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -1639,11 +1643,13 @@ class _Hdiutil:
     def __init__(self, answers: list[tuple[int, str]]) -> None:
         self.answers = answers
         self.calls: list[list[str]] = []
+        self.keywords: list[dict[str, object]] = []
 
-    def __call__(self, argv: list[str], **_: object) -> object:
+    def __call__(self, argv: list[str], **keywords: object) -> object:
         import subprocess
 
         self.calls.append(argv)
+        self.keywords.append(keywords)
         code, stderr = self.answers[len(self.calls) - 1]
         return subprocess.CompletedProcess(argv, code, stdout="", stderr=stderr)
 
@@ -1707,6 +1713,823 @@ def test_every_hdiutil_call_goes_through_the_retry() -> None:
     for script in ("build_app.py", "check_app.py"):
         source = (build_app.TOOLS_DIR / script).read_text(encoding="utf-8")
         assert '["hdiutil"' not in source.replace('argv = ["hdiutil", *args]', ""), script
+
+
+def test_hdiutil_takes_waits_and_a_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
+    busy = build_app.HDIUTIL_BUSY[1]
+    waits: list[float] = []
+    fake = _Hdiutil([(1, busy)])
+    monkeypatch.setattr("subprocess.run", fake)
+    done = build_app.hdiutil(["verify", "x.dmg"], waits=(), sleep=waits.append)
+    assert done.returncode == 1 and len(fake.calls) == 1 and waits == []
+    said: list[str] = []
+    monkeypatch.setattr("builtins.print", lambda *parts, **_: said.append(" ".join(parts)))
+    fake = _Hdiutil([(1, busy), (1, busy)])
+    monkeypatch.setattr("subprocess.run", fake)
+    done = build_app.hdiutil(["verify", "x.dmg"], waits=(1,), sleep=waits.append)
+    assert done.returncode == 1 and len(fake.calls) == 2 and waits == [1]
+    assert [line for line in said if line.startswith("hdiutil is busy")] == [
+        f"hdiutil is busy; trying again in 1 s (try 1 of 2): {busy}"
+    ]
+    fake = _Hdiutil([(0, "")])
+    monkeypatch.setattr("subprocess.run", fake)
+    build_app.hdiutil(["info"], timeout=7)
+    assert fake.keywords[0]["timeout"] == 7
+
+
+# ---------------------------------------------------------------------------------------------
+# The disk image. make_dmg hands on a verified copy of the file `hdiutil create` wrote, never that
+# file. In 3 of 81 CI builds (2026-10-29 to 2026-11-09), hdiutil refused that file ("Resource
+# temporarily unavailable") from the first `verify` until the job ended, while a diskimages-helper
+# the job had started was still alive. That the helper held a lock on that one file, which a copy
+# does not carry, is inferred, not seen. These tests hold files under real flock(2) locks, from
+# real processes: on Linux against stand-ins for ditto and hdiutil, and on a Mac against both.
+
+_HOLD_PROGRAM = """\
+import fcntl, sys, time
+handle = open(sys.argv[1], "rb")
+how = {"ex": fcntl.LOCK_EX, "sh": fcntl.LOCK_SH}[sys.argv[2]]
+try:
+    fcntl.flock(handle.fileno(), how | (fcntl.LOCK_NB if sys.argv[4] == "now" else 0))
+except BlockingIOError:
+    open(sys.argv[3], "w").write("refused")
+    sys.exit(0)
+open(sys.argv[3], "w").write("held")
+time.sleep(600)
+"""
+
+
+class _Holders:
+    """Processes that each hold a file open under a flock(2) lock, ``"ex"`` or ``"sh"``, until the
+    test ends. Never hold a file a second time while a holder has it ``"ex"``: the second holder
+    would wait for ever."""
+
+    def __init__(self, folder: Path) -> None:
+        self.folder = folder
+        self.started: list[subprocess.Popen[bytes]] = []
+
+    def hold(self, path: Path, mode: str, *, at_once: bool = False) -> subprocess.Popen[bytes]:
+        """Start a holder of ``path`` and return it once it holds its lock. With ``at_once``, a
+        lock another process already holds is not waited for: the holder then exits, and
+        :meth:`refused` says so."""
+        ready = self.folder / f"ready-{len(self.started)}"
+        when = "now" if at_once else "wait"
+        process = subprocess.Popen(
+            [sys.executable, "-I", "-c", _HOLD_PROGRAM, str(path), mode, str(ready), when],
+            stdin=subprocess.DEVNULL,
+        )
+        self.started.append(process)
+        deadline = time.monotonic() + 30
+        while not self._said(process):
+            ended = process.poll()
+            assert ended is None or self._said(process), f"the holder of {path} ended ({ended})"
+            assert time.monotonic() < deadline, f"the holder of {path} took no lock in 30 s"
+            time.sleep(0.01)
+        return process
+
+    def _said(self, process: subprocess.Popen[bytes]) -> str:
+        ready = self.folder / f"ready-{self.started.index(process)}"
+        return ready.read_text(encoding="utf-8") if ready.exists() else ""
+
+    def refused(self, process: subprocess.Popen[bytes]) -> bool:
+        return self._said(process) == "refused"
+
+    def all_alive(self) -> bool:
+        return all(process.poll() is None for process in self.started)
+
+    def stop(self) -> None:
+        for process in self.started:
+            if process.poll() is None:
+                process.kill()
+            process.wait()
+
+
+@pytest.fixture
+def holders(tmp_path: Path) -> Iterator[_Holders]:
+    folder = tmp_path / "holders"
+    folder.mkdir()
+    held = _Holders(folder)
+    try:
+        yield held
+    finally:
+        held.stop()
+
+
+def _koly(
+    *, data: tuple[int, int], xml: tuple[int, int], header: int = 512, magic: bytes = b"koly"
+) -> bytearray:
+    """A 512-byte UDIF trailer that puts the data fork and the property list where it says."""
+    trailer = bytearray(512)
+    trailer[0:4] = magic
+    struct.pack_into(">II", trailer, 4, 4, header)
+    struct.pack_into(">QQ", trailer, 0x18, *data)
+    struct.pack_into(">QQ", trailer, 0xD8, *xml)
+    return trailer
+
+
+def _udif(content: bytes, *, good: bool = True) -> bytes:
+    """A stand-in for a UDIF disk image: a zlib data fork, a property list, and a trailer that
+    says where both lie, with the stand-in's own CRC32 of the data fork at 0x168 (wrong when
+    ``good`` is false). Its bytes depend on ``content`` alone."""
+    data = zlib.compress(content)
+    plist = b'<?xml version="1.0" encoding="UTF-8"?>\n<plist version="1.0"><dict/></plist>\n'
+    trailer = _koly(data=(0, len(data)), xml=(len(data), len(plist)))
+    struct.pack_into(">I", trailer, 0x168, zlib.crc32(data) ^ (0 if good else 1))
+    return data + plist + bytes(trailer)
+
+
+_BUSY_STDERR = (
+    'hdiutil: verify: unable to recognize "{path}" as a disk image. '
+    "(Resource temporarily unavailable)\n"
+    "hdiutil: verify failed - Resource temporarily unavailable\n"
+)
+_FAKE_HELPER = "/System/Library/PrivateFrameworks/DiskImages2.framework/diskimages-helper"
+# What the stand-in ps knows: a disk-image helper, and a shell whose arguments name disk images
+# and set a made-up variable. Only the helper's command line may reach the log.
+_EXECUTABLES = {"4242": _FAKE_HELPER, "777": "/bin/bash"}
+_PROCESSES = {
+    "4242": f"4242     1 runner Mon Nov  9 02:01:01 2026 02:10 Ss {_FAKE_HELPER}",
+    "777": "777     1 runner Mon Nov  9 02:00:00 2026 03:11 S /bin/bash -c "
+    "export LUCILLE_EXAMPLE=not-a-secret; ls diskimages",
+}
+_LOG_LINES = 100
+_LOG_SHOW = [
+    "log",
+    "show",
+    "--last",
+    "3m",
+    "--style",
+    "compact",
+    "--info",
+    "--debug",
+    "--predicate",
+    'subsystem == "com.apple.diskimages"',
+]
+
+
+class _DiskTools:
+    """A stand-in for subprocess.run, for make_dmg and what it runs. ``ditto`` copies. ``hdiutil
+    create`` writes a stand-in disk image (:func:`_udif`) over its output path, as ``-ov`` may,
+    keeping its inode, and then as ``plan`` says: ``"hold"`` leaves a process holding it under
+    an exclusive flock(2) lock, ``"short"`` writes it with no trailer, ``"damaged"`` with a wrong
+    checksum. ``hdiutil verify`` refuses, with the words CI saw, a file another process holds
+    under a flock(2) lock (as DiskImages is thought to; inferred) and, with ``"refuse-all"``,
+    every file; it fails at once, but not as busy, on a damaged one. ``ps``, ``lsof``, ``sudo -n
+    lsof``, ``hdiutil info``, ``hdiutil verify -debug`` and ``log show`` give canned answers, or
+    fail as ``broken`` says (``"missing"``, ``"hangs"``, ``"fails"``). Anything else fails the
+    test."""
+
+    def __init__(
+        self, holders: _Holders, plan: str = "plain", broken: Mapping[str, str] | None = None
+    ) -> None:
+        import fcntl
+
+        self.holders = holders
+        self.plan = plan
+        self.broken = dict(broken or {})
+        self.calls: list[list[str]] = []
+        self.timeouts: list[object] = []
+        self.created: list[str] = []  # the sha256 of each image create wrote
+        self.verified: list[tuple[Path, int, str]] = []  # (path, inode, sha256) of each pass
+        self._flock = fcntl.flock  # kept, so that a test may break fcntl.flock for the build
+        self._shared = fcntl.LOCK_SH | fcntl.LOCK_NB
+
+    @staticmethod
+    def tool(argv: Sequence[str]) -> str:
+        match list(argv):
+            case ["ditto", _, _]:
+                return "ditto"
+            case ["hdiutil", "create", *_]:
+                return "create"
+            case ["hdiutil", "verify", "-debug", _]:
+                return "verify-debug"
+            case ["hdiutil", "verify", _]:
+                return "verify"
+            case ["hdiutil", "info"]:
+                return "info"
+            case ["ps", "-axo", "pid=,comm="]:
+                return "ps-list"
+            case ["ps", "-o", _, "-p", _]:
+                return "ps-show"
+            case ["ps", *_]:
+                return "ps-all"
+            case ["lsof", "--", _]:
+                return "lsof"
+            case ["sudo", "-n", "lsof", "--", _]:
+                return "sudo"
+            case ["log", "show", *_]:
+                return "log"
+        raise AssertionError(f"the stand-in runs no {argv}")
+
+    def _locked(self, path: Path) -> bool:
+        with path.open("rb") as handle:
+            try:
+                self._flock(handle.fileno(), self._shared)
+            except BlockingIOError:
+                return True
+        return False
+
+    def __call__(self, argv: Sequence[str], **keywords: Any) -> subprocess.CompletedProcess[str]:
+        argv = list(argv)
+        self.calls.append(argv)
+        self.timeouts.append(keywords.get("timeout"))
+        tool = self.tool(argv)
+        failure = self.broken.get(tool)
+        if failure == "missing":
+            raise FileNotFoundError(errno.ENOENT, "No such file or directory", argv[0])
+        if failure == "hangs":
+            raise subprocess.TimeoutExpired(argv, keywords.get("timeout") or 0)
+        if failure == "fails":
+            return self._done(argv, 1, "", f"{argv[0]}: the stand-in fails\n")
+        path = Path(argv[-1])
+        if tool == "ditto":
+            shutil.copytree(argv[1], argv[2], symlinks=True)
+            return self._done(argv, 0, "", "")
+        if tool == "create":
+            return self._create(argv, path)
+        if tool == "verify":
+            return self._verify(argv, path)
+        if tool == "verify-debug":
+            if self.plan == "refuse-all" or self._locked(path):
+                said = "DIBackingStoreOpenLockFriendly: open with lock returned 35\n"
+                return self._done(argv, 1, "", "DIDiskImage: probing\n" + said + _BUSY_STDERR)
+            return self._done(argv, 0, "DIDiskImage: probing\nverified   CRC32 $00000000\n", "")
+        if tool == "info":
+            return self._done(argv, 0, "framework       : 671\ndriver          : 671\n", "")
+        if tool == "ps-list":
+            listed = [f"{pid:>5} {executable}" for pid, executable in _EXECUTABLES.items()]
+            return self._done(argv, 0, "\n".join(listed) + "\n", "")
+        header = "  PID  PPID USER     STARTED                      ELAPSED STAT COMMAND"
+        if tool == "ps-show":
+            shown = [_PROCESSES[pid] for pid in argv[-1].split(",") if pid in _PROCESSES]
+            return self._done(argv, 0, "\n".join([header, *shown]) + "\n", "")
+        if tool == "ps-all":
+            return self._done(argv, 0, "\n".join([header, *_PROCESSES.values()]) + "\n", "")
+        if tool in ("lsof", "sudo"):
+            said = f"COMMAND   PID   USER  FD  TYPE NAME\npython3  4343 runner  3r  REG {path}\n"
+            return self._done(argv, 0, said, "")
+        lines = [f"2026-11-09 02:01:01 diskimages line {n}" for n in range(_LOG_LINES)]
+        return self._done(argv, 0, "\n".join(lines) + "\n", "")
+
+    def _create(self, argv: list[str], out: Path) -> subprocess.CompletedProcess[str]:
+        folder = Path(argv[argv.index("-srcfolder") + 1])
+        names = "\n".join(sorted(path.name for path in folder.iterdir())).encode()
+        # 8 KiB that zlib cannot shrink, so that the image is longer than its trailer.
+        content = b"".join(hashlib.sha256(names + bytes([n])).digest() for n in range(256))
+        image = _udif(content, good=self.plan != "damaged")
+        if self.plan == "short":
+            image = image[:-512]
+        with out.open("wb") as handle:
+            handle.write(image)
+        self.created.append(hashlib.sha256(image).hexdigest())
+        if self.plan == "hold":
+            self.holders.hold(out, "ex")
+        return self._done(argv, 0, f"created: {out}\n", "")
+
+    def _verify(self, argv: list[str], path: Path) -> subprocess.CompletedProcess[str]:
+        if not path.exists():
+            return self._done(argv, 1, "", "hdiutil: verify failed - No such file or directory\n")
+        if self.plan == "refuse-all" or self._locked(path):
+            return self._done(argv, 1, "", _BUSY_STDERR.format(path=path))
+        raw = path.read_bytes()
+        trailer = raw[-512:]
+        start, length = struct.unpack(">QQ", trailer[0x18:0x28])
+        if trailer[:4] != b"koly" or struct.unpack(">I", trailer[0x168:0x16C])[0] != zlib.crc32(
+            raw[start : start + length]
+        ):
+            return self._done(argv, 1, "", "hdiutil: verify failed - the stand-in's CRC differs\n")
+        self.verified.append((path, path.stat().st_ino, hashlib.sha256(raw).hexdigest()))
+        return self._done(argv, 0, "verified   CRC32 $C878A96B\n", "")
+
+    @staticmethod
+    def _done(argv: list[str], code: int, out: str, err: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(argv, code, stdout=out, stderr=err)
+
+
+def _no_waits(monkeypatch: pytest.MonkeyPatch) -> list[float]:
+    """Make every hdiutil call's waits entries of the list returned, made at once. make_dmg looks
+    hdiutil up as a module global, so this reaches its calls whatever they pass."""
+    waits: list[float] = []
+    real = build_app.hdiutil
+    monkeypatch.setattr(
+        "tools.macos.build_app.hdiutil",
+        lambda args, **given: real(args, **{**given, "sleep": waits.append}),
+    )
+    return waits
+
+
+@dataclasses.dataclass
+class _Disk:
+    app: Path
+    out: Path
+    dmg: Path
+    tools: _DiskTools
+    waits: list[float]
+
+    @property
+    def work(self) -> Path:
+        return self.out / "work"
+
+    @property
+    def made(self) -> Path:
+        return self.work / "made.dmg"
+
+    @property
+    def copy(self) -> Path:
+        return self.work / "copy.dmg"
+
+    def make(self) -> None:
+        build_app.make_dmg(self.app, self.dmg, "Capsule", self.work)
+
+    def images(self) -> list[Path]:
+        return build_app.disk_images(self.out, "Capsule")
+
+    def verifies(self) -> list[Path]:
+        """The paths of every `hdiutil verify` but the diagnostics' `verify -debug`."""
+        return [Path(c[-1]) for c in self.tools.calls if self.tools.tool(c) == "verify"]
+
+    def looks(self) -> list[list[str]]:
+        """The diagnostics' calls, in order."""
+        kept = ("ps-list", "ps-show", "ps-all", "lsof", "sudo", "info", "verify-debug", "log")
+        return [call for call in self.tools.calls if self.tools.tool(call) in kept]
+
+
+def _app(tmp_path: Path) -> tuple[Path, Path, Path]:
+    """An app to put in a disk image, the build's out folder, and the disk image's path."""
+    app = tmp_path / "Capsule.app"
+    (app / "Contents").mkdir(parents=True)
+    (app / "Contents" / "Info.plist").write_bytes(b"<plist/>\n")
+    out = tmp_path / "out"
+    return app, out, out / build_app.dmg_name("Capsule", "0.1.0", "abcdef123456")
+
+
+def _disk(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    holders: _Holders,
+    plan: str = "plain",
+) -> _Disk:
+    app, out, dmg = _app(tmp_path)
+    tools = _DiskTools(holders, plan)
+    monkeypatch.setattr("subprocess.run", tools)
+    monkeypatch.delenv("GITHUB_ACTIONS", raising=False)
+    return _Disk(app, out, dmg, tools, _no_waits(monkeypatch))
+
+
+def _looks_at(image: Path, *, sudo: bool = False) -> list[list[str]]:
+    """What show_image_holders runs about ``image``, in order, given _DiskTools' processes."""
+    lsof = [["lsof", "--", str(image)]]
+    if sudo:
+        lsof.append(["sudo", "-n", "lsof", "--", str(image)])
+    return [
+        ["ps", "-axo", "pid=,comm="],
+        ["ps", "-o", "pid,ppid,user,lstart,etime,stat,command", "-p", "4242"],
+        *lsof,
+        ["hdiutil", "info"],
+        ["hdiutil", "verify", "-debug", str(image)],
+        _LOG_SHOW,
+    ]
+
+
+def test_make_dmg_creates_in_work_and_hands_on_the_copy_it_verified(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    holders: _Holders,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    disk = _disk(tmp_path, monkeypatch, holders)
+    disk.make()
+    staging = disk.work / "dmg"
+    assert disk.tools.calls == [
+        ["ditto", str(disk.app), str(staging / "Capsule.app")],
+        ["hdiutil", "create", "-volname", "Capsule", "-srcfolder", str(staging)]
+        + ["-format", "UDZO", "-ov", str(disk.made)],
+        ["hdiutil", "verify", str(disk.copy)],
+    ]
+    # The image is made beside the folder it is made from, never inside it.
+    assert staging not in disk.made.parents and disk.made.parent == disk.work
+    assert disk.waits == []
+    assert disk.images() == [disk.dmg]
+    [(path, inode, digest)] = disk.tools.verified
+    assert path == disk.copy
+    assert disk.dmg.stat().st_ino == inode and build_app.sha256_of(disk.dmg) == digest
+    assert disk.tools.created == [digest]
+    assert not disk.made.exists() and not disk.copy.exists()
+    out = capsys.readouterr().out
+    assert "after hdiutil create: made.dmg has no lock on it\n" in out
+    assert f"verified a copy of made.dmg; it is now {disk.dmg.name}\n" in out
+
+
+def test_the_file_create_leaves_held_is_never_verified_or_handed_on(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    holders: _Holders,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    disk = _disk(tmp_path, monkeypatch, holders, "hold")
+    disk.make()
+    assert disk.verifies() == [disk.copy]
+    assert disk.waits == []
+    # The holder lives on, and the file it holds was unlinked under it.
+    assert len(holders.started) == 1 and holders.all_alive()
+    assert not disk.made.exists()
+    assert disk.images() == [disk.dmg]
+    assert [build_app.sha256_of(disk.dmg)] == disk.tools.created
+    assert disk.looks() == _looks_at(disk.made)
+    out = capsys.readouterr().out
+    assert (
+        "after hdiutil create: made.dmg is locked by another process; this build verifies and "
+        "hands on a copy of it instead\n"
+    ) in out
+    assert "OpenLockFriendly" in out  # verify -debug's lock line reaches the log
+
+
+@pytest.mark.parametrize("github_actions", ["true", "false", None])
+def test_sudo_lsof_runs_only_on_github_actions(
+    github_actions: str | None,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    holders: _Holders,
+) -> None:
+    disk = _disk(tmp_path, monkeypatch, holders, "hold")
+    if github_actions is not None:
+        monkeypatch.setenv("GITHUB_ACTIONS", github_actions)
+    disk.make()
+    assert disk.looks() == _looks_at(disk.made, sudo=github_actions == "true")
+
+
+def test_a_file_without_a_whole_udif_trailer_is_refused_before_verify(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, holders: _Holders
+) -> None:
+    disk = _disk(tmp_path, monkeypatch, holders, "short")
+    with pytest.raises(build_app.BuildError, match="made no whole disk image: .*UDIF trailer"):
+        disk.make()
+    assert disk.verifies() == []
+    assert disk.images() == []
+    assert not disk.copy.exists() and disk.made.exists()
+
+
+def test_a_file_that_changes_while_it_is_copied_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, holders: _Holders
+) -> None:
+    disk = _disk(tmp_path, monkeypatch, holders)
+    real = shutil.copyfileobj
+
+    def copy_then_write(source: Any, target: Any, *rest: Any) -> None:
+        real(source, target, *rest)
+        if str(getattr(source, "name", "")).endswith("made.dmg"):
+            with disk.made.open("ab") as handle:
+                handle.write(b"\0")
+
+    monkeypatch.setattr("shutil.copyfileobj", copy_then_write)
+    with pytest.raises(build_app.BuildError, match="changed while it was copied"):
+        disk.make()
+    assert disk.verifies() == []
+    assert disk.images() == []
+    assert not disk.copy.exists()
+
+
+def test_a_refusal_of_every_file_fails_after_todays_waits_with_nothing_handed_on(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, holders: _Holders
+) -> None:
+    disk = _disk(tmp_path, monkeypatch, holders, "refuse-all")
+    with pytest.raises(
+        build_app.BuildError,
+        match=r"^hdiutil verify failed: .*\(Resource temporarily unavailable\)",
+    ):
+        disk.make()
+    assert disk.verifies() == [disk.copy] * build_app.HDIUTIL_TRIES
+    assert disk.waits == list(build_app.HDIUTIL_WAITS)
+    assert disk.looks() == _looks_at(disk.copy)
+    assert disk.images() == []
+    assert not disk.copy.exists()
+
+
+def test_a_damaged_image_fails_at_once_with_nothing_handed_on(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, holders: _Holders
+) -> None:
+    disk = _disk(tmp_path, monkeypatch, holders, "damaged")
+    with pytest.raises(build_app.BuildError, match="^hdiutil verify failed: .*CRC differs"):
+        disk.make()
+    assert disk.verifies() == [disk.copy]
+    assert disk.waits == [] and disk.looks() == []
+    assert disk.images() == []
+    assert not disk.copy.exists()
+
+
+def test_a_copy_that_fails_or_is_interrupted_leaves_no_copy_and_no_image(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, holders: _Holders
+) -> None:
+    # A disk that fills while the copy is written, a create that exits 0 without writing its
+    # file, and Control-C during the waits after the copy's verify is refused as busy: none leaves
+    # copy.dmg or a disk image. The first two end as a BuildError, which main() says in one line.
+    unpatched = build_app.hdiutil  # before _disk wraps it
+    disk = _disk(tmp_path / "full", monkeypatch, holders)
+    real = shutil.copyfileobj
+
+    def fill_the_disk(source: Any, target: Any, *rest: Any) -> None:
+        if not str(getattr(source, "name", "")).endswith("made.dmg"):
+            return real(source, target, *rest)
+        target.write(source.read(100))
+        raise OSError(errno.ENOSPC, "No space left on device")
+
+    monkeypatch.setattr("shutil.copyfileobj", fill_the_disk)
+    with pytest.raises(build_app.BuildError, match=r"^could not copy .*No space left on device"):
+        disk.make()
+    assert disk.verifies() == [] and disk.images() == [] and not disk.copy.exists()
+    monkeypatch.setattr("shutil.copyfileobj", real)
+
+    disk = _disk(tmp_path / "unwritten", monkeypatch, holders)
+    monkeypatch.setattr(disk.tools, "_create", lambda argv, _: disk.tools._done(argv, 0, "", ""))
+    with pytest.raises(build_app.BuildError, match=r"^could not copy .*No such file"):
+        disk.make()
+    assert disk.verifies() == [] and disk.images() == [] and not disk.copy.exists()
+
+    disk = _disk(tmp_path / "interrupted", monkeypatch, holders, "refuse-all")
+
+    def control_c(seconds: float) -> None:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(
+        "tools.macos.build_app.hdiutil",
+        lambda args, **given: unpatched(args, **{**given, "sleep": control_c}),
+    )
+    with pytest.raises(KeyboardInterrupt):
+        disk.make()
+    assert disk.verifies() == [disk.copy]
+    assert disk.images() == [] and not disk.copy.exists()
+
+
+@pytest.mark.parametrize("github_actions", ["true", "false", None])
+@pytest.mark.parametrize("plan", ["plain", "hold", "refuse-all"])
+def test_a_held_file_or_a_refused_copy_is_a_warning_on_github_actions(
+    plan: str,
+    github_actions: str | None,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    holders: _Holders,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # A build the copy rescued is green, and the line that says so sits in a log of about 5,000
+    # lines. On GitHub Actions it is also a warning annotation, which the run's page shows.
+    disk = _disk(tmp_path, monkeypatch, holders, plan)
+    if github_actions is not None:
+        monkeypatch.setenv("GITHUB_ACTIONS", github_actions)
+    if plan == "refuse-all":
+        with pytest.raises(build_app.BuildError, match="^hdiutil verify failed"):
+            disk.make()
+    else:
+        disk.make()
+    annotations = [line for line in capsys.readouterr().out.splitlines() if line.startswith("::")]
+    starts = {
+        "plain": [],
+        "hold": ["::warning title=disk image::made.dmg was locked by another process "],
+        "refuse-all": ["::warning title=disk image::hdiutil verify refused copy.dmg, "],
+    }[plan]
+    if github_actions != "true":
+        starts = []
+    assert len(annotations) == len(starts), annotations
+    for line, start in zip(annotations, starts, strict=True):
+        assert line.startswith(start) and "%" not in line, line
+
+
+def test_only_the_lines_of_verify_debug_that_name_a_lock_are_shown(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    kept = [
+        "DIBackingStoreOpenLockFriendly: open with lock returned 35",
+        "flock(2) failed",
+        "unlock",
+        "LOCKED",
+    ]
+    dropped = ["read block 12", "clock skew", "blocked on I/O", "BlockingIOError"]
+    last = "hdiutil: verify failed - Resource temporarily unavailable"
+    said = "\n".join([*kept, *dropped]) + "\n"
+    build_app._show(subprocess.CompletedProcess([], 1, stdout=said, stderr=last), only_locks=True)
+    assert capsys.readouterr().out.splitlines() == [*kept, last]
+
+
+def test_stale_held_files_are_replaced_by_new_ones(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, holders: _Holders
+) -> None:
+    # A file opened "wb" over a path keeps its inode, and so any lock on it (seen on Linux); each
+    # file make_dmg writes must be a new one.
+    disk = _disk(tmp_path, monkeypatch, holders)
+    disk.work.mkdir(parents=True)
+    for stale in (disk.made, disk.copy, disk.dmg):
+        stale.write_bytes(b"left by an earlier build")
+        holders.hold(stale, "ex")
+    stale_copy = disk.copy.stat().st_ino
+    disk.make()
+    [(path, inode, _)] = disk.tools.verified
+    assert path == disk.copy and inode != stale_copy
+    assert disk.waits == []
+    assert holders.all_alive()
+    assert disk.images() == [disk.dmg] and disk.dmg.stat().st_ino == inode
+
+
+def test_image_lock_held(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    holders: _Holders,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    image = tmp_path / "image.dmg"
+    assert isinstance(build_app.image_lock_held(image), FileNotFoundError)
+    image.write_bytes(b"image")
+    assert build_app.image_lock_held(image) is False
+    holders.hold(image, "ex")
+    assert build_app.image_lock_held(image) is True
+    # A shared holder too: a probe that asked for a shared lock would be granted one, and blind.
+    shared = tmp_path / "shared.dmg"
+    shared.write_bytes(b"image")
+    holders.hold(shared, "sh")
+    assert build_app.image_lock_held(shared) is True
+    # A probe that cannot be made says so, and the build goes on.
+    disk = _disk(tmp_path, monkeypatch, holders)
+
+    def no_locks(fd: int, operation: int) -> None:
+        raise OSError(errno.ENOLCK, "No locks available")
+
+    monkeypatch.setattr("fcntl.flock", no_locks)
+    error = build_app.image_lock_held(shared)
+    assert isinstance(error, OSError) and error.errno == errno.ENOLCK
+    capsys.readouterr()
+    disk.make()
+    assert disk.images() == [disk.dmg]
+    out = capsys.readouterr().out
+    assert "after hdiutil create: made.dmg could not be checked for a lock: " in out
+    assert "No locks available" in out
+
+
+def _sparse(path: Path, size: int, trailer: bytes) -> Path:
+    with path.open("wb") as handle:
+        handle.truncate(size)
+        handle.seek(size - len(trailer))
+        handle.write(trailer)
+    return path
+
+
+def test_udif_trailer_problem(tmp_path: Path) -> None:
+    # The values of the trailer of a real image, built by CI (job 128888004295): 43,611,369 bytes,
+    # the data fork at 0 and 43,597,364 bytes long, the property list right after it, 13,493 bytes.
+    size, data, xml = 43_611_369, (0, 43_597_364), (43_597_364, 13_493)
+    real = _sparse(tmp_path / "real.dmg", size, bytes(_koly(data=data, xml=xml)))
+    assert build_app.udif_trailer_problem(real) is None
+    short = tmp_path / "short.dmg"
+    short.write_bytes(b"k" * 511)
+    end = size - 512
+    cases = {
+        "too short": short,
+        "do not start": _koly(data=data, xml=xml, magic=b"kolx"),
+        "says it is 511 bytes": _koly(data=data, xml=xml, header=511),
+        "data fork": _koly(data=(0, end + 1), xml=xml),
+        "property list (13494 bytes": _koly(data=data, xml=(xml[0], xml[1] + 1)),
+        "no length": _koly(data=data, xml=(end, 0)),
+    }
+    for words, case in cases.items():
+        path = case if isinstance(case, Path) else _sparse(tmp_path / "x.dmg", size, bytes(case))
+        problem = build_app.udif_trailer_problem(path)
+        assert problem is not None and words in problem, (words, problem)
+
+
+def test_show_image_holders_prints_and_never_raises(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    holders: _Holders,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    image = tmp_path / "made.dmg"
+    image.write_bytes(b"image")
+    monkeypatch.setenv("GITHUB_ACTIONS", "true")
+    _no_waits(monkeypatch)
+    order = [_DiskTools.tool(call) for call in _looks_at(image, sudo=True)]
+    # Nothing fails: only the matched process's own command line is shown, and long output is cut.
+    tools = _DiskTools(holders)
+    monkeypatch.setattr("subprocess.run", tools)
+    build_app.show_image_holders(image)
+    out = capsys.readouterr().out
+    assert [tools.tool(call) for call in tools.calls] == order
+    assert _PROCESSES["4242"] in out
+    assert "LUCILLE_EXAMPLE" not in out and "/bin/bash" not in out
+    cut = _LOG_LINES - build_app.DIAGNOSIS_LINES
+    assert f"({cut} lines before these are not shown)\n" in out
+    assert f"diskimages line {_LOG_LINES - 1}\n" in out
+    assert f"diskimages line {cut - 1}\n" not in out and f"diskimages line {cut}\n" in out
+    assert set(tools.timeouts) == {build_app.DIAGNOSIS_TIMEOUT}
+    # Each tool in turn cannot start, does not end in time, or fails: one line says so, and every
+    # later look still runs.
+    for broken in order:
+        for failure in ("missing", "hangs", "fails"):
+            tools = _DiskTools(holders, broken={broken: failure})
+            monkeypatch.setattr("subprocess.run", tools)
+            build_app.show_image_holders(image)
+            out = capsys.readouterr().out
+            skipped = {"ps-show"} if broken == "ps-list" else set()  # no list, no pid to show
+            ran = [tools.tool(call) for call in tools.calls]
+            assert ran == [tool for tool in order if tool not in skipped], (broken, failure)
+            words = {
+                "missing": "could not be run",
+                "hangs": f"did not end within {build_app.DIAGNOSIS_TIMEOUT} s",
+                "fails": "exited 1",
+            }[failure]
+            assert words in out, (broken, failure, out)
+
+
+_ON_A_MAC = pytest.mark.skipif(
+    sys.platform != "darwin" or shutil.which("hdiutil") is None,
+    reason="needs macOS and its hdiutil",
+)
+
+
+@_ON_A_MAC
+def test_make_dmg_hands_on_a_verified_image_while_a_process_holds_the_file_create_wrote(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    holders: _Holders,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # The real ditto and hdiutil, and a real process holding the file `hdiutil create` wrote under
+    # an exclusive flock(2) lock from the moment create returns. The build must hand on a verified
+    # image whatever hdiutil makes of a file held so. A pass does not say which that is, and the
+    # code before the copy fails this test either way: if DiskImages refuses the file, with the
+    # BuildError CI saw after seven refused tries; if it does not, with a TypeError on the `waits`
+    # that its hdiutil() did not take. So only the way the old code fails tells the two apart. The
+    # next test records, as a warning, what `hdiutil verify` answers for a file held so.
+    #
+    # The holder asks for its lock without waiting. If something already holds the file (a
+    # lingering diskimages-helper, as in CI's three failures), it is refused and exits, and the
+    # file is still held by another process, which is what this test needs.
+    app, out, dmg = _app(tmp_path)
+    work = out / "work"
+    waits: list[float] = []
+    real = build_app.hdiutil
+
+    def hdiutil_then_hold(args: Sequence[str], **given: Any) -> subprocess.CompletedProcess[str]:
+        done = real(args, **{**given, "sleep": waits.append})
+        if args[0] == "create" and done.returncode == 0:
+            holders.hold(Path(args[-1]), "ex", at_once=True)
+        return done
+
+    monkeypatch.setattr("tools.macos.build_app.hdiutil", hdiutil_then_hold)
+    shown: list[Path] = []
+    monkeypatch.setattr("tools.macos.build_app.show_image_holders", shown.append, raising=False)
+    try:
+        build_app.make_dmg(app, dmg, "lucille-host-test", work)
+    except build_app.BuildError as error:
+        if str(error).startswith("hdiutil create failed"):
+            pytest.skip(f"hdiutil could not make a disk image here: {error}")
+        raise
+    assert dmg.is_file() and not (work / "made.dmg").exists()
+    [holder] = holders.started
+    assert holders.refused(holder) or holder.poll() is None
+    assert build_app.hdiutil(["verify", str(dmg)], waits=()).returncode == 0
+    assert build_app.udif_trailer_problem(dmg) is None
+    assert shown == [work / "made.dmg"]
+    assert "is locked by another process" in capsys.readouterr().out
+
+
+@_ON_A_MAC
+def test_show_image_holders_names_the_process_that_holds_a_real_image(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    holders: _Holders,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "file.txt").write_text("a disk image for a test\n", encoding="utf-8")
+    image = tmp_path / "image.dmg"
+    create = ["create", "-volname", "lucille-host-test", "-srcfolder", str(source)]
+    done = build_app.hdiutil([*create, "-format", "UDZO", "-ov", str(image)])
+    if done.returncode != 0:
+        pytest.skip(f"hdiutil could not make a disk image here: {done.stderr.strip()}")
+    holder = holders.hold(image, "ex", at_once=True)
+    if holders.refused(holder):
+        pytest.skip(
+            "another process held the new disk image under a flock(2) lock right after hdiutil "
+            f"create returned: evidence for the reading of CI's refusals ({image})"
+        )
+    # The control, recorded and not asserted: whether hdiutil refuses a file that another process
+    # holds under an exclusive flock(2) lock. This is the one look at that on a real Mac; the
+    # pytest run's warnings summary shows it.
+    control = build_app.hdiutil(["verify", str(image)], waits=())
+    said = (control.stderr.strip() or control.stdout.strip()).splitlines()
+    answer = (
+        f"hdiutil verify of a file another process holds under flock(LOCK_EX): exit "
+        f"{control.returncode}, refused as busy: {build_app.hdiutil_busy(control)}; its last line: "
+        f"{said[-1] if said else '(none)'}"
+    )
+    print(answer)
+    warnings.warn(answer, stacklevel=1)
+    monkeypatch.delenv("GITHUB_ACTIONS", raising=False)
+    capsys.readouterr()
+    build_app.show_image_holders(image)
+    out = capsys.readouterr().out
+    lsof = out.split("+ " + shlex.join(["lsof", "--", str(image)]) + "\n", 1)[1]
+    lsof = lsof.split("\n+ ", 1)[0]
+    assert re.search(rf"\b{holder.pid}\b", lsof), out
+    assert "+ sudo" not in out, out
 
 
 # ---------------------------------------------------------------------------------------------

@@ -39,8 +39,9 @@ ignores):
 :func:`signing_plan` gives (the libraries deepest first, then the interpreter with its own
 identifier, then the bundle; with the hardened runtime when the pins say so; no entitlements),
 and builds ``<name>-<version>-<commit>-adhoc-macOS-arm64.dmg``, which holds the app and a link to
-``/Applications``. A signature macOS trusts needs a Developer ID and notarization, which this
-script does not do.
+``/Applications``. ``hdiutil create`` writes it in ``work/``, and the build hands on a copy that has
+the same bytes, a whole UDIF trailer and a passing ``hdiutil verify`` (:func:`make_dmg`). A
+signature macOS trusts needs a Developer ID and notarization, which this script does not do.
 
 ``plan`` reads the pins, the build constraints, the prune list and the version, and writes the
 ``Info.plist`` the app would get, without running any other program. ``toolchain`` checks that the
@@ -62,6 +63,7 @@ import plistlib
 import re
 import shlex
 import shutil
+import struct
 import subprocess
 import sys
 import tarfile
@@ -914,36 +916,198 @@ def _run(argv: list[str], *, cwd: Path | None = None, env: Mapping[str, str] | N
     subprocess.run(argv, check=True, cwd=cwd, env=None if env is None else dict(env))
 
 
-# hdiutil fails now and then on a busy machine, while the disk-image helper is still at work on
-# an earlier call: "Resource busy" or "Resource temporarily unavailable" (EAGAIN). Both pass if
-# the same call is made again later. A few seconds was not always enough: on 2026-11-08 a macos-15
-# runner still refused `hdiutil verify` of a disk image it had just made after 30 s of waits
-# (5, 10 and 15 s), every try failing at once. So the waits now add up to two minutes.
+# hdiutil sometimes refuses a call with "Resource busy" or "Resource temporarily unavailable"
+# (EAGAIN, which hdiutil(1) ties to DiskImages' lock on an image file). A call refused so is made
+# again after each of HDIUTIL_WAITS, two minutes in all, unless its caller passes other waits. In
+# this repository's logs (149 macOS jobs, 2026-10-29 to 2026-11-09) that has never turned a
+# refusal into a pass. The three refusals were of the `hdiutil verify` run right after `hdiutil
+# create`. Every try the job made of that file was refused, while a diskimages-helper the job had
+# started was still alive. So make_dmg never relies on a verify of the file create wrote, and never
+# hands that file on: it verifies a copy. (It runs `hdiutil verify -debug` on that file only to
+# print, for the log, why it is held.)
 HDIUTIL_BUSY: Final = ("Resource busy", "Resource temporarily unavailable")
 HDIUTIL_WAITS: Final = (5, 10, 15, 20, 30, 40)
 HDIUTIL_TRIES: Final = len(HDIUTIL_WAITS) + 1
+# Every UDIF disk image ends in a 512-byte trailer that starts "koly" and says where the data fork
+# and the XML property list (the chunk table and its checksums) lie.
+UDIF_TRAILER: Final = 512
+UDIF_MAGIC: Final = b"koly"
+# What show_image_holders runs is cut off after DIAGNOSIS_TIMEOUT seconds, and what it prints of
+# each after its last DIAGNOSIS_LINES lines. Of ps, it shows only the processes whose executable's
+# name matches HOLDER_NAMES, with their own command lines: the job log of a public repository is
+# public, and another process's arguments may hold a secret.
+DIAGNOSIS_TIMEOUT: Final = 30
+DIAGNOSIS_LINES: Final = 60
+HOLDER_NAMES: Final = re.compile(r"diskimage|hdiutil|xprotect|^mds|^mdworker", re.IGNORECASE)
+# A line of `hdiutil verify -debug` that names a lock: "lock" anywhere, "OpenLockFriendly", "flock"
+# and "unlock" included, but not as the end of "block" or "clock".
+LOCK_WORD: Final = re.compile(r"(?<![bc])lock", re.IGNORECASE)
 
 
-def hdiutil(args: Sequence[str], *, sleep: Any = time.sleep) -> subprocess.CompletedProcess[str]:
+def hdiutil_busy(done: subprocess.CompletedProcess[str]) -> bool:
+    """Whether ``hdiutil`` refused a call as busy."""
+    return done.returncode != 0 and any(word in done.stderr for word in HDIUTIL_BUSY)
+
+
+def hdiutil(
+    args: Sequence[str],
+    *,
+    waits: Sequence[float] = HDIUTIL_WAITS,
+    timeout: float | None = None,
+    sleep: Any = time.sleep,
+) -> subprocess.CompletedProcess[str]:
     """Run ``hdiutil`` with ``args`` and return how it ended, output captured as text. A call
-    that fails because the machine is busy is made again, up to ``HDIUTIL_TRIES`` times in all,
-    waiting each of ``HDIUTIL_WAITS`` in turn between them; any other failure is returned at
-    once. Each wait is said, and flushed, before it starts, so the log's times are true."""
+    refused as busy is made again after each of ``waits`` in turn; any other failure is returned
+    at once. Each wait is said, and flushed, before it starts, so the log's times are true.
+    ``timeout`` is subprocess.run's own, and raises as it does."""
     argv = ["hdiutil", *args]
-    for attempt in range(1, HDIUTIL_TRIES + 1):
+    tries = len(waits) + 1
+    for attempt in range(1, tries + 1):
         print("+ " + shlex.join(argv), flush=True)
-        done = subprocess.run(argv, capture_output=True, text=True, check=False)
-        busy = done.returncode != 0 and any(word in done.stderr for word in HDIUTIL_BUSY)
-        if not busy or attempt == HDIUTIL_TRIES:
+        done = subprocess.run(argv, capture_output=True, text=True, check=False, timeout=timeout)
+        if not hdiutil_busy(done) or attempt == tries:
             return done
         said = done.stderr.strip()
-        wait = HDIUTIL_WAITS[attempt - 1]
+        wait = waits[attempt - 1]
         print(
-            f"hdiutil is busy; trying again in {wait} s (try {attempt} of {HDIUTIL_TRIES}): {said}",
+            f"hdiutil is busy; trying again in {wait} s (try {attempt} of {tries}): {said}",
             flush=True,
         )
         sleep(wait)
     raise AssertionError("unreachable")
+
+
+def image_lock_held(path: Path) -> bool | OSError:
+    """Whether another process holds a flock(2) lock on ``path``, shared or exclusive: True when an
+    exclusive lock is refused at once, False when it is granted (and given back at once), and the
+    error when it could not be asked for. It asks for an exclusive lock because a shared one is
+    granted beside another shared one."""
+    import fcntl  # here, so that the commands that run anywhere import anywhere
+
+    try:
+        with path.open("rb") as handle:
+            try:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                return True
+            return False  # closing the file gives the lock back
+    except OSError as error:
+        return error
+
+
+def udif_trailer_problem(path: Path) -> str | None:
+    """None when ``path`` ends in a UDIF trailer whose data fork and property list both lie in the
+    file before it; otherwise what is wrong. A disk image cut short has no such ending."""
+    size = path.stat().st_size
+    if size < UDIF_TRAILER:
+        return f"it is {size} bytes, too short to end in a UDIF trailer of {UDIF_TRAILER}"
+    with path.open("rb") as handle:
+        handle.seek(size - UDIF_TRAILER)
+        trailer = handle.read(UDIF_TRAILER)
+    if trailer[:4] != UDIF_MAGIC:
+        return f"it does not end in a UDIF trailer: its last {UDIF_TRAILER} bytes do not start koly"
+    (header,) = struct.unpack(">I", trailer[8:12])
+    data_offset, data_length = struct.unpack(">QQ", trailer[0x18:0x28])
+    xml_offset, xml_length = struct.unpack(">QQ", trailer[0xD8:0xE8])
+    end = size - UDIF_TRAILER
+    if header != UDIF_TRAILER:
+        return f"its UDIF trailer says it is {header} bytes, not {UDIF_TRAILER}"
+    if data_offset + data_length > end:
+        return (
+            f"its UDIF trailer puts the end of the data fork at byte {data_offset + data_length}, "
+            f"past the trailer's start at {end}"
+        )
+    if xml_length == 0:
+        return "its UDIF trailer gives the property list no length"
+    if xml_offset + xml_length > end:
+        return (
+            f"its UDIF trailer puts the property list ({xml_length} bytes at {xml_offset}) past "
+            f"the trailer's start at {end}"
+        )
+    return None
+
+
+def _tail(text: str) -> str:
+    lines = text.splitlines()
+    if len(lines) <= DIAGNOSIS_LINES:
+        return text
+    cut = len(lines) - DIAGNOSIS_LINES
+    return "\n".join([f"({cut} lines before these are not shown)", *lines[-DIAGNOSIS_LINES:]])
+
+
+def _look(program: str, args: list[str]) -> subprocess.CompletedProcess[str] | None:
+    """Run ``program`` with ``args`` for show_image_holders, within DIAGNOSIS_TIMEOUT; hdiutil
+    through :func:`hdiutil`, once. One line says so when it could not be run, did not end in time
+    (both give None) or exited non-zero."""
+    what = f"{program} {args[0]}" if program == "hdiutil" else program
+    try:
+        if program == "hdiutil":
+            done = hdiutil(args, waits=(), timeout=DIAGNOSIS_TIMEOUT)
+        else:
+            argv = [program, *args]
+            print("+ " + shlex.join(argv), flush=True)
+            done = subprocess.run(
+                argv, capture_output=True, text=True, check=False, timeout=DIAGNOSIS_TIMEOUT
+            )
+    except subprocess.TimeoutExpired:
+        print(f"({what} did not end within {DIAGNOSIS_TIMEOUT} s)", flush=True)
+        return None
+    except (OSError, ValueError, subprocess.SubprocessError) as error:
+        print(f"({what} could not be run: {error})", flush=True)
+        return None
+    if done.returncode != 0:
+        print(f"({what} exited {done.returncode})", flush=True)
+    return done
+
+
+def _show(done: subprocess.CompletedProcess[str] | None, *, only_locks: bool = False) -> None:
+    if done is None:
+        return
+    lines = (done.stdout + done.stderr).strip().splitlines()
+    if only_locks:  # the lines that name a lock (LOCK_WORD), and the last line
+        lines = [line for line in lines[:-1] if LOCK_WORD.search(line)] + lines[-1:]
+    print(_tail("\n".join(lines)) if lines else "(no output)", flush=True)
+
+
+def show_image_holders(image: Path) -> None:
+    """Print, for the log, what may be holding ``image``: the disk-image, XProtect and Spotlight
+    processes, with their parents, start times and command lines; what has the file open, also as
+    root under ``sudo -n`` on GitHub Actions only, never on a developer's own Mac; the images
+    attached; the lines of ``hdiutil verify -debug`` that name a lock (:data:`LOCK_WORD`), and its
+    last line; and the disk-image log of the last three minutes. Never fails the build."""
+    print(f"what may be holding {image}:", flush=True)
+    listed = _look("ps", ["-axo", "pid=,comm="])
+    pids = []
+    if listed is not None and listed.returncode == 0:
+        for line in listed.stdout.splitlines():
+            pid, _, executable = line.strip().partition(" ")
+            if pid.isdigit() and HOLDER_NAMES.search(Path(executable.strip()).name):
+                pids.append(pid)
+        if not pids:
+            print("(no disk-image, XProtect or Spotlight process is running)", flush=True)
+    if pids:
+        _show(_look("ps", ["-o", "pid,ppid,user,lstart,etime,stat,command", "-p", ",".join(pids)]))
+    _show(_look("lsof", ["--", str(image)]))
+    if os.environ.get("GITHUB_ACTIONS") == "true":
+        _show(_look("sudo", ["-n", "lsof", "--", str(image)]))
+    _show(_look("hdiutil", ["info"]))
+    _show(_look("hdiutil", ["verify", "-debug", str(image)]), only_locks=True)
+    predicate = 'subsystem == "com.apple.diskimages"'
+    _show(
+        _look(
+            "log",
+            ["show", "--last", "3m", "--style", "compact", "--info", "--debug"]
+            + ["--predicate", predicate],
+        )
+    )
+
+
+def _annotate(message: str) -> None:
+    """On GitHub Actions only, print ``message`` as a warning annotation, which the run's page
+    shows: a line in a build log of thousands is read by nobody. ``message`` is one line of this
+    script's own words, with no ``%``, so it needs no escaping."""
+    if os.environ.get("GITHUB_ACTIONS") == "true":
+        print(f"::warning title=disk image::{message}", flush=True)
 
 
 def _output(
@@ -1328,31 +1492,86 @@ def manifest_text(data: Mapping[str, Any]) -> str:
 
 
 def make_dmg(app: Path, dmg: Path, volume: str, work: Path) -> None:
-    """A compressed disk image holding the app and a link to /Applications to drag it to."""
+    """A compressed disk image holding the app and a link to /Applications to drag it to.
+    ``hdiutil create`` writes it as ``work/made.dmg``. This build never relies on a verify of
+    that file and never hands it on (when it is locked, ``hdiutil verify -debug`` runs on it only
+    for the log): in three CI builds hdiutil refused that file on every try the job made, and that
+    a lingering disk-image helper held a lock on it is inferred, not seen. Instead a copy, a new
+    file, is checked to have the same bytes and a whole UDIF trailer, and to pass ``hdiutil
+    verify``. Only then is it renamed to ``dmg``, so ``dmg`` never names an image that verify has
+    not passed. On GitHub Actions, a locked ``made.dmg`` and a copy refused as busy are also said
+    as warning annotations."""
     staging = work / "dmg"
     if staging.exists():
         shutil.rmtree(staging)
     staging.mkdir(parents=True)
     _run(["ditto", str(app), str(staging / app.name)])
     (staging / "Applications").symlink_to("/Applications")
-    if dmg.exists():
-        dmg.unlink()
-    create = [
-        "create",
-        "-volname",
-        volume,
-        "-srcfolder",
-        str(staging),
-        "-format",
-        "UDZO",
-        "-ov",
-        str(dmg),
-    ]
-    for args, what in ((create, "create"), (["verify", str(dmg)], "verify")):
-        done = hdiutil(args)
+    made = work / "made.dmg"  # beside the folder it is made from, never inside it
+    copy = work / "copy.dmg"
+    for old in (dmg, made, copy):
+        old.unlink(missing_ok=True)  # so each is a new file, never one something still holds
+    create = ["create", "-volname", volume, "-srcfolder", str(staging), "-format", "UDZO", "-ov"]
+    done = hdiutil([*create, str(made)])
+    print(done.stdout, end="", flush=True)
+    if done.returncode != 0:
+        raise BuildError(f"hdiutil create failed: {done.stderr.strip()}")
+    held = image_lock_held(made)
+    if isinstance(held, OSError):
+        print(
+            f"after hdiutil create: {made.name} could not be checked for a lock: {held}",
+            flush=True,
+        )
+    elif held:
+        print(
+            f"after hdiutil create: {made.name} is locked by another process; this build "
+            "verifies and hands on a copy of it instead",
+            flush=True,
+        )
+        _annotate(
+            f"{made.name} was locked by another process right after hdiutil create, so this build "
+            "verifies a copy of it instead. This step's log says what held it, after the line that "
+            "starts 'after hdiutil create'."
+        )
+        show_image_holders(made)
+    else:
+        print(f"after hdiutil create: {made.name} has no lock on it", flush=True)
+    try:
+        try:
+            with made.open("rb") as source, copy.open("xb") as target:
+                shutil.copyfileobj(source, target)
+        except OSError as error:
+            raise BuildError(f"could not copy {made} to {copy.name}: {error}") from error
+        copied, now = sha256_of(copy), sha256_of(made)
+        if copied != now:
+            raise BuildError(
+                f"{made} changed while it was copied (copy {copied}, now {now}): something was "
+                "still writing it after hdiutil create returned"
+            )
+        problem = udif_trailer_problem(copy)
+        if problem is not None:
+            raise BuildError(f"hdiutil create made no whole disk image: {problem}")
+        done = hdiutil(["verify", str(copy)])
         print(done.stdout, end="", flush=True)
         if done.returncode != 0:
-            raise BuildError(f"hdiutil {what} failed: {done.stderr.strip()}")
+            if hdiutil_busy(done):
+                _annotate(
+                    f"hdiutil verify refused {copy.name}, a new file this build had just copied "
+                    f"from {made.name}, as busy, so the copy did not get past the refusal. This "
+                    "step's log says what held it, after the line that starts 'what may be "
+                    "holding'."
+                )
+                show_image_holders(copy)
+            raise BuildError(f"hdiutil verify failed: {done.stderr.strip()}")
+    except BaseException:
+        copy.unlink(missing_ok=True)  # nothing unverified is left to be taken for the image
+        raise
+    os.replace(copy, dmg)  # the same file system: an atomic rename of the inode verify passed
+    print(f"verified a copy of {made.name}; it is now {dmg.name}", flush=True)
+    try:
+        made.unlink()
+    except OSError as error:
+        print(f"could not remove {made}: {error}", flush=True)
 
 
 def plan(out: Path, tag: str | None, build_number: str | None) -> None:
