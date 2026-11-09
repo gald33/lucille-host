@@ -1386,7 +1386,9 @@ action: the signing steps use Apple's own tools and `gh`, which the images ship.
 job is now in `ci.yml`, so there is one macOS build pipeline. It runs on every pull request and every push
 to `main`, with no path filter; a new push to a pull request cancels that pull request's older run.
 - **`macos-app`**, on `macos-15`, selects the pinned Xcode, builds the host's wheel and the app, signs the
-  app ad hoc and builds the disk image. It runs every check of §19 on them, and the host's whole test suite
+  app ad hoc and builds the disk image. The image it hands on is a verified copy of the file `hdiutil
+  create` wrote, never that file (`build_app.py`, `make_dmg`; `macos/README.md`, "Building it on a Mac",
+  says why). It runs every check of §19 on them, and the host's whole test suite
   on a copy of the bundled runtime. Then, with that copy's interpreter, which holds Switchboard's hub and the
   test harness, it runs the end-to-end check of pairing and supervision (`check_app.py pairing`) against a
   hub of its own on a loopback port and a stand-in for Lucille. Then it builds the unsigned app a second
@@ -1517,7 +1519,8 @@ Connect API key, its id and issuer id, as environment secrets, never repository-
   typed gate, refuse-while-held, the fresh policy on a new pair, `uninstall-data`, `diagnostics`;
 - the M13 test: an audit hook records process creation across pair, resolve, touch and a request;
 - the build script's pure logic: `Info.plist` rendering, version rules, the prune plan, signing order, the
-  manifest, and the Linux-side assembly of `site-packages`;
+  manifest, and the Linux-side assembly of `site-packages`; and the disk-image step (`make_dmg`) against
+  stand-ins for `ditto` and `hdiutil`, with real processes holding files under `flock`;
 - the Swift library's tests (Foundation only), driving the **real** Python CLI;
 - the guards (§20).
 

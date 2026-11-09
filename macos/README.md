@@ -67,7 +67,10 @@ build is, and what is planned after it.
   the two.
 - **`Capsule-<version>-<commit>-adhoc-macOS-arm64.dmg`**, a disk image whose volume is named Capsule. It holds
   the app and a link to the Applications folder. The file name says the signature is ad hoc and names
-  the commit, so the image cannot be taken for a release asset.
+  the commit, so the image cannot be taken for a release asset. `hdiutil create` writes it as
+  `build/macos/work/made.dmg`. The build copies that file to a new one, checks that the copy has the same
+  sha256 and ends in a whole disk-image trailer, runs `hdiutil verify` on the copy, and only then gives the
+  copy this name.
 
 ## What the app does when it opens
 
@@ -671,6 +674,25 @@ number), and `--tag vX.Y.Z`, for a build from that tag, whose version must then 
 suffix. `assemble`, with the same arguments, stops before signing, and leaves the unsigned app and its
 tarball.
 
+The disk image gets its name only once `hdiutil verify` has passed on it, so a build that fails while
+making the disk image leaves none in `build/macos/`. A build that fails before that step leaves the
+disk image of the build before it, if there was one, and `check_app.py dmg` would check that one.
+`build/macos/work/` holds the build's scratch files.
+
+In 3 of 81 CI builds (2026-10-29 to 2026-11-09), `hdiutil` refused to open the file `create` had just
+written ("Resource temporarily unavailable") on every try the job made, while a `diskimages-helper` the
+job had started was still running. That is why the build verifies a copy. That the helper held a lock on
+that one file, which a copy does not carry, is inferred, not seen.
+
+After `create`, the build prints whether another process holds a `flock(2)` lock on the file. When one
+does, it also prints what `ps`, `lsof`, `hdiutil info`, `hdiutil verify -debug` and the disk-image log
+say. When `GITHUB_ACTIONS` is `true`, as it is on GitHub's runners, such a lock, and a copy that `hdiutil
+verify` refuses as busy, are also shown as warnings on the run's page. The build never ends a process,
+and it runs `sudo -n lsof` only when `GITHUB_ACTIONS` is `true`. `hdiutil info` lists every disk image
+attached, by path, and the disk-image log can name images too, so on your own Mac that output can name
+disk images of your own: read it before you share the log. A helper left behind keeps the deleted file,
+about 44 MB, until it exits (inferred).
+
 The app, its tarball and the disk image land in `build/macos/`, which git ignores. Then run the checks CI
 runs, in the order it runs them:
 
@@ -988,6 +1010,21 @@ need a Mac and a person, and none has been done yet:
   `HostCLI.lockHolders`) and the wiring the build tests read, not with a live stuck run.
 - **VoiceOver.** Whether it reads the menu bar item as "Capsule", and "Capsule, paused".
 - **A full menu bar, or one beside a notch,** where macOS hides the icon.
+
+These two need no person, only a CI run in which it happens:
+
+- **A real `diskimages-helper` holding the file `hdiutil create` wrote.** On macos-latest, and in the
+  `suite` check on macos-15, a test holds that file with `flock` against the real `hdiutil` and checks
+  that the build hands on a verified copy, and another records, as a pytest warning, what `hdiutil
+  verify` answers for a file held so. Whether the helper's own hold is of that kind has not been seen.
+  The build's line after `create` says whether another process holds a lock on the file that `flock(2)`
+  sees. "has no lock on it" does not rule out a hold of another kind, or an `fcntl` lock, if macOS does
+  not make the two conflict (not checked).
+- **A helper left holding the copy.** A `diskimages-helper` left by the passing `verify` of the copy
+  would hold the file the build hands on, and `check_app.py dmg`'s `verify` and `attach` of it would be
+  refused as before (inferred, not seen). Against it: in each of the 78 CI builds from 2026-10-29 to
+  2026-11-09 that saw no refusal, `dmg` verified and mounted, minutes later, the very file the build's
+  own `verify` had passed (in run 42522633104, 5.5 minutes later).
 
 ### Testing log out by hand
 
