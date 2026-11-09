@@ -15,6 +15,7 @@ import hashlib
 import json
 import os
 import plistlib
+import random
 import re
 import shlex
 import shutil
@@ -8272,7 +8273,7 @@ def test_the_profile_lister_never_reads_a_failed_pgrep_as_none(
     else:
         assert check_app._profile_processes() == pids
     [(argv, kwargs)] = calls
-    assert argv == ["pgrep", "-f", f"lucille_host --profile {check_app.APP_PROFILE} "]
+    assert argv == ["pgrep", "-f", f"lucille_host --profile {check_app.APP_PROFILE}( |$)"]
     assert kwargs.get("timeout") == 5 and kwargs.get("errors") == "replace"
 
 
@@ -8389,6 +8390,73 @@ def test_the_ps_lister_sees_the_profile_and_every_child_of_a_running_copy(
     assert kwargs.get("timeout") == 5 and kwargs.get("errors") == "replace"
 
 
+# Command lines a host on the app's profile may have, and some that are not one: whether the
+# listers' pattern matches each.
+_PROFILE_LINES = [
+    (f"/x/python -m lucille_host --profile {check_app.APP_PROFILE} --json --version", True),
+    (f"/x/python -m lucille_host --profile {check_app.APP_PROFILE} run --json-events", True),
+    # A command line that ends at the profile's name: no verb after it.
+    (f"/x/python -m lucille_host --profile {check_app.APP_PROFILE}", True),
+    (f"/x/python -m lucille_host --profile {check_app.APP_PROFILE}2 --json status", False),
+    (f"/x/python -m lucille_host --profile {check_app.APP_PROFILE}s", False),
+    (f"/x/python -m lucille_host --profile {check_app.APP_PROFILE}-old", False),
+    ("/x/python -m lucille_host --profile other --json status", False),
+]
+
+
+@pytest.mark.parametrize(("command", "matched"), _PROFILE_LINES)
+def test_both_listers_match_a_host_whose_command_line_ends_at_the_profile(
+    monkeypatch: pytest.MonkeyPatch, command: str, matched: bool
+) -> None:
+    # The pattern ends at the profile's name, then a space or the end of the command line: a host
+    # started with no verb after its profile is still one, and a profile whose name only begins
+    # with the app's is not. It is plain POSIX extended syntax, with no backslash, so that pgrep's
+    # regcomp should read it as Python's re does (seen with Linux's pgrep; Apple's is not yet
+    # seen, which the real-lister test below is for); ps matches with re.
+    rows = f"   99     1 S    {_APP_COMMAND}\n  101     1 S    {command}\n"
+    monkeypatch.setattr("subprocess.run", lambda argv, **kwargs: _done(argv, 0, rows))
+    hosts, _ = check_app._ps_profile()
+    assert hosts == ([101] if matched else [])
+    pattern = check_app.PROFILE_PROCESS
+    assert bool(re.search(pattern, command)) is matched
+    assert pattern == f"lucille_host --profile {check_app.APP_PROFILE}( |$)" and "\\" not in pattern
+
+
+@pytest.mark.parametrize("lister", ["pgrep", "ps"])
+def test_the_real_listers_find_a_process_whose_command_line_ends_at_the_profile(
+    lister: str,
+) -> None:
+    # The listers as they are on this machine, with this pattern: a process whose command line
+    # ends at the profile's name is found, and one whose profile only begins with it is not. On a
+    # Mac this is Apple's pgrep and ps. Where the lister is missing, or cannot read the process
+    # table here at all, there is nothing to learn. So pgrep is asked first with a plain pattern,
+    # no metacharacter in it: where that reads the table, pgrep must read it with the listers'
+    # pattern too, and a pattern it cannot compile (pgrep exits 2) fails here, never skips.
+    if shutil.which(lister) is None:
+        pytest.skip(f"no {lister} here")
+    sleeper = "import time; time.sleep(30)"
+    tail = f"lucille_host --profile {check_app.APP_PROFILE}"
+    ours = subprocess.Popen([sys.executable, "-c", sleeper, "-m", *tail.split()])
+    other = subprocess.Popen([sys.executable, "-c", sleeper, "-m", *f"{tail}2".split()])
+    try:
+        if lister == "pgrep":
+            try:
+                check_app._pgrep(["-f", tail])
+            except check_app.ListerBlind as exc:
+                pytest.skip(f"pgrep cannot read the process table here: {exc}")
+            hosts = check_app._profile_processes()
+        else:
+            try:
+                hosts, _ = check_app._ps_profile()
+            except check_app.ListerBlind as exc:
+                pytest.skip(f"ps cannot read the process table here: {exc}")
+        assert ours.pid in hosts and other.pid not in hosts, (hosts, ours.pid, other.pid)
+    finally:
+        for process in (ours, other):
+            process.kill()
+            process.wait()
+
+
 @pytest.mark.parametrize(
     ("code", "out", "err"),
     [
@@ -8485,43 +8553,64 @@ def _watched(*readings: Any, began: float = 0.0, ended: float | None = None) -> 
     return watch
 
 
-def test_a_watch_is_blind_where_no_lister_read_for_longer_than_the_shortest_burst() -> None:
+def test_a_watch_is_blind_where_no_lister_read_for_longer_than_the_limit() -> None:
     # Readings at 0 and 0.1 s, then two calls that failed, then one at 1.05 s: from the second
-    # reading's start, 0.1 s, to the third's end, 1.1 s, the check could not see, and a burst of
-    # host processes could have come and gone in it.
+    # reading's start, 0.1 s, to the third's end, 2.3 s, the check could not see, longer than the
+    # 2 s limit: a burst of host processes could have come and gone in it.
     watch = _watched(
+        _reading(0.0, 0.05, True),
+        _reading(0.1, 0.15, True, lister="ps"),
+        _reading(0.2, 1.2, False, "pgrep did not answer in 5 s"),
+        _reading(1.25, 2.2, False, "ps exited 1", lister="ps"),
+        _reading(2.25, 2.3, True),
+    )
+    assert len(watch.readings) == 5 and watch.errors() == [
+        (0.2, "pgrep did not answer in 5 s"),
+        (1.25, "ps exited 1"),
+    ]
+    assert watch.longest_gap == pytest.approx(2.2)
+    [(start, end, why)] = watch.blind()
+    assert (start, end) == pytest.approx((0.1, 2.3))
+    assert why == "pgrep did not answer in 5 s; ps exited 1"
+    assert watch.read_by("pgrep") and watch.read_by("ps")
+    # The same, a second shorter: within the limit, so not blind, and recorded.
+    shorter = _watched(
         _reading(0.0, 0.05, True),
         _reading(0.1, 0.15, True, lister="ps"),
         _reading(0.2, 0.6, False, "pgrep did not answer in 5 s"),
         _reading(0.65, 1.0, False, "ps exited 1", lister="ps"),
         _reading(1.05, 1.1, True),
     )
-    assert len(watch.readings) == 5 and watch.errors() == [
-        (0.2, "pgrep did not answer in 5 s"),
-        (0.65, "ps exited 1"),
+    assert shorter.blind() == [] and shorter.longest_gap == pytest.approx(1.0)
+    assert watch.recorded() == [
+        "recorded, not a gate: no reading from 0.10 s to 2.30 s (2.20 s); lister errors in it: "
+        "pgrep did not answer in 5 s; ps exited 1"
     ]
-    assert watch.longest_gap == pytest.approx(1.0)
-    [(start, end, why)] = watch.blind()
-    assert (start, end) == pytest.approx((0.1, 1.1))
-    assert "pgrep did not answer in 5 s" in why and "ps exited 1" in why
-    assert watch.read_by("pgrep") and watch.read_by("ps")
+    assert check_app.BLIND_LIMIT == 2.0 and check_app.RECORDED_GAP == 0.35
+    assert shorter.recorded() == [
+        "recorded, not a gate: no reading from 0.10 s to 1.10 s (1.00 s); lister errors in it: "
+        "pgrep did not answer in 5 s; ps exited 1"
+    ]
     # No reading at all is blind from the watch's start to its end, however short.
     never = _watched(_reading(0.0, 0.05, False, "pgrep exited 3"))
     assert [(a, b) for a, b, _ in never.blind()] == [pytest.approx((0.0, 0.05))]
     assert not never.read_by("pgrep")
     # Readings 0.1 s long, starting 0.25 s apart: from one's start to the next one's end is
-    # 0.35 s, within the bound, and so is the stretch after the last one's start.
+    # 0.35 s, which is not recorded, and so is the stretch after the last one's start.
     fine = _watched(*(_reading(t, t + 0.1, True) for t in (0.0, 0.25, 0.5, 0.75)), ended=1.0)
-    assert fine.blind() == [] and fine.longest_gap == pytest.approx(0.35)
+    assert fine.blind() == [] and fine.recorded() == []
+    assert fine.longest_gap == pytest.approx(0.35)
 
 
 def test_a_stretch_runs_from_one_readings_start_to_the_next_ones_end() -> None:
     # A lister reads the table somewhere within its call. Calls that start 0.31 s apart, the
-    # second slow, leave 0.57 s in which nothing proves a read; the watch says so.
+    # second slow, leave 0.57 s in which nothing proves a read; the watch records it, and is not
+    # blind for it.
     slow = _watched(_reading(0.0, 0.01, True), _reading(0.31, 0.57, True), ended=0.6)
-    [(start, end, why)] = slow.blind()
-    assert (start, end) == pytest.approx((0.0, 0.57))
-    assert why == "no reading for 0.57 s"
+    assert slow.blind() == []
+    [(start, end, why)] = slow.stretches(check_app.RECORDED_GAP)
+    assert (start, end) == pytest.approx((0.0, 0.57)) and why == ""
+    assert slow.recorded() == ["recorded, not a gate: no reading from 0.00 s to 0.57 s (0.57 s)"]
     # Two listers' calls that overlap count together: a reading inside the stretch closes it.
     both = _watched(
         _reading(0.0, 0.3, True),
@@ -8531,13 +8620,111 @@ def test_a_stretch_runs_from_one_readings_start_to_the_next_ones_end() -> None:
         _reading(0.4, 0.45, True, lister="ps"),
         ended=0.62,
     )
-    assert both.blind() == [] and both.longest_gap == pytest.approx(0.3)
+    assert both.recorded() == [] and both.longest_gap == pytest.approx(0.3)
     # A watch that starts, or ends, with a long stretch with no reading is blind there: the
-    # stretch before the first reading's end, and the stretch after the last one's start.
+    # stretch before the first reading's end, and the stretch after the last one's start. Shorter
+    # than the limit, the same stretches are recorded.
+    start = _watched(_reading(2.5, 2.55, True), _reading(2.6, 2.65, True), ended=2.7)
+    assert [(a, b) for a, b, _ in start.blind()] == [pytest.approx((0.0, 2.55))]
+    end = _watched(_reading(0.0, 0.05, True), _reading(0.1, 0.15, True), ended=2.6)
+    assert [(a, b) for a, b, _ in end.blind()] == [pytest.approx((0.1, 2.6))]
     start = _watched(_reading(0.5, 0.55, True), _reading(0.6, 0.65, True), ended=0.7)
-    assert [(a, b) for a, b, _ in start.blind()] == [pytest.approx((0.0, 0.55))]
+    assert start.blind() == [] and start.recorded() == [
+        "recorded, not a gate: no reading from 0.00 s to 0.55 s (0.55 s)"
+    ]
     end = _watched(_reading(0.0, 0.05, True), _reading(0.1, 0.15, True), ended=0.6)
-    assert [(a, b) for a, b, _ in end.blind()] == [pytest.approx((0.1, 0.6))]
+    assert end.blind() == [] and end.recorded() == [
+        "recorded, not a gate: no reading from 0.10 s to 0.60 s (0.50 s)"
+    ]
+
+
+def test_stretches_that_overlap_are_each_said_with_their_own_length() -> None:
+    # Both listers take 0.2 s a call, ps starting 0.05 s after pgrep: a reading ends every
+    # 0.05 or 0.2 s, but from each ps call's start to the end of the next ps call is 0.4 s, and
+    # those stretches overlap. Each is said on its own, with its own length; none is joined into
+    # one span that no reading crossed, which would read as a real blind spell.
+    readings = []
+    for step in range(8):
+        at = 0.25 * step
+        readings += [_reading(at, at + 0.2, True), _reading(at + 0.05, at + 0.25, True, "", "ps")]
+    watch = _watched(*readings, ended=2.0)
+    assert watch.blind() == []
+    said = watch.recorded()
+    assert said == [
+        f"recorded, not a gate: no reading from {0.25 * step + 0.05:.2f} s to "
+        f"{0.25 * step + 0.45:.2f} s (0.40 s)"
+        for step in range(7)
+    ], said
+    assert watch.longest_gap == pytest.approx(0.4) and watch.blind() == []
+    # A stretch that lies within a longer one is not said again: from 0 s and from 0.1 s, where
+    # a slow pgrep call starts, the next reading to end is ps's at 0.65 s, so the one stretch is
+    # from 0 s.
+    nested = _watched(
+        _reading(0.0, 0.05, True),
+        _reading(0.1, 1.0, True),
+        _reading(0.6, 0.65, True, lister="ps"),
+        _reading(0.7, 0.75, True, lister="ps"),
+        ended=1.0,
+    )
+    assert nested.recorded() == [
+        "recorded, not a gate: no reading from 0.00 s to 0.65 s (0.65 s)"
+    ], nested.recorded()
+
+
+def _fast_pgrep_slow_ps() -> Any:
+    """A watch of 10 s, made up: pgrep answers none every 0.1 s in 0.02 s, as Apple's may where
+    sysmond gives no command line, and each ps call takes 1.5 s, the next 0.05 s after it."""
+    readings = [_reading(step / 10, step / 10 + 0.02, True) for step in range(100)]
+    readings += [_reading(1.55 * call, 1.55 * call + 1.5, True, lister="ps") for call in range(6)]
+    return _watched(*readings, ended=10.0)
+
+
+def test_a_watch_gives_the_longest_stretch_with_no_reading_by_ps_alone() -> None:
+    # pgrep's fast readings keep the stretches over both listers short, and a pgrep reading of
+    # none can be wrong. From one ps reading's start to the next one's end is 3.05 s: a host
+    # process could run that long with no ps reading inside its run. The watch's line gives that
+    # stretch too, not as a gate, so that a run like this one shows.
+    watch = _fast_pgrep_slow_ps()
+    assert watch.longest_gap == pytest.approx(0.12) and watch.blind() == []
+    assert watch.longest_gap_of("ps") == pytest.approx(3.05)
+    assert watch.longest_gap_of("pgrep") == pytest.approx(0.12)
+    assert (
+        "longest gap between readings 0.12 s; between ps's own readings 3.05 s (not a gate); "
+        "lister errors 0"
+    ) in watch.summary(), watch.summary()
+    # ps never reading the table: its own stretch is the whole watch.
+    alone = _watched(_reading(0.0, 0.02, True), _reading(0.1, 0.12, False, lister="ps"), ended=10.0)
+    assert alone.longest_gap_of("ps") == pytest.approx(10.0)
+
+
+def test_a_span_longer_than_the_longest_stretch_holds_a_whole_reading() -> None:
+    # What the docs rest on: in any span of the watch longer than its longest stretch with no
+    # reading, a reading both started and ended, and with ps's readings alone, a ps reading did.
+    # Made-up watches with calls of every length, overlapping, and some blind.
+    rng = random.Random(20261109)
+    for _ in range(300):
+        readings = []
+        for lister in check_app.LISTERS:
+            at = rng.uniform(0.0, 0.5)
+            while at < 10.0:
+                took = rng.choice([0.01, 0.1, 0.3, 0.8, 1.6])
+                readings.append(_reading(at, at + took, rng.random() > 0.15, "x", lister))
+                at += took + rng.choice([0.05, 0.05, 0.2])
+        watch = _watched(*readings, ended=max(r.ended for r in readings))
+        for lister in (None, "ps"):
+            read = [r for r in readings if r.hosts is not None and lister in (None, r.lister)]
+            longest = watch.longest_gap if lister is None else watch.longest_gap_of(lister)
+            for _ in range(40):
+                length = longest + rng.uniform(1e-6, 1.0)
+                if length > watch.ended:
+                    continue
+                start = rng.uniform(0.0, watch.ended - length)
+                assert any(start <= r.started and r.ended <= start + length for r in read), (
+                    lister,
+                    longest,
+                    start,
+                    length,
+                )
 
 
 def test_the_two_listers_run_at_once_so_one_held_never_holds_back_the_other(
@@ -8742,19 +8929,28 @@ def _refusing_in(world: _ListerWorld, tmp_path: Path, monkeypatch: pytest.Monkey
     return checker
 
 
+_NOT_JUDGED = "not judged: the check was blind (see above)"
+_COULD_SEE_2S = (
+    "the check could see for all 10 s: ps read the process table, and no stretch of more than "
+    "2.0 s went without a reading"
+)
+
+
 def test_a_refusing_copy_fails_when_both_listers_are_blind(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     # pgrep's request to sysmond fails and ps fails too: the check saw nothing because it could
-    # not look, so it may not say that the copy started nothing.
+    # not look, so it may not say that the copy started nothing. One cause, one failure: whether
+    # the copy started anything is not judged, and the check says so.
     world = _ListerWorld(
         pgrep=lambda at: (3, "", "pgrep: sysmon request failed\n"),
         ps=lambda at: (1, "", "ps: no\n"),
     )
     checker = _refusing_in(world, tmp_path, monkeypatch)
     said = capsys.readouterr().out
-    assert any("could see" in what for what in checker.failures), checker.failures
-    assert any("starts no host process" in what for what in checker.failures), checker.failures
+    assert checker.failures == [_COULD_SEE_2S], checker.failures
+    assert f"{_NOT_JUDGED}: for 10 s it runs, and starts no host process" in said, said
+    assert "FAIL: for 10 s it runs" not in said, said
     assert "the check was blind from 0.00 s to 10.0" in said, said
     assert "sysmon request failed" in said and "ps never read the process table" in said, said
 
@@ -8778,40 +8974,194 @@ def test_a_refusing_copy_fails_when_only_pgrep_reads(
 ) -> None:
     # ps fails throughout and pgrep reads none at every call: pgrep alone can read none where a
     # host process runs (pkill.c falls back to a process's name), so the check may not say that
-    # the copy started nothing.
+    # the copy started nothing, and fails once for it.
     world = _ListerWorld(pgrep=_none, ps=lambda at: (1, "", "ps: no\n"))
     checker = _refusing_in(world, tmp_path, monkeypatch)
     said = capsys.readouterr().out
-    assert any("could see" in what for what in checker.failures), checker.failures
-    assert "ps never read the process table" in said, said
+    assert checker.failures == [_COULD_SEE_2S], checker.failures
+    assert "ps never read the process table" in said and _NOT_JUDGED in said, said
     assert "the check was blind from" not in said, said
 
 
-def test_a_refusing_copy_fails_when_its_readings_are_too_far_apart(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+@pytest.mark.parametrize(("took", "blind"), [(0.5, False), (1.1, True)])
+def test_a_refusing_copy_fails_only_when_its_readings_are_more_than_the_limit_apart(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    took: float,
+    blind: bool,
 ) -> None:
-    # Each lister takes half a second: three back-to-back host verbs could start and end between
-    # two readings.
-    world = _ListerWorld(pgrep=_none, ps=_ps_none, took=0.5)
+    # Each lister's call takes half a second, and then 1.1 s, one after the other: from one
+    # reading's start to the next one's end is twice that. A second is within the 2 s limit, and
+    # each such stretch is recorded, not a gate; 2.2 s is not, and the watch is blind there: each
+    # such stretch is said, with its length, where it fails the watch, and is not called "not a
+    # gate".
+    world = _ListerWorld(pgrep=_none, ps=_ps_none, took=took)
     checker = _refusing_in(world, tmp_path, monkeypatch)
     said = capsys.readouterr().out
-    assert any("could see" in what for what in checker.failures), checker.failures
-    assert "the check was blind from" in said, said
-    assert re.search(r"longest gap between readings 1\.\d\d s", said), said
+    assert checker.failures == ([_COULD_SEE_2S] if blind else []), checker.failures
+    gap = re.search(r"longest gap between readings (\d\.\d\d) s", said)
+    assert gap and float(gap.group(1)) == pytest.approx(2 * took, abs=0.01), said
+    recorded = re.findall(r"recorded, not a gate: no reading from .* \((\d\.\d\d) s\)", said)
+    failing = re.findall(r"the check was blind from .* \((\d\.\d\d) s\): no reading", said)
+    each, neither = (failing, recorded) if blind else (recorded, failing)
+    assert neither == [], said
+    assert len(each) >= 8 and all(float(n) == pytest.approx(2 * took, abs=0.01) for n in each)
 
 
-def test_a_refusing_copy_fails_when_slow_calls_leave_a_stretch_unread(
+def test_a_refusing_copy_records_the_stretches_slow_calls_leave_unread(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     # pgrep is blind throughout and each ps call takes 0.2 s: ps's calls start 0.25 s apart, but
-    # from one's start to the next one's end is 0.45 s, in which nothing proves a read.
+    # from one's start to the next one's end is 0.45 s, in which nothing proves a read. That is
+    # within the limit: the copy passes, and each stretch is recorded with its own length, never
+    # joined with the next into one span.
     world = _ListerWorld(
         pgrep=lambda at: (3, "", "pgrep: sysmon request failed\n"), ps=_ps_none, ps_took=0.2
     )
     checker = _refusing_in(world, tmp_path, monkeypatch)
     said = capsys.readouterr().out
-    assert any("could see" in what for what in checker.failures), checker.failures
+    assert checker.failures == [], checker.failures
     assert re.search(r"longest gap between readings 0\.4\d s", said), said
+    lengths = re.findall(r"recorded, not a gate: no reading from .* \((\d\.\d\d) s\)", said)
+    assert len(lengths) > 20 and all(0.35 < float(n) < 0.5 for n in lengths), lengths
+
+
+def _steady_watch(*gaps: float, host_at: float | None = None) -> Any:
+    """A refusing copy's watch, made up: the two listers read in turn, each call 0.02 s long and
+    0.1 s after the last one started, for 10 s, with no error; for each of ``gaps``, at 2 s, 4 s
+    and so on, one stretch of that many seconds with no reading, from a reading's start to the
+    next one's end. With ``host_at``, the reading then saw a host process."""
+    took = 0.02
+    starts = [step / 10 for step in range(100)]
+    for number, gap in enumerate(gaps, start=1):
+        hole = 2.0 * number
+        starts = [start for start in starts if not hole < start < hole + gap]
+        starts.append(hole + gap - took)
+    readings = [
+        check_app._Reading(
+            check_app.LISTERS[index % 2],
+            start,
+            start + took,
+            frozenset({4242}) if start == host_at else frozenset(),
+        )
+        for index, start in enumerate(sorted(starts))
+    ]
+    return _watched(*readings, ended=10.0)
+
+
+@pytest.mark.parametrize("gaps", [(0.45, 0.95), (1.9,)])
+def test_a_refusing_copy_passes_with_stretches_under_the_limit_and_records_each(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    gaps: tuple[float, ...],
+) -> None:
+    # Run 42681859860 measured stretches with no reading of up to 0.41 s in refusing copies'
+    # watches, and 0.95 s in a control's, with no lister error: a passing app. Stretches like
+    # these, within the 2 s limit, fail nothing; each is recorded on its own line, with its own
+    # length.
+    _in_lister_world(tmp_path, monkeypatch, _ListerWorld(pgrep=_none, ps=_ps_none))
+    monkeypatch.setattr(check_app, "_watch_profile", lambda seconds: _steady_watch(*gaps))
+    checker = check_app.Checker()
+    copy = tmp_path / "out" / f"{check_app.APP_NAME}.app"
+    words = (check_app.PLACEMENT_TITLE, check_app.PLACEMENT_ELSEWHERE)
+    check_app._refusing_copy(copy, checker, tmp_path, "elsewhere", words, False)
+    said = capsys.readouterr().out
+    assert checker.failures == [], checker.failures
+    recorded = [line for line in said.splitlines() if "recorded, not a gate" in line]
+    assert recorded == [
+        f"elsewhere: recorded, not a gate: no reading from {2.0 * number:.2f} s to "
+        f"{2.0 * number + gap:.2f} s ({gap:.2f} s)"
+        for number, gap in enumerate(gaps, start=1)
+    ], recorded
+    assert re.search(
+        rf"longest gap between readings {max(gaps):.2f} s; between ps's own readings "
+        r"\d\.\d\d s \(not a gate\); lister errors 0",
+        said,
+    ), said
+
+
+@pytest.mark.parametrize(
+    ("host_at", "running", "failures"),
+    [
+        (None, ["99"], 1),
+        (None, None, 1),
+        (5.0, ["99"], 2),
+        (None, [], 2),
+    ],
+)
+def test_a_refusing_copy_with_a_stretch_over_the_limit_fails_once_for_it(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    host_at: float | None,
+    running: list[str] | None,
+    failures: int,
+) -> None:
+    # A stretch of 2.1 s with no reading, and no lister error: the watch is blind there, and the
+    # copy fails for that, once. Whether it started anything is then not judged, unless what the
+    # check did see says so on its own: a host process a reading saw, or a reading that the copy
+    # no longer runs. Where pgrep cannot say whether it runs, that too is not judged.
+    _in_lister_world(tmp_path, monkeypatch, _ListerWorld(pgrep=_none, ps=_ps_none))
+    watch = _steady_watch(2.1, host_at=host_at)
+    monkeypatch.setattr(check_app, "_watch_profile", lambda seconds: watch)
+    monkeypatch.setattr(check_app, "_running_now", lambda name: running)
+    checker = check_app.Checker()
+    copy = tmp_path / "out" / f"{check_app.APP_NAME}.app"
+    words = (check_app.PLACEMENT_TITLE, check_app.PLACEMENT_ELSEWHERE)
+    check_app._refusing_copy(copy, checker, tmp_path, "elsewhere", words, False)
+    said = capsys.readouterr().out
+    assert len(checker.failures) == failures and checker.failures[0] == _COULD_SEE_2S, (
+        checker.failures
+    )
+    assert "the check was blind from 2.00 s to 4.10 s (2.10 s): no reading" in said, said
+    assert "recorded, not a gate: no reading from 2.00 s to 4.10 s" not in said, said
+    assert (_NOT_JUDGED in said) == (failures == 1), said
+    if failures == 2:
+        assert checker.failures[1].startswith("for 10 s it runs"), checker.failures
+        assert "the check was also blind" in said, said
+
+
+def test_a_refusing_copy_records_a_short_stretch_and_fails_on_a_long_one_said_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Two stretches with no reading, of 0.45 s and 2.1 s, and no lister error: the first is
+    # recorded, not a gate; the second fails the watch as blind and is said there, once, with its
+    # length, and never called "not a gate".
+    _in_lister_world(tmp_path, monkeypatch, _ListerWorld(pgrep=_none, ps=_ps_none))
+    monkeypatch.setattr(check_app, "_watch_profile", lambda seconds: _steady_watch(0.45, 2.1))
+    checker = check_app.Checker()
+    copy = tmp_path / "out" / f"{check_app.APP_NAME}.app"
+    words = (check_app.PLACEMENT_TITLE, check_app.PLACEMENT_ELSEWHERE)
+    check_app._refusing_copy(copy, checker, tmp_path, "elsewhere", words, False)
+    said = capsys.readouterr().out
+    assert checker.failures == [_COULD_SEE_2S], checker.failures
+    recorded = [line for line in said.splitlines() if "recorded, not a gate" in line]
+    assert recorded == [
+        "elsewhere: recorded, not a gate: no reading from 2.00 s to 2.45 s (0.45 s)"
+    ], recorded
+    assert "the check was blind from 4.00 s to 6.10 s (2.10 s): no reading" in said, said
+    assert said.count("4.00 s to 6.10 s") == 1, said
+
+
+def test_a_refusing_copy_passes_on_fast_pgrep_readings_and_its_line_says_ps_was_slow(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # pgrep answers none fast and often while ps takes 1.5 s a call: no stretch over both
+    # listers reaches the limit, and the copy passes, as before. Its line now says that ps's own
+    # longest stretch was 3.05 s, which is what a host process would have had to outlast for ps
+    # to see it.
+    _in_lister_world(tmp_path, monkeypatch, _ListerWorld(pgrep=_none, ps=_ps_none))
+    monkeypatch.setattr(check_app, "_watch_profile", lambda seconds: _fast_pgrep_slow_ps())
+    checker = check_app.Checker()
+    copy = tmp_path / "out" / f"{check_app.APP_NAME}.app"
+    words = (check_app.PLACEMENT_TITLE, check_app.PLACEMENT_ELSEWHERE)
+    check_app._refusing_copy(copy, checker, tmp_path, "elsewhere", words, False)
+    said = capsys.readouterr().out
+    assert checker.failures == [], checker.failures
+    line = next(line for line in said.splitlines() if "the watch of the app's profile" in line)
+    assert "between ps's own readings 3.05 s (not a gate)" in line, line
 
 
 @pytest.mark.parametrize(
@@ -8829,12 +9179,14 @@ def test_a_refusing_copy_fails_when_it_was_blind_at_the_start_or_the_end_of_its_
     stretch: str,
 ) -> None:
     # Both listers are blind for the first seconds of the watch, when a refusing copy's launch
-    # burst would come, or for its last seconds: either way the check names the stretch.
+    # burst would come, or for its last seconds: either way the check names the stretch, and the
+    # errors in it, and fails once.
     world = _ListerWorld(pgrep=_blind_while(blind, _none), ps=_blind_while(blind, _ps_none))
     checker = _refusing_in(world, tmp_path, monkeypatch)
     said = capsys.readouterr().out
-    assert any("could see" in what for what in checker.failures), checker.failures
-    assert re.search(stretch, said), said
+    assert checker.failures == [_COULD_SEE_2S], checker.failures
+    assert re.search(stretch + r" \(\d\.\d\d s\): .*sysmon request failed", said), said
+    assert _NOT_JUDGED in said, said
 
 
 def test_a_refusing_copy_fails_when_ps_sees_a_child_of_the_app(
@@ -8924,6 +9276,10 @@ def test_a_failed_control_says_when_the_host_came_after_the_gate(
     assert re.search(r"the first host process appeared at 30\.\d s, after the 30 s gate", case)
     assert "missed" not in case, case
     assert len(world.snapshots) == 1 and len(world.logs) == 1
+    # Its watch's line records the burst too, as far as the watch saw it.
+    line = next(line for line in said.splitlines() if line.startswith("the control's watch"))
+    assert re.search(r"last seen by pgrep at 3\d\.\d\d s; ps at 3\d\.\d\d s", line), line
+    assert "and pgrep and ps still saw one at its last reading" in line, line
 
 
 def test_a_failed_control_names_a_late_start_though_a_reading_also_missed_one(
@@ -9050,6 +9406,110 @@ def test_a_passing_control_records_both_listers_and_the_status_read(
     assert "the listers: stand-in" in said and "note: the control passed" not in said
 
 
+def _host_between(when: float, until: float) -> Callable[[float | None], tuple[int, str, str]]:
+    def pgrep(at: float | None) -> tuple[int, str, str]:
+        return (0, "4242\n", "") if at is not None and when <= at < until else (1, "", "")
+
+    return pgrep
+
+
+def test_a_passing_control_records_the_last_sightings_and_the_burst(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # The app's launch burst, as the listers see it: host processes from 0.4 s to 0.9 s after the
+    # open by pgrep, and from 0.45 s to 0.85 s by ps, and its first status read ended at 0.8 s.
+    # After the gate the watch goes on until both listers have seen a host process, the app has
+    # written its line, and each lister's last reading saw none, and its line records when each
+    # lister last saw one, and the burst from the first sighting to the last. Recorded, not a
+    # gate: it is there to check the 2 s limit against real launches.
+    world = _ListerWorld(
+        pgrep=_host_between(0.4, 0.9), ps=_ps_with((0.45, 0.85, _PS_HOST_ROW)), marker_at=0.8
+    )
+    checker, _ = _control_in(world, tmp_path, monkeypatch)
+    said = capsys.readouterr().out
+    assert checker.failures == [], checker.failures
+    line = next(line for line in said.splitlines() if line.startswith("the control's watch"))
+    first = re.search(r"first seen by pgrep at (0\.\d\d) s; ps at (0\.\d\d) s", line)
+    last = re.search(r"last seen by pgrep at (0\.\d\d) s; ps at (0\.\d\d) s", line)
+    burst = re.search(r"the burst, from the first host sighting to the last, (0\.\d\d) s", line)
+    assert first and last and burst, line
+    assert 0.4 <= float(first.group(1)) < 0.5 and 0.8 < float(last.group(1)) < 0.9, line
+    assert 0.45 <= float(first.group(2)) < 0.55 and 0.75 < float(last.group(2)) < 0.85, line
+    assert float(burst.group(1)) == pytest.approx(
+        max(float(last.group(1)), float(last.group(2))) - float(first.group(1)), abs=0.011
+    )
+    assert "still saw" not in line and "recorded, not a gate" in line, line
+    # The watch stopped soon after the burst ended, not 5 s after the gate.
+    took = re.search(r"in (\d+\.\d) s from", line)
+    assert took and float(took.group(1)) < 1.0, line
+
+
+def test_a_passing_control_whose_host_keeps_running_says_so(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # A host process that runs on (``run``, while the profile holds a confirmed pair): the watch
+    # goes on its 5 s after the gate, and its line says that both listers still saw one at their
+    # last reading, so the burst is only as long as the watch.
+    world = _ListerWorld(pgrep=_host_from(0.4), ps=_ps_host_from(0.4), marker_at=0.8)
+    checker, _ = _control_in(world, tmp_path, monkeypatch)
+    said = capsys.readouterr().out
+    assert checker.failures == [], checker.failures
+    line = next(line for line in said.splitlines() if line.startswith("the control's watch"))
+    assert re.search(r"in 5\.\d s from 0\.2\d s", line), line
+    assert re.search(r"last seen by pgrep at 5\.\d\d s; ps at 5\.\d\d s", line), line
+    assert "and pgrep and ps still saw one at its last reading" in line, line
+
+
+def test_a_passing_control_never_takes_a_blind_reading_for_the_end_of_the_burst(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # pgrep sees a host process from 0.4 s and is blind from 0.6 s on; ps sees it only until
+    # 0.7 s. pgrep's last reading that read the table saw one, so the burst is not known to be
+    # over: the watch goes on its 5 s, and its line says that pgrep still saw one.
+    world = _ListerWorld(
+        pgrep=_blind_while(lambda at: at >= 0.6, _host_from(0.4)),
+        ps=_ps_with((0.4, 0.7, _PS_HOST_ROW)),
+        marker_at=0.8,
+    )
+    checker, _ = _control_in(world, tmp_path, monkeypatch)
+    said = capsys.readouterr().out
+    assert checker.failures == [], checker.failures
+    line = next(line for line in said.splitlines() if line.startswith("the control's watch"))
+    assert re.search(r"in 5\.\d s from 0\.2\d s", line), line
+    assert "and pgrep still saw one at its last reading" in line, line
+
+
+@pytest.mark.parametrize(("starts", "took"), [(True, 0.35), (False, 0.35), (True, 1.1)])
+def test_a_control_records_its_long_stretches_and_does_not_gate_on_them(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    starts: bool,
+    took: float,
+) -> None:
+    # Calls of 0.35 s each, as in xcode-27's control in run 42681859860 (0.71 s at most): the
+    # stretches with no reading, 0.7 s, are recorded, each on its own line, and the control
+    # passes on its host process all the same. Where no host process comes, the control fails on
+    # that alone, and its detail records the same stretches. The control has no gate on them:
+    # calls of 1.1 s leave stretches of 2.2 s, past a refusing copy's limit, and these too are
+    # recorded, not a gate.
+    host = 0.4 if starts else 1e9
+    world = _ListerWorld(pgrep=_host_from(host), ps=_ps_host_from(host), marker_at=1.5, took=took)
+    checker, _ = _control_in(world, tmp_path, monkeypatch)
+    said = capsys.readouterr().out
+    assert checker.failures == (
+        []
+        if starts
+        else ["the control: it starts the host on the app's profile, and the check sees it"]
+    ), checker.failures
+    lengths = re.findall(
+        r"^the control: recorded, not a gate: no reading from .* \((\d\.\d\d) s\)$",
+        said,
+        re.MULTILINE,
+    )
+    assert lengths and all(float(n) == pytest.approx(2 * took, abs=0.01) for n in lengths), said
+
+
 def test_the_control_keeps_its_gate_and_opens_the_copy_with_its_output_kept() -> None:
     # The gate stays at 30 s and a refusing copy's watch at 10; the snapshot at 5 s and the watch
     # to 60 s are for the record. The control's open keeps the app's standard output and error,
@@ -9062,8 +9522,12 @@ def test_the_control_keeps_its_gate_and_opens_the_copy_with_its_output_kept() ->
     assert "found.seen" not in watch and "watch.seen" not in watch
     assert check_app.CONTROL_GATE == 30 and check_app.REFUSAL_WATCH == 10
     assert check_app.CONTROL_SNAPSHOT_AT == 5 and check_app.CONTROL_DIAGNOSIS == 60
-    assert check_app.SHORTEST_BURST == 0.35 and check_app.LISTER_LIMIT == 5
-    assert check_app.POLL_PAUSE < check_app.SHORTEST_BURST
+    # A stretch longer than 0.35 s with no reading is recorded; one longer than 2 s makes a
+    # refusing copy's watch blind: more than twice the longest that run 42681859860 measured on
+    # any image, 0.95 s, in xcode-27's control.
+    assert check_app.RECORDED_GAP == 0.35 and check_app.BLIND_LIMIT == 2.0
+    assert check_app.LISTER_LIMIT == 5 and check_app.POLL_PAUSE < check_app.RECORDED_GAP
+    assert check_app.BLIND_LIMIT > 2 * 0.95
 
 
 @pytest.mark.parametrize("failure", ["timeout", "missing", "exit"])

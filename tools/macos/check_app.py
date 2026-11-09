@@ -3058,19 +3058,38 @@ REFUSAL_WATCH: Final = 10
 # that fails, writes on standard error, gives something that is not its list, or takes longer than
 # LISTER_LIMIT seconds is blind, never "none". A lister reads the table somewhere between the start
 # and the end of its call, so a stretch with no reading runs from one reading's start to the next
-# one's end. A watch may say that nothing ran only if no such stretch is longer than
-# SHORTEST_BURST seconds. That is a heuristic, not a bound: at launch the app runs three host verbs
-# back to back (--version, ops list, roots list: App/HostModel.swift), which together span about
-# 0.36 s or more, from --version's fastest start-up of 121 ms on macos-15 (inferred for the other
-# verbs and images); the moments between the verbs, when no host process runs, are not counted.
+# one's end: with both listers slow at once, up to about twice a call's time and POLL_PAUSE. Each
+# stretch longer than RECORDED_GAP seconds is printed on a line of its own, recorded, not a gate
+# (in a refusing copy's watch, one that fails it is said where it fails it). A refusing copy's
+# watch may say that nothing ran only if ps read the table, a lister read it at all, and no stretch
+# was longer than BLIND_LIMIT seconds. The limit is set from run 42681859860 (seen in its logs):
+# with no lister error, the longest stretch was 0.41 s in a refusing copy's watch and 0.95 s in a
+# control's, on xcode-27 while the app launched, with calls of up to 0.71 s; a limit of 0.35 s
+# failed two refusing copies, on macos-15 and xcode-27, in whose watches no reading saw a host
+# process or a child (that they started nothing is inferred). It is more than twice 0.95 s. What
+# it no longer proves: a burst of host processes shorter than BLIND_LIMIT seconds, between two
+# readings, could be missed. In that run the app's launch, from the first host process a lister
+# saw to the moment the check saw the end of its first status read, took 0.38 s, 0.50 s and 0.95 s
+# on macos-15, macos-26 and xcode-27, well under the limit. So what a refusing copy's watch shows
+# against a launch is its own line, not the limit: its lister errors, and its longest stretch with
+# no reading by ps alone, which the line records, not as a gate. A host process that ran inside the
+# watch for longer than that stretch had a whole ps reading inside its run, by how stretches are
+# counted, and that reading would have counted it, as a child of the copy if not by its command
+# line (inferred from how ps lists the table; not yet seen in a refusing copy's watch); a shorter
+# one could be missed. The longest stretch over both listers says less: it counts pgrep's readings
+# too, and a pgrep reading of none can be wrong (_profile_processes).
 LISTER_LIMIT: Final = 5
-SHORTEST_BURST: Final = 0.35
+RECORDED_GAP: Final = 0.35
+BLIND_LIMIT: Final = 2.0
 POLL_PAUSE: Final = 0.05
-# What the listers match: the host's processes on the app's profile, as pgrep -f matches them; a
-# running copy of the app, wherever it is and whatever its bundle is called. How a watch names the
-# two listers, and what ps also reports in a watch: a child of a running copy of the app, whatever
-# its command line shows.
-PROFILE_PROCESS: Final = f"lucille_host --profile {APP_PROFILE} "
+# What the listers match: the host's processes on the app's profile, as pgrep -f matches them,
+# with the profile's name followed by a space or the end of the command line (POSIX extended
+# syntax with no backslash, which Python's re reads the same way; Linux's pgrep compiles it, seen,
+# and Apple's is not yet seen: where pgrep reads the table but not with this pattern, the
+# real-lister test in tests/test_macos_build.py fails); a running copy of the app, wherever it is
+# and whatever its bundle is called. How a watch names the two listers, and what ps also reports
+# in a watch: a child of a running copy of the app, whatever its command line shows.
+PROFILE_PROCESS: Final = f"lucille_host --profile {APP_PROFILE}( |$)"
 APP_EXECUTABLE: Final = re.compile(rf"\.app/Contents/MacOS/{re.escape(APP_NAME)}(?:\s|$)")
 LISTERS: Final = ("pgrep", "ps")
 CHILD: Final = "ps, a child of the app"
@@ -3082,7 +3101,8 @@ LISTER_PROGRAMS: Final = ("/bin/ps", "/usr/bin/pgrep")
 # host process seen CONTROL_SNAPSHOT_AT seconds after the open, a snapshot of the screen and the
 # app; after a failed gate, the watch goes on to CONTROL_DIAGNOSIS seconds and the unified log is
 # saved; after a passing one, it goes on up to CONTROL_AFTER seconds more, until both listers have
-# seen a host process and the app has written STATUS_READ_MARKER. The app writes it on standard
+# seen a host process, the app has written STATUS_READ_MARKER and each lister's last reading saw
+# none, so that the watch's line can record the launch's burst. The app writes it on standard
 # error once its first status read has ended: with no pair, where the read leads to the login
 # item's removal (App/Supervisor.swift, statusRead; App/Connection.swift, .pairGone); with a
 # confirmed one, where it checks the login item (App/Connection.swift, checkLoginItemAtLaunch).
@@ -5149,9 +5169,9 @@ def _profile_processes_said() -> str:
 class _Watch:
     """What a watch of the app's profile saw (:func:`_watch_profile`), reading by reading: the host
     processes that either lister matched, the children of a running copy that ps saw, when each
-    lister first saw one, and where the check could not see. In seconds: ``began`` is when the
-    watch started and ``ended`` when it stopped, and every time the watch reports counts from
-    ``since``."""
+    lister first and last saw one, and where the check could not see. In seconds: ``began`` is
+    when the watch started and ``ended`` when it stopped, and every time the watch reports counts
+    from ``since``; a sighting's time is its reading's start."""
 
     began: float
     since: float
@@ -5160,6 +5180,7 @@ class _Watch:
     hosts: set[int] = field(default_factory=set)
     children: dict[int, str] = field(default_factory=dict)
     first: dict[str, float] = field(default_factory=dict)
+    last: dict[str, float] = field(default_factory=dict)
     first_child: str = ""
     status_read: float | None = None
 
@@ -5169,6 +5190,10 @@ class _Watch:
         if reading.hosts:
             self.hosts |= reading.hosts
             self.first.setdefault(reading.lister, reading.started - self.since)
+            self.last[reading.lister] = max(
+                self.last.get(reading.lister, reading.started - self.since),
+                reading.started - self.since,
+            )
         if reading.children and CHILD not in self.first:
             self.first[CHILD] = reading.started - self.since
             pid, said = reading.children[0]
@@ -5190,15 +5215,32 @@ class _Watch:
         """Whether ``lister`` read the process table at least once."""
         return any(r.lister == lister and r.hosts is not None for r in self.readings)
 
+    def saw_last(self, lister: str) -> bool:
+        """Whether the last reading of ``lister`` that read the process table saw a host
+        process."""
+        latest = max(
+            (r for r in self.readings if r.lister == lister and r.hosts is not None),
+            key=lambda r: r.started,
+            default=None,
+        )
+        return latest is not None and bool(latest.hosts)
+
     def errors(self) -> list[tuple[float, str]]:
         """When a lister was blind, and why."""
         return [(r.started, r.error) for r in self.readings if r.hosts is None]
 
-    def _stretches(self) -> list[tuple[float, float]]:
+    def _stretches(self, lister: str | None = None) -> list[tuple[float, float]]:
         """The longest stretch from the watch's start, and from each reading's start, in which no
         reading both started and ended: a lister reads the table somewhere within its call, so
-        nothing proves that the table was read in such a stretch."""
-        read = sorted((r.started, r.ended) for r in self.readings if r.hosts is not None)
+        nothing proves that the table was read in such a stretch. One that lies within another is
+        left out, so that stretches that overlap are each said once, on their own, and never
+        joined into a span that readings did cross. With ``lister``, its readings alone count. So
+        any span of the watch longer than the longest stretch holds a whole reading."""
+        read = sorted(
+            (r.started, r.ended)
+            for r in self.readings
+            if r.hosts is not None and lister in (None, r.lister)
+        )
         starts = [start for start, _ in read]
         earliest = [self.ended] * (len(read) + 1)
         for i in range(len(read) - 1, -1, -1):
@@ -5212,34 +5254,72 @@ class _Watch:
             end = earliest[later]
             if end > start:
                 found.append((start, end))
-        return found
+        kept: list[tuple[float, float]] = []
+        for start, end in sorted(set(found)):
+            # From the same start, a later end holds the earlier stretch; from a later start, an
+            # end no later than the last kept one's lies within it.
+            while kept and kept[-1][0] == start:
+                kept.pop()
+            if not kept or end > kept[-1][1]:
+                kept.append((start, end))
+        return kept
 
     @property
     def longest_gap(self) -> float:
         return max((end - start for start, end in self._stretches()), default=0.0)
 
-    def blind(self) -> list[tuple[float, float, str]]:
-        """Each stretch longer than :data:`SHORTEST_BURST` with no reading in it, overlapping ones
-        joined (the whole watch, if no lister read at all): from and to, counted from ``since``,
-        and why."""
-        read = any(r.hosts is not None for r in self.readings)
-        long = sorted(
-            (start, end)
-            for start, end in self._stretches()
-            if not read or end - start > SHORTEST_BURST
-        )
-        joined: list[list[float]] = []
-        for start, end in long:
-            if joined and start <= joined[-1][1]:
-                joined[-1][1] = max(joined[-1][1], end)
-            else:
-                joined.append([start, end])
+    def longest_gap_of(self, lister: str) -> float:
+        """The longest stretch with no reading by ``lister`` alone: the whole watch if it never
+        read the table."""
+        return max((end - start for start, end in self._stretches(lister)), default=0.0)
+
+    def stretches(self, longer_than: float) -> list[tuple[float, float, str]]:
+        """Each stretch with no reading in it longer than ``longer_than`` seconds, on its own: from
+        and to, counted from ``since``, and the lister errors that came in it."""
         found: list[tuple[float, float, str]] = []
-        for start, end in joined:
-            why = sorted({error for at, error in self.errors() if start <= at <= end})
-            said = "; ".join(why) or f"no reading for {end - start:.2f} s"
-            found.append((start - self.since, end - self.since, said))
+        for start, end in self._stretches():
+            if end - start > longer_than:
+                why = sorted({error for at, error in self.errors() if start <= at <= end})
+                found.append((start - self.since, end - self.since, "; ".join(why)))
         return found
+
+    def blind(self) -> list[tuple[float, float, str]]:
+        """Where the watch was blind: each stretch with no reading in it longer than
+        :data:`BLIND_LIMIT` seconds, or, if no lister read at all, the whole watch, however short
+        (:meth:`stretches`)."""
+        read = any(r.hosts is not None for r in self.readings)
+        return self.stretches(BLIND_LIMIT if read else -1.0)
+
+    def recorded(self, gated: bool = False) -> list[str]:
+        """Recorded, not a gate: each stretch with no reading in it longer than
+        :data:`RECORDED_GAP` seconds, one line each, with its own length and the lister errors
+        that came in it. With ``gated``, for a refusing copy's watch, which :meth:`blind` gates,
+        a stretch that it gives is left out: it fails the watch, and is said there."""
+        gate = {(start, end) for start, end, _ in self.blind()} if gated else set()
+        return [
+            f"recorded, not a gate: no reading from {start:.2f} s to {end:.2f} s "
+            f"({end - start:.2f} s)" + (f"; lister errors in it: {why}" if why else "")
+            for start, end, why in self.stretches(RECORDED_GAP)
+            if (start, end) not in gate
+        ]
+
+    def burst(self) -> str:
+        """Recorded, not a gate: when each lister last saw a host process, the burst from the
+        first sighting to the last, and which lister still saw one at its last reading, in which
+        case the burst is only as long as the watch."""
+        lasts = "; ".join(
+            f"{lister} at {self.last[lister]:.2f} s" if lister in self.last else f"{lister} never"
+            for lister in LISTERS
+        )
+        first = self.first_host
+        if first is None:
+            return f"recorded, not a gate: last seen by {lasts}; no burst seen"
+        still = [lister for lister in LISTERS if self.saw_last(lister)]
+        return (
+            f"recorded, not a gate: last seen by {lasts}; the burst, from the first host sighting "
+            f"to the last, {max(self.last.values()) - first:.2f} s"
+            + (f", and {' and '.join(still)} still saw one at its last reading" if still else "")
+        )
 
     def summary(self) -> str:
         errors = sorted({error for _, error in self.errors()})
@@ -5254,7 +5334,8 @@ class _Watch:
         said = (
             f"lister calls ({calls}) in {self.ended - self.began:.1f} s from "
             f"{self.began - self.since:.2f} s; longest call {longest:.2f} s; longest gap between "
-            f"readings {self.longest_gap:.2f} s; lister errors {len(self.errors())}"
+            f"readings {self.longest_gap:.2f} s; between ps's own readings "
+            f"{self.longest_gap_of('ps'):.2f} s (not a gate); lister errors {len(self.errors())}"
             + (f" ({'; '.join(errors[:3])})" if errors else "")
             + f"; first seen by {firsts}"
         )
@@ -5416,14 +5497,17 @@ def _watch_control(
     The gate: a host process on the app's profile, matched by either lister, seen within
     :data:`CONTROL_GATE` seconds of the watch's start. A child of the app whose command line does
     not match is recorded, with when it was first seen, and does not pass the gate. Seen, the
-    watch goes on up to :data:`CONTROL_AFTER` seconds more, until both listers have seen one and
-    the app has written :data:`STATUS_READ_MARKER` in ``err_log``, prints when each did, and adds
-    a note for a lister that never saw one or was blind. With no host process seen
-    :data:`CONTROL_SNAPSHOT_AT` seconds after the open, child or not, it takes
-    :func:`_control_snapshot` on a thread of its own, without pausing the listers. With none seen
-    at the gate, it watches on to :data:`CONTROL_DIAGNOSIS` seconds, saves the unified log
-    (:func:`_save_control_log`), and its detail ends with the case (:func:`_control_case`).
-    Returns whether the gate held, and the detail for when it did not."""
+    watch goes on up to :data:`CONTROL_AFTER` seconds more, until both listers have seen one, the
+    app has written :data:`STATUS_READ_MARKER` in ``err_log`` and each lister's last reading saw
+    none; it prints when each lister first and last saw one and the burst between (recorded, not a
+    gate: :meth:`_Watch.burst`), and adds a note for a lister that never saw one or was blind.
+    With no host process seen :data:`CONTROL_SNAPSHOT_AT` seconds after the open, child or not, it
+    takes :func:`_control_snapshot` on a thread of its own, without pausing the listers. With none
+    seen at the gate, it watches on to :data:`CONTROL_DIAGNOSIS` seconds, saves the unified log
+    (:func:`_save_control_log`), and its detail ends with the case (:func:`_control_case`). Either
+    way it prints each stretch with no reading longer than :data:`RECORDED_GAP` seconds
+    (:meth:`_Watch.recorded`). Returns whether the gate held, and the detail for when it did
+    not."""
     snapshot: list[threading.Thread] = []
 
     def each(watch: _Watch) -> None:
@@ -5451,7 +5535,8 @@ def _watch_control(
 
         def recorded(found: _Watch) -> bool:
             listers = all(lister in found.first for lister in LISTERS)
-            return (listers and found.status_read is not None) or time.monotonic() >= until
+            over = not any(found.saw_last(lister) for lister in LISTERS)
+            return (listers and over and found.status_read is not None) or time.monotonic() >= until
 
         _watch_profile(CONTROL_GATE + CONTROL_AFTER, stop=recorded, each=each, watch=watch)
     else:
@@ -5465,15 +5550,17 @@ def _watch_control(
         thread.join(SNAPSHOT_LIMIT)
         if thread.is_alive():
             print("note: the control's snapshot had not finished; the check goes on", flush=True)
+    said = f"the control's watch: {watch.summary()}; {watch.burst()}"
+    stretches = [f"the control: {line}" for line in watch.recorded()]
     if gated:
-        print(f"the control's watch: {watch.summary()}", flush=True)
+        print("\n".join([said, *stretches]), flush=True)
         for note in _control_notes(watch):
             print(f"note: the control passed, but {note}", flush=True)
         return True, ""
     lines = [
         f"no host process of the app's profile was seen in {CONTROL_GATE} s",
-        f"the control's watch: {watch.summary()}",
-        *(f"the check was blind from {a:.2f} s to {b:.2f} s: {why}" for a, b, why in watch.blind()),
+        said,
+        *stretches,
         _save_control_log(work / "control-log.txt", opened_wall),
         f"the case: {_control_case(watch)}",
     ]
@@ -5685,13 +5772,18 @@ def _refusing_copy(
     """Open ``copy``, which is not the copy at /Applications/<name>.app, with no other copy of
     the app running. For :data:`REFUSAL_WATCH` seconds from the watch's start it starts no host
     process on the app's profile, nor any child, as both listers see it (:func:`_watch_profile`),
-    which is said only if ps read the process table at least once (pgrep alone can read none
+    which is judged only if ps read the process table at least once (pgrep alone can read none
     where there is one: :func:`_profile_processes`) and no stretch of more than
-    :data:`SHORTEST_BURST` seconds went without a reading; and it changes nothing in the profile's
-    folder; it says ``words``, a title and a sentence of its note, which
-    offers only Quit, and Quit quits it. With ``shows_folder``, for a copy the app judges not to be
-    in the Applications folder, the note offers only Show Applications Folder and Quit, in either
-    order, which is printed as read, and Show Applications Folder shows that folder and quits it
+    :data:`BLIND_LIMIT` seconds went without a reading (:meth:`_Watch.blind`). Where the watch was
+    blind, that fails once, and whether the copy started anything is not judged, unless what the
+    check did see says so: a host process or child a reading saw, or a reading that the copy no
+    longer runs. Each stretch with no reading longer than :data:`RECORDED_GAP` seconds is printed,
+    recorded, not a gate, but one that fails the watch only where it fails it; the watch's line
+    gives ps's own longest stretch, not a gate (:meth:`_Watch.summary`). It changes nothing in the
+    profile's folder; it says ``words``, a title and a sentence of its note, which offers only
+    Quit, and Quit quits it. With ``shows_folder``, for a copy the app judges not to be in the
+    Applications folder, the note offers only Show Applications Folder and Quit, in either order,
+    which is printed as read, and Show Applications Folder shows that folder and quits it
     (:func:`_shows_applications_folder`). A button is pressed only once the check has read it on
     the note. Screenshots ``0-placement-*``."""
     _stop_the_app(checker, "a copy of the app")
@@ -5705,9 +5797,18 @@ def _refusing_copy(
     ):
         return
     watch = _watch_profile(REFUSAL_WATCH)
-    print(f"{label}: the watch of the app's profile: {watch.summary()}", flush=True)
+    print(
+        "\n".join(
+            [
+                f"{label}: the watch of the app's profile: {watch.summary()}",
+                *(f"{label}: {line}" for line in watch.recorded(gated=True)),
+            ]
+        ),
+        flush=True,
+    )
     blind = [
-        f"the check was blind from {a:.2f} s to {b:.2f} s: {why}" for a, b, why in watch.blind()
+        f"the check was blind from {a:.2f} s to {b:.2f} s ({b - a:.2f} s): {why or 'no reading'}"
+        for a, b, why in watch.blind()
     ]
     if not watch.read_by("ps"):
         blind.append(
@@ -5716,16 +5817,22 @@ def _refusing_copy(
     seeing = checker.expect(
         not blind,
         f"the check could see for all {REFUSAL_WATCH} s: ps read the process table, and no "
-        f"stretch of more than {SHORTEST_BURST} s went without a reading",
+        f"stretch of more than {BLIND_LIMIT} s went without a reading",
         "\n".join(blind),
     )
     running = _running_now(APP_NAME)
-    checker.expect(
-        seeing and not watch.seen and bool(running),
-        f"for {REFUSAL_WATCH} s it runs, and starts no host process of the app's profile",
-        f"seen: {sorted(watch.seen)}; still running: {running}; now: "
-        f"{_profile_processes_said()}" + ("" if seeing else "; not claimed: the check was blind"),
-    )
+    started = f"for {REFUSAL_WATCH} s it runs, and starts no host process of the app's profile"
+    said = f"seen: {sorted(watch.seen)}; still running: {running}; now: {_profile_processes_said()}"
+    # One cause, one failure: a blind watch has failed above, and leaves this unjudged, unless
+    # what the check did see fails it on its own.
+    if seeing or watch.seen or running == []:
+        checker.expect(
+            seeing and not watch.seen and bool(running),
+            started,
+            said + ("" if seeing else "; the check was also blind (see above)"),
+        )
+    else:
+        print(f"not judged: the check was blind (see above): {started}\n{said}", flush=True)
     checker.expect(
         _folder_state(folder) == before,
         f"nothing in {folder} changed",
