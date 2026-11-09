@@ -921,10 +921,11 @@ def _run(argv: list[str], *, cwd: Path | None = None, env: Mapping[str, str] | N
 # again after each of HDIUTIL_WAITS, two minutes in all, unless its caller passes other waits. In
 # this repository's logs (149 macOS jobs, 2026-10-29 to 2026-11-09) that has never turned a
 # refusal into a pass. The three refusals were of the `hdiutil verify` run right after `hdiutil
-# create`. Every try the job made of that file was refused, while a diskimages-helper the job had
-# started was still alive. So make_dmg never relies on a verify of the file create wrote, and never
-# hands that file on: it verifies a copy. (It runs `hdiutil verify -debug` on that file only to
-# print, for the log, why it is held.)
+# create`. Every try the job made of that file was refused. The logs show a diskimages-helper still
+# alive at the job's cleanup; that it was alive during the tries, and that the job's create started
+# it, is inferred. So make_dmg never relies on a verify of the file create wrote, and never hands
+# that file on: it verifies a copy. (It runs `hdiutil verify -debug` on that file only to print,
+# for the log, why it is held.)
 HDIUTIL_BUSY: Final = ("Resource busy", "Resource temporarily unavailable")
 HDIUTIL_WAITS: Final = (5, 10, 15, 20, 30, 40)
 HDIUTIL_TRIES: Final = len(HDIUTIL_WAITS) + 1
