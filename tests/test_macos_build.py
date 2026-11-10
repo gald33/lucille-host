@@ -9779,7 +9779,10 @@ def test_the_real_lsof_finds_a_process_by_the_runtimes_name_with_its_parent(
         pytest.skip("no lsof here")
     runtime = Path(_runtime_of(tmp_path / f"{check_app.APP_NAME}.app"))
     runtime.parent.mkdir(parents=True)
-    shutil.copy2("/bin/sleep", runtime)
+    # copyfile and chmod, not copy2: copy2 also copies /bin/sleep's file flags, which macOS refuses
+    # to set on a copy of a system binary (seen in CI, job 129545633292: PermissionError, errno 1).
+    shutil.copyfile("/bin/sleep", runtime)
+    runtime.chmod(0o755)
     shell = subprocess.Popen(
         ["/bin/sh", "-c", '"$0" 30 & wait', str(runtime)], start_new_session=True
     )
