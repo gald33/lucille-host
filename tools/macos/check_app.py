@@ -3077,7 +3077,10 @@ REFUSAL_WATCH: Final = 10
 # counted, and that reading would have counted it, as a child of the copy if not by its command
 # line (inferred from how ps lists the table; not yet seen in a refusing copy's watch); a shorter
 # one could be missed. The longest stretch over both listers says less: it counts pgrep's readings
-# too, and a pgrep reading of none can be wrong (_profile_processes).
+# too, and a pgrep reading of none can be wrong (_profile_processes). Where ps cannot read a
+# process's arguments at all, it counts it by what it maps instead (RUNTIME_SHORT_NAME, below); a
+# ps reading is then ps's call and one lsof call after it, which has what is left of LISTER_LIMIT,
+# so the reading still ends within about LISTER_LIMIT seconds, and its span counts lsof's time.
 LISTER_LIMIT: Final = 5
 RECORDED_GAP: Final = 0.35
 BLIND_LIMIT: Final = 2.0
@@ -3094,18 +3097,64 @@ APP_EXECUTABLE: Final = re.compile(rf"\.app/Contents/MacOS/{re.escape(APP_NAME)}
 LISTERS: Final = ("pgrep", "ps")
 CHILD: Final = "ps, a child of the app"
 LISTER_PROGRAMS: Final = ("/bin/ps", "/usr/bin/pgrep")
+# A process whose arguments ps cannot read, and what it maps (macos/README.md, placement). Seen in
+# run 42700559897 (xcode-27, 27.0.1): a child of the app ran from 1.04 s after the open, and ps
+# showed it only as '19072 R (lucille-host-run)', in parentheses, with no arguments; the app's
+# first status read had ended by 2.21 s; in 60 s neither ps nor pgrep -f matched a host process by
+# its command line, and neither lister failed. That neither could read the arguments is inferred:
+# for ps from its source, below; for pgrep -f from adv_cmds' pkill.c, which matches a process's
+# name where sysmond gives no arguments. Why they could not is not known. ps prints a process's
+# name in parentheses, p_comm cut to MAXCOMLEN (16) characters, where sysctl KERN_PROCARGS2 fails
+# or gives no argument (adv_cmds' ps/print.c, getproclline, read at 6bed873), so the bundled
+# runtime shows as RUNTIME_SHORT_NAME. lsof reads the files a process maps (txt) from its regions
+# with proc_pidinfo, not from its arguments (Apple's lsof, dialects/darwin/libproc/dproc.c,
+# process_text, read at 7a8a1b2); a region it cannot read it reports as a txt entry named "region
+# info error: ...", which is lsof's message, not a file, so only an absolute path counts as one
+# (_lsof_records). lsof lists every file a process maps, not its program alone, so where the
+# control's gate takes a process by what it maps, its name must be the runtime's too. Two lookups
+# ask lsof. The ps lister, after each ps call, about each row ps showed in parentheses that is a
+# child of a running copy of the app or shows that name, with what is left of LISTER_LIMIT. And,
+# in the control's watch only, a reader of its own, NAMED, on a thread of its own, asks lsof by
+# name for each process whose name begins as the runtime's or the app's, with its parent, so that
+# a slow ps does not hold the lookup back: in run 42700559897 the ps call that first showed the
+# child ran until 2.21 s or later (from its stretches), when the status read had ended, so a
+# lookup after it would likely have found the child gone (inferred, not seen). NAME_PREFIX is how
+# much of a name lsof is given: Linux's lsof refuses more than 15 characters, and Apple's sets no
+# limit (its machine.h defines no MAXSYSCMDL; read at 7a8a1b2). libproc's proc_pidpath would give
+# the program alone, but ctypes, which could call it, is refused everywhere in the repository
+# (tools/guards/ast_lint.py, native-code). A copy's bundled runtime is a path that ends as
+# RUNTIME_EXECUTABLE: in any folder, whatever it is called, the copy the placement check sets aside
+# included. Where the arguments are readable, they decide, as before; what a process maps stands in
+# only for arguments ps could not read. BY_EXECUTABLE and MAYBE_HOST are how a watch names the two
+# ways ps sees such a host process; CHILDREN_SHOWN, how many of the app's children, and of the
+# processes NAMED saw, the control's record shows.
+RUNTIME_SHORT_NAME: Final = f"({Path(build_app.INTERPRETER).name[:16]})"
+RUNTIME_NAME: Final = Path(build_app.INTERPRETER).name
+RUNTIME_EXECUTABLE: Final = re.compile(rf"/{re.escape(build_app.RUNTIME_IN_APP)}$")
+BY_EXECUTABLE: Final = "ps, by executable (its arguments unreadable)"
+MAYBE_HOST: Final = "ps, possibly a host (its arguments and executable unreadable)"
+NAMED: Final = "lsof, by name"
+NAME_PREFIX: Final = 15
+CHILDREN_SHOWN: Final = 5
 # The control's gate: the copy in /Applications, opened, starts a host process that a lister
-# matches by PROFILE_PROCESS within CONTROL_GATE seconds of the watch's start; a child of the app
-# whose command line does not match is recorded, and does not count. Not lengthened while the cause
-# of the failures in macos/README.md (placement) is open. The rest is for the record only: with no
-# host process seen CONTROL_SNAPSHOT_AT seconds after the open, a snapshot of the screen and the
-# app; after a failed gate, the watch goes on to CONTROL_DIAGNOSIS seconds and the unified log is
-# saved; after a passing one, it goes on up to CONTROL_AFTER seconds more, until both listers have
-# seen a host process, the app has written STATUS_READ_MARKER and each lister's last reading saw
-# none, so that the watch's line can record the launch's burst. The app writes it on standard
-# error once its first status read has ended: with no pair, where the read leads to the login
-# item's removal (App/Supervisor.swift, statusRead; App/Connection.swift, .pairGone); with a
-# confirmed one, where it checks the login item (App/Connection.swift, checkLoginItemAtLaunch).
+# matches by PROFILE_PROCESS within CONTROL_GATE seconds of the watch's start; or, where ps could
+# read the arguments of none of the app's children, a child that has the runtime's name and maps
+# that copy's bundled runtime (RUNTIME_SHORT_NAME, above), which does not prove the pattern, and
+# the control says so. A child of the app whose command line does not match is recorded, and does
+# not count. Not lengthened: in the failure of run 42700559897 (xcode-27) a child of the app ran
+# from 1.04 s and the app's first status read had ended by 2.21 s, and in the 60 s it watched
+# neither lister matched a host process by its arguments (seen), so a wait of up to 60 s would not
+# have helped; that the child and the status read were host processes is inferred from the app's
+# code, and that the four earlier failures had the same cause is inferred. The rest is for the
+# record only: while the gate has not held CONTROL_SNAPSHOT_AT
+# seconds after the open, a snapshot of the screen and the app; after a failed gate, the watch goes
+# on to CONTROL_DIAGNOSIS seconds and the unified log is saved; after a passing one, it goes on up
+# to CONTROL_AFTER seconds more, until both listers have seen a host process, the app has written
+# STATUS_READ_MARKER and each lister's last reading saw none, so that the watch's line can record
+# the launch's burst. The app writes it on standard error once its first status read has ended:
+# with no pair, where the read leads to the login item's removal (App/Supervisor.swift,
+# statusRead; App/Connection.swift, .pairGone); with a confirmed one, where it checks the login
+# item (App/Connection.swift, checkLoginItemAtLaunch).
 CONTROL_GATE: Final = 30
 CONTROL_SNAPSHOT_AT: Final = 5
 CONTROL_DIAGNOSIS: Final = 60
@@ -5063,17 +5112,251 @@ def _profile_processes() -> list[int]:
     """The host's processes on the app's profile, whoever started them, by ``pgrep -f``
     (:func:`_pgrep`). Where sysmond gives no arguments for a process, Apple's pgrep matches its name
     instead and may exit 1, saying nothing (pkill.c): a reading of none by pgrep alone can be
-    wrong, which :func:`_ps_profile` is there for."""
+    wrong, which :func:`_ps_processes` is there for."""
     return _pgrep(["-f", PROFILE_PROCESS])
 
 
-def _ps_profile() -> tuple[list[int], list[tuple[int, str]]]:
+@dataclass(frozen=True)
+class _Unread:
+    """A process whose arguments ps could not read, shown as its name in parentheses
+    (:data:`RUNTIME_SHORT_NAME`), or one :data:`NAMED` saw by its name (``seen_by``): its pid, its
+    parent, its state and what ps showed (nothing, for one NAMED saw), whether it is a child of a
+    running copy of the app, the files lsof says it maps (:func:`_lsof_records`), or why lsof
+    gave none, and when lsof was asked (``asked``, by :func:`time.monotonic`)."""
+
+    pid: int
+    parent: int
+    state: str
+    command: str
+    child: bool
+    texts: tuple[str, ...] = ()
+    why: str = ""
+    asked: float | None = None
+    seen_by: str = "ps"
+
+    @property
+    def said(self) -> str:
+        return f"{self.state} {self.command}"[:200]
+
+    @property
+    def executable(self) -> str | None:
+        """The bundled runtime of a copy of the app, where it is among the files it maps."""
+        return next((text for text in self.texts if RUNTIME_EXECUTABLE.search(text)), None)
+
+    @property
+    def host(self) -> bool:
+        """A host process by what it maps: a copy's bundled runtime is among its files. Waits
+        and refusing copies take that alone; the control's gate also needs :attr:`named`."""
+        return self.executable is not None
+
+    @property
+    def named(self) -> bool:
+        """Whether its name is the bundled runtime's: ps shows it as :data:`RUNTIME_SHORT_NAME`,
+        or :data:`NAMED` found it by that name."""
+        return self.seen_by == NAMED or self.command == RUNTIME_SHORT_NAME
+
+    @property
+    def maybe(self) -> bool:
+        """Possibly a host process: ps shows the runtime's short name, and lsof gave no file it
+        maps (an answer of lsof's that is not a path, such as "region info error: ...", is no
+        file). Waits and refusing copies count it, to fail safe; the control's gate never takes
+        it."""
+        return not self.texts and self.command == RUNTIME_SHORT_NAME
+
+
+@dataclass
+class _Listed:
+    """What lsof's ``-F`` output says of one process: its parent and name, where asked for, the
+    absolute paths of the files it maps, and what else lsof put where a file's name goes."""
+
+    parent: int = 0
+    command: str = ""
+    files: list[str] = field(default_factory=list)
+    said: list[str] = field(default_factory=list)
+
+
+def _lsof_records(out: str) -> dict[int, _Listed]:
+    """lsof's ``-F`` output, process by process (fields p, R, c and n; others are passed over).
+    Only an absolute path is a file. Where Apple's lsof cannot read a region of a process, it
+    writes a txt entry whose name is "region info error: " and the error (dialects/darwin/libproc/
+    dproc.c, process_text, read at 7a8a1b2): that, and any other name that is not an absolute
+    path, is what lsof said, not a file."""
+    found: dict[int, _Listed] = {}
+    current: _Listed | None = None
+    for line in out.splitlines():
+        field_, value = line[:1], line[1:]
+        if field_ == "p" and value.isdigit():
+            current = found.setdefault(int(value), _Listed())
+        elif current is None:
+            continue
+        elif field_ == "R" and value.isdigit():
+            current.parent = int(value)
+        elif field_ == "c":
+            current.command = value
+        elif field_ == "n" and value.startswith("/"):
+            current.files.append(value)
+        elif field_ == "n":
+            current.said.append(value)
+    return found
+
+
+def _runs_now(pid: int) -> bool | None:
+    """Whether a process with ``pid`` runs now (``os.kill(pid, 0)``): True, False where none
+    does, None where that cannot be told."""
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return None
+    return True
+
+
+def _still_said(pid: int) -> str:
+    """For a process lsof gave no file of, whether it still ran once lsof had answered: a lookup
+    that came after the process had ended finds nothing, which says nothing of what it mapped."""
+    runs = _runs_now(pid)
+    if runs is None:
+        return "whether it still ran once lsof had answered is not known"
+    if runs:
+        return "a process of that pid still ran once lsof had answered"
+    return "it had ended by the time lsof answered"
+
+
+def _none_said(listed: _Listed | None, done: subprocess.CompletedProcess[str]) -> str:
+    """Why lsof gave no file of a process, from its own answer: what it said where a file's name
+    goes, or that it listed none, with its exit and standard error."""
+    if listed is not None and listed.said:
+        return f"lsof said {listed.said[0][:200]!r}"
+    err = done.stderr.strip()
+    return f"lsof listed no text file for it (exit {done.returncode}" + (
+        f", {err[:200]!r})" if err else ")"
+    )
+
+
+def _texts_of(
+    pids: Sequence[int], limit: float = LISTER_LIMIT
+) -> dict[int, tuple[tuple[str, ...], str]]:
+    """The files lsof says each of ``pids`` maps, by one call of ``lsof -a -p PIDS -d txt``: the
+    program, and on macOS the libraries it maps too, which lsof reads from the process's mapped
+    regions with proc_pidinfo, not from its arguments (:data:`RUNTIME_SHORT_NAME`). Each pid gets
+    its files, absolute paths only (:func:`_lsof_records`), or none and why: what lsof said
+    instead, that it listed none, or that it did not start or answer within ``limit`` seconds,
+    with whether the process still ran once lsof had answered (:func:`_still_said`). Never
+    raises."""
+    if not pids:
+        return {}
+    if limit <= 0:
+        why = f"no time was left for lsof within the reading's {LISTER_LIMIT} s"
+        return {pid: ((), f"{why}; {_still_said(pid)}") for pid in pids}
+    try:
+        done = subprocess.run(
+            ["lsof", "-w", "-a", "-p", ",".join(str(pid) for pid in pids), "-d", "txt", "-F", "pn"],
+            capture_output=True,
+            text=True,
+            errors="replace",
+            timeout=limit,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        why = f"lsof did not answer in {limit:.3g} s"
+        return {pid: ((), f"{why}; {_still_said(pid)}") for pid in pids}
+    except OSError as exc:
+        return {pid: ((), f"lsof could not start: {exc}") for pid in pids}
+    found = _lsof_records(done.stdout)
+    return {
+        pid: (tuple(found[pid].files), "")
+        if pid in found and found[pid].files
+        else ((), f"{_none_said(found.get(pid), done)}; {_still_said(pid)}")
+        for pid in pids
+    }
+
+
+def _named_processes() -> tuple[list[_Unread], str]:
+    """:data:`NAMED`'s one call: ``lsof -a -c RUNTIME -c APP -d txt -R -F pcRn``, every process
+    whose name begins as the bundled runtime's or the app's (:data:`NAME_PREFIX` characters of
+    each), with its parent and the files it maps, read as by :func:`_lsof_records`. lsof joins
+    the two names in one set before it takes only the txt entries of their processes (Apple's
+    lsof, proc.c, is_cmd_excl, read at 7a8a1b2; seen with Linux's lsof 4.95). Returns each
+    process of the runtime's name, but the check's own, this process and its children
+    (:func:`_ps_processes`), as a child of a running copy of the app where its parent maps the
+    app's executable (:data:`APP_EXECUTABLE`) in the same answer; and what went wrong, where
+    lsof did not start, answer within :data:`LISTER_LIMIT` seconds, or exit 0 or 1 with nothing
+    on standard error. Never raises: this reader is never blind, and the listers stay what they
+    were."""
+    asked = time.monotonic()
+    try:
+        done = subprocess.run(
+            [
+                "lsof",
+                "-w",
+                "-a",
+                "-c",
+                RUNTIME_NAME[:NAME_PREFIX],
+                "-c",
+                APP_NAME[:NAME_PREFIX],
+                "-d",
+                "txt",
+                "-R",
+                "-F",
+                "pcRn",
+            ],
+            capture_output=True,
+            text=True,
+            errors="replace",
+            timeout=LISTER_LIMIT,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        return [], f"lsof did not answer in {LISTER_LIMIT} s"
+    except OSError as exc:
+        return [], f"lsof could not start: {exc}"
+    error = (
+        ""
+        if done.returncode in (0, 1) and not done.stderr.strip()
+        else f"lsof exited {done.returncode}, with {done.stderr.strip()[:200]!r}"
+    )
+    listed = _lsof_records(done.stdout)
+    apps = {
+        pid
+        for pid, each in listed.items()
+        if any(APP_EXECUTABLE.search(path) for path in each.files)
+    }
+    own = os.getpid()
+    found = [
+        _Unread(
+            pid,
+            each.parent,
+            "",
+            "",
+            each.parent in apps,
+            tuple(each.files),
+            "" if each.files else f"{_none_said(each, done)}; {_still_said(pid)}",
+            asked,
+            NAMED,
+        )
+        for pid, each in listed.items()
+        if each.command.startswith(RUNTIME_NAME[:NAME_PREFIX]) and own not in (pid, each.parent)
+    ]
+    return found, error
+
+
+def _ps_processes() -> tuple[list[int], list[tuple[int, str]], list[_Unread]]:
     """The same by ``ps``, which is believed not to ask sysmond (inferred, not checked: the
     control prints which of the two links libsysmon). Returns the host's processes on the app's
-    profile, matched as pgrep matches them (a pgrep never counts), and every child of a running
-    copy of the app, whatever its command line says, with its state and command line: a child
-    still in exec may show none. Anything but exit 0 with a line it can read for each process
-    raises :class:`ListerBlind`."""
+    profile, matched as pgrep matches them (a pgrep never counts); every child of a running copy
+    of the app, whatever its command line says, with its state and command line; and each
+    process whose arguments ps could not read (:class:`_Unread`) that is a child of a running copy
+    or shows the bundled runtime's short name, with the files lsof says it maps, in one call after
+    ps's, given what is left of :data:`LISTER_LIMIT` (:func:`_texts_of`). The check's own
+    processes, this one and its children, are left out of that last list: the check runs the
+    bundled runtime itself (the pairing check runs on a copy of it, and starts the hub and the
+    host's commands), and a wait must never wait on the check. By its arguments, a host process of
+    the check's own still counts, as before. Anything but exit 0 with a line it can read for each
+    process raises :class:`ListerBlind`; lsof failing does not."""
+    started = time.monotonic()
     try:
         done = subprocess.run(
             ["ps", "-axww", "-o", "pid=,ppid=,stat=,command="],
@@ -5107,14 +5390,36 @@ def _ps_profile() -> tuple[list[int], list[tuple[int, str]]]:
     children = [
         (pid, f"{state} {command}"[:200]) for pid, parent, state, command in rows if parent in apps
     ]
-    return hosts, children
+    own = os.getpid()
+    unread: list[tuple[int, int, str, str]] = []
+    for pid, parent, state, command in rows:
+        shown = command.strip()
+        # ps shows a process whose arguments it could not read as its name in parentheses.
+        if shown[:1] != "(" or shown[-1:] != ")" or own in (pid, parent):
+            continue
+        if parent in apps or shown == RUNTIME_SHORT_NAME:
+            unread.append((pid, parent, state, shown))
+    asked = time.monotonic()
+    texts = _texts_of([pid for pid, _, _, _ in unread], LISTER_LIMIT - (asked - started))
+    return (
+        hosts,
+        children,
+        [
+            _Unread(pid, parent, state, command, parent in apps, *texts[pid], asked)
+            for pid, parent, state, command in unread
+        ],
+    )
 
 
 @dataclass(frozen=True)
 class _Reading:
     """One call of one lister (:func:`_read`): which one, when the call started and ended, the
-    host processes on the app's profile it saw (None where it was blind, and then why), and, for
-    ps, each child of a running copy of the app, with its state and command line."""
+    host processes on the app's profile it matched by their arguments (None where it was blind,
+    and then why), and, for ps, each child of a running copy of the app, with its state and
+    command line, and each process whose arguments it could not read, with what it maps
+    (:func:`_ps_processes`). A reading of :data:`NAMED` matches nothing by arguments and is never
+    blind: its ``unread`` are the processes it saw, and its ``error`` what went wrong, if
+    anything (:func:`_named_processes`)."""
 
     lister: str
     started: float
@@ -5122,19 +5427,26 @@ class _Reading:
     hosts: frozenset[int] | None
     children: tuple[tuple[int, str], ...] = ()
     error: str = ""
+    unread: tuple[_Unread, ...] = ()
 
 
 def _read(lister: str) -> _Reading:
-    """One call of ``lister``, one of :data:`LISTERS`; a blind one is a reading of nothing."""
+    """One call of ``lister``, one of :data:`LISTERS` or :data:`NAMED`; a blind one is a reading
+    of nothing."""
     started = time.monotonic()
+    if lister == NAMED:
+        named, error = _named_processes()
+        return _Reading(lister, started, time.monotonic(), frozenset(), (), error, tuple(named))
     try:
         if lister == "pgrep":
-            hosts, children = _profile_processes(), []
+            hosts, children, unread = _profile_processes(), [], []
         else:
-            hosts, children = _ps_profile()
+            hosts, children, unread = _ps_processes()
     except ListerBlind as exc:
         return _Reading(lister, started, time.monotonic(), None, (), str(exc))
-    return _Reading(lister, started, time.monotonic(), frozenset(hosts), tuple(children))
+    return _Reading(
+        lister, started, time.monotonic(), frozenset(hosts), tuple(children), "", tuple(unread)
+    )
 
 
 def _look() -> tuple[_Reading, ...]:
@@ -5143,35 +5455,81 @@ def _look() -> tuple[_Reading, ...]:
 
 
 def _hosts_in(readings: Iterable[_Reading]) -> set[int]:
-    """The host processes on the app's profile that any of ``readings`` saw."""
+    """The host processes on the app's profile that any of ``readings`` matched by their
+    arguments."""
     return {pid for reading in readings for pid in reading.hosts or ()}
+
+
+def _unread_hosts_in(readings: Iterable[_Reading]) -> dict[int, _Unread]:
+    """Of the processes whose arguments ps could not read in ``readings``, those that map a
+    copy's bundled runtime (:attr:`_Unread.host`) and those that may (:attr:`_Unread.maybe`),
+    whatever their parent. The check's own are never among them (:func:`_ps_processes`)."""
+    return {
+        unread.pid: unread
+        for reading in readings
+        for unread in reading.unread
+        if unread.host or unread.maybe
+    }
 
 
 def _no_profile_process() -> bool:
     """Whether a lister read the process table and no lister saw a host process of the app's
-    profile: a blind lister is never taken for none. A child of the app does not count here: the
-    waits that ask this stop the app first."""
+    profile, by its arguments, or, where ps could not read those, by what it maps or may map
+    (:func:`_unread_hosts_in`): a blind lister is never taken for none, nor a process ps showed
+    by the runtime's short name of which lsof gave no file, whatever lsof said instead. A child of
+    the app does not count as such here: the waits that ask this stop the app first."""
     readings = _look()
-    return any(reading.hosts is not None for reading in readings) and not _hosts_in(readings)
+    return (
+        any(reading.hosts is not None for reading in readings)
+        and not _hosts_in(readings)
+        and not _unread_hosts_in(readings)
+    )
+
+
+def _unread_said(unread: Iterable[_Unread], since: float | None = None) -> str:
+    """Of processes whose arguments ps could not read, those it counts as host processes, and
+    how, for a check's detail, with when lsof was asked, counted from ``since``."""
+    said = []
+    for each in unread:
+        if each.host:
+            said.append(
+                f"by its executable, its arguments unreadable: {each.pid} maps {each.executable}"
+                f" ({_lookup_said(each, since)}; parent {each.parent})"
+            )
+        elif each.maybe:
+            said.append(
+                "possibly a host, its arguments and executable unreadable: "
+                f"{each.pid} ({_why_said(each, since)})"
+            )
+    return "; ".join(said)
 
 
 def _profile_processes_said() -> str:
     """What each lister sees of the app's profile now, for a check's detail."""
     readings = _look()
-    return "; ".join(
+    said = "; ".join(
         f"{reading.lister}: "
         + ("blind, " + reading.error if reading.hosts is None else f"{sorted(reading.hosts)}")
         for reading in readings
     )
+    unread = _unread_said(_unread_hosts_in(readings).values())
+    return said + (f"; {unread}" if unread else "")
 
 
 @dataclass
 class _Watch:
     """What a watch of the app's profile saw (:func:`_watch_profile`), reading by reading: the host
-    processes that either lister matched, the children of a running copy that ps saw, when each
-    lister first and last saw one, and where the check could not see. In seconds: ``began`` is
-    when the watch started and ``ended`` when it stopped, and every time the watch reports counts
-    from ``since``; a sighting's time is its reading's start."""
+    processes that either lister matched by their arguments, the children of a running copy that
+    ps saw, when each lister first and last saw one, and where the check could not see; of the
+    processes whose arguments ps could not read (:class:`_Unread`), what lsof said of each
+    (``unread``), when ps first showed each (``shown``), which mapped a copy's bundled runtime and
+    when (``by_executable``), which may have (``maybe``), and which children of the app ps did read
+    the arguments of (``read_children``); and, where :data:`NAMED` ran, its readings, kept apart
+    from the listers' (``named``), and what it said of each process it saw and when it first saw
+    it (``named_seen``). ``runs`` holds each sighting, by either, of a process that mapped a
+    copy's runtime. In seconds: ``began`` is when the watch started and ``ended`` when it
+    stopped, and every time the watch reports counts from ``since``; a sighting's time is its
+    reading's start."""
 
     began: float
     since: float
@@ -5183,28 +5541,231 @@ class _Watch:
     last: dict[str, float] = field(default_factory=dict)
     first_child: str = ""
     status_read: float | None = None
+    unread: dict[int, _Unread] = field(default_factory=dict)
+    shown: dict[int, tuple[float, str]] = field(default_factory=dict)
+    by_executable: dict[int, float] = field(default_factory=dict)
+    maybe: dict[int, float] = field(default_factory=dict)
+    runs: list[tuple[float, _Unread]] = field(default_factory=list)
+    read_children: dict[int, str] = field(default_factory=dict)
+    named: list[_Reading] = field(default_factory=list)
+    named_seen: dict[int, tuple[float, _Unread]] = field(default_factory=dict)
 
     def add(self, reading: _Reading) -> None:
+        at = reading.started - self.since
+        if reading.lister == NAMED:
+            self.named.append(reading)
+            for each in reading.unread:
+                first, known = self.named_seen.get(each.pid, (at, each))
+                # What lsof said of it that says the most, the first time it said it.
+                self.named_seen[each.pid] = (first, each if _told(each) > _told(known) else known)
+                if each.host:
+                    self.runs.append((at, each))
+            return
         self.readings.append(reading)
         self.ended = max(self.ended, reading.ended)
         if reading.hosts:
             self.hosts |= reading.hosts
-            self.first.setdefault(reading.lister, reading.started - self.since)
-            self.last[reading.lister] = max(
-                self.last.get(reading.lister, reading.started - self.since),
-                reading.started - self.since,
-            )
+            self.first.setdefault(reading.lister, at)
+            self.last[reading.lister] = max(self.last.get(reading.lister, at), at)
         if reading.children and CHILD not in self.first:
-            self.first[CHILD] = reading.started - self.since
+            self.first[CHILD] = at
             pid, said = reading.children[0]
             self.first_child = f"{pid} {said}"
         for pid, said in reading.children:
             self.children.setdefault(pid, said)
+        for each in reading.unread:
+            # What lsof said of it that says the most, the first time it said it: that it maps a
+            # copy's runtime, then any file, then nothing.
+            known = self.unread.get(each.pid)
+            if known is None or _told(each) > _told(known):
+                self.unread[each.pid] = each
+            self.shown.setdefault(each.pid, (at, each.said))
+            if each.host:
+                self.by_executable.setdefault(each.pid, at)
+                self.first.setdefault(BY_EXECUTABLE, at)
+                self.runs.append((at, each))
+            elif each.maybe:
+                self.maybe.setdefault(each.pid, at)
+                self.first.setdefault(MAYBE_HOST, at)
+        unread = {each.pid for each in reading.unread}
+        for pid, said in reading.children:
+            if pid not in unread:
+                self.read_children.setdefault(pid, said)
 
     @property
     def seen(self) -> set[int]:
-        """The host processes either lister matched, and the children of the app ps saw."""
-        return self.hosts | set(self.children)
+        """The host processes either lister matched, the children of the app ps saw, and each
+        process whose arguments ps could not read that mapped, or may have mapped, a copy's
+        bundled runtime, whatever its parent. What :data:`NAMED` saw is not among them: it runs in
+        the control's watch alone."""
+        return self.hosts | set(self.children) | set(self.by_executable) | set(self.maybe)
+
+    def _app_child(self, each: _Unread) -> bool:
+        """Whether ``each`` is a child of a running copy of the app: by its parent, as its lister
+        saw it, or as ps saw it in any reading."""
+        return each.child or each.pid in self.children
+
+    def _told_most(self, pid: int) -> _Unread | None:
+        """What lsof said of ``pid`` that says the most, from either lookup; where both say as
+        much, the ps lister's."""
+        known = [self.unread.get(pid), self.named_seen.get(pid, (0.0, None))[1]]
+        told = [each for each in known if each is not None]
+        return max(told, key=_told) if told else None
+
+    def passed_by(self, runtime: str | Path) -> tuple[str, str]:
+        """How the control's gate held, if it did, and what held it, inside :data:`CONTROL_GATE`
+        seconds of the watch's start. ``"arguments"``: a lister matched a host process by its
+        command line, which proves the listers' pattern matches the app's host, as before.
+        Otherwise ``"executable"``: a child of a running copy of the app whose arguments ps did not
+        read, which has the bundled runtime's name (:attr:`_Unread.named`) and which lsof says maps
+        ``runtime``, that copy's bundled runtime, by the ps lister's lookup or by :data:`NAMED`'s;
+        but only where ps read the arguments of no child of the app that the pattern does not
+        match, since arguments ps can read are what the control proves the pattern against (a
+        stale pattern must fail it, not pass on what a process maps). lsof lists every file a
+        process maps, so its name is asked too. A process lsof gave no file of never holds it.
+        Otherwise ``("", "")``."""
+        gate = self.began - self.since + CONTROL_GATE
+        first = self.first_host
+        if first is not None and first < gate:
+            lister = next(name for name in LISTERS if self.first.get(name) == first)
+            return "arguments", (
+                f"by its arguments: {lister} matched a host process by its command line at "
+                f"{first:.2f} s"
+            )
+        if any(pid not in self.hosts for pid in self.read_children):
+            return "", ""
+        for at, each in self.runs:
+            if (
+                at < gate
+                and each.named
+                and self._app_child(each)
+                and each.pid not in self.read_children
+                and _same_file(each.executable, runtime)
+            ):
+                shown = self.shown.get(each.pid)
+                return "executable", (
+                    (
+                        "by its executable, its arguments unreadable"
+                        if shown is not None
+                        else "by its executable, ps never read its arguments"
+                    )
+                    + f": pid {each.pid}, a child of the app, has the runtime's name and maps "
+                    f"{each.executable} ({_lookup_said(each, self.since)}), and "
+                    + (
+                        f"ps showed it as {shown[1]!r} at {shown[0]:.2f} s"
+                        if shown is not None
+                        else "ps did not list it"
+                    )
+                    + "; ps read the arguments of none of the app's children, so this run does not "
+                    "prove that the listers' pattern matches the app's command line"
+                )
+        return "", ""
+
+    def children_said(self) -> str:
+        """Recorded, not a gate: the first :data:`CHILDREN_SHOWN` children of the app, as ps first
+        showed them, and, for one whose arguments it could not read, what lsof said it maps, by
+        either lookup (:meth:`_told_most`)."""
+        if not self.children:
+            return "ps saw no child of the app"
+        shown = []
+        for pid, said in list(self.children.items())[:CHILDREN_SHOWN]:
+            each = self._told_most(pid) if pid in self.unread else None
+            shown.append(
+                f"{pid} {said!r}"
+                + (
+                    ""
+                    if each is None
+                    else f", its arguments unreadable, {_runs_said(each, self.since)}"
+                )
+            )
+        more = len(self.children) - CHILDREN_SHOWN
+        return (
+            "the app's children, as ps first showed them: "
+            + "; ".join(shown)
+            + (f"; and {more} more" if more > 0 else "")
+        )
+
+    def named_said(self) -> str:
+        """Recorded, not a gate: :data:`NAMED`'s readings, how many, the longest and what went
+        wrong in them, and the first :data:`CHILDREN_SHOWN` processes of the runtime's name it saw,
+        each with its parent, whether that is a running copy of the app, when it first saw it, and
+        what lsof said it maps; or "" where it did not run."""
+        if not self.named:
+            return ""
+        errors = sorted({reading.error for reading in self.named if reading.error})
+        longest = max(reading.ended - reading.started for reading in self.named)
+        said = (
+            f"{NAMED}, recorded, not a gate: {len(self.named)} calls, longest {longest:.2f} s, "
+            f"lsof errors {sum(bool(reading.error) for reading in self.named)}"
+            + (f" ({'; '.join(errors[:3])})" if errors else "")
+        )
+        seen = list(self.named_seen.items())
+        if not seen:
+            return f"{said}; it saw no process of the runtime's name"
+        shown = [
+            f"{pid} (parent {each.parent}"
+            + (", a running copy of the app" if self._app_child(each) else "")
+            + f") from {at:.2f} s, {_runs_said(each, self.since)}"
+            for pid, (at, each) in seen[:CHILDREN_SHOWN]
+        ]
+        more = len(seen) - CHILDREN_SHOWN
+        return (
+            f"{said}; the processes of the runtime's name it saw: "
+            + "; ".join(shown)
+            + (f"; and {more} more" if more > 0 else "")
+        )
+
+    def executables_said(self, runtime: str | Path) -> str:
+        """For a failed control's case: what lsof said each child of the app maps whose arguments
+        ps did not read (the first three, by either lookup), and, where one maps ``runtime``, a
+        child of the app whose arguments ps read and the pattern does not match, which kept it
+        from the gate."""
+        pids = [pid for pid in self.children if pid in self.unread]
+        pids += [
+            pid
+            for pid, (_, each) in self.named_seen.items()
+            if self._app_child(each) and pid not in pids and pid not in self.read_children
+        ]
+        said = []
+        for pid in pids[:3]:
+            each = self._told_most(pid)
+            if each is None:
+                continue
+            if each.executable is not None and _same_file(each.executable, runtime):
+                at = min(when for when, run in self.runs if run.pid == pid)
+                said.append(
+                    f"{pid} maps that copy's runtime (by lsof), from {at:.1f} s"
+                    + ("" if each.named else f", but its name is not the runtime's ({each.said!r})")
+                )
+            elif each.executable is not None:
+                said.append(f"{pid} maps {each.executable} (by lsof), not that copy's runtime")
+            elif each.texts:
+                said.append(f"{pid} maps {each.texts[0]} and no copy's runtime (by lsof)")
+            else:
+                said.append(f"{pid}: lsof gave no executable ({_why_said(each, self.since)})")
+        text = (
+            "; of the app's children whose arguments ps did not read: " + "; ".join(said)
+            if said
+            else ""
+        )
+        ran = any(
+            self._app_child(each) and _same_file(each.executable, runtime) for _, each in self.runs
+        )
+        unmatched = [(pid, s) for pid, s in self.read_children.items() if pid not in self.hosts]
+        if ran and unmatched:
+            pid, s = unmatched[0]
+            text += (
+                "; ps read the arguments of a child of the app that the listers' pattern does "
+                f"not match ({pid} {s!r}), so what a child maps does not pass the gate"
+            )
+        return text
+
+    def named_child(self) -> tuple[float, int] | None:
+        """When :data:`NAMED` first saw a child of a running copy of the app, and its pid."""
+        return min(
+            ((at, pid) for pid, (at, each) in self.named_seen.items() if self._app_child(each)),
+            default=None,
+        )
 
     @property
     def first_host(self) -> float | None:
@@ -5329,6 +5890,10 @@ class _Watch:
         firsts = "; ".join(
             f"{lister} at {self.first[lister]:.2f} s" if lister in self.first else f"{lister} never"
             for lister in (*LISTERS, CHILD)
+        ) + "".join(
+            f"; {name} at {self.first[name]:.2f} s"
+            for name in (BY_EXECUTABLE, MAYBE_HOST)
+            if name in self.first
         )
         longest = max((r.ended - r.started for r in self.readings), default=0.0)
         said = (
@@ -5346,10 +5911,55 @@ class _Watch:
         return said
 
 
+def _told(unread: _Unread) -> int:
+    """How much lsof said of a process: that it maps a copy's runtime (2), any file (1), nothing
+    (0)."""
+    return 2 if unread.host else 1 if unread.texts else 0
+
+
+def _lookup_said(unread: _Unread, since: float | None = None) -> str:
+    """Which lookup asked lsof of ``unread``, and when, counted from ``since``."""
+    via = "lsof" if unread.seen_by == "ps" else f"{NAMED}"
+    if unread.asked is None or since is None:
+        return f"by {via}"
+    return f"by {via}, asked at {unread.asked - since:.2f} s"
+
+
+def _why_said(unread: _Unread, since: float | None = None) -> str:
+    """Why lsof gave no file ``unread`` maps, with when it was asked, counted from ``since``."""
+    when = (
+        "" if unread.asked is None or since is None else f"; asked at {unread.asked - since:.2f} s"
+    )
+    return f"{unread.why}{when}"
+
+
+def _runs_said(unread: _Unread, since: float | None = None) -> str:
+    """What lsof said a process whose arguments ps could not read maps, and when it was asked,
+    counted from ``since``."""
+    if unread.executable is not None:
+        return f"{_lookup_said(unread, since)}, it maps {unread.executable}"
+    if unread.texts:
+        return f"{_lookup_said(unread, since)}, it maps {unread.texts[0]} and no copy's runtime"
+    return f"its executable unknown: {_why_said(unread, since)}"
+
+
+def _same_file(path: str | None, expected: str | Path) -> bool:
+    """Whether ``path`` names ``expected``: the same string, or the same file however it is
+    spelled (lsof may give a path through a firmlink, say; not seen)."""
+    if path is None:
+        return False
+    if path == str(expected):
+        return True
+    try:
+        return os.path.samefile(path, expected)
+    except OSError:
+        return False
+
+
 def _lister_pool() -> concurrent.futures.Executor:
-    """The threads the listers run on, one each."""
+    """The threads the listers run on, one each, and one for :data:`NAMED`."""
     return concurrent.futures.ThreadPoolExecutor(
-        max_workers=len(LISTERS), thread_name_prefix="lister"
+        max_workers=len(LISTERS) + 1, thread_name_prefix="lister"
     )
 
 
@@ -5360,28 +5970,32 @@ def _watch_profile(
     each: Callable[[_Watch], None] | None = None,
     watch: _Watch | None = None,
     since: float | None = None,
+    named: bool = False,
 ) -> _Watch:
     """Read the process table with both listers, each on a thread of its own and called again
     :data:`POLL_PAUSE` seconds after its last call ended, so that one held never holds back the
     other, until ``seconds`` after the watch's start or until ``stop`` says so; ``each`` runs after
-    every reading. With ``watch``, go on with it; ``since`` is what a new watch counts its times
-    from (its start by default). A call still running when the watch stops is not waited for."""
+    every reading. With ``named``, :data:`NAMED` runs too, the same way, on a thread of its own;
+    the listers' readings are counted as before, and its own are kept apart (:class:`_Watch`).
+    With ``watch``, go on with it; ``since`` is what a new watch counts its times from (its start
+    by default). A call still running when the watch stops is not waited for."""
     if watch is None:
         began = time.monotonic()
         watch = _Watch(began=began, since=began if since is None else since)
     deadline = watch.began + seconds
+    readers = (*LISTERS, NAMED) if named else LISTERS
     pool = _lister_pool()
     pending: dict[str, concurrent.futures.Future[_Reading]] = {}
-    ready = dict.fromkeys(LISTERS, time.monotonic())
+    ready = dict.fromkeys(readers, time.monotonic())
     try:
         while True:
-            for lister in LISTERS:
+            for lister in readers:
                 if lister not in pending and time.monotonic() >= ready[lister]:
                     pending[lister] = pool.submit(_read, lister)
             now = time.monotonic()
             pause = max(
                 0.0,
-                min([POLL_PAUSE, *(ready[name] - now for name in LISTERS if name not in pending)]),
+                min([POLL_PAUSE, *(ready[name] - now for name in readers if name not in pending)]),
             )
             if pending:
                 concurrent.futures.wait(
@@ -5421,12 +6035,13 @@ def _stop_the_app(checker: Checker, what: str) -> None:
 
 def _placement_control(checker: Checker, work: Path, require_driven: bool) -> bool:
     """The control: the copy at :func:`installed_app_path`, opened, starts the host on the app's
-    profile, which a lister matches by its command line (:func:`_watch_control`), and says where
-    its menu is, not where it should be; while the profile holds a confirmed pair, it says neither
-    (decisions/0002, What is built today). Without it, seeing no host process later would prove
-    nothing. The app's standard output and error go to ``control-app-stdout.txt`` and
-    ``control-app-stderr.txt`` in ``work``. Whether System Events can drive the app here; with
-    ``require_driven``, not being able to is a failure."""
+    profile, which a lister matches by its command line, or, where ps could read the arguments of
+    none of the app's children, a child that has the runtime's name and maps that copy's bundled
+    runtime (:func:`_watch_control`), and says where its menu is, not where it should be; while the
+    profile holds a confirmed pair, it says neither (decisions/0002, What is built today). Without
+    it, seeing no host process later would prove nothing. The app's standard output and error go to
+    ``control-app-stdout.txt`` and ``control-app-stderr.txt`` in ``work``. Whether System Events can
+    drive the app here; with ``require_driven``, not being able to is a failure."""
     installed = installed_app_path()
     screens = work / "screens"
     screens.mkdir(parents=True, exist_ok=True)
@@ -5456,7 +6071,7 @@ def _placement_control(checker: Checker, work: Path, require_driven: bool) -> bo
         f"the control: open starts the copy at {installed}",
         _shown(done),
     )
-    gated, detail = _watch_control(work, err_log, opened, opened_wall)
+    gated, detail = _watch_control(work, err_log, opened, opened_wall, python_in(installed))
     checker.expect(
         gated, "the control: it starts the host on the app's profile, and the check sees it", detail
     )
@@ -5491,30 +6106,39 @@ def _text_of(path: Path) -> str:
 
 
 def _watch_control(
-    work: Path, err_log: Path, opened: float, opened_wall: float
+    work: Path, err_log: Path, opened: float, opened_wall: float, runtime: Path
 ) -> tuple[bool, str]:
-    """The control's watch, with its times counted from the open (macos/README.md, placement).
-    The gate: a host process on the app's profile, matched by either lister, seen within
-    :data:`CONTROL_GATE` seconds of the watch's start. A child of the app whose command line does
-    not match is recorded, with when it was first seen, and does not pass the gate. Seen, the
-    watch goes on up to :data:`CONTROL_AFTER` seconds more, until both listers have seen one, the
-    app has written :data:`STATUS_READ_MARKER` in ``err_log`` and each lister's last reading saw
-    none; it prints when each lister first and last saw one and the burst between (recorded, not a
-    gate: :meth:`_Watch.burst`), and adds a note for a lister that never saw one or was blind.
-    With no host process seen :data:`CONTROL_SNAPSHOT_AT` seconds after the open, child or not, it
-    takes :func:`_control_snapshot` on a thread of its own, without pausing the listers. With none
-    seen at the gate, it watches on to :data:`CONTROL_DIAGNOSIS` seconds, saves the unified log
+    """The control's watch, with its times counted from the open (macos/README.md, placement). The
+    gate (:meth:`_Watch.passed_by`), within :data:`CONTROL_GATE` seconds of the watch's start: a
+    host process on the app's profile that either lister matches by its command line; or, where ps
+    read the arguments of no child of the app that the pattern does not match, a child whose
+    arguments ps did not read, which has the runtime's name and which lsof says maps ``runtime``,
+    the copy's bundled runtime. lsof is asked by the ps lister, after ps, and by :data:`NAMED`,
+    which runs in this watch alone, on a thread of its own, so that a slow ps does not hold the
+    lookup back. The second way does not prove that the pattern matches the app's command line, and
+    its line says so. A child of the app whose command line does not match is recorded, with when it
+    was first seen, and does not pass the gate. Held, the watch goes on up to :data:`CONTROL_AFTER`
+    seconds more, until both listers have seen a host process, the app has written
+    :data:`STATUS_READ_MARKER` in ``err_log`` and each lister's last reading saw none; then the gate
+    is asked again, over the whole watch, since a lister's match inside the gate is the better
+    proof, and a child whose arguments ps read takes the executable's pass away. It prints when each
+    lister first and last saw one and the burst between (recorded, not a gate:
+    :meth:`_Watch.burst`), how the gate held, and adds a note for a lister that never saw one or was
+    blind. While the gate has not held :data:`CONTROL_SNAPSHOT_AT` seconds after the open, it takes
+    :func:`_control_snapshot` on a thread of its own, without pausing the listers. Where it did not
+    hold, it watches on to :data:`CONTROL_DIAGNOSIS` seconds, saves the unified log
     (:func:`_save_control_log`), and its detail ends with the case (:func:`_control_case`). Either
-    way it prints each stretch with no reading longer than :data:`RECORDED_GAP` seconds
-    (:meth:`_Watch.recorded`). Returns whether the gate held, and the detail for when it did
-    not."""
+    way it prints, once, the app's children as ps first showed them (:meth:`_Watch.children_said`),
+    what :data:`NAMED` saw (:meth:`_Watch.named_said`), and each stretch with no reading longer than
+    :data:`RECORDED_GAP` seconds (:meth:`_Watch.recorded`). Returns whether the gate held, and the
+    detail for when it did not."""
     snapshot: list[threading.Thread] = []
 
     def each(watch: _Watch) -> None:
         now = time.monotonic() - watch.since
         if watch.status_read is None and STATUS_READ_MARKER in _text_of(err_log):
             watch.status_read = now
-        if not watch.hosts and not snapshot and now >= CONTROL_SNAPSHOT_AT:
+        if not watch.passed_by(runtime)[0] and not snapshot and now >= CONTROL_SNAPSHOT_AT:
             print(
                 f"note: no host process seen {now:.2f} s after the open: the control takes its "
                 "snapshot",
@@ -5527,10 +6151,13 @@ def _watch_control(
             snapshot.append(thread)
 
     watch = _watch_profile(
-        CONTROL_GATE, stop=lambda found: bool(found.hosts), each=each, since=opened
+        CONTROL_GATE,
+        stop=lambda found: bool(found.passed_by(runtime)[0]),
+        each=each,
+        since=opened,
+        named=True,
     )
-    gated = bool(watch.hosts)
-    if gated:
+    if watch.passed_by(runtime)[0]:
         until = time.monotonic() + CONTROL_AFTER
 
         def recorded(found: _Watch) -> bool:
@@ -5538,31 +6165,39 @@ def _watch_control(
             over = not any(found.saw_last(lister) for lister in LISTERS)
             return (listers and over and found.status_read is not None) or time.monotonic() >= until
 
-        _watch_profile(CONTROL_GATE + CONTROL_AFTER, stop=recorded, each=each, watch=watch)
-    else:
+        _watch_profile(
+            CONTROL_GATE + CONTROL_AFTER, stop=recorded, each=each, watch=watch, named=True
+        )
+    how, held = watch.passed_by(runtime)
+    if not how:
         _watch_profile(
             CONTROL_DIAGNOSIS,
             stop=lambda found: bool(found.hosts) and found.status_read is not None,
             each=each,
             watch=watch,
+            named=True,
         )
     for thread in snapshot:
         thread.join(SNAPSHOT_LIMIT)
         if thread.is_alive():
             print("note: the control's snapshot had not finished; the check goes on", flush=True)
     said = f"the control's watch: {watch.summary()}; {watch.burst()}"
+    children = [f"the control: {watch.children_said()}", f"the control: {watch.named_said()}"]
     stretches = [f"the control: {line}" for line in watch.recorded()]
-    if gated:
-        print("\n".join([said, *stretches]), flush=True)
+    if how:
+        print(
+            "\n".join([said, f"the control's gate held {held}", *children, *stretches]), flush=True
+        )
         for note in _control_notes(watch):
             print(f"note: the control passed, but {note}", flush=True)
         return True, ""
     lines = [
         f"no host process of the app's profile was seen in {CONTROL_GATE} s",
         said,
+        *children,
         *stretches,
         _save_control_log(work / "control-log.txt", opened_wall),
-        f"the case: {_control_case(watch)}",
+        f"the case: {_control_case(watch, runtime)}",
     ]
     return False, "\n".join(lines)
 
@@ -5581,16 +6216,21 @@ def _control_notes(watch: _Watch) -> list[str]:
     return notes
 
 
-def _control_case(watch: _Watch) -> str:
-    """Which cause a failed control fits, which the job logs alone could not tell apart
-    (macos/README.md, placement). In order: a child of the app was seen inside the gate, but no
-    host process the gate matches (a spawn held in exec, or a host whose command line the
-    pattern does not match, which a status read ended inside the gate would point to); the app's
-    first status read had ended inside the gate, but no reading saw a host process (the listers
-    missed one); the first host process, or the end of the first status read, came only after the
-    gate (its start was held, in the app or in macOS); or none of these by the end of the watch.
-    What each case points to is inferred from the app's code. The times count from the open, and
-    the gate's end is :data:`CONTROL_GATE` seconds after the watch's start."""
+def _control_case(watch: _Watch, runtime: str | Path) -> str:
+    """Which cause a failed control fits (macos/README.md, placement). In order: a child of the app
+    was seen inside the gate, by ps or by :data:`NAMED`, but no host process the gate takes,
+    followed by what lsof said each child whose arguments ps did not read maps
+    (:meth:`_Watch.executables_said`). This is the case of run 42700559897 on xcode-27: ps showed
+    the app's first child only as '(lucille-host-run)', neither lister matched a host process in 60
+    s, and the app's first status read had ended by 2.2 s (seen in its record); that the child and
+    the status read were host processes is inferred from the app's code. The gate now takes such a
+    child by what it maps. Then: the app's first status read had ended inside the gate, but no
+    reading saw a host process or a child (the listers missed them); the first host process, or the
+    end of the first status read, came only after the gate (its start held, in the app or in macOS:
+    inferred, and not yet seen in a run's record); or none of these by the end of the watch. Whether
+    the four earlier failures, from before this record, had the first case's cause is inferred, not
+    seen. The times count from the open, and the gate's end is :data:`CONTROL_GATE` seconds after
+    the watch's start."""
     gate = watch.began - watch.since + CONTROL_GATE
     found, read, child = watch.first_host, watch.status_read, watch.first.get(CHILD)
     by = f"by {watch.ended - watch.since:.1f} s"
@@ -5601,7 +6241,16 @@ def _control_case(watch: _Watch) -> str:
         else f"; the app's first status read had ended by {read:.1f} s"
     )
     if child is not None and child < gate:
-        return f"a child of the app from {child:.1f} s ({watch.first_child!r}), but {seen}{status}"
+        return (
+            f"a child of the app from {child:.1f} s ({watch.first_child!r}), but {seen}{status}"
+            + watch.executables_said(runtime)
+        )
+    named = watch.named_child()
+    if named is not None and named[0] < gate:
+        return (
+            f"a child of the app from {named[0]:.1f} s ({named[1]}, seen by {NAMED} alone), but "
+            f"{seen}{status}" + watch.executables_said(runtime)
+        )
     if read is not None and read < gate:
         return (
             f"the app's first status read had ended by {read:.1f} s, inside the "
@@ -5769,23 +6418,28 @@ def _refusing_copy(
     shows_folder: bool = False,
     require_driven: bool = False,
 ) -> None:
-    """Open ``copy``, which is not the copy at /Applications/<name>.app, with no other copy of
-    the app running. For :data:`REFUSAL_WATCH` seconds from the watch's start it starts no host
-    process on the app's profile, nor any child, as both listers see it (:func:`_watch_profile`),
-    which is judged only if ps read the process table at least once (pgrep alone can read none
-    where there is one: :func:`_profile_processes`) and no stretch of more than
-    :data:`BLIND_LIMIT` seconds went without a reading (:meth:`_Watch.blind`). Where the watch was
-    blind, that fails once, and whether the copy started anything is not judged, unless what the
-    check did see says so: a host process or child a reading saw, or a reading that the copy no
-    longer runs. Each stretch with no reading longer than :data:`RECORDED_GAP` seconds is printed,
-    recorded, not a gate, but one that fails the watch only where it fails it; the watch's line
-    gives ps's own longest stretch, not a gate (:meth:`_Watch.summary`). It changes nothing in the
-    profile's folder; it says ``words``, a title and a sentence of its note, which offers only
-    Quit, and Quit quits it. With ``shows_folder``, for a copy the app judges not to be in the
-    Applications folder, the note offers only Show Applications Folder and Quit, in either order,
-    which is printed as read, and Show Applications Folder shows that folder and quits it
-    (:func:`_shows_applications_folder`). A button is pressed only once the check has read it on
-    the note. Screenshots ``0-placement-*``."""
+    """Open ``copy``, which is not the copy at /Applications/<name>.app, with no other copy of the
+    app running. For :data:`REFUSAL_WATCH` seconds from the watch's start it starts no host process
+    on the app's profile, nor any child, as both listers see it (:func:`_watch_profile`), nor,
+    whatever its parent (one whose parent went is launchd's), a process whose arguments ps could not
+    read that maps a copy's bundled runtime, by lsof, or that ps shows by the runtime's short name
+    and lsof gives no file of, whatever it says instead, which counts, to fail safe
+    (:attr:`_Watch.seen`). :data:`NAMED` does not run here: the watch counts a child of the copy by
+    its parent, which ps gives whatever it can read of the child, and its stretches stay as they
+    were measured for :data:`BLIND_LIMIT`. That is judged only if ps read the process table at least
+    once (pgrep alone can read none where there is one: :func:`_profile_processes`) and no stretch
+    of more than :data:`BLIND_LIMIT` seconds went without a reading (:meth:`_Watch.blind`). Where
+    the watch was blind, that fails once, and whether the copy started anything is not judged,
+    unless what the check did see says so: a host process or child a reading saw, or a reading that
+    the copy no longer runs. Each stretch with no reading longer than :data:`RECORDED_GAP` seconds
+    is printed, recorded, not a gate, but one that fails the watch only where it fails it; the
+    watch's line gives ps's own longest stretch, not a gate (:meth:`_Watch.summary`). It changes
+    nothing in the profile's folder; it says ``words``, a title and a sentence of its note, which
+    offers only Quit, and Quit quits it. With ``shows_folder``, for a copy the app judges not to be
+    in the Applications folder, the note offers only Show Applications Folder and Quit, in either
+    order, which is printed as read, and Show Applications Folder shows that folder and quits it
+    (:func:`_shows_applications_folder`). A button is pressed only once the check has read it on the
+    note. Screenshots ``0-placement-*``."""
     _stop_the_app(checker, "a copy of the app")
     folder = _profile_folder()
     before = _folder_state(folder)
@@ -5822,7 +6476,14 @@ def _refusing_copy(
     )
     running = _running_now(APP_NAME)
     started = f"for {REFUSAL_WATCH} s it runs, and starts no host process of the app's profile"
-    said = f"seen: {sorted(watch.seen)}; still running: {running}; now: {_profile_processes_said()}"
+    unread = _unread_said(
+        (watch.unread[pid] for pid in sorted(set(watch.by_executable) | set(watch.maybe))),
+        watch.since,
+    )
+    said = (
+        f"seen: {sorted(watch.seen)}; still running: {running}; now: {_profile_processes_said()}"
+        + (f"\nseen where ps could not read the arguments: {unread}" if unread else "")
+    )
     # One cause, one failure: a blind watch has failed above, and leaves this unjudged, unless
     # what the check did see fails it on its own.
     if seeing or watch.seen or running == []:
@@ -7294,11 +7955,31 @@ class _PairingCheck:
                 _wait_until(lambda: not _running(APP_NAME), 15), "the app stops on SIGTERM"
             )
         if self.owns_profile and not _wait_until(_no_profile_process, 90):
-            left = sorted(_hosts_in(_look()))
+            # Killed: what the listers matched by its arguments, and, where ps could not read
+            # them, what maps the bundled runtime of the copy this check opened, on the profile
+            # this check owns. What maps another copy's runtime may be on another profile, and one
+            # of which lsof gave no file the check cannot tell: each is named, and left.
+            readings = _look()
+            unread = _unread_hosts_in(readings)
+            ours = python_in(self.app)
+            mine = {pid for pid, each in unread.items() if _same_file(each.executable, ours)}
+            left = sorted(_hosts_in(readings) | mine)
             print(f"note: host processes of the app's profile still ran, and were killed: {left}")
             for pid in left:
                 with contextlib.suppress(ProcessLookupError):
                     os.kill(pid, signal.SIGKILL)
+            other = sorted(pid for pid, each in unread.items() if each.host and pid not in mine)
+            if other:
+                print(
+                    "note: processes that map another copy's bundled runtime, whose arguments ps "
+                    f"could not read, still ran, and were left: {other}"
+                )
+            unknown = sorted(pid for pid, each in unread.items() if not each.host)
+            if unknown:
+                print(
+                    "note: possibly host processes of the app's profile still ran, whose "
+                    f"executables the check could not read, and were left: {unknown}"
+                )
         if self.owns_profile and self.url and self.profile.exists():
             print(f"forget, at the end: {_shown(self.host('--json', 'forget'))}")
         for child in reversed(self.children):

@@ -8159,8 +8159,10 @@ def _placement_world(
     monkeypatch.setattr(
         check_app, "_profile_processes", lambda: [4242] if opened and starts else []
     )
-    # raising=False: so that these tests also run against a check without the second lister.
+    # raising=False: so that these tests also run against a check without the second lister, or
+    # with it under its earlier name, which gave no third part.
     monkeypatch.setattr(check_app, "_ps_profile", lambda: ([], []), raising=False)
+    monkeypatch.setattr(check_app, "_ps_processes", lambda: ([], [], []), raising=False)
     monkeypatch.setattr(check_app, "_lister_pool", _NowPool, raising=False)
     for name, seconds in (
         ("CONTROL_GATE", 0.2),
@@ -8352,7 +8354,7 @@ def test_a_lister_that_does_not_answer_in_time_is_blind(
         if lister == "pgrep":
             check_app._profile_processes()
         else:
-            check_app._ps_profile()
+            check_app._ps_processes()
 
 
 def test_the_ps_lister_sees_the_profile_and_every_child_of_a_running_copy(
@@ -8360,8 +8362,9 @@ def test_the_ps_lister_sees_the_profile_and_every_child_of_a_running_copy(
 ) -> None:
     # The second lister reads ps, not pgrep: the host's processes on the app's profile, matched as
     # pgrep matches them, and every child of a running copy of the app, wherever that copy is and
-    # whatever its argv says (a child still in exec may show none), with its state and command
-    # line. Its own pgrep is never one, nor a host on another profile.
+    # whatever its argv says (ps may show a child by its name alone), with its state and command
+    # line. Its own pgrep is never one, nor a host on another profile. A child whose arguments ps
+    # could not read, which it shows as its name in parentheses, is also asked of lsof (below).
     rows = [
         "    1     0 Ss   /sbin/launchd",
         f"   99     1 S    {_APP_COMMAND}",
@@ -8378,16 +8381,23 @@ def test_the_ps_lister_sees_the_profile_and_every_child_of_a_running_copy(
 
     def run(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
         calls.append((argv, kwargs))
+        if argv[0] == "lsof":
+            return _done(argv, 1)
         return _done(argv, 0, "\n".join(rows) + "\n")
 
     monkeypatch.setattr("subprocess.run", run)
-    assert check_app._ps_profile() == (
+    hosts, children, unread = check_app._ps_processes()
+    assert (hosts, children) == (
         [101],
         [(100, "U (lucille-host-ru)"), (105, "S /bin/sleep 5")],
     )
-    [(argv, kwargs)] = calls
+    assert [(u.pid, u.parent, u.said, u.child, u.texts) for u in unread] == [
+        (100, 99, "U (lucille-host-ru)", True, ())
+    ]
+    [(argv, kwargs), (lsof, _)] = calls
     assert argv == ["ps", "-axww", "-o", "pid=,ppid=,stat=,command="]
     assert kwargs.get("timeout") == 5 and kwargs.get("errors") == "replace"
+    assert lsof == ["lsof", "-w", "-a", "-p", "100", "-d", "txt", "-F", "pn"]
 
 
 # Command lines a host on the app's profile may have, and some that are not one: whether the
@@ -8415,7 +8425,7 @@ def test_both_listers_match_a_host_whose_command_line_ends_at_the_profile(
     # seen, which the real-lister test below is for); ps matches with re.
     rows = f"   99     1 S    {_APP_COMMAND}\n  101     1 S    {command}\n"
     monkeypatch.setattr("subprocess.run", lambda argv, **kwargs: _done(argv, 0, rows))
-    hosts, _ = check_app._ps_profile()
+    hosts, _, _ = check_app._ps_processes()
     assert hosts == ([101] if matched else [])
     pattern = check_app.PROFILE_PROCESS
     assert bool(re.search(pattern, command)) is matched
@@ -8447,7 +8457,7 @@ def test_the_real_listers_find_a_process_whose_command_line_ends_at_the_profile(
             hosts = check_app._profile_processes()
         else:
             try:
-                hosts, _ = check_app._ps_profile()
+                hosts, _, _ = check_app._ps_processes()
             except check_app.ListerBlind as exc:
                 pytest.skip(f"ps cannot read the process table here: {exc}")
         assert ours.pid in hosts and other.pid not in hosts, (hosts, ours.pid, other.pid)
@@ -8471,7 +8481,7 @@ def test_the_ps_lister_is_blind_when_ps_fails_or_says_what_it_cannot_read(
 ) -> None:
     monkeypatch.setattr("subprocess.run", lambda argv, **kwargs: _done(argv, code, out, err))
     with pytest.raises(check_app.ListerBlind, match="ps"):
-        check_app._ps_profile()
+        check_app._ps_processes()
 
 
 def test_what_the_listers_and_diagnostics_read_need_not_be_utf8(
@@ -8496,7 +8506,7 @@ def test_what_the_listers_and_diagnostics_read_need_not_be_utf8(
         script.write_text("#!/bin/sh\n" + body, encoding="utf-8")
         script.chmod(0o755)
     monkeypatch.setenv("PATH", f"{bin_}{os.pathsep}{os.environ.get('PATH', '')}")
-    assert check_app._ps_profile() == ([], [(100, "S /bin/sleep \ufffd")])
+    assert check_app._ps_processes() == ([], [(100, "S /bin/sleep \ufffd")], [])
     assert check_app._profile_processes() == [4242]
     assert check_app._save_app_processes(tmp_path / "control-ps.txt") == [99]
     said = check_app._save_control_log(tmp_path / "control-log.txt", time.time())
@@ -8532,7 +8542,12 @@ def test_no_host_process_is_said_only_after_a_lister_read_the_table(
         return lister
 
     monkeypatch.setattr(check_app, "_profile_processes", answer(pgrep))
-    monkeypatch.setattr(check_app, "_ps_profile", answer(ps))
+    # raising=False: so that this test also runs against a check whose ps lister had the earlier
+    # name and gave no third part.
+    monkeypatch.setattr(check_app, "_ps_profile", answer(ps), raising=False)
+    monkeypatch.setattr(
+        check_app, "_ps_processes", answer(ps if ps == "blind" else (*ps, [])), raising=False
+    )
     assert check_app._no_profile_process() is none
     said = check_app._profile_processes_said()
     assert ("could not read" in said) == ("blind" in (pgrep, ps)), said
@@ -8738,7 +8753,8 @@ def test_the_two_listers_run_at_once_so_one_held_never_holds_back_the_other(
         return []
 
     monkeypatch.setattr(check_app, "_profile_processes", held)
-    monkeypatch.setattr(check_app, "_ps_profile", lambda: ([], []))
+    monkeypatch.setattr(check_app, "_ps_profile", lambda: ([], []), raising=False)
+    monkeypatch.setattr(check_app, "_ps_processes", lambda: ([], [], []), raising=False)
     # The stand-in worlds replace this pool with one that runs each call at once.
     assert "pool = _lister_pool()" in _python_function(
         _CHECK_APP.read_text(encoding="utf-8"), "_watch_profile"
@@ -8788,8 +8804,12 @@ class _ListerWorld:
     call takes ``took`` seconds (``ps_took`` for ps, where given). Asking whether the app runs
     takes ``asking`` seconds, so the open and the watch's start differ. Once ``open`` was given a
     file for the app's standard error, the app writes its login item line there ``marker_at``
-    seconds after the open. The control's snapshots are counted, and when its unified log was
-    asked for is recorded."""
+    seconds after the open. ``lsof(t, pids)`` gives lsof's answer about ``pids`` (by default, it
+    lists nothing and exits 1), each call taking ``took`` seconds too, and may raise as running
+    it would. ``named(t)`` gives the answer of the control's lsof by name (by default, nothing,
+    exit 1), each call taking ``named_took`` seconds, none by default, so that the listers' times
+    stay what they were without it. A process runs now where ps would list it now. The control's
+    snapshots are counted, and when its unified log was asked for is recorded."""
 
     pgrep: Callable[[float | None], tuple[int, str, str]]
     ps: Callable[[float | None], tuple[int, str, str]]
@@ -8797,6 +8817,10 @@ class _ListerWorld:
     ps_took: float | None = None
     asking: float = 0.25
     marker_at: float | None = None
+    lsof: Callable[[float | None, list[int]], tuple[int, str, str]] | None = None
+    named: Callable[[float | None], tuple[int, str, str]] | None = None
+    named_took: float = 0.0
+    named_calls: int = 0
     clock: _Clock = dataclasses.field(default_factory=_Clock)
     opened: list[list[str]] = dataclasses.field(default_factory=list)
     opened_at: float | None = None
@@ -8811,6 +8835,10 @@ class _ListerWorld:
     def running(self, name: str) -> list[str]:
         self.clock.now += self.asking
         return ["99"] if self.opened else []
+
+    def runs_now(self, pid: int) -> bool:
+        _, out, _ = self.ps(self.since_open())
+        return any(line.split()[:1] == [str(pid)] for line in out.splitlines())
 
     def run(self, argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
         if argv[0] == "open":
@@ -8834,6 +8862,18 @@ class _ListerWorld:
                     file.write("login item: notFound\n")
                 self.marked = True
             return _done(argv, *(self.pgrep if argv[0] == "pgrep" else self.ps)(at))
+        if argv[0] == "lsof" and "-c" in argv:
+            self.named_calls += 1
+            self.clock.now += self.named_took
+            if self.named is None:
+                return _done(argv, 1)
+            return _done(argv, *self.named(self.since_open()))
+        if argv[0] == "lsof":
+            self.clock.now += self.took
+            pids = [int(pid) for pid in argv[argv.index("-p") + 1].split(",")]
+            if self.lsof is None:
+                return _done(argv, 1)
+            return _done(argv, *self.lsof(self.since_open(), pids))
         return _done(argv, 0)
 
 
@@ -8847,6 +8887,8 @@ def _in_lister_world(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, world: _Li
     monkeypatch.setattr(check_app.time, "monotonic", world.clock.monotonic)
     monkeypatch.setattr(check_app.time, "sleep", world.clock.sleep)
     monkeypatch.setattr(check_app, "_lister_pool", _NowPool, raising=False)
+    # raising=False: so that these tests also run against a check that never asked.
+    monkeypatch.setattr(check_app, "_runs_now", world.runs_now, raising=False)
     monkeypatch.setattr(check_app, "installed_app_path", lambda: installed)
     monkeypatch.setattr(check_app, "_profile_folder", lambda: profile)
     monkeypatch.setattr(check_app, "_running", world.running)
@@ -9333,12 +9375,12 @@ def test_the_control_fails_on_a_child_of_the_app_that_is_not_the_host_on_its_pro
     assert re.search(r"status read had ended by 1\.\d s", case), case
 
 
-def test_a_failed_control_names_a_child_held_before_the_host_appears(
+def test_a_failed_control_names_a_child_seen_before_the_host_appears(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    # A child of the app whose command line ps cannot read yet, from 0.4 s, and the host on the
-    # app's profile only from 30.5 s, past the gate: a spawn held in exec. The control fails,
-    # takes its snapshot and the unified log, and names that case.
+    # A child of the app that ps shows only by its name, from 0.4 s, and the host on the app's
+    # profile only from 30.5 s, past the gate (the set-up, not a cause). The control fails, takes
+    # its snapshot and the unified log, and names that case.
     ps = _ps_with((0.4, 30.5, " 5555    99 U    (lucille-host-ru)"), (30.5, 1e9, _PS_HOST_ROW))
     world = _ListerWorld(pgrep=_host_from(30.5), ps=ps, marker_at=32.0)
     checker, _ = _control_in(world, tmp_path, monkeypatch)
@@ -9512,13 +9554,16 @@ def test_a_control_records_its_long_stretches_and_does_not_gate_on_them(
 
 def test_the_control_keeps_its_gate_and_opens_the_copy_with_its_output_kept() -> None:
     # The gate stays at 30 s and a refusing copy's watch at 10; the snapshot at 5 s and the watch
-    # to 60 s are for the record. The control's open keeps the app's standard output and error,
-    # and its gate takes only a host process the listers match, never a bare child of the app.
+    # to 60 s are for the record. The control's open keeps the app's standard output and error.
+    # Its gate takes a host process the listers match by its command line, or a child of the app
+    # that runs that copy's bundled runtime where ps could read none of the children's arguments
+    # (_Watch.passed_by), never a bare child of the app.
     source = _CHECK_APP.read_text(encoding="utf-8")
     control = _python_function(source, "_placement_control")
     assert '"--stdout"' in control and '"--stderr"' in control
+    assert "_watch_control(work, err_log, opened, opened_wall, python_in(installed))" in control
     watch = _python_function(source, "_watch_control")
-    assert "stop=lambda found: bool(found.hosts)" in watch and "bool(watch.hosts)" in watch
+    assert "found.passed_by(runtime)" in watch and "watch.passed_by(runtime)" in watch
     assert "found.seen" not in watch and "watch.seen" not in watch
     assert check_app.CONTROL_GATE == 30 and check_app.REFUSAL_WATCH == 10
     assert check_app.CONTROL_SNAPSHOT_AT == 5 and check_app.CONTROL_DIAGNOSIS == 60
@@ -9528,6 +9573,1193 @@ def test_the_control_keeps_its_gate_and_opens_the_copy_with_its_output_kept() ->
     assert check_app.RECORDED_GAP == 0.35 and check_app.BLIND_LIMIT == 2.0
     assert check_app.LISTER_LIMIT == 5 and check_app.POLL_PAUSE < check_app.RECORDED_GAP
     assert check_app.BLIND_LIMIT > 2 * 0.95
+
+
+# --- check_app.py placement: a host process whose arguments ps cannot read, told by its
+# executable. In run 42700559897 (xcode-27, macOS 27.0.1) ps showed the app's first child as
+# '19072 R (lucille-host-run)', and neither lister matched a host process by its command line in
+# 60 s, though the app's first status read had ended by 2.21 s.
+
+_SHORT = "(lucille-host-run)"
+# The bundled runtime's own name, as lsof gives it, read from the build, not from the check, so
+# that the tests that give it run against a check that does not have it.
+_RUNTIME_NAME = Path(build_app.INTERPRETER).name
+# What Apple's lsof writes where a file's name goes when it cannot read a region of a process
+# (dialects/darwin/libproc/dproc.c, process_text, read at 7a8a1b2), for an errno other than ESRCH
+# or EINVAL: its own message, not a file.
+_REGION_ERROR = "region info error: Operation not permitted"
+
+
+def _runtime_of(app: Path) -> str:
+    return str(check_app.python_in(app))
+
+
+def _installed_in(tmp_path: Path) -> Path:
+    """Where :func:`_in_lister_world` puts the copy in /Applications."""
+    return tmp_path / "Applications" / f"{check_app.APP_NAME}.app"
+
+
+def _lsof_giving(
+    texts: Mapping[int, Sequence[str]],
+) -> Callable[[float | None, list[int]], tuple[int, str, str]]:
+    """lsof -F pn, made up: for each pid asked about, the text files ``texts`` gives it, and exit 1
+    where any pid asked about has none, as lsof exits when it cannot find one."""
+
+    def lsof(at: float | None, pids: list[int]) -> tuple[int, str, str]:
+        out = "".join(
+            f"p{pid}\n" + "".join(f"n{path}\n" for path in texts[pid])
+            for pid in pids
+            if texts.get(pid)
+        )
+        return (0 if all(texts.get(pid) for pid in pids) else 1), out, ""
+
+    return lsof
+
+
+def test_ps_shows_the_bundled_runtime_by_its_name_cut_to_sixteen_characters() -> None:
+    # Where ps cannot read a process's arguments it prints its name in parentheses, the kernel's
+    # p_comm, cut to MAXCOMLEN, 16 (adv_cmds' ps/print.c, getproclline). Seen in run 42700559897:
+    # '(lucille-host-run)'. A copy's bundled runtime is told by its path's end, wherever the copy
+    # is and whatever its folder is called, the copy the placement check sets aside included.
+    assert check_app.RUNTIME_SHORT_NAME == _SHORT
+    assert check_app.RUNTIME_SHORT_NAME == f"({Path(build_app.INTERPRETER).name[:16]})"
+    runtime = check_app.RUNTIME_EXECUTABLE
+    for path, matched in [
+        (_runtime_of(Path("/Applications") / f"{check_app.APP_NAME}.app"), True),
+        (_runtime_of(Path("/x") / f"{check_app.RENAMED_COPY}.app"), True),
+        (_runtime_of(Path("/Applications") / f".{check_app.APP_NAME}.app.set-aside-by-x"), True),
+        ("/opt/other/bin/lucille-host-runtime", False),
+        (_runtime_of(Path("/x") / f"{check_app.APP_NAME}.app") + "-old", False),
+        ("/usr/bin/python3", False),
+    ]:
+        assert bool(runtime.search(path)) is matched, path
+
+
+def test_the_ps_lister_asks_lsof_for_what_runs_where_it_cannot_read_the_arguments(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # For each row whose arguments ps could not read, a child of a running copy of the app or a
+    # process shown by the bundled runtime's short name, the ps lister asks lsof, once per
+    # reading, for the files it maps (txt), with what is left of the reading's 5 s: lsof reads
+    # those from the process's mapped regions, not from its arguments. A row whose arguments ps
+    # read is judged by them, and lsof is not asked about it; nor about the check's own processes,
+    # which are left out. Where lsof gives no file, why says whether the process still ran.
+    own = os.getpid()
+    installed = _runtime_of(Path("/Applications") / f"{check_app.APP_NAME}.app")
+    renamed = _runtime_of(Path("/Applications") / f"{check_app.RENAMED_COPY}.app")
+    rows = [
+        "    1     0 Ss   /sbin/launchd",
+        f"   99     1 S    {_APP_COMMAND}",
+        f"  100    99 R    {_SHORT}",
+        f"  101     1 S    {_HOST_COMMAND}",
+        f"  102     1 S    {_SHORT}",
+        f"  103     1 S    {_SHORT}",
+        f"  104     1 S    {_SHORT}",
+        "  105     1 S    (sleep)",
+        f"  106 {own:>5} S    {_SHORT}",
+        f"{own:>5}     1 S    {_SHORT}",
+        "  108    99 S    /bin/sleep 5",
+        "  109    99 U    (Capsule)",
+        "  110    99 U    (Capsule)",
+    ]
+    texts = {
+        100: ["/usr/lib/dyld", installed],
+        102: [renamed],
+        104: ["/opt/other/bin/lucille-host-runtime"],
+        109: [f"/Applications/{check_app.APP_NAME}.app/Contents/MacOS/{check_app.APP_NAME}"],
+    }
+    calls: list[tuple[list[str], dict[str, Any]]] = []
+
+    def run(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        calls.append((argv, kwargs))
+        if argv[0] == "lsof":
+            pids = [int(pid) for pid in argv[argv.index("-p") + 1].split(",")]
+            return _done(argv, *_lsof_giving(texts)(None, pids))
+        return _done(argv, 0, "\n".join(rows) + "\n")
+
+    monkeypatch.setattr("subprocess.run", run)
+    monkeypatch.setattr(check_app, "_runs_now", lambda pid: pid != 103)
+    before = time.monotonic()
+    hosts, children, unread = check_app._ps_processes()
+    assert hosts == [101]
+    assert [pid for pid, _ in children] == [100, 108, 109, 110]
+    [_, (lsof, kwargs)] = calls
+    assert lsof == ["lsof", "-w", "-a", "-p", "100,102,103,104,109,110", "-d", "txt", "-F", "pn"]
+    assert 4 < kwargs["timeout"] <= 5 and kwargs.get("errors") == "replace", kwargs
+    found = {u.pid: u for u in unread}
+    assert all(before <= u.asked <= time.monotonic() and u.seen_by == "ps" for u in unread)
+    assert sorted(found) == [100, 102, 103, 104, 109, 110]
+    assert found[100].child and found[100].executable == installed and found[100].host
+    assert found[100].said == f"R {_SHORT}" and found[100].parent == 99
+    # Reparented, it runs another copy's runtime: a host by its executable, whatever its parent.
+    assert not found[102].child and found[102].executable == renamed and found[102].host
+    # lsof listed nothing for it: possibly a host, never taken for none.
+    assert found[103].texts == () and found[103].maybe and not found[103].host
+    assert "lsof listed no text file for it" in found[103].why, found[103].why
+    assert found[103].why.endswith("; it had ended by the time lsof answered"), found[103].why
+    assert found[110].why.endswith("; a process of that pid still ran once lsof had answered")
+    # Another program of that name, outside any copy: neither.
+    assert found[104].executable is None and not found[104].host and not found[104].maybe
+    # A child of the app in parentheses that runs the app itself: neither, but still its child.
+    assert found[109].child and not found[109].host and not found[109].maybe
+    # One of which lsof says nothing is possibly a host only where ps shows the runtime's name.
+    assert found[110].child and found[110].texts == () and not found[110].maybe
+
+
+@pytest.mark.parametrize(
+    ("failure", "said"),
+    [
+        ("missing", "lsof could not start"),
+        ("timeout", "lsof did not answer in 5 s"),
+        ("nothing", "lsof listed no text file for it (exit 1"),
+        ("garbage", "lsof listed no text file for it (exit 0"),
+    ],
+)
+def test_what_runs_is_unknown_where_lsof_fails_and_the_check_goes_on(
+    monkeypatch: pytest.MonkeyPatch, failure: str, said: str
+) -> None:
+    # lsof missing (off a Mac where it is not installed), held, finding nothing, or answering what
+    # is not its list: each pid gets no file and why, nothing raises, and a pid it did list keeps
+    # its files. No pid, no call.
+    def run(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        assert argv[0] == "lsof" and kwargs.get("timeout") == 5, argv
+        if failure == "missing":
+            raise FileNotFoundError("lsof")
+        if failure == "timeout":
+            raise subprocess.TimeoutExpired(argv, kwargs["timeout"])
+        if failure == "nothing":
+            return _done(argv, 1, "p42\nn/bin/sleep\n", "")
+        return _done(argv, 0, "not\nits list\n", "")
+
+    monkeypatch.setattr("subprocess.run", run)
+    texts = check_app._texts_of([42, 43])
+    assert sorted(texts) == [42, 43]
+    if failure == "nothing":
+        assert texts[42] == (("/bin/sleep",), "")
+    else:
+        assert texts[42][0] == () and said in texts[42][1], texts
+    assert texts[43][0] == () and said in texts[43][1], texts
+    monkeypatch.setattr("subprocess.run", lambda argv, **kwargs: pytest.fail(f"ran {argv}"))
+    assert check_app._texts_of([]) == {}
+
+
+def _names(path: str, expected: str | Path) -> bool:
+    """Whether ``path`` names ``expected``, compared as strings first, as a file only where it is
+    one, so that a name that is not a path is a failed match and not an error."""
+    return path == str(expected) or (os.path.exists(path) and os.path.samefile(path, expected))
+
+
+def test_the_real_lsof_names_the_program_a_process_runs() -> None:
+    # lsof as it is on this machine: the files a sleeping /bin/sleep maps include /bin/sleep, or
+    # the file /bin/sleep names. On a Mac this is Apple's lsof, whose -d txt lists the program and
+    # the libraries it maps. A process that has ended gets none, and why says it had ended.
+    if shutil.which("lsof") is None:
+        pytest.skip("no lsof here")
+    sleeper = subprocess.Popen(["/bin/sleep", "30"])
+    try:
+        texts, why = check_app._texts_of([sleeper.pid])[sleeper.pid]
+        assert why == "" and any(_names(path, "/bin/sleep") for path in texts), (texts, why)
+        assert all(path.startswith("/") for path in texts), texts
+    finally:
+        sleeper.kill()
+        sleeper.wait()
+    texts, why = check_app._texts_of([sleeper.pid])[sleeper.pid]
+    assert texts == () and "lsof listed no text file for it" in why, why
+    assert why.endswith("; it had ended by the time lsof answered"), why
+
+
+def test_the_real_lsof_finds_a_process_by_the_runtimes_name_with_its_parent(
+    tmp_path: Path,
+) -> None:
+    # lsof as it is on this machine, asked as the control's reader by name asks it: a copy of
+    # /bin/sleep at a copy's runtime path, started by a shell, is found by its name, with the
+    # shell as its parent and the copy among the files it maps. Its parent maps no copy of the
+    # app, so it is no child of one. Seen here with Linux's lsof; on a Mac, Apple's.
+    if shutil.which("lsof") is None:
+        pytest.skip("no lsof here")
+    runtime = Path(_runtime_of(tmp_path / f"{check_app.APP_NAME}.app"))
+    runtime.parent.mkdir(parents=True)
+    shutil.copy2("/bin/sleep", runtime)
+    shell = subprocess.Popen(
+        ["/bin/sh", "-c", '"$0" 30 & wait', str(runtime)], start_new_session=True
+    )
+    try:
+        found: list[Any] = []
+        error = ""
+        deadline = time.monotonic() + 10
+        while not found and time.monotonic() < deadline:
+            seen, error = check_app._named_processes()
+            found = [each for each in seen if each.parent == shell.pid]
+            time.sleep(0.1)
+        assert error == "" and len(found) == 1, (found, error)
+        [each] = found
+        assert each.seen_by == check_app.NAMED and each.named and not each.child, each
+        assert any(_names(path, runtime) for path in each.texts), each
+        assert each.executable is not None and _names(each.executable, runtime), each
+    finally:
+        os.killpg(shell.pid, signal.SIGKILL)
+        shell.wait()
+
+
+def _child_world(
+    tmp_path: Path, texts: Mapping[int, Sequence[str]], *rows: tuple[float, float, str]
+) -> _ListerWorld:
+    """pgrep never matches; ps shows ``rows``; lsof gives ``texts``; the app's login item line
+    comes at 1.5 s."""
+    return _ListerWorld(pgrep=_none, ps=_ps_with(*rows), lsof=_lsof_giving(texts), marker_at=1.5)
+
+
+def test_the_control_passes_on_a_child_that_runs_its_runtime_where_ps_cannot_read_arguments(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # As in run 42700559897: from 0.4 s ps shows a child of the app only as '(lucille-host-run)',
+    # and pgrep never matches. lsof says the child runs the copy's own bundled runtime: the gate
+    # holds by its executable. The line says so, with the child's pid, what it runs and what ps
+    # showed, and that this run does not prove the listers' pattern; the app's children, as ps
+    # showed them, are recorded once. No snapshot or unified log: the gate held.
+    runtime = _runtime_of(_installed_in(tmp_path))
+    world = _child_world(tmp_path, {5555: [runtime]}, (0.4, 2.0, f" 5555    99 R    {_SHORT}"))
+    checker, _ = _control_in(world, tmp_path, monkeypatch)
+    said = capsys.readouterr().out
+    assert checker.failures == [], checker.failures
+    gate = next(line for line in said.splitlines() if line.startswith("the control's gate held"))
+    assert re.fullmatch(
+        r"the control's gate held by its executable, its arguments unreadable: pid 5555, a child "
+        rf"of the app, has the runtime's name and maps {re.escape(runtime)} \(by lsof, asked at "
+        rf"0\.4\d s\), and ps showed it as 'R {re.escape(_SHORT)}' at 0\.4\d s; ps read the "
+        r"arguments of none of the app's children, so this run does not prove that the listers' "
+        r"pattern matches the app's command line",
+        gate,
+    ), gate
+    record = [line for line in said.splitlines() if "the app's children, as ps first" in line]
+    assert len(record) == 1 and re.fullmatch(
+        rf"the control: the app's children, as ps first showed them: 5555 'R {re.escape(_SHORT)}', "
+        rf"its arguments unreadable, by lsof, asked at 0\.4\d s, it maps {re.escape(runtime)}",
+        record[0],
+    ), said
+    named = [line for line in said.splitlines() if line.startswith("the control: lsof, by name")]
+    assert len(named) == 1 and re.fullmatch(
+        r"the control: lsof, by name, recorded, not a gate: \d+ calls, longest 0\.00 s, lsof "
+        r"errors 0; it saw no process of the runtime's name",
+        named[0],
+    ), named
+    line = next(line for line in said.splitlines() if "the control's watch" in line)
+    assert re.search(r"ps, by executable \(its arguments unreadable\) at 0\.4\d s", line), line
+    # The gate held at its first such reading, and the watch went on for the record for 5 s, not
+    # to the gate's 30 s.
+    assert re.search(r"lister calls \(.*\) in 5\.\d s from 0\.2\d s", line), line
+    assert world.snapshots == [] and world.logs == []
+
+
+@pytest.mark.parametrize(
+    "child",
+    ["elsewhere", "another copy", "unknown", "an error", "no lsof", "not a child", "none"],
+)
+def test_the_control_still_fails_unless_a_child_runs_that_copys_runtime(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    child: str,
+) -> None:
+    # A child whose arguments ps cannot read passes the gate only if lsof says it maps that copy's
+    # own bundled runtime: not another program, not another copy's runtime, not where lsof lists
+    # nothing, says only that it could not read the process (Apple's lsof writes that where a
+    # file's name goes) or is not there, not one that maps it but is not the app's child, and not
+    # with no child at all. The case says what lsof gave.
+    other = _runtime_of(tmp_path / f"{check_app.RENAMED_COPY}.app")
+    runtime = _runtime_of(_installed_in(tmp_path))
+    texts = {
+        "elsewhere": {5555: ["/usr/bin/python3"]},
+        "another copy": {5555: [other]},
+        "an error": {5555: [_REGION_ERROR]},
+        "not a child": {5555: [runtime]},
+    }
+    parent = 1 if child == "not a child" else 99
+    row = (0.4, 2.0, f" 5555 {parent:>5} R    {_SHORT}")
+    world = _child_world(tmp_path, texts.get(child, {}), *([] if child == "none" else [row]))
+    if child == "no lsof":
+
+        def missing(at: float | None, pids: list[int]) -> tuple[int, str, str]:
+            raise FileNotFoundError("lsof")
+
+        world.lsof = missing
+    checker, _ = _control_in(world, tmp_path, monkeypatch)
+    said = capsys.readouterr().out
+    assert checker.failures == [
+        "the control: it starts the host on the app's profile, and the check sees it"
+    ], checker.failures
+    assert "the control's gate held" not in said, said
+    assert len(world.snapshots) == 1 and len(world.logs) == 1
+    case = _case(said)
+    expected = {
+        "not a child": "but no reading saw a host process by 60.",
+        "elsewhere": "5555 maps /usr/bin/python3 and no copy's runtime (by lsof)",
+        "another copy": f"5555 maps {other} (by lsof), not that copy's runtime",
+        "unknown": "5555: lsof gave no executable (lsof listed no text file for it",
+        "an error": f"5555: lsof gave no executable (lsof said {_REGION_ERROR!r}; ",
+        "no lsof": "5555: lsof gave no executable (lsof could not start",
+        "none": "but no reading saw a host process by 60.",
+    }[child]
+    assert expected in case, case
+    if child in ("none", "not a child"):
+        assert "the control: ps saw no child of the app" in said, said
+
+
+def test_the_controls_gate_needs_every_child_ps_read_to_match_the_pattern(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Where ps could read the arguments of a child of the app, they are what the control proves
+    # the pattern against: here one child runs the copy's runtime with arguments ps cannot read,
+    # and another, on another profile, shows its arguments, which the pattern does not match. The
+    # control fails, and says why the first did not pass it.
+    runtime = _runtime_of(_installed_in(tmp_path))
+    wrong = _HOST_COMMAND.replace(f"--profile {check_app.APP_PROFILE} ", "--profile default ")
+    world = _child_world(
+        tmp_path,
+        {5555: [runtime]},
+        (0.4, 2.0, f" 5555    99 R    {_SHORT}"),
+        (0.6, 2.0, f" 5556    99 S    {wrong}"),
+    )
+    checker, _ = _control_in(world, tmp_path, monkeypatch)
+    said = capsys.readouterr().out
+    assert any("the control: it starts the host" in what for what in checker.failures)
+    case = _case(said)
+    assert "5555 maps that copy's runtime (by lsof), from 0.4 s" in case, case
+    assert re.search(
+        r"ps read the arguments of a child of the app that the listers' pattern does not match "
+        r"\(5556 'S .*--profile default .*'\), so what a child maps does not pass the gate",
+        case,
+    ), case
+
+
+def test_the_control_fails_on_a_child_that_runs_its_runtime_only_after_the_gate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # The gate is 30 s for a child told by its executable too: one first seen at 30.5 s does not
+    # pass it.
+    runtime = _runtime_of(_installed_in(tmp_path))
+    world = _child_world(tmp_path, {5555: [runtime]}, (30.5, 32.0, f" 5555    99 R    {_SHORT}"))
+    checker, _ = _control_in(world, tmp_path, monkeypatch)
+    said = capsys.readouterr().out
+    assert checker.failures == [
+        "the control: it starts the host on the app's profile, and the check sees it"
+    ], checker.failures
+    assert "the control's gate held" not in said, said
+    line = next(line for line in said.splitlines() if "the control's watch" in line)
+    assert re.search(r"ps, by executable \(its arguments unreadable\) at 30\.\d\d s", line), line
+
+
+def test_the_controls_record_keeps_what_lsof_said_once_it_said_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # lsof gives no file of the child at first, and from 0.6 s says that it maps the copy's
+    # runtime: the gate holds at the reading that asked it then, and the record keeps what says
+    # the most, the first time it was said, not lsof's first answer.
+    runtime = _runtime_of(_installed_in(tmp_path))
+
+    def lsof(at: float | None, pids: list[int]) -> tuple[int, str, str]:
+        if at is None or at < 0.6:
+            return 1, "", ""
+        return 0, "".join(f"p{pid}\nn{runtime}\n" for pid in pids), ""
+
+    world = _ListerWorld(
+        pgrep=_none,
+        ps=_ps_with((0.4, 2.0, f" 5555    99 R    {_SHORT}")),
+        lsof=lsof,
+        marker_at=1.5,
+    )
+    checker, _ = _control_in(world, tmp_path, monkeypatch)
+    said = capsys.readouterr().out
+    assert checker.failures == [], checker.failures
+    assert re.search(
+        r"\(by lsof, asked at 0\.[5-7]\d s\), and ps showed it as 'R \(lucille-host-run\)' at "
+        r"0\.4\d s",
+        said,
+    ), said
+    assert re.search(
+        rf"its arguments unreadable, by lsof, asked at 0\.[5-7]\d s, it maps {re.escape(runtime)}",
+        said,
+    ), said
+    assert "its executable unknown" not in said, said
+
+
+def test_the_controls_record_shows_the_first_five_children_of_the_app() -> None:
+    # Recorded, not a gate: the app's children as ps first showed them, five at most, with what
+    # lsof said of each whose arguments ps could not read, and how many more there were.
+    unread = check_app._Unread(106, 99, "R", _SHORT, True, (), "lsof listed no text file for it")
+    reading = check_app._Reading(
+        "ps",
+        0.0,
+        0.1,
+        frozenset(),
+        tuple((pid, f"S /bin/sleep {pid}") for pid in range(100, 106)) + ((106, f"R {_SHORT}"),),
+        "",
+        (unread,),
+    )
+    watch = _watched(reading)
+    assert watch.children_said() == (
+        "the app's children, as ps first showed them: "
+        + "; ".join(f"{pid} 'S /bin/sleep {pid}'" for pid in range(100, 105))
+        + "; and 2 more"
+    )
+    first = _watched(
+        check_app._Reading("ps", 0.0, 0.1, frozenset(), ((106, f"R {_SHORT}"),), "", (unread,))
+    )
+    assert first.children_said() == (
+        f"the app's children, as ps first showed them: 106 'R {_SHORT}', its arguments "
+        "unreadable, its executable unknown: lsof listed no text file for it"
+    )
+    assert _watched().children_said() == "ps saw no child of the app"
+
+
+def test_a_path_names_the_runtime_however_it_is_spelled(tmp_path: Path) -> None:
+    # The same string, or the same file by another path (here a link to its folder), names it;
+    # another file, a path that is not there, or none, does not.
+    folder = tmp_path / "Contents"
+    folder.mkdir()
+    runtime = folder / "lucille-host-runtime"
+    runtime.write_text("", encoding="utf-8")
+    other = folder / "other"
+    other.write_text("", encoding="utf-8")
+    (tmp_path / "link").symlink_to(folder)
+    assert check_app._same_file(str(runtime), runtime)
+    assert check_app._same_file(str(tmp_path / "link" / "lucille-host-runtime"), runtime)
+    assert not check_app._same_file(str(other), runtime)
+    assert not check_app._same_file(str(tmp_path / "gone"), runtime)
+    assert not check_app._same_file(None, runtime)
+
+
+def test_the_controls_gate_takes_only_what_came_inside_it() -> None:
+    # The gate, asked of a watch over made-up readings: inside its 30 s, a host a lister matched by
+    # its arguments holds it by its arguments, even where a child told by its executable came first;
+    # a child that runs the copy's runtime holds it by its executable; either one first seen past
+    # the 30 s does not.
+    runtime = _runtime_of(Path("/Applications") / f"{check_app.APP_NAME}.app")
+    child = check_app._Unread(5555, 99, "R", _SHORT, True, (runtime,))
+
+    def ps(at: float, hosts: frozenset[int] = frozenset(), unread: tuple[Any, ...] = ()) -> Any:
+        return check_app._Reading("ps", at, at + 0.01, hosts, ((5555, f"R {_SHORT}"),), "", unread)
+
+    assert _watched(ps(0.4, unread=(child,)), ended=40.0).passed_by(runtime)[0] == "executable"
+    assert _watched(ps(30.5, unread=(child,)), ended=40.0).passed_by(runtime) == ("", "")
+    both = _watched(ps(0.3, unread=(child,)), ps(0.5, frozenset({5555})), ended=40.0)
+    assert both.passed_by(runtime)[0] == "arguments"
+    assert _watched(ps(30.5, frozenset({5555})), ended=40.0).passed_by(runtime) == ("", "")
+    assert _watched(ps(0.4, unread=(child,)), ended=40.0).passed_by("/x/other") == ("", "")
+
+
+def test_a_control_that_sees_both_says_it_held_by_the_arguments(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # ps shows a child only by its name at 0.3 s (why is not known), and lsof says it maps the
+    # copy's runtime; from 0.5 s ps reads its arguments and both listers match it. Inside the gate
+    # a lister matched it by its command line, so the control held by its arguments, the proof it
+    # had before, and the line says that and no more.
+    runtime = _runtime_of(_installed_in(tmp_path))
+    ps = _ps_with((0.3, 0.5, f" 4242    99 R    {_SHORT}"), (0.5, 1e9, _PS_HOST_ROW))
+    world = _ListerWorld(
+        pgrep=_host_from(0.5), ps=ps, lsof=_lsof_giving({4242: [runtime]}), marker_at=1.5
+    )
+    checker, _ = _control_in(world, tmp_path, monkeypatch)
+    said = capsys.readouterr().out
+    assert checker.failures == [], checker.failures
+    gate = [line for line in said.splitlines() if line.startswith("the control's gate held")]
+    assert len(gate) == 1 and re.fullmatch(
+        r"the control's gate held by its arguments: (pgrep|ps) matched a host process by its "
+        r"command line at 0\.5\d s",
+        gate[0],
+    ), gate
+    assert "does not prove" not in said, said
+
+
+def test_a_passing_control_by_the_arguments_still_prints_its_lines_as_before(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Where ps reads the arguments, nothing is asked of lsof by pid, and the control's lines are
+    # the ones it printed before, with the gate's own line, the record of the app's children and
+    # what the reader by name saw added. That reader saw the same child, which maps the copy's
+    # runtime, but its arguments were readable: the record does not call them unreadable, and the
+    # gate held by them.
+    installed = _installed_in(tmp_path)
+    runtime = _runtime_of(installed)
+    world = _ListerWorld(
+        pgrep=_host_from(0.4),
+        ps=_ps_host_from(0.4),
+        named=_named_giving(_app_listed(installed), (0.4, 1e9, 4242, 99, _RUNTIME_NAME, [runtime])),
+        marker_at=1.5,
+    )
+    asked: list[list[int]] = []
+
+    def lsof(at: float | None, pids: list[int]) -> tuple[int, str, str]:
+        asked.append(pids)
+        return 1, "", ""
+
+    world.lsof = lsof
+    checker, _ = _control_in(world, tmp_path, monkeypatch)
+    said = capsys.readouterr().out
+    assert checker.failures == [] and asked == [], (checker.failures, asked)
+    assert re.search(
+        r"^the control's gate held by its arguments: (pgrep|ps) matched a host process by its "
+        r"command line at 0\.4\d s$",
+        said,
+        re.MULTILINE,
+    ), said
+    assert (
+        f"the control: the app's children, as ps first showed them: 4242 'S {_HOST_COMMAND}'\n"
+        in said
+    ), said
+    line = next(line for line in said.splitlines() if "the control's watch" in line)
+    assert "by executable" not in line and "possibly a host" not in line, line
+    assert re.search(
+        r"the processes of the runtime's name it saw: 4242 \(parent 99, a running copy of the "
+        rf"app\) from 0\.4\d s, by lsof, by name, asked at 0\.4\d s, it maps {re.escape(runtime)}$",
+        said,
+        re.MULTILINE,
+    ), said
+
+
+@pytest.mark.parametrize(
+    ("texts", "starts"),
+    [
+        ([f"/x/{check_app.APP_NAME}.app/{build_app.RUNTIME_IN_APP}"], True),
+        ([], True),
+        ([_REGION_ERROR], True),
+        (["/opt/other/bin/lucille-host-runtime"], False),
+    ],
+    ids=["a copy's runtime", "lsof says nothing", "lsof says only an error", "another program"],
+)
+def test_a_refusing_copy_fails_on_a_runtime_process_it_left_behind(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    texts: list[str],
+    starts: bool,
+) -> None:
+    # A process whose arguments ps cannot read, and whose parent is not the copy (its parent went,
+    # and launchd took it): where lsof says it maps a copy's bundled runtime, the copy started it;
+    # where lsof lists nothing, or only its own error where a file's name goes, it may have, and
+    # the check fails safe. One that maps another program of that name is not counted.
+    world = _ListerWorld(
+        pgrep=_none,
+        ps=_ps_with((2.0, 2.5, f" 7777     1 S    {_SHORT}")),
+        lsof=_lsof_giving({7777: texts}),
+    )
+    checker = _refusing_in(world, tmp_path, monkeypatch)
+    said = capsys.readouterr().out
+    started = (
+        f"for {check_app.REFUSAL_WATCH} s it runs, and starts no host process of the app's profile"
+    )
+    assert checker.failures == ([started] if starts else []), checker.failures
+    read = bool(texts) and texts[0].startswith("/")
+    if read:
+        how = (
+            f"by its executable, its arguments unreadable: 7777 maps {texts[0]} (by lsof, asked at "
+        )
+    elif texts:
+        how = (
+            "possibly a host, its arguments and executable unreadable: 7777 "
+            f"(lsof said {texts[0]!r}"
+        )
+    else:
+        how = "possibly a host, its arguments and executable unreadable: 7777 (lsof listed no text"
+    assert (how in said) is starts, said
+    if read and starts:
+        assert re.search(re.escape(how) + r"\d\.\d\d s; parent 1\)", said), said
+    if starts:
+        assert "seen: [7777]" in said, said
+        line = next(line for line in said.splitlines() if "the watch of the app's profile" in line)
+        name = check_app.BY_EXECUTABLE if read else check_app.MAYBE_HOST
+        assert re.search(re.escape(name) + r" at \d\.\d\d s", line), line
+
+
+def _ps_rows_then(*tables: list[str]) -> Callable[..., subprocess.CompletedProcess[str]]:
+    """subprocess.run, made up: pgrep finds nothing; ps gives each of ``tables`` in turn, the last
+    one from then on; lsof lists nothing (no text file for any pid)."""
+    left = list(tables)
+
+    def run(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        if argv[0] == "pgrep":
+            return _done(argv, 1)
+        if argv[0] == "lsof":
+            return _done(argv, 1)
+        rows = left.pop(0) if len(left) > 1 else left[0]
+        return _done(argv, 0, "".join(row + "\n" for row in rows))
+
+    return run
+
+
+@pytest.mark.parametrize(
+    ("row", "texts", "none"),
+    [
+        # Possibly a host: its executable could not be read. Fail safe.
+        (f" 7777     1 S    {_SHORT}", None, False),
+        # A copy's runtime, by its executable.
+        (
+            f" 7777     1 S    {_SHORT}",
+            [f"/x/{check_app.APP_NAME}.app/{build_app.RUNTIME_IN_APP}"],
+            False,
+        ),
+        # Another program of that name.
+        (f" 7777     1 S    {_SHORT}", ["/opt/other/bin/lucille-host-runtime"], True),
+        # The check's own child, and the check itself, whatever they run: never a host here.
+        ("OWN-CHILD", None, True),
+        ("SELF", None, True),
+        # A host process of the app's profile that ps can read, the check's own child or not, is
+        # one, as before, by its arguments.
+        (f" 7777     1 S    {_HOST_COMMAND}", None, False),
+        ("OWN-HOST", None, False),
+    ],
+    ids=[
+        "lsof says nothing",
+        "a copy's runtime",
+        "another program",
+        "the check's child",
+        "the check",
+        "a host by its arguments",
+        "the check's host by its arguments",
+    ],
+)
+def test_the_waits_for_no_host_count_what_runs_where_ps_cannot_read_the_arguments(
+    monkeypatch: pytest.MonkeyPatch, row: str, texts: list[str] | None, none: bool
+) -> None:
+    own = os.getpid()
+    row = {
+        "OWN-CHILD": f" 7777 {own:>5} S    {_SHORT}",
+        "SELF": f"{own:>5}     1 S    {_SHORT}",
+        "OWN-HOST": f" 7777 {own:>5} S    {_HOST_COMMAND}",
+    }.get(row, row)
+    base = _ps_rows_then(["    1     0 Ss   /sbin/launchd", row])
+    lsof = None if texts is None else _lsof_giving({7777: texts})
+
+    def run(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        if argv[0] == "lsof" and lsof is not None:
+            return _done(argv, *lsof(None, [7777]))
+        return base(argv, **kwargs)
+
+    monkeypatch.setattr("subprocess.run", run)
+    assert check_app._no_profile_process() is none
+    said = check_app._profile_processes_said()
+    if not none and row.endswith(_SHORT):
+        assert "7777" in said and ("possibly" in said) is (texts is None), said
+
+
+def test_a_wait_for_no_host_holds_once_a_process_ps_cannot_read_has_gone(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The wait does not pass while a '(lucille-host-run)' runs whose executable lsof cannot give,
+    # and passes once it has gone; while it never goes, the wait fails.
+    gone = ["    1     0 Ss   /sbin/launchd"]
+    there = [*gone, f" 7777     1 S    {_SHORT}"]
+    clock = _Clock()
+    monkeypatch.setattr(check_app.time, "monotonic", clock.monotonic)
+    monkeypatch.setattr(check_app.time, "sleep", clock.sleep)
+    monkeypatch.setattr("subprocess.run", _ps_rows_then(there, there, there, gone))
+    assert check_app._wait_until(check_app._no_profile_process, 30) is True
+    assert clock.now == pytest.approx(1001.5)
+    monkeypatch.setattr("subprocess.run", _ps_rows_then(there))
+    assert check_app._wait_until(check_app._no_profile_process, 30) is False
+
+
+def _named_giving(
+    *processes: tuple[float, float, int, int, str, Sequence[str]],
+) -> Callable[[float | None], tuple[int, str, str]]:
+    """The control's lsof by name, made up: each of ``processes`` (from, until, pid, parent, name,
+    files) is listed from ``from`` to ``until`` seconds after the open, as lsof -F pcRn lists it,
+    and lsof exits 1 where it lists none."""
+
+    def named(at: float | None) -> tuple[int, str, str]:
+        out = "".join(
+            f"p{pid}\nc{name}\nR{parent}\n" + "".join(f"n{path}\n" for path in files)
+            for when, until, pid, parent, name, files in processes
+            if at is not None and when <= at < until
+        )
+        return (0 if out else 1), out, ""
+
+    return named
+
+
+def _app_listed(installed: Path) -> tuple[float, float, int, int, str, list[str]]:
+    """The app itself, pid 99, as the control's lsof by name lists it."""
+    app = f"{installed}/Contents/MacOS/{check_app.APP_NAME}"
+    return (0.0, 1e9, 99, 1, check_app.APP_NAME, ["/usr/lib/dyld", app])
+
+
+def test_lsof_s_own_error_where_a_files_name_goes_is_no_file(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Apple's lsof writes "region info error: ..." where a file's name goes when it cannot read a
+    # region of the process, for an errno other than ESRCH or EINVAL. That is no file: the process
+    # gets none, and why quotes what lsof said. Only an absolute path is a file.
+    monkeypatch.setattr(check_app, "_runs_now", lambda pid: True)
+    answer = f"p7777\nf txt\nn{_REGION_ERROR}\np7778\nf txt\nn/bin/sleep\nnnot a path\n"
+    monkeypatch.setattr("subprocess.run", lambda argv, **kwargs: _done(argv, 0, answer))
+    texts = check_app._texts_of([7777, 7778])
+    assert texts[7777] == (
+        (),
+        f"lsof said {_REGION_ERROR!r}; a process of that pid still ran once lsof had answered",
+    )
+    assert texts[7778] == (("/bin/sleep",), "")
+    listed = check_app._lsof_records(answer)
+    assert listed[7777].files == [] and listed[7777].said == [_REGION_ERROR]
+    assert listed[7778].files == ["/bin/sleep"] and listed[7778].said == ["not a path"]
+
+
+def test_a_wait_for_no_host_does_not_pass_on_a_process_lsof_says_it_cannot_read(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A '(lucille-host-run)' whose parent went, of which lsof gives only its own error: possibly a
+    # host, so the wait does not pass, and what the check says names lsof's words, not a file.
+    base = _ps_rows_then(["    1     0 Ss   /sbin/launchd", f" 7777     1 S    {_SHORT}"])
+
+    def run(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        if argv[0] == "lsof":
+            return _done(argv, 0, f"p7777\nf txt\nn{_REGION_ERROR}\n")
+        return base(argv, **kwargs)
+
+    monkeypatch.setattr("subprocess.run", run)
+    # raising=False: so that this test also runs against a check that never asked.
+    monkeypatch.setattr(check_app, "_runs_now", lambda pid: True, raising=False)
+    assert check_app._no_profile_process() is False
+    said = check_app._profile_processes_said()
+    assert (
+        "possibly a host, its arguments and executable unreadable: 7777 (lsof said "
+        f"{_REGION_ERROR!r}; a process of that pid still ran once lsof had answered)"
+    ) in said, said
+
+
+@pytest.mark.parametrize(
+    ("runs", "said"),
+    [
+        (False, "it had ended by the time lsof answered"),
+        (True, "a process of that pid still ran once lsof had answered"),
+        (None, "whether it still ran once lsof had answered is not known"),
+    ],
+)
+def test_where_lsof_gives_no_file_the_check_says_whether_the_process_still_ran(
+    monkeypatch: pytest.MonkeyPatch, runs: bool | None, said: str
+) -> None:
+    # A lookup that came after the process had ended finds nothing, which says nothing of what it
+    # mapped: why says which it was, after lsof listed none, did not answer, or had no time left.
+    monkeypatch.setattr(check_app, "_runs_now", lambda pid: runs)
+    monkeypatch.setattr("subprocess.run", lambda argv, **kwargs: _done(argv, 1))
+    assert check_app._texts_of([42]) == {
+        42: ((), f"lsof listed no text file for it (exit 1); {said}")
+    }
+
+    def held(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        assert kwargs["timeout"] == 2.5, kwargs
+        raise subprocess.TimeoutExpired(argv, kwargs["timeout"])
+
+    monkeypatch.setattr("subprocess.run", held)
+    assert check_app._texts_of([42], 2.5) == {42: ((), f"lsof did not answer in 2.5 s; {said}")}
+    monkeypatch.setattr("subprocess.run", lambda argv, **kwargs: pytest.fail(f"ran {argv}"))
+    assert check_app._texts_of([42], 0.0) == {
+        42: ((), f"no time was left for lsof within the reading's 5 s; {said}")
+    }
+
+
+def test_whether_a_process_runs_now_is_asked_of_the_kernel(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # This process runs; a child that has been waited for does not. One the kernel will not let
+    # this process signal (another user's) runs; any other error cannot tell.
+    assert check_app._runs_now(os.getpid()) is True
+    child = subprocess.Popen(["/bin/sh", "-c", "exit 0"])
+    child.wait()
+    assert check_app._runs_now(child.pid) is False
+    for error, runs in ((PermissionError, True), (OSError, None), (ProcessLookupError, False)):
+
+        def kill(pid: int, sent: int, error: type[OSError] = error) -> None:
+            raise error(pid)
+
+        monkeypatch.setattr("os.kill", kill)
+        assert check_app._runs_now(4242) is runs, error
+
+
+def test_the_ps_lister_gives_lsof_what_is_left_of_its_five_seconds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A ps call that took 4 s leaves lsof 1 s, so that the reading still ends within about 5 s.
+    clock = _Clock()
+    monkeypatch.setattr(check_app.time, "monotonic", clock.monotonic)
+    asked: list[float] = []
+
+    def run(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        if argv[0] == "lsof":
+            asked.append(kwargs["timeout"])
+            return _done(argv, 1)
+        clock.now += 4.0
+        return _done(argv, 0, f"    1     0 Ss   /sbin/launchd\n 7777     1 S    {_SHORT}\n")
+
+    monkeypatch.setattr("subprocess.run", run)
+    monkeypatch.setattr(check_app, "_runs_now", lambda pid: True)
+    _, _, [unread] = check_app._ps_processes()
+    assert asked == [pytest.approx(1.0)] and unread.asked == clock.now
+
+
+def test_the_control_passes_where_its_reader_by_name_sees_a_child_ps_was_too_slow_for(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # As run 42700559897's record suggests (inferred, not seen): while the app launches a ps call
+    # takes over a second, and the child, shown by ps only as '(lucille-host-run)', has gone by
+    # the time the ps lister's own lookup asks lsof. The control's reader by name, on a thread of
+    # its own, saw it while it ran, as a child of the app that maps the copy's runtime: the gate
+    # holds by its executable. The ps lister's late lookup says the child had ended.
+    installed = _installed_in(tmp_path)
+    runtime = _runtime_of(installed)
+    world = _ListerWorld(
+        pgrep=_none,
+        ps=_ps_with((1.0, 2.2, f" 5555    99 R    {_SHORT}")),
+        ps_took=1.2,
+        lsof=_lsof_giving({}),
+        named=_named_giving(
+            _app_listed(installed),
+            (1.0, 2.2, 5555, 99, _RUNTIME_NAME, ["/usr/lib/dyld", runtime]),
+        ),
+        marker_at=2.0,
+    )
+    checker, _ = _control_in(world, tmp_path, monkeypatch)
+    said = capsys.readouterr().out
+    assert checker.failures == [], checker.failures
+    gate = next(line for line in said.splitlines() if line.startswith("the control's gate held"))
+    assert re.fullmatch(
+        r"the control's gate held by its executable, its arguments unreadable: pid 5555, a child "
+        rf"of the app, has the runtime's name and maps {re.escape(runtime)} \(by lsof, by name, "
+        r"asked at 1\.\d\d s\), and ps showed it as 'R \(lucille-host-run\)' at 1\.\d\d s; ps read "
+        r"the arguments of none of the app's children, so this run does not prove that the "
+        r"listers' pattern matches the app's command line",
+        gate,
+    ), gate
+    named = next(line for line in said.splitlines() if line.startswith("the control: lsof, by"))
+    assert re.search(
+        r"the processes of the runtime's name it saw: 5555 \(parent 99, a running copy of the "
+        rf"app\) from 1\.\d\d s, by lsof, by name, asked at 1\.\d\d s, it maps "
+        rf"{re.escape(runtime)}$",
+        named,
+    ), named
+    children = next(line for line in said.splitlines() if "the app's children, as ps" in line)
+    assert re.search(
+        rf"5555 'R {re.escape(_SHORT)}', its arguments unreadable, by lsof, by name, asked at "
+        rf"1\.\d\d s, it maps {re.escape(runtime)}",
+        children,
+    ), children
+    assert world.named_calls > 0
+
+
+def test_the_control_passes_on_a_child_its_reader_by_name_alone_saw(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # ps never lists the child at all; the reader by name sees it, a child of the app that maps
+    # the copy's runtime, from 0.4 s. The gate holds by its executable, and the line says ps never
+    # read its arguments and did not list it, not that they were unreadable.
+    installed = _installed_in(tmp_path)
+    runtime = _runtime_of(installed)
+    world = _ListerWorld(
+        pgrep=_none,
+        ps=_ps_none,
+        named=_named_giving(_app_listed(installed), (0.4, 2.0, 5555, 99, _RUNTIME_NAME, [runtime])),
+        marker_at=1.5,
+    )
+    checker, _ = _control_in(world, tmp_path, monkeypatch)
+    said = capsys.readouterr().out
+    assert checker.failures == [], checker.failures
+    gate = next(line for line in said.splitlines() if line.startswith("the control's gate held"))
+    assert gate.startswith(
+        "the control's gate held by its executable, ps never read its arguments: pid 5555, a child "
+        f"of the app, has the runtime's name and maps {runtime} (by lsof, by name, asked at 0.4"
+    ), gate
+    assert "and ps did not list it; ps read the arguments of none" in gate, gate
+    assert "the control: ps saw no child of the app" in said, said
+    assert re.search(
+        r"^the control: lsof, by name, recorded, not a gate: \d+ calls, longest 0\.00 s, lsof "
+        r"errors 0; the processes of the runtime's name it saw: 5555 \(parent 99, a running copy "
+        r"of the "
+        rf"app\) from 0\.4\d s, by lsof, by name, asked at 0\.4\d s, it maps {re.escape(runtime)}$",
+        said,
+        re.MULTILINE,
+    ), said
+
+
+@pytest.mark.parametrize("seen", ["not a child", "another copy", "no file"])
+def test_the_control_still_fails_on_what_its_reader_by_name_alone_saw_otherwise(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    seen: str,
+) -> None:
+    # The reader by name holds the gate only for a child of the app that maps that copy's
+    # runtime: not one whose parent is launchd, not one that maps another copy's runtime, and not
+    # one of which lsof gave only its error. The case says which, for a child of the app.
+    installed = _installed_in(tmp_path)
+    other = _runtime_of(tmp_path / f"{check_app.RENAMED_COPY}.app")
+    parent, files = {
+        "not a child": (1, [_runtime_of(installed)]),
+        "another copy": (99, [other]),
+        "no file": (99, [_REGION_ERROR]),
+    }[seen]
+    world = _ListerWorld(
+        pgrep=_none,
+        ps=_ps_none,
+        named=_named_giving(_app_listed(installed), (0.4, 2.0, 5555, parent, _RUNTIME_NAME, files)),
+        marker_at=1.5,
+    )
+    checker, _ = _control_in(world, tmp_path, monkeypatch)
+    said = capsys.readouterr().out
+    assert checker.failures == [
+        "the control: it starts the host on the app's profile, and the check sees it"
+    ], checker.failures
+    case = _case(said)
+    if seen == "not a child":
+        assert "but no reading saw a host process by 60." in case, case
+        assert "5555 (parent 1) from 0.4" in said, said
+        return
+    assert case.startswith(
+        "the case: a child of the app from 0.4 s (5555, seen by lsof, by name alone), but no host "
+        "process the gate matches by 60."
+    ), case
+    if seen == "another copy":
+        assert f"5555 maps {other} (by lsof), not that copy's runtime" in case, case
+    else:
+        assert f"5555: lsof gave no executable (lsof said {_REGION_ERROR!r}; " in case, case
+        assert re.search(r"; it had ended by the time lsof answered; asked at 0\.4\d s\)", case), (
+            case
+        )
+
+
+def test_the_reader_by_name_takes_a_child_that_ps_saw_where_lsof_did_not_list_the_app(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # lsof by name lists the child, which maps the copy's runtime, but not the app itself, so its
+    # own answer cannot say whose child it is; ps, slow, shows it as a child of the app only by its
+    # name, later. A child of the app as ps saw it is one too, and the gate holds by its
+    # executable, at the reader's sighting.
+    runtime = _runtime_of(_installed_in(tmp_path))
+    world = _ListerWorld(
+        pgrep=_none,
+        ps=_ps_with((1.0, 2.2, f" 5555    99 R    {_SHORT}")),
+        ps_took=1.2,
+        named=_named_giving((1.0, 2.2, 5555, 99, _RUNTIME_NAME, [runtime])),
+        marker_at=2.0,
+    )
+    checker, _ = _control_in(world, tmp_path, monkeypatch)
+    said = capsys.readouterr().out
+    assert checker.failures == [], checker.failures
+    gate = next(line for line in said.splitlines() if line.startswith("the control's gate held"))
+    assert re.search(
+        r"pid 5555, a child of the app, .*\(by lsof, by name, asked at 1\.4\d s\)", gate
+    )
+    assert "5555 (parent 99, a running copy of the app) from 1.4" in said, said
+
+
+def test_the_controls_record_of_its_reader_by_name_says_what_went_wrong_and_how_many_it_saw() -> (
+    None
+):
+    # Recorded, not a gate: how often the reader asked and what went wrong in it, and the first
+    # five processes of the runtime's name it saw, with how many more; nothing where it never ran.
+    runtime = _runtime_of(Path("/Applications") / f"{check_app.APP_NAME}.app")
+    seen = tuple(
+        check_app._Unread(pid, 1, "", "", False, (runtime,), "", None, check_app.NAMED)
+        for pid in range(100, 107)
+    )
+    failed = check_app._Reading(check_app.NAMED, 0.0, 0.25, frozenset(), (), "lsof exited 2, x")
+    found = check_app._Reading(check_app.NAMED, 0.5, 0.6, frozenset(), (), "", seen)
+    said = _watched(failed, found).named_said()
+    assert said.startswith(
+        "lsof, by name, recorded, not a gate: 2 calls, longest 0.25 s, lsof errors 1 (lsof exited "
+        "2, x); the processes of the runtime's name it saw: 100 (parent 1) from 0.50 s, by lsof, "
+        f"by name, it maps {runtime}; 101 (parent 1)"
+    ), said
+    assert said.endswith("; and 2 more") and "105 (parent 1)" not in said, said
+    assert _watched(failed).named_said().endswith("; it saw no process of the runtime's name")
+    assert _watched().named_said() == ""
+
+
+def test_the_controls_gate_needs_the_runtimes_name_as_well_as_what_a_child_maps(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # lsof lists every file a process maps, not its program alone: a child of the app that ps
+    # shows as another program's name, and that maps the copy's runtime among its files, does
+    # not pass the gate. The case says it maps the runtime, but its name is not the runtime's.
+    runtime = _runtime_of(_installed_in(tmp_path))
+    world = _child_world(
+        tmp_path,
+        {5555: ["/usr/bin/codesign", runtime]},
+        (0.4, 2.0, " 5555    99 R    (codesign)"),
+    )
+    checker, _ = _control_in(world, tmp_path, monkeypatch)
+    said = capsys.readouterr().out
+    assert any("the control: it starts the host" in what for what in checker.failures)
+    assert (
+        "5555 maps that copy's runtime (by lsof), from 0.4 s, but its name is not the runtime's "
+        "('R (codesign)')"
+    ) in _case(said), said
+
+
+def test_a_child_whose_arguments_ps_reads_later_takes_the_executables_pass_away(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # ps shows a child only by its name at 0.3 s, and lsof says it maps the copy's runtime, so the
+    # gate holds at first; from 0.5 s ps reads its arguments, on another profile, which the
+    # pattern does not match. Asked again over the whole watch, the gate does not hold: the
+    # control fails, and the case names the child ps read.
+    runtime = _runtime_of(_installed_in(tmp_path))
+    wrong = _HOST_COMMAND.replace(f"--profile {check_app.APP_PROFILE} ", "--profile default ")
+    world = _child_world(
+        tmp_path,
+        {5555: [runtime]},
+        (0.3, 0.5, f" 5555    99 R    {_SHORT}"),
+        (0.5, 2.0, f" 5555    99 S    {wrong}"),
+    )
+    checker, _ = _control_in(world, tmp_path, monkeypatch)
+    said = capsys.readouterr().out
+    assert checker.failures == [
+        "the control: it starts the host on the app's profile, and the check sees it"
+    ], checker.failures
+    assert "the control's gate held" not in said, said
+    assert re.search(
+        r"ps read the arguments of a child of the app that the listers' pattern does not match "
+        r"\(5555 'S .*--profile default .*'\), so what a child maps does not pass the gate",
+        _case(said),
+    ), said
+
+
+def test_the_controls_gate_never_takes_what_a_child_maps_once_ps_has_read_its_arguments() -> None:
+    # The reader by name sees a child that maps the copy's runtime at 0.4 s; ps reads its
+    # arguments, which the pattern matches, only at 30.5 s, past the gate. Its arguments were
+    # readable, so what it maps does not stand in for them, and the gate does not hold.
+    runtime = _runtime_of(Path("/Applications") / f"{check_app.APP_NAME}.app")
+    seen = check_app._Unread(5555, 99, "", "", True, (runtime,), "", 0.4, check_app.NAMED)
+    named = check_app._Reading(check_app.NAMED, 0.4, 0.41, frozenset(), (), "", (seen,))
+    ps = check_app._Reading("ps", 30.5, 30.51, frozenset({5555}), ((5555, f"S {_HOST_COMMAND}"),))
+    assert _watched(named, ended=40.0).passed_by(runtime)[0] == "executable"
+    assert _watched(named, ps, ended=40.0).passed_by(runtime) == ("", "")
+
+
+def test_the_controls_record_keeps_the_first_of_two_answers_that_say_as_much() -> None:
+    # Two answers of lsof that say as much, a file each and neither a copy's runtime: the record
+    # keeps the first.
+    def ps(at: float, path: str) -> Any:
+        unread = check_app._Unread(5555, 99, "R", "(other)", True, (path,))
+        return check_app._Reading(
+            "ps", at, at + 0.01, frozenset(), ((5555, "R (other)"),), "", (unread,)
+        )
+
+    said = _watched(ps(0.1, "/a/first"), ps(0.2, "/b/second")).children_said()
+    assert "it maps /a/first and no copy's runtime" in said and "/b/second" not in said, said
+
+
+def test_the_reader_by_name_runs_in_the_controls_watch_alone(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The control's watch asks lsof by name; a refusing copy's does not, so its stretches stay as
+    # they were measured. The pool has a thread for it.
+    pool = check_app._lister_pool()
+    try:
+        assert pool._max_workers == len(check_app.LISTERS) + 1
+    finally:
+        pool.shutdown()
+    world = _ListerWorld(pgrep=_host_from(0.4), ps=_ps_host_from(0.4), marker_at=1.5)
+    _control_in(world, tmp_path / "control", monkeypatch)
+    assert world.named_calls > 0
+    world = _ListerWorld(pgrep=_none, ps=_ps_none)
+    _refusing_in(world, tmp_path / "refusing", monkeypatch)
+    assert world.named_calls == 0
+    source = _CHECK_APP.read_text(encoding="utf-8")
+    assert _python_function(source, "_watch_control").count("named=True") == 3
+    assert "named=True" not in _python_function(source, "_refusing_copy")
+
+
+def test_the_reader_by_name_lists_the_runtimes_processes_with_their_parents(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # One call: lsof -a -c RUNTIME -c APP -d txt -R -F pcRn, each name cut to 15 characters. A
+    # process of the runtime's name is a child of the app where its parent, in the same answer,
+    # maps the app's executable; the check's own, and its children, are left out; a process of
+    # another name is not one; lsof's own error is no file.
+    own = os.getpid()
+    app = f"/Applications/{check_app.APP_NAME}.app/Contents/MacOS/{check_app.APP_NAME}"
+    runtime = _runtime_of(Path("/Applications") / f"{check_app.APP_NAME}.app")
+    name = _RUNTIME_NAME
+    answer = "".join(
+        [
+            f"p99\nc{check_app.APP_NAME}\nR1\nn/usr/lib/dyld\nn{app}\n",
+            f"p100\nc{name}\nR99\nn{runtime}\n",
+            f"p101\nc{name}\nR1\nn{_REGION_ERROR}\n",
+            f"p{own}\nc{name}\nR1\nn{runtime}\n",
+            f"p102\nc{name}\nR{own}\nn{runtime}\n",
+            f"p103\nc{check_app.APP_NAME} Helper\nR99\nn/x/Helper\n",
+            f"p104\nc{name[:15]}\nR98\nn{runtime}\n",
+        ]
+    )
+    calls: list[tuple[list[str], dict[str, Any]]] = []
+
+    def run(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        calls.append((argv, kwargs))
+        return _done(argv, 0, answer)
+
+    monkeypatch.setattr("subprocess.run", run)
+    monkeypatch.setattr(check_app, "_runs_now", lambda pid: False)
+    found, error = check_app._named_processes()
+    [(argv, kwargs)] = calls
+    assert argv == [
+        "lsof",
+        "-w",
+        "-a",
+        "-c",
+        name[:15],
+        "-c",
+        check_app.APP_NAME[:15],
+        "-d",
+        "txt",
+        "-R",
+        "-F",
+        "pcRn",
+    ]
+    assert kwargs.get("timeout") == 5 and kwargs.get("errors") == "replace" and error == ""
+    by = {each.pid: each for each in found}
+    assert sorted(by) == [100, 101, 104]
+    assert by[100].child and by[100].host and by[100].named and by[100].seen_by == check_app.NAMED
+    assert by[100].parent == 99 and by[100].command == "" and not by[100].maybe
+    assert not by[101].child and by[101].texts == () and not by[101].host
+    assert by[101].why == f"lsof said {_REGION_ERROR!r}; it had ended by the time lsof answered"
+    assert not by[104].child and by[104].host
+    assert all(each.asked is not None for each in found)
+
+
+@pytest.mark.parametrize(
+    ("failure", "said"),
+    [
+        ("missing", "lsof could not start"),
+        ("timeout", "lsof did not answer in 5 s"),
+        ("exit", "lsof exited 2, with 'no such option'"),
+        ("stderr", "lsof exited 0, with 'a warning'"),
+    ],
+)
+def test_the_reader_by_name_never_raises_and_says_what_went_wrong(
+    monkeypatch: pytest.MonkeyPatch, failure: str, said: str
+) -> None:
+    # lsof missing, held, failing or writing on standard error: the reader says so and never
+    # raises; what it could read it still gives. Nothing found and exit 1 is no error.
+    runtime = _runtime_of(Path("/Applications") / f"{check_app.APP_NAME}.app")
+    answer = f"p100\nc{_RUNTIME_NAME}\nR1\nn{runtime}\n"
+
+    def run(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        if failure == "missing":
+            raise FileNotFoundError("lsof")
+        if failure == "timeout":
+            raise subprocess.TimeoutExpired(argv, kwargs["timeout"])
+        if failure == "exit":
+            return _done(argv, 2, "", "no such option\n")
+        return _done(argv, 0, answer, "a warning\n")
+
+    monkeypatch.setattr("subprocess.run", run)
+    found, error = check_app._named_processes()
+    assert said in error, error
+    assert [each.pid for each in found] == ([100] if failure == "stderr" else [])
+    monkeypatch.setattr("subprocess.run", lambda argv, **kwargs: _done(argv, 1))
+    assert check_app._named_processes() == ([], "")
+    reading = check_app._read(check_app.NAMED)
+    assert reading.hosts == frozenset() and reading.error == "" and reading.unread == ()
 
 
 @pytest.mark.parametrize("failure", ["timeout", "missing", "exit"])
@@ -9621,6 +10853,55 @@ def test_the_pairing_checks_tidy_kills_the_host_processes_still_running(
     pairing.tidy()
     assert killed == [(4242, signal.SIGKILL), (4343, signal.SIGKILL)]
     assert "still ran, and were killed: [4242, 4343]" in capsys.readouterr().out
+
+
+def test_the_pairing_checks_tidy_kills_a_runtime_process_and_names_one_it_cannot_tell(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Where ps could not read a process's arguments: one that lsof says maps the bundled runtime
+    # of the copy this check opened is killed with the host processes the listers matched; one
+    # that maps another copy's runtime may be on another profile, and one of which lsof gave no
+    # file the check cannot tell: each is named, and left.
+    pairing = object.__new__(check_app._PairingCheck)
+    pairing.checker = check_app.Checker()
+    pairing.owns_profile = True
+    pairing.url = ""
+    pairing.profile = tmp_path / "profile"
+    pairing.children = []
+    pairing.set_aside = None
+    pairing.folder = tmp_path / "folder"
+    pairing.app = tmp_path / f"{check_app.APP_NAME}.app"
+    pairing.logs = []
+    runtime = _runtime_of(pairing.app)
+    other = f"/x/{check_app.APP_NAME}.app/{build_app.RUNTIME_IN_APP}"
+    unread = (
+        check_app._Unread(7777, 1, "S", _SHORT, False, (runtime,)),
+        check_app._Unread(7778, 1, "S", _SHORT, False, (), "lsof listed no text file for it"),
+        check_app._Unread(7779, 1, "S", _SHORT, False, (other,)),
+    )
+    seen = (
+        check_app._Reading("pgrep", 0.0, 0.0, frozenset({4242})),
+        check_app._Reading("ps", 0.0, 0.0, frozenset(), (), "", unread),
+    )
+    killed: list[tuple[int, int]] = []
+    monkeypatch.setattr(check_app, "_may_run", lambda name: False)
+    monkeypatch.setattr(check_app, "_wait_until", lambda test, seconds: False)
+    monkeypatch.setattr(check_app, "_look", lambda: seen)
+    monkeypatch.setattr("os.kill", lambda pid, sent: killed.append((pid, sent)))
+    monkeypatch.setattr(check_app, "_set_pasteboard", lambda text: None)
+    monkeypatch.setattr("subprocess.run", lambda argv, **kwargs: _done(argv, 0))
+    pairing.tidy()
+    assert killed == [(4242, signal.SIGKILL), (7777, signal.SIGKILL)]
+    said = capsys.readouterr().out
+    assert "still ran, and were killed: [4242, 7777]" in said, said
+    assert (
+        "possibly host processes of the app's profile still ran, whose executables the check "
+        "could not read, and were left: [7778]"
+    ) in said, said
+    assert (
+        "processes that map another copy's bundled runtime, whose arguments ps could not read, "
+        "still ran, and were left: [7779]"
+    ) in said, said
 
 
 def test_the_listers_libraries_are_read_from_otool() -> None:
