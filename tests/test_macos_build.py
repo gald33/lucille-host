@@ -8746,8 +8746,10 @@ def test_the_two_listers_run_at_once_so_one_held_never_holds_back_the_other(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # Real threads and real time: pgrep is held for a second at each call; ps answers at once.
-    # In half a second ps reads again and again, and the watch ends on time, not waiting for
-    # pgrep.
+    # In half a second ps reads more than once, and the watch ends on time, not waiting for
+    # pgrep. With one thread for both, ps would read at most once before pgrep held it past the
+    # watch's end. How many more times ps reads depends on the runner (3 in half a second on a
+    # loaded macos-latest runner, job 129550873713), so only "more than once" is asked.
     def held() -> list[int]:
         time.sleep(1.0)
         return []
@@ -8764,7 +8766,7 @@ def test_the_two_listers_run_at_once_so_one_held_never_holds_back_the_other(
     took = time.monotonic() - started
     assert took < 0.9, took
     assert not watch.read_by("pgrep")
-    assert sum(r.lister == "ps" for r in watch.readings) >= 4, watch.readings
+    assert sum(r.lister == "ps" for r in watch.readings) >= 2, watch.readings
 
 
 class _NowPool:
