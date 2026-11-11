@@ -1,6 +1,6 @@
 # 0003: Local credentials (draft)
 
-**Status: storage built; use chosen (credential proxy), not built.** `src/lucille_host/credentials.py` can save, list and remove a credential
+**Status: storage built; entry and use chosen, not built.** `src/lucille_host/credentials.py` can save, list and remove a credential
 for an online service, kept only on this computer. Nothing yet writes to it from the command line, and
 nothing Lucille sends can reach it. This record says what was built, and what is still to be decided
 before a credential kept here can be used.
@@ -34,16 +34,13 @@ This repository builds only the first. The other two belong to Lucille's backend
   (`tests/test_credentials.py`, `test_nothing_else_in_the_runtime_imports_it`). No request, operation or
   reply can write, read or list it.
 
-## What is not decided
+## What was open, and how it was decided
 
-1. **How a credential gets in.** The value must be entered on the computer and must never pass through
-   Lucille, or this would not be the private option. The likely shape is `lucille-host credential set
-   <service> <name>`, reading the value from stdin with no echo, plus `list` and `remove`. That needs
-   `spec/CLI.md` objects for `--json`, and the Mac app's panel. Not built.
-2. **Whether Lucille learns the names.** Lucille's backend keeps a row for each credential the user said
-   is on their computer, so it can show the user where each one is. Whether the host reports its names
-   (for example in `host.describe`) or the user tells Lucille, is open. Reporting names would add a
-   sentence to the claim: "Lucille learns the names of the credentials you saved here, never their values."
+1. **How a credential gets in.** Decided 2026-11-11: see "Entry: Lucille asks, the user types it here"
+   below. The value is entered on the computer and never passes through Lucille.
+2. **Whether Lucille learns the names.** Decided 2026-11-11: yes. Lucille may learn a credential's
+   service, name and bound hosts, never its value. The claim gains the sentence: "Lucille learns the names
+   of the credentials you saved here, never their values."
 3. **How a credential is used.** Decided 2026-11-11 by the operator: see "Use: the host as a
    credential proxy" below.
 
@@ -86,3 +83,29 @@ section of 0001 and the AST and Switchboard lints change with it, in the same PR
 and stays true. The proxy design keeps Lucille's own logic off the computer; only this repository's
 public code runs here. A future feature that ships Lucille logic to run here (for example to keep data
 off Lucille's servers) would expose that logic to the user; obfuscation slows a reader and stops none.
+
+## Entry: Lucille asks, the user types it here (chosen 2026-11-11, not built)
+
+Lucille may ask the host to collect a credential. For example: "ask the user for `gmail/app-password`,
+for hosts `imap.gmail.com` and `smtp.gmail.com`". The request carries no value. The user can also add
+one unprompted with `lucille-host credential set`.
+
+**The risk this creates is phishing through our own program.** A request Lucille sends is just a
+request. If Lucille, or anyone who controls Lucille's account or servers, could ask for "your bank
+password" bound to a host it controls, rule 1 of the proxy would send the password there. So:
+
+- **The prompt is shown by the host, on the computer, never in chat.** A native dialog in the Mac app,
+  or the terminal for the command-line host. Lucille cannot draw it and cannot fill it in.
+- **The hosts are shown as the user's decision.** The dialog lists every host the credential will be
+  sent to, as plain domain names the user approves. Lucille's request proposes them; the user's OK
+  binds them. Lucille cannot add a host later. Changing hosts means asking again.
+- **Lucille's own words are marked as Lucille's.** Any reason text it sends is shown under "Lucille
+  says:", apart from the service, name and hosts, which the host lays out itself.
+- **Declining is the default.** Closing or ignoring the dialog declines. Lucille learns only "saved"
+  or "declined". Repeated requests for the same credential are rate-limited, so Lucille cannot nag.
+- **The reply never echoes the value,** and the request-to-collect is logged in the usage log like a
+  use.
+
+What stays true: the value is typed only on this computer, into this program, and Lucille never receives
+it. What does not: a user who approves a host they should not have will send their password there. The
+dialog's job is to make that choice plain, and it cannot make it for them.
