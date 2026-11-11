@@ -1,6 +1,6 @@
 # 0003: Local credentials (draft)
 
-**Status: storage only.** `src/lucille_host/credentials.py` can save, list and remove a credential
+**Status: storage built; use chosen (credential proxy), not built.** `src/lucille_host/credentials.py` can save, list and remove a credential
 for an online service, kept only on this computer. Nothing yet writes to it from the command line, and
 nothing Lucille sends can reach it. This record says what was built, and what is still to be decided
 before a credential kept here can be used.
@@ -44,17 +44,45 @@ This repository builds only the first. The other two belong to Lucille's backend
    is on their computer, so it can show the user where each one is. Whether the host reports its names
    (for example in `host.describe`) or the user tells Lucille, is open. Reporting names would add a
    sentence to the claim: "Lucille learns the names of the credentials you saved here, never their values."
-3. **How a credential is used. This is the decision that matters.** A credential on this computer is
-   useful only if something on this computer uses it. Today the host makes outbound HTTPS to one hub only
-   (0001, "Transport"), and runs only catalog operations. Possible answers, none chosen:
-   - **a catalog operation that calls a named service** (for example an `http.*` family with a
-     catalog-listed set of hosts per operation), with the credential added by the host and never put in
-     the reply. This ends "outbound HTTPS to one hub only" and changes the claim, the threat model and the
-     AST and Switchboard lints;
-   - **a local program the user installs** that asks the host for a credential. This widens who can read
-     the item past this program;
-   - **handing the value to Lucille for each use.** This is not the private option, and the claim says
-     passwords stay on the computer. Ruled out unless the claim changes.
+3. **How a credential is used.** Decided 2026-11-11 by the operator: see "Use: the host as a
+   credential proxy" below.
 
-   Until one is chosen, `value()` has no caller, and the claim's sentence "So do your passwords, keys and
-   browser sessions [stay on your computer]" covers credentials kept here without change.
+## Use: the host as a credential proxy (chosen 2026-11-11, not built)
+
+The operator chose this over two alternatives. A local program that asks the host for a credential
+would let more than this program read the item. Handing the value to Lucille for each use would end
+the private option. A third-party confidential-computing runtime (a hardware enclave, checked by
+attestation before the host releases a value) was discussed and left for Lucille's `third_party`
+store. Its program would enforce the same rules as below.
+
+**The split.** Lucille decides what to do, on Lucille's servers, and that code never comes to this
+computer. The host runs a small, public, reviewed proxy: it takes a request that names a credential,
+checks it against the rules, adds the credential itself and makes the call. The reply goes back to
+Lucille. Lucille's logic never sees the value, so it can stay private without putting the value at
+risk. The user trusts this repository's code, not Lucille's.
+
+**Rules the proxy enforces, all of them, or a value can leave through the service:**
+
+1. **Hosts per credential.** Each credential is bound to a list of hosts when it is saved, and is
+   attached only to requests to those hosts. Lucille cannot widen the list.
+2. **No redirects off the list** while a credential is attached.
+3. **A fixed place in the request.** The credential goes only where its kind says, such as an
+   `Authorization` header or a login step, never into a URL, query or body Lucille wrote. Otherwise
+   an allowed service can store it where Lucille reads it back, for example as the text of a draft.
+4. **The value is scrubbed from replies,** in case a service echoes it.
+
+**A local log the user can read**: which credential was used, against which host, how many times, and
+when. The user sees what was done with a credential, not why Lucille did it.
+
+**What this does not protect.** While the proxy is on, Lucille can do whatever the credential allows
+on that service and read the replies. It protects the value, not the data the value opens. Narrowly
+scoped tokens limit that where a service offers them.
+
+**What it changes here.** The host stops making outbound HTTPS to its hub only: it also reaches the
+hosts the user bound to a credential. `CLAIMS.md`, `PRIVACY.md`, `THREAT_MODEL.md`, the transport
+section of 0001 and the AST and Switchboard lints change with it, in the same PR as the proxy.
+
+**Anything that runs on this computer can be read by its owner.** That is true of this program today
+and stays true. The proxy design keeps Lucille's own logic off the computer; only this repository's
+public code runs here. A future feature that ships Lucille logic to run here (for example to keep data
+off Lucille's servers) would expose that logic to the user; obfuscation slows a reader and stops none.
