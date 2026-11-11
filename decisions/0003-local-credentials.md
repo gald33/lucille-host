@@ -109,3 +109,40 @@ password" bound to a host it controls, rule 1 of the proxy would send the passwo
 What stays true: the value is typed only on this computer, into this program, and Lucille never receives
 it. What does not: a user who approves a host they should not have will send their password there. The
 dialog's job is to make that choice plain, and it cannot make it for them.
+
+## Hardening (chosen 2026-11-11)
+
+The proxy and the entry prompt protect the value. These narrow what a request can do with it, who
+else on the computer can reach it, and what a bad update could do.
+
+**With the first use PR:**
+
+1. **Risk tiers per credential, chosen by the user.** Reads run on their own. Anything that changes
+   something (sends, pays, deletes, edits) shows a prompt on the computer first, and declines on close
+   or timeout. Whether a request is a read comes from the service template below, never from Lucille.
+   This covers the risk the proxy leaves open: Lucille, or whoever controls it, acting as the user.
+2. **Narrow, revocable credentials first.** Where a service offers app passwords or OAuth, the host
+   points the user there. For OAuth, the host runs the sign-in on the computer with the narrowest
+   scopes, so the token is created here and seen nowhere else. Saving what looks like an account's main
+   password draws a warning.
+3. **No local network.** The proxy refuses plain HTTP, IP literals, `localhost`, link-local and private
+   addresses. It checks the resolved address on every connection, so a name cannot be re-pointed at a
+   device on the user's network between the check and the call.
+
+**With each service:**
+
+4. **Service templates.** A credential is bound to the request shapes its service's reviewed template
+   allows (method and path patterns, and which are reads), not to every request to its hosts. A service
+   with no template cannot be used.
+
+**Separately, each with its own item:**
+
+5. **The keychain item opens only for this app.** On macOS, an access-control list on the signing
+   identity, and optionally Touch ID or the login password once per session. Needs a stable signature,
+   which ad hoc builds (0002) do not have.
+6. **Pause, expiry, notifications.** One control on the computer stops every use. Approvals lapse
+   after 30 days unless renewed. A notification on a credential's first use and on unusual volume, and
+   a per-credential rate cap.
+7. **Updates.** A malicious update could read every credential whatever the rules say, so updates are
+   the last trust point. Rebuildable, signed releases are already planned; on top of them, the host
+   warns before installing an update that changes the credential or proxy code.
