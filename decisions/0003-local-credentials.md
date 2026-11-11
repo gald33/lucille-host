@@ -41,12 +41,12 @@ This repository builds only the first. The other two belong to Lucille's backend
 2. **Whether Lucille learns the names.** Decided 2026-11-11: yes. Lucille may learn a credential's
    service, name and bound hosts, never its value. The claim gains the sentence: "Lucille learns the names
    of the credentials you saved here, never their values."
-3. **How a credential is used.** Decided 2026-11-11 by the operator: see "Use: the host as a
+3. **How a credential is used.** Decided 2026-11-11: see "Use: the host as a
    credential proxy" below.
 
 ## Use: the host as a credential proxy (chosen 2026-11-11, not built)
 
-The operator chose this over two alternatives. A local program that asks the host for a credential
+This was chosen over two alternatives. A local program that asks the host for a credential
 would let more than this program read the item. Handing the value to Lucille for each use would end
 the private option. A third-party confidential-computing runtime (a hardware enclave, checked by
 attestation before the host releases a value) was discussed and left for Lucille's `third_party`
