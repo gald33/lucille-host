@@ -26,8 +26,8 @@ The bundle as built:
   ``AppIcon.icns`` into an iconset of exactly the ten files the entries' slots name, each a PNG
   whose IHDR gives the pixels its name says (:func:`check_icon_reader`); what it says, and each
   file with that size, are printed. That it names the file of ``is32`` and ``s8mk``
-  ``icon_16x16.png``, and that of ``il32`` and ``l8mk`` ``icon_32x32.png``, is inferred: no run
-  has yet read those types, and this check fails, naming the file, if it does not. Last, AppKit
+  ``icon_16x16.png``, and that of ``il32`` and ``l8mk`` ``icon_32x32.png``, is inferred from the
+  slots: it prints files, not entries, and ``ic11``'s slot gives a 32 pixel file too. Last, AppKit
   must load each glyph from the bundle by its name, 18 points square from two files, of 18 and 36
   pixels (:func:`check_glyph_loader`). Both ran in CI in run 42620168506, in macos-app (macOS
   15.8.2) and in the smoke jobs (26.7.2 and 27.0.1), when the iconutil step printed its files and
@@ -35,8 +35,9 @@ The bundle as built:
   an entry the build no longer writes (inferred; ``icons.ICNS_SLOTS``), and AppKit found each
   glyph as 18 points from 18 and 36 pixels. In run 42636263428 (PR 30, head 8d3949d), in the same
   three jobs, iconutil wrote exactly the ten names above, each a PNG of its name's size, and the
-  step passed. That run's file still held PNG icp4 and icp5, so no run has yet read the RGB and
-  mask types.
+  step passed. That run's file still held PNG icp4 and icp5. In run 42652174302 (PR 31, head
+  1ce6531), in the same three jobs, the step passed at a head whose build writes is32 and s8mk, and
+  il32 and l8mk, in their place, and iconutil wrote the ten names again.
 - ``bytecode``: the bundle holds one checked-hash ``.pyc`` beside each ``.py`` of the runtime's
   library, and no other bytecode (``build_app.bytecode_layout_problems``); the bundled interpreter,
   running the build's own program, finds each one byte for byte what it compiles from its ``.py``
@@ -1165,8 +1166,12 @@ def check_icon_reader(app: Path, checker: Checker) -> None:
     run's step printed the names and byte counts and passed; it did not check them. In run
     42636263428 (PR 30, head 8d3949d), in the same three jobs, iconutil wrote exactly the ten
     files, each with the IHDR size its name gives, and this check passed. Both runs' files held PNG
-    icp4 and icp5 where is32 and s8mk, and il32 and l8mk, are now; that iconutil gives those the
-    same two names, icon_16x16.png and icon_32x32.png, is inferred."""
+    icp4 and icp5 where is32 and s8mk, and il32 and l8mk, are now. In run 42652174302 (PR 31, head
+    1ce6531), in the same three jobs, iconutil read the build's file, with those, into the ten files
+    again, with the same byte counts in each job, and this check passed. That it gives them the
+    names icon_16x16.png and icon_32x32.png is inferred: no line says which entry gave which file,
+    and icon_16x16@2x.png, the name of ic11's slot, is 32 pixels and had the same 1287 bytes as
+    icon_32x32.png."""
     rel = f"{icons.RESOURCES}/{icons.ICNS_FILE}"
     wanted = icons.iconset_files()
     what = (

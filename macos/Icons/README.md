@@ -102,8 +102,9 @@ names the RGB entries' files `icon_16x16.png` and `icon_32x32.png` is inferred),
 AppKit load each glyph from the built app by its name, as two files of 18 and 36 pixels. Both ran in CI
 in run 42620168506, on macos-15 and in the smoke jobs on macOS 26 and 27, before `iconutil`'s files were
 checked. In run 42636263428 (PR 30), on the same three, `iconutil` wrote exactly the ten files, each a
-PNG of its name's size, from a file that still held PNG `icp4` and `icp5`; no run has yet read `is32` or
-`il32`.
+PNG of its name's size, from a file that still held PNG `icp4` and `icp5`. In run 42652174302 (PR 31), on
+the same three, it did so from the build's file with `is32` and `s8mk`, and `il32` and `l8mk` (the
+check fails unless the file is the build's).
 
 ## Not done
 

@@ -19,8 +19,8 @@ depends on the PNGs alone. Each entry type but a mask has a slot of its own, by 
 reads the file is seen only on a Mac: the ``bundle`` check has ``iconutil`` read it into an
 iconset, and requires exactly the files the entries' slots name, each a PNG of its slot's size.
 Run 42636263428 held ``iconutil``'s files to that rule on macOS 15.8.2, 26.7.2 and 27.0.1, with PNG
-``icp4`` and ``icp5``; no run has yet read a file with the RGB and mask types. Whether macOS draws
-each entry is not seen.
+``icp4`` and ``icp5``, and run 42652174302 with the RGB and mask types in their place. Which entry
+gave which file, and whether macOS draws each entry, are not seen.
 
 A menu bar glyph is a template image: every pixel black, only its alpha varying. Its name ends in
 ``Template``, which makes ``NSImage(named:)`` treat it as a template, and ``<name>@2x.png`` is the
@@ -67,10 +67,15 @@ APP_SIZES: Final = (16, 32, 64, 128, 256, 512, 1024)
 # about twice theirs, while each other file is 1.2 to 1.6 times its PNG. That is why the build
 # writes no icp6.
 #
-# is32 and il32 fill the slots icp4 and icp5 filled in that run. That iconutil names their files
-# icon_16x16.png and icon_32x32.png, as it named icp4's and icp5's, is inferred: the public lists
-# give is32 and il32 as 16 and 32 pixels, but no run has yet read a file with these types. The
-# bundle check of the next Mac run is the first to show it, and fails, naming the file, if not.
+# is32 and il32 fill the slots icp4 and icp5 filled in that run. Seen in CI, run 42652174302 (PR
+# 31, head 1ce6531), in the same three jobs: iconutil read the build's file, with is32 and s8mk,
+# and il32 and l8mk, into exactly the ten names, with the same byte counts in each job. Which type
+# gave which name is inferred here too. icon_16x16.png (529 bytes) is the only 16 pixel file, and
+# is32 and its mask the only 16 pixel types, unless iconutil scales one. icon_32x32.png (1287
+# bytes) fits il32 and ic11 alike, which both hold app-32.png's pixels, and icon_16x16@2x.png, the
+# name of ic11's slot by the same public lists, had the same 1287 bytes. The byte counts fit: each
+# file is 1.2 to 1.6 times its PNG, these two now among them, and two files of one PNG have the
+# same count.
 ICNS_SLOTS: Final = {
     "is32": (16, 1),
     "il32": (32, 1),
@@ -475,7 +480,8 @@ def iconset_files() -> list[tuple[str, int]]:
     :data:`ICNS_ENTRIES` whose type has a slot, in that order, the slot's file name and its
     pixels, points x scale, which is what the name says (``icon_<N>x<N>.png`` is N pixels
     square, ``icon_<N>x<N>@2x.png`` 2N). A mask fills no slot and gives no file of its own: its
-    RGB entry's file is the image of both (inferred: no run has yet read these types)."""
+    RGB entry's file is the image of both (inferred: in run 42652174302 iconutil wrote only the
+    slots' ten files from a file with the masks, and does not say which entry gave which)."""
     files: list[tuple[str, int]] = []
     for kind, _, _ in ICNS_ENTRIES:
         if entry_format(kind) != "mask" and kind in ICNS_SLOTS:

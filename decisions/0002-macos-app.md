@@ -670,11 +670,21 @@ ripgrep.
   readers would read wrongly (seen in their source): none as long as unpacked RGB, which Pillow's reader
   takes for unpacked, and none that starts with four zero bytes, which libicns and the Rust `icns` crate
   skip in any 24-bit RGB entry, as `it32`'s header. What macOS does with either is not known. That the
-  report holds on macOS 15, 26 and 27 is not seen, and neither is how these entries look. That
-  `iconutil` names the file of `is32` and `s8mk` `icon_16x16.png`, and that of `il32` and `l8mk`
-  `icon_32x32.png`, as it named those of `icp4` and `icp5`, is inferred: the `bundle` check of the next
-  Mac run is the first to read them, and fails, naming the file, if it does not. The check still wants
-  the same ten files.
+  report holds on macOS 15, 26 and 27 is not seen, and neither is how these entries look. Seen in CI,
+  run 42652174302 (PR 31, head 1ce6531), in `macos-app` (macOS 15.8.2) and in the smoke jobs (26.7.2
+  and 27.0.1): the `bundle` step passed, and `iconutil` read the icon file into exactly the ten
+  files, each a PNG of its name's size, with the same byte counts in the three jobs. The step prints
+  no entry types; that the file held these twelve entries follows from its passing, since at that
+  head it fails unless the file is byte for byte the build's, which writes them. Which entry gave
+  which file is not printed either. That `icon_16x16.png` (16 pixels, 529 bytes) is the file of
+  `is32` and `s8mk` is inferred: no other entry holds 16 pixels, unless `iconutil` scales one. That
+  `icon_32x32.png` (32 pixels, 1287 bytes) is that of `il32` and `l8mk` is inferred from the slots
+  alone: `ic11` holds 32 pixels too, of the same `app-32.png`, and `icon_16x16@2x.png`, the name of
+  its slot, had the same 1287 bytes, so the log cannot tell the two apart. The
+  byte counts fit: each of the ten files is 1.2 to 1.6 times its PNG, these two among them (529
+  against 435 bytes, 1287 against 1071), where in run 42620168506 `icp4`'s and `icp5`'s were about
+  twice theirs, and the files of two entries that hold one PNG have the same count. The check still
+  wants the same ten files.
 - **M10 and the signature.** `codesign` writes each Mach-O file's signature into the file, so after signing
   the two extension files no longer equal their wheels' bytes (seen in CI, run 41407347108, 2026-11-02:
   `record` found the two signed files differ from their wheels'). So M10 (§22) holds byte for byte before
