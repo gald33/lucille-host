@@ -1610,14 +1610,48 @@ check from `tools/macos/check_app.py`:
   each with `/usr/bin/open`, prints the names of System Settings' windows and takes a screenshot, then quits
   System Settings by its name; it gates on the window's title, which is not yet seen on a Mac;
 - only that copy acts (§13; `placement`): first the control, that copy opened starts the host on the app's
-  profile and the check sees it; then the build's own copy, and a copy named `Capsule 2.app` in
-  `/Applications` with `/Applications/Capsule.app` there and then moved aside, each say why they can't run
-  and how to fix that, start no host process of the app's profile for 10 s, and change nothing in its
-  folder. The renamed copy offers only Quit, and quits when Quit is pressed; the build's own copy offers
-  only Show Applications Folder and Quit, in either order (the check prints the order it reads, which is
-  not yet seen on a Mac), and Show Applications Folder quits it and shows a Finder window,
-  which the check prints and closes, and whose name, Applications, is not yet seen on a Mac, so that only
-  this job gates on it;
+  profile and the check sees it within 30 s: a host process whose command line `pgrep -f` or `ps` matches,
+  or, where `ps` can read the arguments of none of the app's children, a child whose arguments `ps` did
+  not read, which has the runtime's name and maps that copy's bundled runtime, by `lsof` (which does not
+  prove the pattern, and the check says so), not merely a child of the app; then the build's own copy, and
+  a copy named `Capsule 2.app` in `/Applications` with `/Applications/Capsule.app` there and then moved
+  aside, each say why they can't run and how to fix that, start no host process of the app's profile, nor
+  any child, nor, whatever its parent, a process whose arguments `ps` cannot read that maps a copy's
+  bundled runtime or may, for 10 s, and
+  change nothing in its folder. The check says that nothing started only if `ps` read the process table and
+  no stretch of more than 2 s went without a reading, counted from the start of one lister's call to the
+  end of the next one's, from the watch's first call on; a lister that fails is blind, never "none", and a
+  blind watch fails once, leaving unjudged whether the copy started anything, unless a reading saw that it
+  did or that it stopped. Each stretch of more than 0.35 s is printed on its own, recorded, not a gate (in
+  a refusing copy's watch, one of more than 2 s where it fails it). The 2 s are set from run 42681859860,
+  the check's first run on all three images, with no lister error: the longest stretch was 0.30 to 0.37 s
+  (macos-15), 0.24 to 0.30 s (macos-26) and 0.32 to 0.41 s (xcode-27) in the refusing copies' watches, and
+  0.29, 0.36 and 0.95 s in the controls', where calls took up to 0.71 s (xcode-27) while the app launched;
+  a bound of 0.35 s failed two refusing copies in whose watches no reading saw a host process or a child
+  (that they started nothing is inferred). 2 s is more than twice 0.95 s. It no longer proves that a burst
+  of host processes shorter than 2 s between two readings was seen: in that run the app's launch, from the
+  first host process seen to when the check saw the end of its first status read, took 0.38 s, 0.50 s and
+  0.95 s. What a refusing copy's watch shows against a launch is its own line, not the limit: its lister
+  errors, and its longest stretch with no reading by `ps` alone, which it gives, not as a gate. A host
+  process that ran for longer than that had a whole `ps` reading inside its run, which would have counted
+  it, as a child if not by its command line (inferred; not yet seen in such a watch); a shorter one could
+  be missed. The longest stretch over both listers says less, since a `pgrep` reading of none can be wrong.
+  The pattern ends at the profile's name and a space or the end of the command line; Apple's `pgrep` is not
+  yet seen to read it. When the control fails, it records what tells the causes apart. In run 42700559897
+  (xcode-27) that record showed, seen: a child of the app from 1.04 s that `ps` showed only as
+  `(lucille-host-run)`, the app's first status read ended by 2.21 s, and neither `ps` nor `pgrep -f`
+  matching a host process by its command line in 60 s, with no lister error. Inferred: that these were
+  host processes (from the app's code), and that neither lister could read their arguments (from adv_cmds'
+  `ps/print.c` and `pkill.c`). A start held for about 30 s does not fit it. Why the arguments could not be
+  read is not known, and whether the four failures before it (macos/README.md, `placement`) had that cause
+  is inferred. So the control's watch also asks `lsof` by name, on a thread of its own, for each process
+  of the runtime's name and its parent, so that a slow `ps` does not hold the lookup back. When the
+  control passes, it records the burst of host processes as the listers saw it. The
+  renamed copy offers only Quit, and quits when Quit is pressed;
+  the build's own copy offers only Show Applications Folder and Quit, in either order (the check prints
+  the order it reads, which is not yet seen on a Mac), and Show Applications Folder quits it and shows a
+  Finder window, which the check prints and closes, and whose name, Applications, is not yet seen on a
+  Mac, so that only this job gates on it;
 - the menu driven through System Events, with screenshots kept as a CI artifact, the last checked step
   Reset Settings… on a settings file the check makes unreadable and then puts back; then, best effort and
   failing nothing, a folder added in Documents, which macOS protects: if macOS asks, the check reads the
