@@ -217,17 +217,24 @@ The host:
   (sb `docs/sharing.md:533-536`). The host keeps room keys as it keeps the pair: in its OS-keyring Store,
   beside the pair, or in a 0600 file only under `--store-file`, with the same warning
   (spec/PROTOCOL.md §18).
-- The host keeps the pair in one keyring backend on each system, known by its class, and refuses to run as
-  uid 0. The class must be exactly keyring's Secret Service backend
-  (`keyring.backends.SecretService.Keyring`) on Linux, or its Keychain backend
-  (`keyring.backends.macOS.Keyring`) on macOS, compared by `__module__` and `__qualname__` as strings, so
-  the host's own code imports neither (keyring's detection imports every backend its entry points name,
-  these two among them, before the check). Every other backend is refused when the store is opened and again
-  before every read and write of the item: keyring's `fail` and `null` backends, a subclass of the known
-  class, a class under any other name, one that writes secrets unencrypted to a file among them, and every
-  chain of backends, whatever it holds. This checks the class's identity, not how the backend keeps a
-  secret. `pair --store-file` pairs where the keyring backend is refused; a pair kept in a refused backend
-  before is left there and never read.
+- The host keeps the pair in one keyring backend on each system, and refuses to run as uid 0. It builds that
+  backend itself: keyring's Secret Service backend (`keyring.backends.SecretService.Keyring`) on Linux, or
+  its Keychain backend (`keyring.backends.macOS.Keyring`) on macOS, importing that system's module alone. It
+  never asks keyring for a backend, so keyring chooses none: `PYTHON_KEYRING_BACKEND` and keyring's
+  `keyringrc.cfg` are not consulted, and none of the backends keyring's entry points name is loaded
+  (keyring's choice loaded all of them, and on Linux its macOS backend's `ctypes.util.find_library` ran
+  `ldconfig`, `gcc` and `ld`, the last two with the host's whole environment). Before building it, the host
+  asks for the class's `priority`, keyring's own test of whether a backend can be used: the Secret Service's
+  connects to the session bus at `DBUS_SESSION_BUS_ADDRESS`, a local socket, and asks whether a Secret
+  Service runs there or can be started; the Keychain's asks whether this is macOS and the Security framework
+  loaded. Where it cannot be used, the host takes keyring's `fail` backend in its place, as keyring did
+  where it found nothing it could use, and refuses it with the same sentence and code. The class of the
+  backend must be exactly that one, compared by `__module__` and `__qualname__` as strings, when the store
+  is opened and again before every read and write of the item, and every other backend is refused: keyring's
+  `fail` and `null` backends, a subclass of the known class, a class under any other name, one that writes
+  secrets unencrypted to a file among them, and every chain of backends, which is never asked what it holds.
+  This checks the class's identity, not how the backend keeps a secret. `pair --store-file` pairs where the
+  keyring backend is refused; a pair kept in a refused backend before is left there and never read.
 
 **Hazards neutralized,** each with a test:
 - **The signer socket.**

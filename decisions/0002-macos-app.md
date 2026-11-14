@@ -385,8 +385,8 @@ from a SwiftPM-built executable and a runtime tree (§6).
   uninstaller.
 - **Briefcase.** A second framework, in beta, with its own launcher and support package, whose failures
   cannot be debugged without a Mac.
-- **PyInstaller, py2app, Nuitka.** A frozen executable finds imports by heuristic (keyring finds its macOS
-  backend through an entry point), adds a prebuilt bootloader as a trust root, and no longer compares file by
+- **PyInstaller, py2app, Nuitka.** A frozen executable finds imports by heuristic (keyring found its macOS
+  backend through an entry point, before the host built it itself), adds a prebuilt bootloader as a trust root, and no longer compares file by
   file with the PyPI wheel. Verification gets harder; surprises appear only on a Mac.
 - **A Python GUI (rumps, Toga, PyObjC).** `objc`, `AppKit` and `ctypes` are outside the runtime import
   allowlist, and registering a login item from Python fails the `register()` lint.
@@ -482,8 +482,10 @@ ripgrep.
   the build writes, one per `.py` a `RECORD` lists. Those are named, and each rewritten `RECORD` is
   compared line by line with the wheel's own. The build checks all of this, and that the installed
   distributions are exactly the expected ones, before it signs anything, and refuses on any difference.
-- **No wheel's `*.dist-info` folder is removed**: keyring finds its macOS backend through an entry point. The
-  one `*.dist-info` folder the build removes is the runtime's own pip, which is no locked wheel's: it is
+- **No wheel's `*.dist-info` folder is removed**: each holds the `RECORD` that the check above compares with
+  its wheel's own. (keyring would find its macOS backend through an entry point listed there, but the host
+  never asks keyring to find a backend: it builds that one itself, `src/lucille_host/store.py`.) The one
+  `*.dist-info` folder the build removes is the runtime's own pip, which is no locked wheel's: it is
   uninstalled whole, by its own `RECORD` (which lists `bin/pip`, `bin/pip3` and `bin/pip3.13` too), before any
   wheel is installed, and `MANIFEST.json` records it under `runtime.removed`. The removal skips a row whose
   file is absent and checks no hash before it deletes a file, because the pinned archive's pip lacks the

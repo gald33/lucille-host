@@ -53,7 +53,7 @@ from lucille_host.controls import Controls
 from lucille_host.ops import OPERATIONS
 from tests import _audit_hook
 from tests._host import HostEnv, lock_free, lock_held
-from tests._keyring import MemoryKeyring
+from tests._keyring import MemoryKeyring, no_session_bus
 from tests._run import RunHost, body, counting, fast, nothing, until
 from tests._supervise import Lines, Piped, Supervised, folder, strings
 from tests.spec import _support
@@ -1381,6 +1381,12 @@ def _insecure(env: HostEnv, h: Any, where: Path, patch: pytest.MonkeyPatch, stac
     patch.setattr("keyring.core._keyring_backend", FailKeyring())
 
 
+def _no_session_bus(
+    env: HostEnv, h: Any, where: Path, patch: pytest.MonkeyPatch, stack: Any
+) -> None:
+    no_session_bus(patch)
+
+
 class _Unreadable(MemoryKeyring):
     def get_password(self, service: str, username: str) -> str | None:
         raise KeyringError("locked")
@@ -1516,6 +1522,7 @@ CASES = {
     "expired": _Case("expired", _deadline_passed),
     "already_running": _Case("already_running", _locked),
     "insecure_keyring": _Case("insecure_keyring", _insecure),
+    "insecure_keyring-no_session_bus": _Case("insecure_keyring", _no_session_bus),
     "store_error": _Case("store_error", _unreadable),
     "startup_refused-switchboard": _Case("startup_refused", _switchboard_set),
     "startup_refused-root": _Case("startup_refused", _as_root),

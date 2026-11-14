@@ -35,6 +35,7 @@ from lucille_host.cli import ALREADY_PAIRING, PAIR_LOCK, main
 from tests import _audit_hook
 from tests._cli import HostCli, collecting, until
 from tests._host import HostEnv, lock_free, lock_held
+from tests._keyring import no_session_bus
 from tests._lucille import FakeLucille
 from tests.spec import _support
 
@@ -843,12 +844,17 @@ def test_pair_status_confirm_and_reject_work_while_pair_asks(cli: HostCli, verb:
     assert lock_free(lock)
 
 
+@pytest.mark.parametrize("no_keyring", ["fail-backend", "no-session-bus"])
 def test_store_file_pairs_where_the_keyring_stores_nothing(
-    cli: HostCli, monkeypatch: pytest.MonkeyPatch
+    no_keyring: str, cli: HostCli, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # A computer with no keyring to store in, such as a headless Linux box: the case
     # --store-file is for. Before, `pair --store-file` looked in the keyring first, and refused.
-    monkeypatch.setattr("keyring.core._keyring_backend", FailKeyring())
+    # Shown with keyring's fail backend, and with the host's own Linux backend and no session bus.
+    if no_keyring == "fail-backend":
+        monkeypatch.setattr("keyring.core._keyring_backend", FailKeyring())
+    else:
+        no_session_bus(monkeypatch)
     lucille = cli.lucille()
     ran = cli.run("pair", "--code-stdin", stdin=lucille.start() + "\n")
     assert ran.rc == 1 and "has no keyring to store in" in ran.err and "--store-file" in ran.err

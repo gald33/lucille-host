@@ -18,12 +18,14 @@ import subprocess
 import sys
 import threading
 import time
+import types
 from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
 
 import pytest
 from keyring.backend import KeyringBackend
+from keyring.backends import SecretService
 from keyring.backends.chainer import ChainerBackend
 from keyring.backends.fail import Keyring as FailKeyring
 from keyring.backends.null import Keyring as NullKeyring
@@ -44,6 +46,9 @@ pytestmark = pytest.mark.filterwarnings(
 
 KEYRING = state.HostConfig()
 FILE = state.HostConfig(store="file")
+# The host's own way to its keyring backend, as it is before tests/conftest.py replaces it in each
+# test.
+SYSTEM_BACKEND = store._system_backend
 
 
 @pytest.fixture
@@ -198,8 +203,8 @@ def _refused_everywhere(
     with pytest.raises(store.InsecureKeyring):
         _switchboard.open_link(host_env.dirs, KEYRING)
     assert _switchboard.open_link(host_env.dirs, FILE).warning is not None
-    # On load: the store opened over the keyring the tests stand in for, and then the backend in
-    # use changed.
+    # On load: the store opened over the keyring the tests stand in for, and then the backend the
+    # host gets changed (store._system_backend, which tests/conftest.py points here).
     monkeypatch.setattr("keyring.core._keyring_backend", stand_in)
     link = _switchboard.open_link(host_env.dirs, KEYRING)
     item = store.Item(host_env.dirs.state, host_env.dirs.profile)
@@ -207,7 +212,7 @@ def _refused_everywhere(
     for load in (item.read, link.pairs.names, link.rooms.load, lambda: item.change(_note)):
         with pytest.raises(store.InsecureKeyring, match="cannot keep its pair"):
             load()
-    # On save: the backend in use changes after the item is read and before it is written.
+    # On save: the backend the host gets changes after the item is read and before it is written.
     monkeypatch.setattr("keyring.core._keyring_backend", stand_in)
 
     def swapped(doc: dict[str, Any]) -> None:
@@ -220,6 +225,22 @@ def _refused_everywhere(
     assert [path.read_bytes() for path in files] == kept
     assert stand_in.writes == 0
     return str(refusal.value)
+
+
+def _asked_for_members(
+    monkeypatch: pytest.MonkeyPatch, viable: Callable[[], list[Any]]
+) -> list[None]:
+    """Make ``viable()`` what keyring finds viable, which is what a chain holds, and return a list
+    that gets an entry each time keyring is asked for it: asking a chain what it holds asks that,
+    and loads every backend keyring's entry points name."""
+    asked: list[None] = []
+
+    def found() -> list[Any]:
+        asked.append(None)
+        return viable()
+
+    monkeypatch.setattr("keyring.backend.get_all_keyring", found)
+    return asked
 
 
 # keyrings.alt's backend that writes secrets unencrypted to a file of its own, as it is named
@@ -235,7 +256,7 @@ Plaintext = notes_keyring(
     [
         pytest.param(FailKeyring, list, "has no keyring to store in", id="fail"),
         pytest.param(NullKeyring, list, "stores nothing", id="null"),
-        pytest.param(ChainerBackend, list, "chains no keyring", id="empty-chain"),
+        pytest.param(ChainerBackend, list, "is a chain of keyring backends,", id="empty-chain"),
         pytest.param(Plaintext, list, "is keyrings.alt.file.PlaintextKeyring,", id="plaintext"),
         pytest.param(
             ChainerBackend,
@@ -253,14 +274,15 @@ def test_refuses_insecure_keyring_backend(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # The backends keyring finds viable, which is what a chain holds, for the whole test: keyring
-    # works a chain's members out again each time it is asked.
-    monkeypatch.setattr("keyring.backend.get_all_keyring", lambda: [NullKeyring(), *chained()])
+    # works a chain's members out again each time it is asked, and the host never asks.
+    asked = _asked_for_members(monkeypatch, lambda: [NullKeyring(), *chained()])
     monkeypatch.setattr("keyring.core._keyring_backend", backend())
     with pytest.raises(store.InsecureKeyring, match="cannot keep its pair") as refused:
         store.check_backend()
     assert f") {reason}" in str(refused.value)
     with pytest.raises(store.InsecureKeyring):
         _switchboard.open_link(host_env.dirs, KEYRING)
+    assert asked == []
     # The file store does not use the keyring, so it opens where the keyring stores nothing.
     assert _switchboard.open_link(host_env.dirs, FILE).warning is not None
 
@@ -380,33 +402,39 @@ def test_a_chain_of_backends_is_refused_whatever_it_holds(
         if not isinstance(member, NotesKeyring):
             member.items[(store.SERVICE, host_env.dirs.profile)] = json.dumps(DOC)
     # Each is kept for the whole test: keyring works a chain's members out again each time.
-    monkeypatch.setattr("keyring.backend.get_all_keyring", lambda: chained)
+    asked = _asked_for_members(monkeypatch, lambda: chained)
     refused = chain()
     assert list(refused.backends) == chained
+    asked.clear()
 
     def seen() -> tuple[int, int]:
         return (sum(m.reads for m in chained), sum(m.writes for m in chained))
 
     message = _refused_everywhere(host_env, refused, seen, monkeypatch, (notes,))
-    assert f"({type(refused).__name__}) is a chain of keyring backends, and " in message
-    assert "lucille-host uses one keyring backend, not a chain of them" in message
-    assert f"keyringrc.cfg can name the system one, {_dotted(_system())})," in message
+    assert message.startswith(
+        f"the keyring backend here ({type(refused).__name__}) is a chain of keyring backends, and "
+        "lucille-host uses one keyring backend, not a chain of them, so lucille-host cannot keep "
+    )
+    # Never asked what it holds.
+    assert asked == []
 
 
 def test_a_chain_whose_members_cannot_be_worked_out_is_refused(
     host_env: HostEnv, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # A member that raises when keyring asks for its priority, as the Secret Service does when
-    # the session bus goes away: refused as a chain, the code a user can act on, not an error.
+    # the session bus goes away: refused as a chain, the code a user can act on, not an error,
+    # and without keyring being asked for the members.
     def gone() -> list[Any]:
         raise RuntimeError("the session bus went away")
 
-    monkeypatch.setattr("keyring.backend.get_all_keyring", gone)
+    asked = _asked_for_members(monkeypatch, gone)
     monkeypatch.setattr("keyring.core._keyring_backend", ChainerBackend())
     with pytest.raises(store.InsecureKeyring, match="not a chain of them"):
         store.check_backend()
     with pytest.raises(store.InsecureKeyring, match="not a chain of them"):
         _switchboard.open_link(host_env.dirs, KEYRING)
+    assert asked == []
 
 
 def test_a_backend_of_the_system_class_is_read_and_written(
@@ -434,8 +462,9 @@ def test_a_backend_of_the_system_class_is_read_and_written(
 def test_the_known_backends_are_keyrings_own_classes(
     family: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # Imported here, never by the host, which knows them by their names alone. On Linux, importing
-    # the macOS backend runs ldconfig and a compiler (ctypes' find_library), in this test only.
+    # Both imported here; the host imports its own system's alone (store._build). On Linux,
+    # importing the macOS backend runs ldconfig and a compiler (ctypes' find_library), in this test
+    # only.
     from keyring.backends import SecretService, macOS
 
     classes = {"linux": SecretService.Keyring, "macos": macOS.Keyring}
@@ -458,58 +487,187 @@ def test_the_known_backends_are_keyrings_own_classes(
         store.check_backend(ChainerBackend())
 
 
-def test_the_backend_keyring_detects_here_is_judged(tmp_path: Path) -> None:
-    # keyring's own detection, in a fresh interpreter with nothing in its environment but PATH and
-    # an empty HOME (no keyringrc.cfg, no PYTHON_KEYRING_BACKEND, no session bus address), and the
-    # host's check of what it found. Not in this process, where every test backend is registered
-    # with keyring, so that detection would chain them.
-    home = tmp_path / "home"
-    home.mkdir()
-    source = Path(store.__file__).resolve().parents[1]
-    code = (
-        "import json, sys\n"
-        f"sys.path.insert(0, {str(source)!r})\n"
-        "import keyring\n"
-        "from lucille_host import store\n"
-        "kind = type(keyring.get_keyring())\n"
-        "try:\n"
-        "    store.check_backend()\n"
-        "    refusal = None\n"
-        "except store.InsecureKeyring as refused:\n"
-        "    refusal = str(refused)\n"
-        "print(json.dumps([kind.__module__, kind.__qualname__, refusal]))\n"
-    )
-    done = subprocess.run(
-        [sys.executable, "-I", "-c", code],
-        capture_output=True,
-        text=True,
-        env={"HOME": str(home), "PATH": os.defpath},
-        cwd=home,
-        timeout=120,
-        check=False,
-    )
-    assert done.returncode == 0, done.stderr
-    module, qualname, refusal = json.loads(done.stdout.splitlines()[-1])
-    if paths.os_family() == "macos":
-        # The backend the Mac app keeps the pair in, which nothing else in CI checks.
-        assert [module, qualname, refusal] == [*SYSTEM_BACKENDS["macos"], None]
-    else:
-        # The Secret Service needs a session bus, and there is none here.
-        assert [module, qualname, refusal] == ["keyring.backends.fail", "Keyring", FAIL_SENTENCE]
+class _Bus:
+    """A connection to the session bus: all keyring's check does with one is close it."""
+
+    def close(self) -> None:
+        pass
 
 
-# Where, in src/lucille_host/, keyring may be asked for the backend in use, and the item read or
-# written: the check, and the item's one read and one write, which go through the backend the check
-# returned. Nothing deletes the item.
+class _SecretStorageError(Exception):
+    """secretstorage's own error, ``secretstorage.exceptions.SecretStorageException``."""
+
+
+def _secretstorage(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    version: tuple[int, ...] = (3, 5, 0),
+    connect: Exception | None = None,
+    service: bool = True,
+) -> list[str]:
+    """Put a secretstorage of the test's own where keyring's Secret Service backend looks for it,
+    on either system (it is not installed on macOS), and return what keyring asks of it, in order.
+    Connecting to the session bus raises ``connect``, and ``service`` is whether a Secret Service
+    answers there."""
+    asked: list[str] = []
+
+    def dbus_init() -> _Bus:
+        asked.append("dbus_init")
+        if connect is not None:
+            raise connect
+        return _Bus()
+
+    def check_service_availability(connection: _Bus) -> bool:
+        asked.append("check_service_availability")
+        return service
+
+    fake = types.SimpleNamespace(
+        __name__="secretstorage",
+        __version_tuple__=version,
+        dbus_init=dbus_init,
+        check_service_availability=check_service_availability,
+    )
+    monkeypatch.setattr(SecretService, "secretstorage", fake, raising=False)
+    errors = types.SimpleNamespace(SecretStorageException=_SecretStorageError)
+    monkeypatch.setattr(SecretService, "exceptions", errors, raising=False)
+    return asked
+
+
+def _never_detect(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Fail the test if keyring is asked for a backend, or to find one: that reads
+    ``PYTHON_KEYRING_BACKEND`` and ``keyringrc.cfg``, and loads every backend keyring's entry
+    points name."""
+
+    def detect(*_: Any) -> None:
+        raise AssertionError("keyring was asked to find a backend")
+
+    for name in ("get_keyring", "core.get_keyring", "core.init_backend", "backend.get_all_keyring"):
+        monkeypatch.setattr(f"keyring.{name}", detect)
+
+
+def _unimportable(monkeypatch: pytest.MonkeyPatch, module: str) -> None:
+    """Make ``module``, a backend module of keyring's, fail to import."""
+    package, _, name = module.rpartition(".")
+    monkeypatch.delattr(sys.modules[package], name, raising=False)
+    monkeypatch.setitem(sys.modules, module, None)
+
+
+def test_the_host_builds_its_linux_backend_itself(monkeypatch: pytest.MonkeyPatch) -> None:
+    # keyring's Secret Service backend, built by the host, once the class's own priority (keyring's
+    # test of whether a backend can be used here) found a Secret Service on the session bus.
+    # keyring is never asked to find a backend, so the backend its setting names is not taken.
+    _never_detect(monkeypatch)
+    monkeypatch.setenv("PYTHON_KEYRING_BACKEND", "keyring.backends.null.Keyring")
+    asked = _secretstorage(monkeypatch)
+    built = store._build.__wrapped__("linux")
+    assert type(built) is SecretService.Keyring
+    assert asked == ["dbus_init", "check_service_availability"]
+    monkeypatch.setattr(paths, "os_family", lambda platform=None: "linux")
+    assert store.check_backend(built) is built
+
+
+def test_the_system_backend_is_built_once_per_process(monkeypatch: pytest.MonkeyPatch) -> None:
+    # As keyring kept the backend it found for the life of the process: the session bus is asked
+    # once, however often the item is read and written.
+    asked = _secretstorage(monkeypatch)
+    monkeypatch.setattr(paths, "os_family", lambda platform=None: "linux")
+    monkeypatch.setattr(store, "_system_backend", SYSTEM_BACKEND)
+    store._build.cache_clear()
+    try:
+        built = store.check_backend()
+        assert type(built) is SecretService.Keyring
+        assert store.check_backend() is built and SYSTEM_BACKEND() is built
+    finally:
+        store._build.cache_clear()
+    assert asked == ["dbus_init", "check_service_availability"]
+
+
+@pytest.mark.parametrize(
+    ("family", "setup"),
+    [
+        # Where secretstorage is installed (Linux): real, with no address, or one nothing answers
+        # at. Where it is not (macOS), the class's priority says so.
+        pytest.param(
+            "linux",
+            lambda m, t: m.delenv("DBUS_SESSION_BUS_ADDRESS", raising=False),
+            id="no-session-bus",
+        ),
+        pytest.param(
+            "linux",
+            lambda m, t: m.setenv("DBUS_SESSION_BUS_ADDRESS", f"unix:path={t / 'bus'}"),
+            id="nothing-at-the-session-bus-address",
+        ),
+        pytest.param(
+            "linux", lambda m, t: _secretstorage(m, service=False), id="no-secret-service"
+        ),
+        pytest.param(
+            "linux",
+            lambda m, t: _secretstorage(m, connect=_SecretStorageError("no session bus")),
+            id="secretstorage-refuses",
+        ),
+        pytest.param(
+            "linux",
+            lambda m, t: _secretstorage(
+                m, connect=PermissionError(errno.EACCES, "Permission denied")
+            ),
+            id="secretstorage-fails-otherwise",
+        ),
+        pytest.param(
+            "linux", lambda m, t: _secretstorage(m, version=(3, 1, 0)), id="secretstorage-too-old"
+        ),
+        pytest.param(
+            "linux",
+            lambda m, t: m.delattr(SecretService, "secretstorage", raising=False),
+            id="no-secretstorage",
+        ),
+        pytest.param(
+            "linux",
+            lambda m, t: _unimportable(m, "keyring.backends.SecretService"),
+            id="linux-module-does-not-import",
+        ),
+        pytest.param(
+            "macos",
+            lambda m, t: _unimportable(m, "keyring.backends.macOS"),
+            id="macos-module-does-not-import",
+        ),
+    ],
+)
+def test_a_system_backend_that_cannot_be_used_is_no_keyring(
+    family: str,
+    setup: Callable[[pytest.MonkeyPatch, Path], Any],
+    host_env: HostEnv,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Refused as keyring's fail backend always was where keyring found nothing it could use: the
+    # same sentence, the same refusal, and the file store still opens.
+    setup(monkeypatch, tmp_path)
+    built = store._build.__wrapped__(family)
+    assert type(built) is FailKeyring
+    with pytest.raises(store.InsecureKeyring) as refused:
+        store.check_backend(built)
+    assert str(refused.value) == FAIL_SENTENCE
+    monkeypatch.setattr(store, "_system_backend", lambda: built)
+    with pytest.raises(store.InsecureKeyring) as refused:
+        _switchboard.open_link(host_env.dirs, KEYRING)
+    assert str(refused.value) == FAIL_SENTENCE
+    assert _switchboard.open_link(host_env.dirs, FILE).warning is not None
+
+
+# Where, in src/lucille_host/, the item may be read or written: the item's one read and one write,
+# which go through the backend the check returned. Nothing deletes the item, and nothing asks
+# keyring for its backend.
 KEYRING_USES = {
-    "get_keyring": {"store.check_backend"},
+    # The host builds its backend itself, and never asks keyring for one (or to find one).
+    "get_keyring": set(),
     "get_password": {"store.Item._load"},
     "set_password": {"store.Item._save"},
     "delete_password": set(),
     # Two more ways to the item that bypass the check: a credential read, and a chain's members,
-    # which hand out live backends. A chain is asked only whether it holds any.
+    # which hand out live backends (and load every backend keyring's entry points name). A chain is
+    # refused without being asked what it holds.
     "get_credential": set(),
-    "backends": {"store._unfit"},
+    "backends": set(),
 }
 
 

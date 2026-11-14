@@ -26,23 +26,40 @@
   day. Those stamps only decide whether a pair has gone unread for days, and what is shown about
   a room, so an hour's delay changes neither. Every other change, and every delete, is written
   before the call returns, as Switchboard's store contract asks.
-- The host keeps the item in one keyring backend on each system, and knows it by its class:
-  keyring's Secret Service backend, ``keyring.backends.SecretService.Keyring``, on Linux, and its
-  Keychain backend, ``keyring.backends.macOS.Keyring``, on macOS (:data:`KNOWN_BACKENDS`). The class
-  of the backend in use must be that one exactly, as its ``(__module__, __qualname__)``, compared as
-  strings, so neither module is ever imported here. Every other backend is refused: keyring's
-  ``fail`` and ``null`` backends, a subclass of the known class, a class under any other name, one
-  that writes secrets in the clear to a file among them, and every chain of backends (keyring's
-  ``ChainerBackend``), whatever it holds: a chain is asked only whether it holds any backend, and
-  its members are neither judged nor named. :func:`check_backend` refuses them when the store is
-  opened, and again before each read and each write of the item, which go to the backend it checked.
-  What is checked is the class's identity, not how the backend keeps a secret: which service answers
-  on the session bus, and whether the collection that keeps the item is encrypted, are not checked;
-  nor are the settings keyring gives a backend from ``KEYRING_PROPERTY_*`` environment variables
-  (the Secret Service collection, a Keychain file); and code already running in the process could
-  give a class of its own those names. Before the check sees a backend, keyring has already imported
-  and built the one that an environment variable or its configuration file names, or, with neither,
-  imported every backend its installed entry points name and built every one it can use.
+- The host keeps the item in one keyring backend on each system, and builds it itself: keyring's
+  Secret Service backend, ``keyring.backends.SecretService.Keyring``, on Linux, and its Keychain
+  backend, ``keyring.backends.macOS.Keyring``, on macOS (:data:`KNOWN_BACKENDS`). :func:`_build`
+  imports that system's module alone, never the other's, and builds its class once a process. The
+  host never asks keyring for a backend, so keyring chooses none: ``PYTHON_KEYRING_BACKEND`` and
+  keyring's configuration file, ``keyringrc.cfg``, are not consulted, and the backends keyring's
+  installed entry points name are not loaded (on Linux, loading its macOS backend runs ``ldconfig``,
+  ``gcc`` and ``ld``, through ``ctypes.util.find_library``).
+- Before it builds the class, :func:`_build` asks for the class's ``priority``, keyring's own test
+  of whether a backend can be used here, which keyring asked of every backend before it chose one.
+  It is needed: a Secret Service backend built where there is no session bus raises secretstorage's
+  own error at the first read, which is not a keyring error. The Secret Service's ``priority``
+  connects to the session bus that ``DBUS_SESSION_BUS_ADDRESS`` names, a local socket (jeepney,
+  which secretstorage uses, connects to a ``unix:`` address only), and asks the bus whether a Secret
+  Service runs there or can be started, without starting it; the Keychain's asks only whether this
+  is macOS and its module loaded the Security framework. Neither starts a process: read from keyring
+  25.7, secretstorage 3.5 and jeepney 0.9; tests/test_keyring_backend.py checks it on Linux with no
+  session bus, and on macOS, and nothing checks it with a session bus. Where the class cannot be
+  used (there is no session bus, or no Secret Service on it, secretstorage is missing or fails, or
+  the module does not import), the host takes keyring's ``fail`` backend
+  instead, as keyring did where it found nothing it could use, and refuses it with the same
+  sentence.
+- :func:`check_backend` takes a backend only when its class is exactly the one this system's entry
+  in :data:`KNOWN_BACKENDS` names, as its ``(__module__, __qualname__)``, compared as strings. It
+  checks the backend the host built when the store is opened, and again before each read and each
+  write of the item, which go to the backend it checked, and refuses every other: keyring's ``fail``
+  and ``null`` backends, a subclass of the known class, a class under any other name, one that
+  writes secrets in the clear to a file among them, and every chain of backends (keyring's
+  ``ChainerBackend``), which it never asks what it holds: that would load every backend keyring's
+  entry points name. What is checked is the class's identity, not how the backend keeps a secret:
+  which service answers on the session bus, and whether the collection that keeps the item is
+  encrypted, are not checked; nor are the settings keyring gives a backend from
+  ``KEYRING_PROPERTY_*`` environment variables (the Secret Service collection, a Keychain file); and
+  code already running in the process could give a class of its own those names.
 
 A keyring failure, a backend's own ``OSError`` included, is a :class:`StoreError`, an ``OSError``,
 which is what Switchboard's stores raise for a storage failure; the wrapper never reads one as the
@@ -54,6 +71,7 @@ from __future__ import annotations
 import contextlib
 import copy
 import errno
+import functools
 import json
 import os
 import threading
@@ -63,7 +81,6 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Final, TypeVar
 
-import keyring
 from keyring.backend import KeyringBackend
 from keyring.backends.chainer import ChainerBackend
 from keyring.backends.fail import Keyring as FailKeyring
@@ -102,7 +119,8 @@ DEADLOCK_PAUSE: Final = 0.01
 DEADLOCK_PAUSE_MOST: Final = 0.5
 TABLES: Final = ("records", "pending", "verdicts")
 # The one keyring backend the host keeps the item in, by system, as its class's (__module__,
-# __qualname__): the module docstring says what that does and does not check.
+# __qualname__): the one _build builds. The module docstring says what the check of it does and does
+# not check.
 KNOWN_BACKENDS: Final[Mapping[str, tuple[str, str]]] = MappingProxyType(
     {
         "linux": ("keyring.backends.SecretService", "Keyring"),
@@ -124,8 +142,41 @@ class StoreError(OSError):
 
 
 class InsecureKeyring(state.Refused):
-    """The keyring backend in use is not, by its class, the one the host keeps the item in on this
-    system (:data:`KNOWN_BACKENDS`)."""
+    """The keyring backend is not, by its class, the one the host keeps the item in on this system
+    (:data:`KNOWN_BACKENDS`), or that one cannot be used here."""
+
+
+def _system_backend() -> KeyringBackend:
+    """The keyring backend the host reads and writes the item through: the one :func:`_build` built
+    for this system. It is the one place the host gets a backend, and the one the tests replace
+    (tests/conftest.py)."""
+    return _build(paths.os_family())
+
+
+@functools.cache
+def _build(family: str) -> KeyringBackend:
+    """keyring's backend for ``family`` (:data:`KNOWN_BACKENDS`), built here with only its own
+    module imported, once a process, as keyring kept the backend it chose; keyring's ``fail``
+    backend when that one cannot be used here (the module docstring says when, and what asking
+    tells)."""
+    kind: type[KeyringBackend]
+    try:
+        if family == "linux":
+            from keyring.backends import SecretService
+
+            kind = SecretService.Keyring
+        elif family == "macos":
+            from keyring.backends import macOS
+
+            kind = macOS.Keyring
+        else:
+            return FailKeyring()
+        # The class's priority, which raises when it cannot be used here; viable is False then.
+        if kind.viable:
+            return kind()
+    except Exception:
+        pass
+    return FailKeyring()
 
 
 def _identity(backend: object) -> tuple[str, str]:
@@ -146,26 +197,17 @@ def _unfit(backend: object) -> str | None:
         return "has no keyring to store in"
     if isinstance(backend, NullKeyring):
         return "stores nothing"
-    family = paths.os_family()
-    system = ".".join(KNOWN_BACKENDS[family])
     if isinstance(backend, ChainerBackend):
-        # Asked only whether it holds anything, so that an empty one keeps its old reason. keyring
-        # works the members out again each time, from each backend's priority, which a backend
-        # may raise for (the Secret Service's does when it cannot reach its service, and other
-        # backends raise their own errors): a chain whose members cannot be worked out, for any
-        # reason, is still a chain, refused as one.
-        try:
-            empty = not backend.backends
-        except Exception:
-            empty = False
-        if empty:
-            return "chains no keyring"
+        # Never asked what it holds: keyring works that out from every backend its entry points
+        # name, which it loads to do so.
         return (
             "is a chain of keyring backends, and lucille-host uses one keyring backend, not a "
-            f"chain of them (keyring's keyringrc.cfg can name the system one, {system})"
+            "chain of them"
         )
     if _known(backend):
         return None
+    family = paths.os_family()
+    system = ".".join(KNOWN_BACKENDS[family])
     module, qualname = _identity(backend)
     return f"is {module}.{qualname}, and on {SYSTEM_NAMES[family]} lucille-host uses only {system}"
 
@@ -173,11 +215,12 @@ def _unfit(backend: object) -> str | None:
 def check_backend(
     backend: KeyringBackend | None = None, *, refusal: str = PAIR_REFUSAL
 ) -> KeyringBackend:
-    """The keyring backend in use (or ``backend``), when its class is the one the host keeps the
-    item in on this system; otherwise :class:`InsecureKeyring`, whose message ends with
-    ``refusal``. Read and write through the backend it returns, never through keyring's own
-    ``get_password`` and ``set_password``, which look the backend up again."""
-    current = keyring.get_keyring() if backend is None else backend
+    """The keyring backend the host built for this system (:func:`_system_backend`), or
+    ``backend``, when its class is the one the host keeps the item in on this system; otherwise
+    :class:`InsecureKeyring`, whose message ends with ``refusal``. Read and write through the
+    backend it returns, never through keyring's own ``get_password`` and ``set_password``, which
+    ask keyring for the backend it chooses."""
+    current = _system_backend() if backend is None else backend
     reason = _unfit(current)
     if reason is not None:
         raise InsecureKeyring(

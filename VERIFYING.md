@@ -148,10 +148,12 @@ enforces.
        which is not held to the list. `platform`, `uuid`, `string` and `socket` are left off on
        purpose. The code gives the reason for each entry and for each of those four, and widening the
        list is a reviewed change;
-     - on any part of `keyring` outside the lint's `KEYRING_SURFACE`: the backend in use, the
-       errors, and the backend classes the host must recognise. keyring's own `get_password`,
-       `set_password` and `delete_password` are outside it: each looks the backend up again, and the
-       host reads and writes through the backend it checked;
+     - on any part of `keyring` outside the lint's `KEYRING_SURFACE`: the errors, the two backend
+       classes the host builds (keyring's Secret Service backend for Linux and its Keychain backend
+       for macOS), and the backend classes the host must recognise. `keyring.get_keyring`, and
+       keyring's own `get_password`, `set_password` and `delete_password`, are outside it: each asks
+       keyring for the backend it chooses, and the host builds its own and reads and writes through
+       it;
      - on a module used as a value, any module, this package's own included (`getattr(json, name)`);
      - on anything that can start a process (`subprocess`, `os.spawn*`, `os.exec*`, `os.fork*`,
        `multiprocessing`, `webbrowser`, `pipes` and the rest of its list) outside
@@ -194,12 +196,17 @@ enforces.
    - code outside this repository. The standard library and the dependencies can start processes,
      import by name or run strings on the code's behalf, and the lint does not trace calls into them.
      agent-switchboard 2.6.0's `switchboard/client.py`, which the runtime imports, imports
-     `subprocess` and can run `git` to derive an agent id; keyring imports the backend that an
-     environment variable, its configuration file or an installed entry point names, when the host
-     first asks it for its backend. Tests with an audit hook find that the host's pairing and sharing
-     calls, and `run`, start no process on the paths they take, against Switchboard's in-process hub
-     ([CLAIMS.md](CLAIMS.md), C1), `run`'s events and lifeline included; a path no test takes is not
-     checked;
+     `subprocess` and can run `git` to derive an agent id; the host imports keyring's backend module
+     for its own system alone and builds that backend itself, so keyring consults neither
+     `PYTHON_KEYRING_BACKEND` nor its configuration file, `keyringrc.cfg`, and loads none of the
+     backends its installed entry points name; what that module does inside is not traced (on Linux
+     it connects to the session bus through secretstorage and jeepney, and on macOS it loads the
+     Security framework through `ctypes`). Tests with an audit hook find that the host's pairing and
+     sharing calls, and `run`, start no process on the paths they take, against Switchboard's
+     in-process hub ([CLAIMS.md](CLAIMS.md), C1), `run`'s events and lifeline included, with the
+     tests' own keyring backend in memory; and that opening the keyring store as a real host opens
+     it, in a process of its own with nothing of the tests in it, starts none
+     (`tests/test_keyring_backend.py`). A path no test takes is not checked;
    - files it does not parse: configuration, data and shell scripts.
 
    Review covers the rest.

@@ -1,13 +1,17 @@
 """Keyring backends for the tests: one in memory, so that no test reaches the system keyring, and
-one that keeps secrets in a plain file, which the host must refuse."""
+one that keeps secrets in a plain file, which the host must refuse; and the host's own Linux
+backend where there is no session bus."""
 
 from __future__ import annotations
 
 import json
 from pathlib import Path
 
+import pytest
 from keyring.backend import KeyringBackend
 from keyring.errors import PasswordDeleteError
+
+from lucille_host import store
 
 
 class MemoryKeyring(KeyringBackend):
@@ -81,3 +85,12 @@ def notes_keyring(
         (NotesKeyring,),
         {"__module__": module, "__qualname__": qualname, "path": path},
     )
+
+
+def no_session_bus(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Give the host its own Linux backend, built as a real host builds it (``store._build``, past
+    its once-a-process cache), with no session bus to find a Secret Service on: what keyring's
+    ``fail`` backend stands in for elsewhere in the tests. On macOS, where secretstorage is not
+    installed, the class says so instead, which comes to the same."""
+    monkeypatch.delenv("DBUS_SESSION_BUS_ADDRESS", raising=False)
+    monkeypatch.setattr(store, "_system_backend", lambda: store._build.__wrapped__("linux"))
