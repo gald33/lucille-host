@@ -13,9 +13,13 @@
 - What may be shown, here or anywhere, is the names (service and credential name) and when each
   was saved. The value is returned only by :meth:`CredentialStore.value`, and no error message
   holds anything read from the item.
-- The keyring backend is checked as the pair's is (:func:`store.check_backend`): a backend that
-  stores nothing, or stores in the clear, is refused. A file fallback, like the pair's
-  ``--store-file``, is deliberately not offered.
+- The keyring backend must be one this module names (:data:`TRUSTED`): on macOS the system
+  Keychain, on Linux the Secret Service, libsecret or KWallet. The check is on the exact class, on
+  every read and every write (:func:`check_backend`), so a backend chosen through
+  ``PYTHON_KEYRING_BACKEND``, a ``keyringrc.cfg`` or an installed plugin is refused unless it is
+  one of those, whatever it is called. This is stricter than the pair's rule
+  (:func:`store.check_backend`), which refuses only backends it knows to be unfit. A file
+  fallback, like the pair's ``--store-file``, is deliberately not offered.
 - ``.credentials.lock`` in the state folder is taken around each read and each read-modify-write
   of the item, the same kind of lock as the store's own (:func:`store.file_lock`).
 """
@@ -32,6 +36,7 @@ from pathlib import Path
 from typing import Any, Final
 
 import keyring
+from keyring.backends.chainer import ChainerBackend
 from keyring.errors import KeyringError
 
 from lucille_host import paths, store
@@ -41,6 +46,8 @@ __all__ = [
     "CredentialError",
     "CredentialStore",
     "SavedCredential",
+    "UntrustedKeyring",
+    "check_backend",
 ]
 
 SERVICE: Final = "lucille-host.credentials"
@@ -52,8 +59,51 @@ NAME: Final = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
 MAX_VALUE_CHARS: Final = 64 * 1024
 
 
+# The keyring backends a credential may be kept in, by OS family (``paths.os_family``), named by
+# module and class. Each one encrypts at rest and is unlocked by the user's login. A backend is
+# checked by its exact class, never ``isinstance``, so a subclass is not one of these.
+TRUSTED: Final[dict[str, frozenset[str]]] = {
+    "macos": frozenset({"keyring.backends.macOS.Keyring"}),
+    "linux": frozenset(
+        {
+            "keyring.backends.SecretService.Keyring",
+            "keyring.backends.libsecret.Keyring",
+            "keyring.backends.kwallet.DBusKeyring",
+            "keyring.backends.kwallet.DBusKeyringKWallet4",
+        }
+    ),
+}
+
+
 class CredentialError(ValueError):
     """A name or value this store does not take, or no such credential."""
+
+
+class UntrustedKeyring(store.InsecureKeyring):
+    """The keyring backend in use is not one a credential may be kept in."""
+
+
+def _class_name(backend: object) -> str:
+    cls = type(backend)
+    return f"{cls.__module__}.{cls.__qualname__}"
+
+
+def check_backend(backend: object | None = None, *, platform: str | None = None) -> None:
+    """Refuse the keyring backend in use (or ``backend``) unless it is one of :data:`TRUSTED` for
+    this OS. A chainer passes only when it chains at least one backend and every one is trusted:
+    it writes to whichever of them takes the write."""
+    current = keyring.get_keyring() if backend is None else backend
+    trusted = TRUSTED[paths.os_family(platform)]
+    members = list(current.backends) if type(current) is ChainerBackend else [current]
+    untrusted = [m for m in members if _class_name(m) not in trusted]
+    if not members or untrusted:
+        named = _class_name(untrusted[0]) if untrusted else "a chainer of no keyring"
+        raise UntrustedKeyring(
+            f"the keyring backend here ({named}) is not the system keyring, so lucille-host will "
+            "not keep a credential in it; credentials are kept only in the system keyring "
+            "(the Keychain on macOS; Secret Service, libsecret or KWallet on Linux), with no file "
+            "fallback"
+        )
 
 
 @dataclass(frozen=True)
@@ -105,7 +155,6 @@ class CredentialStore:
             raise CredentialError(f"the value is longer than {MAX_VALUE_CHARS} characters")
         if "\x00" in value:
             raise CredentialError("the value holds a NUL character")
-        store.check_backend()
         saved_at = self._clock()
 
         def edit(doc: dict[str, Any]) -> None:
@@ -159,6 +208,7 @@ class CredentialStore:
             return result
 
     def _load(self) -> dict[str, Any]:
+        check_backend()
         try:
             raw = keyring.get_password(self.service, self.username)
         except (KeyringError, OSError) as exc:
@@ -177,6 +227,7 @@ class CredentialStore:
         return doc
 
     def _save(self, doc: dict[str, Any]) -> None:
+        check_backend()
         text = json.dumps(doc, sort_keys=True, separators=(",", ":"))
         try:
             keyring.set_password(self.service, self.username, text)

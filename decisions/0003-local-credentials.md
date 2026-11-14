@@ -22,9 +22,16 @@ This repository builds only the first. The other two belong to Lucille's backend
   It is not the pair's item (`store.py`), so:
   - a damaged credential item never risks the only copy of the pair secret;
   - `forget`, which ends the pair, leaves the user's credentials alone.
-- **The same keyring rule as the pair.** `store.check_backend` refuses a backend that stores nothing or
-  stores in the clear. There is no file fallback like `--store-file`: a credential is never written to
-  a plain file by this program.
+- **Only the system keyring.** `credentials.check_backend` accepts a backend only if its exact class is
+  one it names: on macOS the Keychain (`keyring.backends.macOS.Keyring`), on Linux the Secret Service,
+  libsecret or KWallet. A chainer passes only if every backend it chains is one of those. The check
+  runs on every read and every write, so a backend picked through `PYTHON_KEYRING_BACKEND`, a
+  `keyringrc.cfg` or an installed plugin is refused unless it is one of those, whatever it is called.
+  This is stricter than the pair's rule (`store.check_backend`), which refuses only backends it knows
+  to be unfit. There is no file fallback like `--store-file`.
+  - What this does not cover: code running as the user that replaces the trusted class itself, for
+    example a `.pth` file that patches keyring at start-up. That code could also read the value from
+    this program's memory, so no check inside the program can stop it.
 - **Names, never values.** Service and credential names follow Lucille's rule (`^[a-z0-9][a-z0-9._-]{0,63}$`).
   `names()` returns names and save times only. Error messages hold nothing read from the item, and a
   value is returned only by `value()`.
@@ -87,8 +94,8 @@ off Lucille's servers) would expose that logic to the user; obfuscation slows a 
 ## Entry: Lucille asks, the user types it here (chosen 2026-11-11, not built)
 
 Lucille may ask the host to collect a credential. For example: "ask the user for `gmail/app-password`,
-for hosts `imap.gmail.com` and `smtp.gmail.com`". The request carries no value. The user can also add
-one unprompted with `lucille-host credential set`.
+for hosts `imap.gmail.com` and `smtp.gmail.com`". The request carries no value. Once this is built, the
+user would also be able to add one unprompted, with a `credential set` command that does not exist yet.
 
 **The risk this creates is phishing through our own program.** A request Lucille sends is just a
 request. If Lucille, or anyone who controls Lucille's account or servers, could ask for "your bank
@@ -110,7 +117,7 @@ What stays true: the value is typed only on this computer, into this program, an
 it. What does not: a user who approves a host they should not have will send their password there. The
 dialog's job is to make that choice plain, and it cannot make it for them.
 
-## Hardening (chosen 2026-11-11)
+## Hardening (chosen 2026-11-11, not built)
 
 The proxy and the entry prompt protect the value. These narrow what a request can do with it, who
 else on the computer can reach it, and what a bad update could do.

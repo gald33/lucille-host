@@ -1,6 +1,6 @@
 """The local credential store (``credentials.py``): kept in its own keyring item, never shown
-with its value, refused on a keyring that stores nothing or stores in the clear, and never
-reached by anything Lucille sends."""
+with its value, kept only in a keyring backend it names (refused on any other, on every read and
+write), and never reached by anything Lucille sends."""
 
 from __future__ import annotations
 
@@ -9,13 +9,51 @@ import json
 from pathlib import Path
 
 import pytest
+from keyring.backend import KeyringBackend
+from keyring.backends.chainer import ChainerBackend
 from keyring.backends.null import Keyring as NullKeyring
 
-from lucille_host import credentials, store
+from lucille_host import credentials, paths, store
 from tests._keyring import MemoryKeyring
 
 PACKAGE = Path(__file__).resolve().parents[1] / "src" / "lucille_host"
 SECRET = "correct-horse-battery-staple"
+
+
+MEMORY = f"{MemoryKeyring.__module__}.{MemoryKeyring.__qualname__}"
+
+
+@pytest.fixture(autouse=True)
+def _memory_keyring_trusted(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The in-memory test keyring stands in for the system keyring here, and only here."""
+    family = paths.os_family()
+    trusted = dict(credentials.TRUSTED)
+    trusted[family] = trusted[family] | {MEMORY}
+    monkeypatch.setattr(credentials, "TRUSTED", trusted)
+
+
+class FileKeyring(KeyringBackend):
+    """Writes every item to a JSON file in the clear, under a name the old rule did not know."""
+
+    priority = 1
+
+    def __init__(self, path: Path) -> None:
+        super().__init__()
+        self.path = path
+
+    def _items(self) -> dict[str, str]:
+        return json.loads(self.path.read_text()) if self.path.exists() else {}
+
+    def get_password(self, service: str, username: str) -> str | None:
+        return self._items().get(f"{service}/{username}")
+
+    def set_password(self, service: str, username: str, password: str) -> None:
+        items = self._items()
+        items[f"{service}/{username}"] = password
+        self.path.write_text(json.dumps(items))
+
+    def delete_password(self, service: str, username: str) -> None:
+        raise NotImplementedError
 
 
 @pytest.fixture
@@ -74,6 +112,86 @@ def test_insecure_keyring_refused(tmp_path: Path, monkeypatch: pytest.MonkeyPatc
     creds = credentials.CredentialStore(tmp_path / "state", "default")
     with pytest.raises(store.InsecureKeyring):
         creds.save("gmail", "x", SECRET)
+
+
+def test_unknown_backend_refused_before_the_value_reaches_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The reviewer's case on cce15be: a backend that writes in the clear, under any class name
+    but ``PlaintextKeyring``, passed the pair's rule and received the value."""
+    plain = tmp_path / "plain.json"
+    monkeypatch.setattr("keyring.core._keyring_backend", FileKeyring(plain))
+    creds = credentials.CredentialStore(tmp_path / "state", "default")
+    with pytest.raises(credentials.UntrustedKeyring) as info:
+        creds.save("gmail", "x", SECRET)
+    assert not plain.exists()
+    assert "FileKeyring" in str(info.value)
+    assert "--store-file" not in str(info.value)
+
+
+@pytest.mark.parametrize("call", ["names", "value", "remove"])
+def test_every_read_and_write_checks_the_backend(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, call: str
+) -> None:
+    monkeypatch.setattr("keyring.core._keyring_backend", NullKeyring())
+    creds = credentials.CredentialStore(tmp_path / "state", "default")
+    args = () if call == "names" else ("gmail", "x")
+    with pytest.raises(credentials.UntrustedKeyring):
+        getattr(creds, call)(*args)
+
+
+def test_exact_class_not_a_subclass() -> None:
+    from keyring.backends import macOS
+
+    class LooksLikeKeychain(macOS.Keyring):
+        pass
+
+    credentials.check_backend(object.__new__(macOS.Keyring), platform="darwin")
+    with pytest.raises(credentials.UntrustedKeyring):
+        credentials.check_backend(object.__new__(LooksLikeKeychain), platform="darwin")
+
+
+def test_trusted_is_per_platform() -> None:
+    from keyring.backends import SecretService, macOS
+
+    with pytest.raises(credentials.UntrustedKeyring):
+        credentials.check_backend(object.__new__(SecretService.Keyring), platform="darwin")
+    with pytest.raises(credentials.UntrustedKeyring):
+        credentials.check_backend(object.__new__(macOS.Keyring), platform="linux")
+    credentials.check_backend(object.__new__(SecretService.Keyring), platform="linux")
+
+
+def test_chainer_needs_every_member_trusted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A chainer's members are every installed backend keyring finds, read when it is used."""
+    good, plain = MemoryKeyring(), FileKeyring(tmp_path / "p.json")
+    for members, ok in (([good], True), ([], False), ([good, plain], False)):
+        monkeypatch.setattr("keyring.backend.get_all_keyring", lambda m=members: m)
+        if ok:
+            credentials.check_backend(ChainerBackend())
+        else:
+            with pytest.raises(credentials.UntrustedKeyring):
+                credentials.check_backend(ChainerBackend())
+
+
+def test_every_trusted_name_is_a_real_class() -> None:
+    """A typo in TRUSTED would refuse a real keychain rather than let a bad one in; still, catch it.
+    Each name must be the module and class of a backend keyring ships."""
+    from keyring.backends import SecretService, kwallet, libsecret, macOS
+
+    real = {
+        "macos": {macOS.Keyring},
+        "linux": {
+            SecretService.Keyring,
+            libsecret.Keyring,
+            kwallet.DBusKeyring,
+            kwallet.DBusKeyringKWallet4,
+        },
+    }
+    for family, classes in real.items():
+        names = {f"{c.__module__}.{c.__qualname__}" for c in classes}
+        assert credentials.TRUSTED[family] - {MEMORY} == names
 
 
 def test_foreign_item_left_alone(
