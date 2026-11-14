@@ -1348,10 +1348,8 @@ def test_the_runtime_may_use_a_modules_members(source: str, rel: str) -> None:
 
 
 KEYRING_ALLOWED = [
-    "import keyring\nkeyring.get_password('lucille-host', 'pair')\n",
-    "import keyring\nkeyring.set_password('lucille-host', 'pair', secret)\n",
-    "import keyring\nkeyring.delete_password('lucille-host', 'pair')\n",
     "import keyring\nbackend = keyring.get_keyring()\n",
+    "import keyring\nkeyring.get_keyring().get_password('lucille-host', 'pair')\n",
     "from keyring import errors\ntry:\n    pass\nexcept errors.PasswordDeleteError:\n    pass\n",
     "import keyring.errors\nraise keyring.errors.KeyringError('x')\n",
     "from keyring.backends import fail, null\nisinstance(backend, (fail.Keyring, null.Keyring))\n",
@@ -1366,6 +1364,11 @@ def test_the_runtime_may_use_keyrings_surface(source: str, rel: str) -> None:
 
 
 KEYRING_DENIED = [
+    # Each looks the backend up again, past the check of the one the host reads and writes through.
+    "import keyring\nkeyring.get_password('lucille-host', 'pair')\n",
+    "import keyring\nkeyring.set_password('lucille-host', 'pair', secret)\n",
+    "import keyring\nkeyring.delete_password('lucille-host', 'pair')\n",
+    "from keyring import get_password\n",
     "from keyring.core import load_keyring\n",
     "import keyring.core\n",
     "from keyring.util.platform_ import platform\nplatform.processor()\n",
@@ -1384,9 +1387,6 @@ def test_the_runtime_uses_nothing_else_of_keyring(source: str, rel: str) -> None
 
 def test_the_keyring_surface_is_pinned() -> None:
     assert ast_lint.KEYRING_SURFACE == {
-        "keyring.get_password",
-        "keyring.set_password",
-        "keyring.delete_password",
         "keyring.get_keyring",
         "keyring.errors.KeyringError",
         "keyring.errors.PasswordSetError",

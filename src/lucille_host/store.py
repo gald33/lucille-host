@@ -26,13 +26,23 @@
   day. Those stamps only decide whether a pair has gone unread for days, and what is shown about
   a room, so an hour's delay changes neither. Every other change, and every delete, is written
   before the call returns, as Switchboard's store contract asks.
-- The host refuses a keyring backend it can recognise as storing nothing, or as storing what it is
-  given in the clear: keyring's ``fail`` and ``null`` backends, a chain of backends with nothing
-  in it, and a backend whose class is named ``PlaintextKeyring``, as ``keyrings.alt`` names the
-  one that writes secrets unencrypted to a file of its own, outside the host's folders
-  (``keyrings/alt/file.py`` in keyrings.alt 5.0.2). That one is known by its class's name, so it
-  is never imported. A chain that holds any of them is refused too. keyrings.alt's other
-  backends encrypt, or hand the secret to another store, and are not refused.
+- The host keeps the item in one keyring backend on each system, and knows it by its class:
+  keyring's Secret Service backend, ``keyring.backends.SecretService.Keyring``, on Linux, and its
+  Keychain backend, ``keyring.backends.macOS.Keyring``, on macOS (:data:`KNOWN_BACKENDS`). The class
+  of the backend in use must be that one exactly, as its ``(__module__, __qualname__)``, compared as
+  strings, so neither module is ever imported here. Every other backend is refused: keyring's
+  ``fail`` and ``null`` backends, a subclass of the known class, a class under any other name, one
+  that writes secrets in the clear to a file among them, and every chain of backends (keyring's
+  ``ChainerBackend``), whatever it holds: a chain is asked only whether it holds any backend, and
+  its members are neither judged nor named. :func:`check_backend` refuses them when the store is
+  opened, and again before each read and each write of the item, which go to the backend it checked.
+  What is checked is the class's identity, not how the backend keeps a secret: which service answers
+  on the session bus, and whether the collection that keeps the item is encrypted, are not checked;
+  nor are the settings keyring gives a backend from ``KEYRING_PROPERTY_*`` environment variables
+  (the Secret Service collection, a Keychain file); and code already running in the process could
+  give a class of its own those names. Before the check sees a backend, keyring has already imported
+  and built the one that an environment variable or its configuration file names, or, with neither,
+  imported every backend its installed entry points name and built every one it can use.
 
 A keyring failure, a backend's own ``OSError`` included, is a :class:`StoreError`, an ``OSError``,
 which is what Switchboard's stores raise for a storage failure; the wrapper never reads one as the
@@ -48,11 +58,13 @@ import json
 import os
 import threading
 import time
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Mapping
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any, Final, TypeVar
 
 import keyring
+from keyring.backend import KeyringBackend
 from keyring.backends.chainer import ChainerBackend
 from keyring.backends.fail import Keyring as FailKeyring
 from keyring.backends.null import Keyring as NullKeyring
@@ -61,6 +73,8 @@ from keyring.errors import KeyringError
 from lucille_host import paths, state
 
 __all__ = [
+    "KNOWN_BACKENDS",
+    "PAIR_REFUSAL",
     "PAIR_STAMPS",
     "ROOM_STAMPS",
     "SERVICE",
@@ -87,6 +101,20 @@ ITEM_LOCK: Final = ".store.lock"
 DEADLOCK_PAUSE: Final = 0.01
 DEADLOCK_PAUSE_MOST: Final = 0.5
 TABLES: Final = ("records", "pending", "verdicts")
+# The one keyring backend the host keeps the item in, by system, as its class's (__module__,
+# __qualname__): the module docstring says what that does and does not check.
+KNOWN_BACKENDS: Final[Mapping[str, tuple[str, str]]] = MappingProxyType(
+    {
+        "linux": ("keyring.backends.SecretService", "Keyring"),
+        "macos": ("keyring.backends.macOS", "Keyring"),
+    }
+)
+SYSTEM_NAMES: Final[Mapping[str, str]] = MappingProxyType({"linux": "Linux", "macos": "macOS"})
+# The end of every refusal of the pair's keyring, after "the keyring backend here (X) <reason>, ".
+PAIR_REFUSAL: Final = (
+    "so lucille-host cannot keep its pair in it; set up the system keyring, or pair with "
+    "--store-file to keep the pair in a file instead, which is weaker"
+)
 
 T = TypeVar("T")
 
@@ -96,40 +124,66 @@ class StoreError(OSError):
 
 
 class InsecureKeyring(state.Refused):
-    """The keyring backend in use stores nothing, or stores in the clear."""
+    """The keyring backend in use is not, by its class, the one the host keeps the item in on this
+    system (:data:`KNOWN_BACKENDS`)."""
+
+
+def _identity(backend: object) -> tuple[str, str]:
+    kind = type(backend)
+    return (kind.__module__, kind.__qualname__)
+
+
+def _known(backend: object) -> bool:
+    """Whether ``backend``'s class is exactly the one this system's entry in
+    :data:`KNOWN_BACKENDS` names. The tests take their own backend in memory as that one too, by
+    replacing this function (tests/conftest.py)."""
+    return _identity(backend) == KNOWN_BACKENDS.get(paths.os_family())
 
 
 def _unfit(backend: object) -> str | None:
-    """Why ``backend`` cannot keep a secret as the pair secret must be kept, or None when it is not
-    one this module knows."""
+    """Why ``backend`` is not the backend the host keeps the item in, or None when it is."""
     if isinstance(backend, FailKeyring):
         return "has no keyring to store in"
     if isinstance(backend, NullKeyring):
         return "stores nothing"
-    if type(backend).__name__ == "PlaintextKeyring":
-        return "keeps secrets unencrypted in a file"
+    family = paths.os_family()
+    system = ".".join(KNOWN_BACKENDS[family])
     if isinstance(backend, ChainerBackend):
-        members = list(backend.backends)
-        if not members:
+        # Asked only whether it holds anything, so that an empty one keeps its old reason. keyring
+        # works the members out again each time, from each backend's priority, which a backend
+        # may raise for (the Secret Service's does when it cannot reach its service, and other
+        # backends raise their own errors): a chain whose members cannot be worked out, for any
+        # reason, is still a chain, refused as one.
+        try:
+            empty = not backend.backends
+        except Exception:
+            empty = False
+        if empty:
             return "chains no keyring"
-        for member in members:
-            reason = _unfit(member)
-            if reason is not None:
-                return f"chains one that {reason}"
-    return None
+        return (
+            "is a chain of keyring backends, and lucille-host uses one keyring backend, not a "
+            f"chain of them (keyring's keyringrc.cfg can name the system one, {system})"
+        )
+    if _known(backend):
+        return None
+    module, qualname = _identity(backend)
+    return f"is {module}.{qualname}, and on {SYSTEM_NAMES[family]} lucille-host uses only {system}"
 
 
-def check_backend(backend: object | None = None) -> None:
-    """Refuse the keyring backend in use (or ``backend``) when it stores nothing, or stores in the
-    clear."""
+def check_backend(
+    backend: KeyringBackend | None = None, *, refusal: str = PAIR_REFUSAL
+) -> KeyringBackend:
+    """The keyring backend in use (or ``backend``), when its class is the one the host keeps the
+    item in on this system; otherwise :class:`InsecureKeyring`, whose message ends with
+    ``refusal``. Read and write through the backend it returns, never through keyring's own
+    ``get_password`` and ``set_password``, which look the backend up again."""
     current = keyring.get_keyring() if backend is None else backend
     reason = _unfit(current)
     if reason is not None:
         raise InsecureKeyring(
-            f"the keyring backend here ({type(current).__name__}) {reason}, so lucille-host "
-            "cannot keep its pair in it; set up the system keyring, or pair with --store-file "
-            "to keep the pair in a file instead, which is weaker"
+            f"the keyring backend here ({type(current).__name__}) {reason}, {refusal}"
         )
+    return current
 
 
 class _FileLock:
@@ -265,8 +319,9 @@ class Item:
             return result
 
     def _load(self) -> dict[str, Any]:
+        backend = check_backend()
         try:
-            raw = keyring.get_password(self.service, self.username)
+            raw = backend.get_password(self.service, self.username)
         except (KeyringError, OSError) as exc:
             raise StoreError(f"the keyring could not be read ({type(exc).__name__})") from exc
         if raw is None:
@@ -300,9 +355,10 @@ class Item:
             and stamps_only(before, after)
         ):
             return
+        backend = check_backend()
         after["written_at"] = now
         text = json.dumps(after, sort_keys=True, separators=(",", ":"))
         try:
-            keyring.set_password(self.service, self.username, text)
+            backend.set_password(self.service, self.username, text)
         except (KeyringError, OSError) as exc:
             raise StoreError(f"the keyring could not be written ({type(exc).__name__})") from exc

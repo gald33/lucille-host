@@ -1085,7 +1085,8 @@ def _answer(
     except store.InsecureKeyring:
         if wanted.store != "file":
             raise
-        # A keyring that stores nothing holds no pair: only the file store is looked in.
+        # A keyring backend the host refuses is never read, whatever it holds: only the file store
+        # is looked in.
         session = link.open_session(dirs, wanted, say=_say, warn=_warn)
         opened = wanted
     if session.held():

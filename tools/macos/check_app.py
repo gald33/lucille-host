@@ -408,16 +408,20 @@ ADDING_BUTTONS: Final = ("Add", "Allow")
 # pause flag, Keychain item and run lock, apart from a command-line host's ``default``. The ui and
 # pairing checks read and change the host's state on this profile, as the app does.
 APP_PROFILE: Final = build_app.APP_PROFILE
-# Loads the native code of the runtime dependencies, the way the host will; and checks that the
-# app's flags leave --check-hash-based-pycs at default, so that the interpreter checks the source
-# hash in each checked-hash .pyc's header against its .py when it imports it, and leave no pycache
-# prefix, so that it reads .pyc files only beside their sources (0002 §6).
+# Loads the native code of the runtime dependencies, the way the host will; checks that the host
+# takes keyring's macOS backend, which it knows by its class's names alone (store.KNOWN_BACKENDS),
+# without asking the Keychain for anything; and checks that the app's flags leave
+# --check-hash-based-pycs at default, so that the interpreter checks the source hash in each
+# checked-hash .pyc's header against its .py when it imports it, and leave no pycache prefix, so
+# that it reads .pyc files only beside their sources (0002 §6).
 NATIVE_PROBE: Final = """\
 import sys
 import _imp
 import _cffi_backend
 import keyring.backends.macOS
 import lucille_host._switchboard
+from lucille_host import store
+store.check_backend(keyring.backends.macOS.Keyring())
 from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
 X25519PrivateKey.generate().public_key()
 assert sys.flags.isolated == 1, sys.flags
@@ -603,7 +607,8 @@ def check_host(app: Path, checker: Checker) -> None:
         )
         checker.expect(
             done.returncode == 0 and "native code loaded" in done.stdout,
-            "cffi, cryptography, keyring's macOS backend and switchboard load, with -I -B -X utf8",
+            "cffi, cryptography, keyring's macOS backend and switchboard load, and the host takes "
+            "that backend, with -I -B -X utf8",
             _shown(done),
         )
 

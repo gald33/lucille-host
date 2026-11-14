@@ -217,11 +217,17 @@ The host:
   (sb `docs/sharing.md:533-536`). The host keeps room keys as it keeps the pair: in its OS-keyring Store,
   beside the pair, or in a 0600 file only under `--store-file`, with the same warning
   (spec/PROTOCOL.md §18).
-- The host refuses insecure keyring backends it can recognise, and refuses to run as uid 0. It recognises
-  keyring's `fail` and `null` backends, a chain with nothing in it, and a backend named `PlaintextKeyring`,
-  as keyrings.alt names the one that writes secrets unencrypted to a file of its own (keyrings.alt 5.0.2),
-  and a chain that holds any of them. `pair --store-file` pairs where the keyring stores nothing, since such
-  a keyring holds no pair.
+- The host keeps the pair in one keyring backend on each system, known by its class, and refuses to run as
+  uid 0. The class must be exactly keyring's Secret Service backend
+  (`keyring.backends.SecretService.Keyring`) on Linux, or its Keychain backend
+  (`keyring.backends.macOS.Keyring`) on macOS, compared by `__module__` and `__qualname__` as strings, so
+  the host's own code imports neither (keyring's detection imports every backend its entry points name,
+  these two among them, before the check). Every other backend is refused when the store is opened and again
+  before every read and write of the item: keyring's `fail` and `null` backends, a subclass of the known
+  class, a class under any other name, one that writes secrets unencrypted to a file among them, and every
+  chain of backends, whatever it holds. This checks the class's identity, not how the backend keeps a
+  secret. `pair --store-file` pairs where the keyring backend is refused; a pair kept in a refused backend
+  before is left there and never read.
 
 **Hazards neutralized,** each with a test:
 - **The signer socket.**
@@ -917,7 +923,7 @@ The spec and the sections above leave these to the host. Each was made with the 
   what was typed ahead at the terminal cannot be discarded) or the gate opens; 1 for every refusal and
   every pairing that ends early, `n` at `pair`'s prompt among them (`rejected`), with the state word first
   on stderr. `run` has its own (spec/CLI.md §13.3): 0, 20, 21, 23, 24, 25, and 1 for a failure.
-- **The startup checks** (not root, no `SWITCHBOARD_*` variable, a keyring backend that stores, a private
+- **The startup checks** (not root, no `SWITCHBOARD_*` variable, the keyring backend the host knows, a private
   runtime folder) run for the pairing verbs, `run`, `status` and `forget`; the other verbs touch no store
   and no hub.
 
@@ -1108,4 +1114,7 @@ the offers it has not decided is under "Choices made in building pairing and the
   re-finding an offer a crash hid, and how a receiver treats a body with a duplicate key.
 - How a release carries exact dependency pins to a user's install. The wheel declares
   `agent-switchboard==2.6.*` and `keyring>=25`, and `pipx` and `uv tool` resolve those on the day they
-  run, without reading the lock.
+  run, without reading the lock. The keyring backend the host accepts is named by its module and class
+  (`keyring.backends.SecretService.Keyring`, `keyring.backends.macOS.Keyring`), so a later keyring that
+  moves either class would make a fresh install refuse its own system's keyring with `insecure_keyring`,
+  until the names are updated. The pin test (`tests/test_store.py`) catches that only when the lock moves.

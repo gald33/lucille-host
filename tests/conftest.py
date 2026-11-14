@@ -2,7 +2,10 @@
 
 No test reaches the system keyring: every test starts with keyring's ``fail`` backend in place,
 which stores nothing, and a test that needs a keyring asks for :func:`memory_keyring` (or
-:func:`host_env`, which includes it).
+:func:`host_env`, which includes it). The host keeps the pair only in the one backend it knows on
+each system (``store.KNOWN_BACKENDS``); in the tests, ``MemoryKeyring`` and every subclass of it
+is taken as that one too, through ``store._known``, never by widening the list. A test of the rule
+itself uses a backend that is not a ``MemoryKeyring``.
 """
 
 from __future__ import annotations
@@ -15,7 +18,7 @@ from types import MappingProxyType
 import pytest
 from keyring.backends.fail import Keyring as FailKeyring
 
-from lucille_host import paths, policy
+from lucille_host import paths, policy, store
 from lucille_host.audit import AuditLog
 from lucille_host.controls import Controls
 from lucille_host.jobs import Context
@@ -31,6 +34,10 @@ TEST_UID = 1000
 @pytest.fixture(autouse=True)
 def _no_system_keyring(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("keyring.core._keyring_backend", FailKeyring())
+    known = store._known
+    monkeypatch.setattr(
+        store, "_known", lambda backend: isinstance(backend, MemoryKeyring) or known(backend)
+    )
 
 
 @pytest.fixture

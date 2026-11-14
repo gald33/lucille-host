@@ -7,6 +7,7 @@ test hub, with a fake Lucille on the other side.
 
 from __future__ import annotations
 
+import ast
 import contextlib
 import errno
 import json
@@ -22,6 +23,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from keyring.backend import KeyringBackend
 from keyring.backends.chainer import ChainerBackend
 from keyring.backends.fail import Keyring as FailKeyring
 from keyring.backends.null import Keyring as NullKeyring
@@ -33,7 +35,7 @@ from lucille_host import link as link_module
 from lucille_host.controls import Controls
 from tests import _audit_hook
 from tests._host import HostEnv, lock_free, lock_held
-from tests._keyring import MemoryKeyring
+from tests._keyring import MemoryKeyring, NotesKeyring, notes_keyring
 from tests._lucille import FakeLucille
 
 pytestmark = pytest.mark.filterwarnings(
@@ -92,51 +94,470 @@ def test_no_write_under_home_switchboard(
     assert _audit_hook.spawns(events) == []
 
 
+# The class the host keeps the pair in on each system, as (module, qualname): stated here, and
+# checked against keyring's installed classes by test_the_known_backends_are_keyrings_own_classes.
+SYSTEM_BACKENDS = {
+    "linux": ("keyring.backends.SecretService", "Keyring"),
+    "macos": ("keyring.backends.macOS", "Keyring"),
+}
+# What every command prints where keyring has no backend to offer (spec/cli/v1/fixtures/
+# status-unreadable.json pins it).
+FAIL_SENTENCE = (
+    "the keyring backend here (Keyring) has no keyring to store in, so lucille-host cannot keep "
+    "its pair in it; set up the system keyring, or pair with --store-file to keep the pair in a "
+    "file instead, which is weaker"
+)
+# An item as the host writes it, with nothing in it.
+DOC = {
+    "v": 1,
+    "written_at": None,
+    "pairs": {"records": {}, "pending": {}, "verdicts": {}},
+    "shared": {},
+}
+
+
+def _system() -> tuple[str, str]:
+    return SYSTEM_BACKENDS[paths.os_family()]
+
+
+def _other_system() -> tuple[str, str]:
+    return SYSTEM_BACKENDS["macos" if paths.os_family() == "linux" else "linux"]
+
+
+def _dotted(identity: tuple[str, str]) -> str:
+    return ".".join(identity)
+
+
+class _Elsewhere(KeyringBackend):
+    """A keyring in memory that is not a MemoryKeyring, so that only its own class decides
+    whether the host takes it; it counts the reads and the writes."""
+
+    priority = 1
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.items: dict[tuple[str, str], str] = {}
+        self.reads = 0
+        self.writes = 0
+
+    def get_password(self, service: str, username: str) -> str | None:
+        self.reads += 1
+        return self.items.get((service, username))
+
+    def set_password(self, service: str, username: str, password: str) -> None:
+        self.writes += 1
+        self.items[(service, username)] = password
+
+    def delete_password(self, service: str, username: str) -> None:
+        self.writes += 1
+        self.items.pop((service, username))
+
+
+def _named(module: str, qualname: str, base: type[Any] = _Elsewhere) -> type[Any]:
+    """A subclass of ``base`` that the host sees as ``module``.``qualname``."""
+    return type(
+        qualname.rpartition(".")[2], (base,), {"__module__": module, "__qualname__": qualname}
+    )
+
+
+class _CountedMemory(MemoryKeyring):
+    """The tests' stand-in for the system keyring, counting the reads too."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.reads = 0
+
+    def get_password(self, service: str, username: str) -> str | None:
+        self.reads += 1
+        return super().get_password(service, username)
+
+
+def _note(doc: dict[str, Any]) -> None:
+    doc["shared"]["note"] = "kept"
+
+
+def _refused_everywhere(
+    host_env: HostEnv,
+    refused: Any,
+    seen: Callable[[], tuple[int, int]],
+    monkeypatch: pytest.MonkeyPatch,
+    files: tuple[Path, ...] = (),
+) -> str:
+    """Show that ``refused``, as the keyring backend, is refused when the store is opened, before
+    every read of the item (on load) and before every write (on save), and that nothing reaches
+    it: ``seen()``, its reads and writes, stays (0, 0), and no file in ``files`` changes. Returns
+    the refusal's message."""
+    kept = [path.read_bytes() for path in files]
+    stand_in = host_env.keyring
+    with pytest.raises(store.InsecureKeyring, match="cannot keep its pair") as refusal:
+        store.check_backend(refused)
+    # At open, where the file store still opens.
+    monkeypatch.setattr("keyring.core._keyring_backend", refused)
+    with pytest.raises(store.InsecureKeyring):
+        store.check_backend()
+    with pytest.raises(store.InsecureKeyring):
+        _switchboard.open_link(host_env.dirs, KEYRING)
+    assert _switchboard.open_link(host_env.dirs, FILE).warning is not None
+    # On load: the store opened over the keyring the tests stand in for, and then the backend in
+    # use changed.
+    monkeypatch.setattr("keyring.core._keyring_backend", stand_in)
+    link = _switchboard.open_link(host_env.dirs, KEYRING)
+    item = store.Item(host_env.dirs.state, host_env.dirs.profile)
+    monkeypatch.setattr("keyring.core._keyring_backend", refused)
+    for load in (item.read, link.pairs.names, link.rooms.load, lambda: item.change(_note)):
+        with pytest.raises(store.InsecureKeyring, match="cannot keep its pair"):
+            load()
+    # On save: the backend in use changes after the item is read and before it is written.
+    monkeypatch.setattr("keyring.core._keyring_backend", stand_in)
+
+    def swapped(doc: dict[str, Any]) -> None:
+        monkeypatch.setattr("keyring.core._keyring_backend", refused)
+        _note(doc)
+
+    with pytest.raises(store.InsecureKeyring, match="cannot keep its pair"):
+        item.change(swapped)
+    assert seen() == (0, 0)
+    assert [path.read_bytes() for path in files] == kept
+    assert stand_in.writes == 0
+    return str(refusal.value)
+
+
 # keyrings.alt's backend that writes secrets unencrypted to a file of its own, as it is named
 # there (keyrings.alt 5.0.2, ``keyrings/alt/file.py``), where keyring would select it when
-# installed; it is not installed here.
-Plaintext = type(
-    "PlaintextKeyring", (MemoryKeyring,), {"__module__": "keyrings.alt.file", "priority": 0.5}
+# installed; it is not installed here. A stand-in that writes a plain file, under that name.
+Plaintext = notes_keyring(
+    Path("/nonexistent/plaintext.json"), "keyrings.alt.file", "PlaintextKeyring"
 )
-
-
-def _chain_with_plaintext() -> ChainerBackend:
-    with pytest.MonkeyPatch.context() as patch:
-        patch.setattr("keyring.backend.get_all_keyring", lambda: [MemoryKeyring(), Plaintext()])
-        return ChainerBackend()
 
 
 @pytest.mark.parametrize(
-    "backend",
+    ("backend", "chained", "reason"),
     [
-        pytest.param(FailKeyring, id="fail"),
-        pytest.param(NullKeyring, id="null"),
-        pytest.param(ChainerBackend, id="empty-chain"),
-        pytest.param(Plaintext, id="plaintext"),
-        pytest.param(_chain_with_plaintext, id="chain-with-plaintext"),
+        pytest.param(FailKeyring, list, "has no keyring to store in", id="fail"),
+        pytest.param(NullKeyring, list, "stores nothing", id="null"),
+        pytest.param(ChainerBackend, list, "chains no keyring", id="empty-chain"),
+        pytest.param(Plaintext, list, "is keyrings.alt.file.PlaintextKeyring,", id="plaintext"),
+        pytest.param(
+            ChainerBackend,
+            lambda: [MemoryKeyring(), Plaintext()],
+            "is a chain of keyring backends, and lucille-host uses one keyring backend",
+            id="chain-with-plaintext",
+        ),
     ],
 )
 def test_refuses_insecure_keyring_backend(
-    backend: Callable[[], Any], host_env: HostEnv, monkeypatch: pytest.MonkeyPatch
+    backend: Callable[[], Any],
+    chained: Callable[[], list[Any]],
+    reason: str,
+    host_env: HostEnv,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # A chain of the backends keyring finds viable: none here, so it chains nothing.
-    monkeypatch.setattr("keyring.backend.get_all_keyring", lambda: [NullKeyring()])
+    # The backends keyring finds viable, which is what a chain holds, for the whole test: keyring
+    # works a chain's members out again each time it is asked.
+    monkeypatch.setattr("keyring.backend.get_all_keyring", lambda: [NullKeyring(), *chained()])
     monkeypatch.setattr("keyring.core._keyring_backend", backend())
-    with pytest.raises(store.InsecureKeyring, match="cannot keep its pair"):
+    with pytest.raises(store.InsecureKeyring, match="cannot keep its pair") as refused:
         store.check_backend()
+    assert f") {reason}" in str(refused.value)
     with pytest.raises(store.InsecureKeyring):
         _switchboard.open_link(host_env.dirs, KEYRING)
     # The file store does not use the keyring, so it opens where the keyring stores nothing.
     assert _switchboard.open_link(host_env.dirs, FILE).warning is not None
 
 
-def test_a_keyring_that_stores_is_accepted(
+def test_the_sentence_where_keyring_has_no_backend_is_unchanged(host_env: HostEnv) -> None:
+    with pytest.raises(store.InsecureKeyring) as refused:
+        store.check_backend(FailKeyring())
+    assert str(refused.value) == FAIL_SENTENCE
+    with pytest.raises(store.InsecureKeyring) as refused:
+        store.check_backend(NullKeyring())
+    assert str(refused.value) == FAIL_SENTENCE.replace(
+        "has no keyring to store in", "stores nothing"
+    )
+    # A store of the host's own other than the pair's ends the refusal with its own words.
+    with pytest.raises(store.InsecureKeyring) as refused:
+        store.check_backend(NullKeyring(), refusal="so it cannot be used")
+    assert (
+        str(refused.value)
+        == "the keyring backend here (Keyring) stores nothing, so it cannot be used"
+    )
+
+
+@pytest.mark.parametrize(
+    ("module", "qualname"),
+    [
+        pytest.param("tests._keyring", "NotesKeyring", id="a-name-of-its-own"),
+        pytest.param("keyrings.alt.file", "PlaintextKeyring", id="the-name-keyrings-alt-gives"),
+        pytest.param("keyrings.alt.file", "Keyring", id="the-system-class-name"),
+        pytest.param("keyring.backends.SecretService", "PlaintextKeyring", id="the-linux-module"),
+        pytest.param("keyring.backends.macOS", "PlaintextKeyring", id="the-macos-module"),
+        pytest.param("keyring.backends", "SecretService.Keyring", id="the-linux-name-split-again"),
+        pytest.param("keyring.backends", "macOS.Keyring", id="the-macos-name-split-again"),
+        pytest.param("SecretService", "Keyring", id="the-linux-module-short"),
+        pytest.param("macOS", "Keyring", id="the-macos-module-short"),
+    ],
+)
+def test_a_backend_that_writes_a_plain_file_is_refused_under_any_name(
+    module: str,
+    qualname: str,
+    host_env: HostEnv,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # It already holds an item the host could read.
+    notes = tmp_path / "notes.json"
+    notes.write_text(json.dumps({store.SERVICE: {host_env.dirs.profile: json.dumps(DOC)}}))
+    refused = notes_keyring(notes, module, qualname)()
+    message = _refused_everywhere(
+        host_env, refused, lambda: (refused.reads, refused.writes), monkeypatch, (notes,)
+    )
+    assert f"({qualname.rpartition('.')[2]}) is {module}.{qualname}, and on " in message
+    assert f"lucille-host uses only {_dotted(_system())}," in message
+
+
+@pytest.mark.parametrize(
+    "make",
+    [
+        pytest.param(lambda: _named("keyrings.alt.file", "EncryptedKeyring"), id="keyrings-alt"),
+        pytest.param(lambda: _named("keyring.backends.kwallet", "DBusKeyring"), id="kwallet"),
+        pytest.param(lambda: _named("keyring.backends.libsecret", "Keyring"), id="libsecret"),
+        pytest.param(lambda: _named("keyring.backends.Windows", "WinVaultKeyring"), id="windows"),
+        pytest.param(lambda: _named(*_other_system()), id="the-other-systems-class"),
+        pytest.param(lambda: _named(_system()[0], "Keyring2"), id="another-class-of-its-module"),
+        pytest.param(
+            lambda: _named("tests.elsewhere", "SystemKeyring", base=_named(*_system())),
+            id="a-subclass-of-the-system-class",
+        ),
+    ],
+)
+def test_a_backend_the_host_does_not_know_is_refused(
+    make: Callable[[], type[Any]], host_env: HostEnv, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    refused = make()()
+    message = _refused_everywhere(
+        host_env, refused, lambda: (refused.reads, refused.writes), monkeypatch
+    )
+    kind = type(refused)
+    assert f"is {kind.__module__}.{kind.__qualname__}, and on " in message
+    assert f"lucille-host uses only {_dotted(_system())}," in message
+
+
+@pytest.mark.parametrize(
+    ("chain", "members"),
+    [
+        pytest.param(
+            ChainerBackend, lambda notes: [_named(*_system())()], id="of-the-system-class"
+        ),
+        pytest.param(
+            ChainerBackend,
+            lambda notes: [notes_keyring(notes, *_system())()],
+            id="of-a-plain-file-named-as-the-system-class",
+        ),
+        pytest.param(ChainerBackend, lambda notes: [_CountedMemory()], id="of-the-tests-stand-in"),
+        pytest.param(
+            ChainerBackend,
+            lambda notes: [_named(*_system())(), notes_keyring(notes)()],
+            id="with-a-plain-file",
+        ),
+        pytest.param(
+            _named("tests.elsewhere", "Chain", base=ChainerBackend),
+            lambda notes: [_named(*_system())()],
+            id="a-subclass-of-the-chainer",
+        ),
+    ],
+)
+def test_a_chain_of_backends_is_refused_whatever_it_holds(
+    chain: Callable[[], Any],
+    members: Callable[[Path], list[Any]],
+    host_env: HostEnv,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    notes = tmp_path / "notes.json"
+    notes.write_text(json.dumps({store.SERVICE: {host_env.dirs.profile: json.dumps(DOC)}}))
+    chained = members(notes)
+    for member in chained:
+        if not isinstance(member, NotesKeyring):
+            member.items[(store.SERVICE, host_env.dirs.profile)] = json.dumps(DOC)
+    # Each is kept for the whole test: keyring works a chain's members out again each time.
+    monkeypatch.setattr("keyring.backend.get_all_keyring", lambda: chained)
+    refused = chain()
+    assert list(refused.backends) == chained
+
+    def seen() -> tuple[int, int]:
+        return (sum(m.reads for m in chained), sum(m.writes for m in chained))
+
+    message = _refused_everywhere(host_env, refused, seen, monkeypatch, (notes,))
+    assert f"({type(refused).__name__}) is a chain of keyring backends, and " in message
+    assert "lucille-host uses one keyring backend, not a chain of them" in message
+    assert f"keyringrc.cfg can name the system one, {_dotted(_system())})," in message
+
+
+def test_a_chain_whose_members_cannot_be_worked_out_is_refused(
     host_env: HostEnv, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    store.check_backend()
+    # A member that raises when keyring asks for its priority, as the Secret Service does when
+    # the session bus goes away: refused as a chain, the code a user can act on, not an error.
+    def gone() -> list[Any]:
+        raise RuntimeError("the session bus went away")
+
+    monkeypatch.setattr("keyring.backend.get_all_keyring", gone)
+    monkeypatch.setattr("keyring.core._keyring_backend", ChainerBackend())
+    with pytest.raises(store.InsecureKeyring, match="not a chain of them"):
+        store.check_backend()
+    with pytest.raises(store.InsecureKeyring, match="not a chain of them"):
+        _switchboard.open_link(host_env.dirs, KEYRING)
+
+
+def test_a_backend_of_the_system_class_is_read_and_written(
+    host_env: HostEnv, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Not a MemoryKeyring, so taken by its class's names alone, which is all the host checks: this
+    # class writes a plain file, and passes because it carries the system class's names.
+    notes = tmp_path / "notes.json"
+    system = notes_keyring(notes, *_system())()
+    monkeypatch.setattr("keyring.core._keyring_backend", system)
+    assert store.check_backend() is system
     assert _switchboard.open_link(host_env.dirs, KEYRING).warning is None
-    monkeypatch.setattr("keyring.backend.get_all_keyring", lambda: [MemoryKeyring()])
-    store.check_backend(ChainerBackend())
+    item = store.Item(host_env.dirs.state, host_env.dirs.profile)
+    item.change(_note)
+    assert item.read()["shared"] == {"note": "kept"}
+    assert system.writes == 1 and system.reads == 2
+    kept = json.loads(json.loads(notes.read_text())[store.SERVICE][host_env.dirs.profile])
+    assert kept["shared"] == {"note": "kept"}
+    # Another class of the same module is not that class.
+    with pytest.raises(store.InsecureKeyring, match="cannot keep its pair"):
+        store.check_backend(notes_keyring(notes, _system()[0], "Keyring2")())
+
+
+@pytest.mark.parametrize("family", ["linux", "macos"])
+def test_the_known_backends_are_keyrings_own_classes(
+    family: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Imported here, never by the host, which knows them by their names alone. On Linux, importing
+    # the macOS backend runs ldconfig and a compiler (ctypes' find_library), in this test only.
+    from keyring.backends import SecretService, macOS
+
+    classes = {"linux": SecretService.Keyring, "macos": macOS.Keyring}
+    assert {name: (k.__module__, k.__qualname__) for name, k in classes.items()} == SYSTEM_BACKENDS
+    assert store.KNOWN_BACKENDS == SYSTEM_BACKENDS
+    monkeypatch.setattr(paths, "os_family", lambda platform=None: family)
+    own = classes[family]()
+    assert store.check_backend(own) is own
+    other = classes["macos" if family == "linux" else "linux"]()
+    with pytest.raises(store.InsecureKeyring, match="cannot keep its pair") as refused:
+        store.check_backend(other)
+    assert f"lucille-host uses only {_dotted(SYSTEM_BACKENDS[family])}," in str(refused.value)
+    subclass = _named("tests.elsewhere", "Keyring", base=classes[family])
+    with pytest.raises(store.InsecureKeyring, match="cannot keep its pair"):
+        store.check_backend(subclass())
+    # A chain of this class alone is refused too, whether or not keyring can work its members out
+    # here (the Secret Service raises with no session bus).
+    monkeypatch.setattr("keyring.backend.get_all_keyring", lambda: [own])
+    with pytest.raises(store.InsecureKeyring, match="not a chain of them"):
+        store.check_backend(ChainerBackend())
+
+
+def test_the_backend_keyring_detects_here_is_judged(tmp_path: Path) -> None:
+    # keyring's own detection, in a fresh interpreter with nothing in its environment but PATH and
+    # an empty HOME (no keyringrc.cfg, no PYTHON_KEYRING_BACKEND, no session bus address), and the
+    # host's check of what it found. Not in this process, where every test backend is registered
+    # with keyring, so that detection would chain them.
+    home = tmp_path / "home"
+    home.mkdir()
+    source = Path(store.__file__).resolve().parents[1]
+    code = (
+        "import json, sys\n"
+        f"sys.path.insert(0, {str(source)!r})\n"
+        "import keyring\n"
+        "from lucille_host import store\n"
+        "kind = type(keyring.get_keyring())\n"
+        "try:\n"
+        "    store.check_backend()\n"
+        "    refusal = None\n"
+        "except store.InsecureKeyring as refused:\n"
+        "    refusal = str(refused)\n"
+        "print(json.dumps([kind.__module__, kind.__qualname__, refusal]))\n"
+    )
+    done = subprocess.run(
+        [sys.executable, "-I", "-c", code],
+        capture_output=True,
+        text=True,
+        env={"HOME": str(home), "PATH": os.defpath},
+        cwd=home,
+        timeout=120,
+        check=False,
+    )
+    assert done.returncode == 0, done.stderr
+    module, qualname, refusal = json.loads(done.stdout.splitlines()[-1])
+    if paths.os_family() == "macos":
+        # The backend the Mac app keeps the pair in, which nothing else in CI checks.
+        assert [module, qualname, refusal] == [*SYSTEM_BACKENDS["macos"], None]
+    else:
+        # The Secret Service needs a session bus, and there is none here.
+        assert [module, qualname, refusal] == ["keyring.backends.fail", "Keyring", FAIL_SENTENCE]
+
+
+# Where, in src/lucille_host/, keyring may be asked for the backend in use, and the item read or
+# written: the check, and the item's one read and one write, which go through the backend the check
+# returned. Nothing deletes the item.
+KEYRING_USES = {
+    "get_keyring": {"store.check_backend"},
+    "get_password": {"store.Item._load"},
+    "set_password": {"store.Item._save"},
+    "delete_password": set(),
+    # Two more ways to the item that bypass the check: a credential read, and a chain's members,
+    # which hand out live backends. A chain is asked only whether it holds any.
+    "get_credential": set(),
+    "backends": {"store._unfit"},
+}
+
+
+class _Uses(ast.NodeVisitor):
+    """Where each name in KEYRING_USES appears in one module: as an attribute, a name, an imported
+    name, a string or a definition, by the qualified name of the scope it is in."""
+
+    def __init__(self, module: str, found: dict[str, set[str]]) -> None:
+        self.scope = [module]
+        self.found = found
+
+    def _use(self, name: str | None) -> None:
+        if name in self.found:
+            self.found[name].add(".".join(self.scope))
+
+    def _enter(self, node: ast.ClassDef | ast.FunctionDef | ast.AsyncFunctionDef) -> None:
+        self._use(node.name)
+        self.scope.append(node.name)
+        self.generic_visit(node)
+        self.scope.pop()
+
+    visit_ClassDef = visit_FunctionDef = visit_AsyncFunctionDef = _enter
+
+    def visit_Attribute(self, node: ast.Attribute) -> None:
+        self._use(node.attr)
+        self.generic_visit(node)
+
+    def visit_Name(self, node: ast.Name) -> None:
+        self._use(node.id)
+
+    def visit_alias(self, node: ast.alias) -> None:
+        self._use(node.name.rpartition(".")[2])
+        self._use(node.asname)
+
+    def visit_Constant(self, node: ast.Constant) -> None:
+        if isinstance(node.value, str):
+            self._use(node.value)
+
+
+def test_the_keyring_is_reached_only_through_the_checked_backend() -> None:
+    # The lint keeps keyring.get_password and its kin out of the runtime (KEYRING_SURFACE), but it
+    # does not follow a backend's own members: this finds every way in by name.
+    package = Path(store.__file__).resolve().parent
+    found: dict[str, set[str]] = {name: set() for name in KEYRING_USES}
+    for path in sorted(package.rglob("*.py")):
+        module = ".".join(path.relative_to(package).with_suffix("").parts)
+        _Uses(module, found).visit(ast.parse(path.read_text(encoding="utf-8"), str(path)))
+    assert found == KEYRING_USES
 
 
 @pytest.mark.parametrize("config", [KEYRING, FILE], ids=["keyring", "file"])
