@@ -30,10 +30,35 @@
   Secret Service backend, ``keyring.backends.SecretService.Keyring``, on Linux, and its Keychain
   backend, ``keyring.backends.macOS.Keyring``, on macOS (:data:`KNOWN_BACKENDS`). :func:`_build`
   imports that system's module alone, never the other's, and builds its class once a process. The
-  host never asks keyring for a backend, so keyring chooses none: ``PYTHON_KEYRING_BACKEND`` and
-  keyring's configuration file, ``keyringrc.cfg``, are not consulted, and the backends keyring's
+  host never asks keyring for a backend, so keyring chooses none and the backends keyring's
   installed entry points name are not loaded (on Linux, loading its macOS backend runs ``ldconfig``,
   ``gcc`` and ``ld``, through ``ctypes.util.find_library``).
+- keyring's own off switch is kept. Before it imports its system's module, :func:`_build` reads
+  ``PYTHON_KEYRING_BACKEND``, and the ``default-keyring`` of the ``[backend]`` section of keyring's
+  configuration file, ``keyringrc.cfg``, as plain text, once a process with the backend it builds.
+  When either names keyring's ``null`` or ``fail`` backend, by the names in :data:`OFF_SWITCH`
+  (``keyring --disable`` writes ``default-keyring=keyring.backends.null.Keyring``), it takes
+  keyring's ``null`` backend, which :func:`check_backend` refuses as storing nothing, with the
+  sentence that points to ``--store-file``. Either is enough, though keyring itself reads the file
+  only when the variable is unset. Any other value is not consulted: the host builds its system's
+  backend as it does with neither set. Nothing either names is imported, the file's ``keyring-path``
+  is never looked up, and nothing is added to ``sys.path``. The variable is compared as it is, as
+  keyring takes it, and the file is read as keyring reads it (``configparser.RawConfigParser``,
+  UTF-8, universal newlines, the value stripped), from where keyring 25.7 reads it on both systems
+  (``config_root`` in ``keyring/util/platform_.py``, which macOS shares with Linux):
+  ``python_keyring/keyringrc.cfg`` under ``$XDG_CONFIG_HOME``, or under ``~/.config`` when that is
+  unset or empty. It is opened so that a FIFO there does not wait for a writer, and read only when
+  it is a regular file, and then no further than one byte past :data:`CONFIG_LIMIT`, so a FIFO or a
+  device there is never read; a regular file on a file system that does not answer (measured with
+  FUSE) is waited on, as keyring waits on it. The limit is far above what ``keyring
+  --disable`` writes (55 bytes) and small for a reason: Python 3.11's ``configparser`` took 0.14 s
+  to reject a 4 KiB line with no ``=`` or ``:``, and half a minute at 64 KiB, where 3.13 takes
+  milliseconds (measured on 3.11.15 and 3.13.14; keyring, which reads with no limit, takes as long).
+  A file that is missing, is not a regular file, is longer than that, cannot be read or does not
+  parse, or has no such value, and a home folder that cannot be found, are no setting: the host goes
+  on as with none, and nothing is raised. That includes a file keyring itself fails on (one that is
+  not UTF-8 or does not parse): keyring then stores nothing, and the host builds its system's
+  backend.
 - Before it builds the class, :func:`_build` asks for the class's ``priority``, keyring's own test
   of whether a backend can be used here, which keyring asked of every backend before it chose one.
   It is needed: a Secret Service backend built where there is no session bus raises secretstorage's
@@ -68,12 +93,15 @@ hub's (``_switchboard.py``). No error message holds anything read from the item.
 
 from __future__ import annotations
 
+import configparser
 import contextlib
 import copy
 import errno
 import functools
+import io
 import json
 import os
+import stat
 import threading
 import time
 from collections.abc import Callable, Iterator, Mapping
@@ -91,6 +119,7 @@ from lucille_host import paths, state
 
 __all__ = [
     "KNOWN_BACKENDS",
+    "OFF_SWITCH",
     "PAIR_REFUSAL",
     "PAIR_STAMPS",
     "ROOM_STAMPS",
@@ -128,6 +157,12 @@ KNOWN_BACKENDS: Final[Mapping[str, tuple[str, str]]] = MappingProxyType(
     }
 )
 SYSTEM_NAMES: Final[Mapping[str, str]] = MappingProxyType({"linux": "Linux", "macos": "macOS"})
+# keyring's own off switch: its null and fail backends, as PYTHON_KEYRING_BACKEND or keyringrc.cfg
+# names them. The module docstring says how each is read.
+OFF_SWITCH: Final = frozenset({"keyring.backends.null.Keyring", "keyring.backends.fail.Keyring"})
+# The most of keyringrc.cfg the host takes, in bytes; it reads at most one byte more, and a longer
+# file is no setting. The module docstring says why it is small.
+CONFIG_LIMIT: Final = 4 * 1024
 # The end of every refusal of the pair's keyring, after "the keyring backend here (X) <reason>, ".
 PAIR_REFUSAL: Final = (
     "so lucille-host cannot keep its pair in it; set up the system keyring, or pair with "
@@ -153,12 +188,63 @@ def _system_backend() -> KeyringBackend:
     return _build(paths.os_family())
 
 
+def _read_config(path: Path) -> bytes | None:
+    """The bytes of the regular file at ``path``, or None where it is not one or is longer than
+    :data:`CONFIG_LIMIT`. It is opened with ``O_NONBLOCK``, so a FIFO there does not block the open,
+    what is not a regular file is never read, and a regular file is read no further than one byte
+    past the limit."""
+    fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOCTTY | os.O_CLOEXEC)
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return None
+        chunks: list[bytes] = []
+        size = 0
+        while size <= CONFIG_LIMIT:
+            chunk = os.read(fd, CONFIG_LIMIT + 1 - size)
+            if not chunk:
+                return b"".join(chunks)
+            chunks.append(chunk)
+            size += len(chunk)
+        return None
+    finally:
+        os.close(fd)
+
+
+def _configured_backend() -> str | None:
+    """The ``default-keyring`` of the ``[backend]`` section of keyring's ``keyringrc.cfg``, as
+    text, or None: the module docstring says where the file is, how it is read, and when it is no
+    setting."""
+    try:
+        root = os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config"
+        data = _read_config(Path(root, "python_keyring", "keyringrc.cfg"))
+        if data is None:
+            return None
+        config = configparser.RawConfigParser()
+        # As keyring reads it: open(..., encoding="utf-8"), universal newlines and all.
+        config.read_file(io.TextIOWrapper(io.BytesIO(data), encoding="utf-8"))
+        return config.get("backend", "default-keyring").strip()
+    except (OSError, ValueError, RuntimeError, configparser.Error):
+        return None
+
+
+def _turned_off() -> bool:
+    """Whether keyring's own settings turn the keyring off: ``PYTHON_KEYRING_BACKEND``, or the
+    ``default-keyring`` of ``keyringrc.cfg``, names one of the backends in :data:`OFF_SWITCH`."""
+    return (
+        os.environ.get("PYTHON_KEYRING_BACKEND") in OFF_SWITCH
+        or _configured_backend() in OFF_SWITCH
+    )
+
+
 @functools.cache
 def _build(family: str) -> KeyringBackend:
     """keyring's backend for ``family`` (:data:`KNOWN_BACKENDS`), built here with only its own
-    module imported, once a process, as keyring kept the backend it chose; keyring's ``fail``
-    backend when that one cannot be used here (the module docstring says when, and what asking
-    tells)."""
+    module imported, once a process, as keyring kept the backend it chose; keyring's ``null``
+    backend, without importing that module, when keyring's own settings turn the keyring off
+    (:func:`_turned_off`); keyring's ``fail`` backend when the system's cannot be used here (the
+    module docstring says when, and what asking tells)."""
+    if _turned_off():
+        return NullKeyring()
     kind: type[KeyringBackend]
     try:
         if family == "linux":

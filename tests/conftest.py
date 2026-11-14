@@ -38,6 +38,10 @@ TEST_UID = 1000
 
 @pytest.fixture(autouse=True)
 def _no_system_keyring(monkeypatch: pytest.MonkeyPatch) -> None:
+    # keyring's own off switch, which the host honours where it builds its own backend
+    # (store._build): a setting in the environment that runs the tests would otherwise turn off the
+    # keyring of every test that builds it. A test of the off switch sets it.
+    monkeypatch.delenv("PYTHON_KEYRING_BACKEND", raising=False)
     monkeypatch.setattr("keyring.core._keyring_backend", FailKeyring())
     monkeypatch.setattr(store, "_system_backend", lambda: keyring_core._keyring_backend)
     known = store._known

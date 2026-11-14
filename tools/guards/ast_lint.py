@@ -309,6 +309,7 @@ RUNTIME_IMPORTS = frozenset(
         "base64",  # encodes bytes
         "binascii",  # encodes bytes
         "collections",  # containers; namedtuple builds its class from identifiers only
+        "configparser",  # reads keyringrc.cfg as text, for keyring's off switch; runs nothing
         "contextlib",  # context managers
         "copy",  # copies objects
         "dataclasses",  # builds methods from field names, which must be identifiers

@@ -220,21 +220,41 @@ The host:
 - The host keeps the pair in one keyring backend on each system, and refuses to run as uid 0. It builds that
   backend itself: keyring's Secret Service backend (`keyring.backends.SecretService.Keyring`) on Linux, or
   its Keychain backend (`keyring.backends.macOS.Keyring`) on macOS, importing that system's module alone. It
-  never asks keyring for a backend, so keyring chooses none: `PYTHON_KEYRING_BACKEND` and keyring's
-  `keyringrc.cfg` are not consulted, and none of the backends keyring's entry points name is loaded
-  (keyring's choice loaded all of them, and on Linux its macOS backend's `ctypes.util.find_library` ran
-  `ldconfig`, `gcc` and `ld`, the last two with the host's whole environment). Before building it, the host
-  asks for the class's `priority`, keyring's own test of whether a backend can be used: the Secret Service's
-  connects to the session bus at `DBUS_SESSION_BUS_ADDRESS`, a local socket, and asks whether a Secret
-  Service runs there or can be started; the Keychain's asks whether this is macOS and the Security framework
-  loaded. Where it cannot be used, the host takes keyring's `fail` backend in its place, as keyring did
-  where it found nothing it could use, and refuses it with the same sentence and code. The class of the
-  backend must be exactly that one, compared by `__module__` and `__qualname__` as strings, when the store
-  is opened and again before every read and write of the item, and every other backend is refused: keyring's
-  `fail` and `null` backends, a subclass of the known class, a class under any other name, one that writes
-  secrets unencrypted to a file among them, and every chain of backends, which is never asked what it holds.
-  This checks the class's identity, not how the backend keeps a secret. `pair --store-file` pairs where the
-  keyring backend is refused; a pair kept in a refused backend before is left there and never read.
+  never asks keyring for a backend, so keyring chooses none, and none of the backends keyring's entry points
+  name is loaded (keyring's choice loaded all of them, and on Linux its macOS backend's
+  `ctypes.util.find_library` ran `ldconfig`, `gcc` and `ld`, the last two with the host's whole environment).
+  Of keyring's settings that choose a backend, only its off switch is kept. Before it imports its system's
+  module, the host reads `PYTHON_KEYRING_BACKEND`, and the `default-keyring` of the `[backend]` section of
+  keyring's `keyringrc.cfg`, as plain text; when either names keyring's `null` or `fail` backend
+  (`keyring.backends.null.Keyring`, which `keyring --disable` writes, or `keyring.backends.fail.Keyring`),
+  it takes keyring's `null` backend, which it refuses as storing nothing, with the sentence that points to
+  `--store-file`. Any other value is not consulted. Nothing either names is imported, the file's
+  `keyring-path` is never used, and nothing is added to `sys.path`. The file is read where keyring 25.7
+  reads it on both systems, `python_keyring/keyringrc.cfg` under `$XDG_CONFIG_HOME`, or under `~/.config`
+  when that is unset or empty. It is opened so that a FIFO there does not wait for a writer, and read only
+  when it is a regular file, and then no further than one byte past 4 KiB, so a FIFO or a device there is
+  never read; a regular file on a mount that does not answer (measured with FUSE) is waited on, as keyring
+  waits on it. One that is missing, is not a regular file, is longer, cannot be read or does not parse is no
+  setting, including one keyring itself fails on (not UTF-8, or not parsing), where keyring would store
+  nothing and the host builds its system's backend. The limit is small because Python 3.11's `configparser`
+  took 0.14 s to reject a 4 KiB line with no `=` or `:`, and half a minute at 64 KiB (measured on 3.11.15;
+  3.13 takes milliseconds, and keyring, which reads with no limit, takes as long); `keyring --disable`
+  writes 55 bytes. The settings keyring gives a backend from `KEYRING_PROPERTY_*` variables still reach the
+  backend the host builds: keyring's own `KeyringBackend.__init__` applies them to every backend built, from
+  any variable whose name contains `KEYRING_PROPERTY_`, and one that names a read-only property, such as
+  `KEYRING_PROPERTY_PRIORITY`, makes every build raise, in keyring and in the host. Before building the
+  system's backend, the host asks for the class's `priority`, keyring's own test of whether a
+  backend can be used: the Secret Service's connects to the session bus at `DBUS_SESSION_BUS_ADDRESS`, a
+  local socket, and asks whether a Secret Service runs there or can be started; the Keychain's asks whether
+  this is macOS and the Security framework loaded. Where it cannot be used, the host takes keyring's `fail`
+  backend in its place, as keyring did where it found nothing it could use, and refuses it with the same
+  sentence and code. The class of the backend must be exactly that one, compared by `__module__` and
+  `__qualname__` as strings, when the store is opened and again before every read and write of the item, and
+  every other backend is refused: keyring's `fail` and `null` backends, a subclass of the known class, a
+  class under any other name, one that writes secrets unencrypted to a file among them, and every chain of
+  backends, which is never asked what it holds. This checks the class's identity, not how the backend keeps a
+  secret. `pair --store-file` pairs where the keyring backend is refused; a pair kept in a refused backend
+  before is left there and never read.
 
 **Hazards neutralized,** each with a test:
 - **The signer socket.**

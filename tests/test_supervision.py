@@ -53,7 +53,7 @@ from lucille_host.controls import Controls
 from lucille_host.ops import OPERATIONS
 from tests import _audit_hook
 from tests._host import HostEnv, lock_free, lock_held
-from tests._keyring import MemoryKeyring, no_session_bus
+from tests._keyring import NULL_SENTENCE, MemoryKeyring, no_session_bus, turned_off
 from tests._run import RunHost, body, counting, fast, nothing, until
 from tests._supervise import Lines, Piped, Supervised, folder, strings
 from tests.spec import _support
@@ -1387,6 +1387,10 @@ def _no_session_bus(
     no_session_bus(patch)
 
 
+def _turned_off(env: HostEnv, h: Any, where: Path, patch: pytest.MonkeyPatch, stack: Any) -> None:
+    turned_off(patch, env.home, "configuration-null")
+
+
 class _Unreadable(MemoryKeyring):
     def get_password(self, service: str, username: str) -> str | None:
         raise KeyringError("locked")
@@ -1523,6 +1527,7 @@ CASES = {
     "already_running": _Case("already_running", _locked),
     "insecure_keyring": _Case("insecure_keyring", _insecure),
     "insecure_keyring-no_session_bus": _Case("insecure_keyring", _no_session_bus),
+    "insecure_keyring-turned_off": _Case("insecure_keyring", _turned_off),
     "store_error": _Case("store_error", _unreadable),
     "startup_refused-switchboard": _Case("startup_refused", _switchboard_set),
     "startup_refused-root": _Case("startup_refused", _as_root),
@@ -3130,6 +3135,22 @@ def test_the_version_record_is_checked_before_the_store(
     refused = unpaired("run", "--json-events", version="0.1.0")
     assert refused.wait(20) == 25
     assert refused.out.objects() == [_stopped("downgrade", last_version="0.2.0")]
+
+
+@pytest.mark.parametrize("setting", ["variable-null", "variable-fail", "configuration-null"])
+def test_run_refuses_a_keyring_keyrings_off_switch_turns_off(
+    setting: str,
+    host_env: HostEnv,
+    unpaired: Callable[..., Supervised],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # keyring's own off switch, with the host's own backend as a real host builds it: `run` stops
+    # for the store (23), saying the keyring stores nothing, as every command does.
+    turned_off(monkeypatch, host_env.home, setting)
+    refused = unpaired("run", "--json-events")
+    assert refused.wait(20) == 23
+    assert refused.out.objects() == [_stopped("insecure_keyring")]
+    assert refused.err.text == f"lucille-host: {NULL_SENTENCE}\n"
 
 
 def test_the_cursor_file_is_read_between_the_store_and_the_digest_key(

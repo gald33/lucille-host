@@ -656,7 +656,7 @@ limit, as it runs every verb, and stops it when the limit passes.
 | `unsupported_platform` | This is not Linux or macOS. |
 | `os_error` | A file the host needed could not be read or written; the message names it. |
 | `startup_refused` | The host does not start here: it runs as root, or `SWITCHBOARD_*` variables are set. |
-| `insecure_keyring` | The keyring backend the host keeps the pair in cannot be used here: keyring's Secret Service backend on Linux (no session bus, or no Secret Service on it), its Keychain backend on macOS. The host builds that backend itself and takes no other; `PYTHON_KEYRING_BACKEND` and keyring's `keyringrc.cfg` are not consulted. |
+| `insecure_keyring` | The keyring backend the host keeps the pair in cannot be used here, and the message says it has no keyring to store in: keyring's Secret Service backend on Linux (no session bus, or no Secret Service on it), its Keychain backend on macOS. The host builds that backend itself and takes no other, so a Linux desktop whose only keyring is KWallet, with no Secret Service on the session bus, now sees that it has no keyring to store in. Or keyring's own off switch is set, and the message says the keyring backend stores nothing: `PYTHON_KEYRING_BACKEND`, or the `default-keyring` of keyring's `keyringrc.cfg`, names keyring's null backend, `keyring.backends.null.Keyring` (what `keyring --disable` writes), or its fail backend, `keyring.backends.fail.Keyring`. Both messages point to `--store-file`. Any other value of either is not consulted, and nothing either names is imported. |
 | `store_error` | The store that keeps the pair could not be used. |
 | `runtime_folder` | The host's private runtime folder is missing, or is not private. |
 | `state_invalid` | A file of the host's own holds something else. |
@@ -840,7 +840,7 @@ lucille-host --profile <name> run --json-events --exit-on-stdin-eof
 | 20 | `pair_unusable` | The pairing library refused the pair here. |
 | 20 | `leaked`, `expired` | The pairing ended early, or its SAS was not confirmed by its deadline, while `run` waited: the pair is forgotten. Pair again. |
 | 21 | `already_running` | Another `run` of this profile runs. Nothing was changed. |
-| 23 | `insecure_keyring`, `store_error` | The keyring backend the host keeps the pair in cannot be used here, or the store cannot be used. |
+| 23 | `insecure_keyring`, `store_error` | The keyring backend the host keeps the pair in cannot be used here, or keyring's own off switch is set, or the store cannot be used. |
 | 24 | `startup_refused` | The host does not start here: it runs as root, or a `SWITCHBOARD_*` variable is set. |
 | 25 | `downgrade` | This release is older than one that started `run` on this profile before (13.6). |
 | 1 | `failed` | Anything else `run` met and stopped for; `code` says what, and standard error says why. An unexpected error (`internal`, which is also any failure `run` has no other code for) writes its traceback in place of that line. |

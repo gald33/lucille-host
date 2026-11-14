@@ -838,6 +838,7 @@ def test_the_runtime_import_allowlist_is_pinned() -> None:
         "base64",
         "binascii",
         "collections",
+        "configparser",
         "contextlib",
         "copy",
         "dataclasses",
