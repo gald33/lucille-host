@@ -130,11 +130,12 @@ In the runtime package, ``src/lucille_host/`` except ``src/lucille_host/conforma
   ``from logging.handlers import socket`` imports ``socket``, and ``from enum import bltns``
   imports ``builtins``. Widening the list is a reviewed change, and the re-export table is then
   written again;
-- [keyring-surface] of ``keyring``, only the members in :data:`KEYRING_SURFACE` (getting, setting
-  and deleting a password, the backend in use, the errors, and the backend classes the host must
-  recognise), the members of those, and, as an import or in a type annotation, the modules on the
-  way to them. ``keyring.core.load_keyring`` imports a module a string names, and
-  ``keyring.util.platform_.platform`` is ``platform``;
+- [keyring-surface] of ``keyring``, only the members in :data:`KEYRING_SURFACE` (the backend in
+  use, the errors, and the backend classes the host must recognise), the members of those, and, as
+  an import or in a type annotation, the modules on the way to them. ``keyring.core.load_keyring``
+  imports a module a string names, and ``keyring.util.platform_.platform`` is ``platform``;
+  keyring's own ``get_password``, ``set_password`` and ``delete_password`` look the backend up
+  again, so the host gets and sets the item through the backend it checked instead;
 - [module-object] no module is used as a value, not only the watched ones: not an allowed
   standard-library module or one of its submodules or re-exports, not keyring, and not a module of
   this package. A module used as a value lets ``getattr`` search it with a string;
@@ -233,7 +234,7 @@ the ways the lint knows to make Python resolve them otherwise. Known blind spots
   import by name or run strings on the code's behalf, and the lint does not trace calls into them:
   agent-switchboard 2.6.0's client can run ``git``; keyring imports the backend an environment
   variable, its configuration file or an installed entry point names, when the host first asks it
-  for a password; ``platform`` runs ``uname`` and ``file``, and ``uuid.getnode`` runs ``ip`` or
+  for its backend; ``platform`` runs ``uname`` and ``file``, and ``uuid.getnode`` runs ``ip`` or
   ``ifconfig``. The allowlist keeps ``platform`` and ``uuid`` out of the runtime, also where an
   allowed module re-exports them (keyring re-exports ``platform``; :data:`KEYRING_SURFACE` keeps
   it out); it cannot keep an allowed module from doing what it does inside. The native-code list
@@ -351,12 +352,10 @@ RUNTIME_IMPORTS = frozenset(
 # does not follow), the modules on the way to them, and nothing else: keyring.core.load_keyring,
 # for one, imports any module a string names. What keyring loads inside these calls (the backend an
 # environment variable, its configuration file or an installed entry point names) is outside this
-# lint.
+# lint. Not keyring.get_password, set_password or delete_password: each looks the backend up again,
+# and the host reads and writes the item through the backend store.check_backend returned.
 KEYRING_SURFACE = frozenset(
     {
-        "keyring.get_password",
-        "keyring.set_password",
-        "keyring.delete_password",
         "keyring.get_keyring",
         "keyring.errors.KeyringError",
         "keyring.errors.PasswordSetError",
@@ -365,7 +364,7 @@ KEYRING_SURFACE = frozenset(
         "keyring.errors.KeyringLocked",
         "keyring.errors.NoKeyringError",
         "keyring.backend.KeyringBackend",
-        # The backends that store nothing, so that the host can refuse them.
+        # The backends the host refuses by type: the two that store nothing, and every chain.
         "keyring.backends.fail.Keyring",
         "keyring.backends.null.Keyring",
         "keyring.backends.chainer.ChainerBackend",

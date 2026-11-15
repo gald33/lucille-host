@@ -148,8 +148,10 @@ enforces.
        which is not held to the list. `platform`, `uuid`, `string` and `socket` are left off on
        purpose. The code gives the reason for each entry and for each of those four, and widening the
        list is a reviewed change;
-     - on any part of `keyring` outside the lint's `KEYRING_SURFACE`: getting, setting and deleting
-       a password, the backend in use, the errors, and the backend classes the host must recognise;
+     - on any part of `keyring` outside the lint's `KEYRING_SURFACE`: the backend in use, the
+       errors, and the backend classes the host must recognise. keyring's own `get_password`,
+       `set_password` and `delete_password` are outside it: each looks the backend up again, and the
+       host reads and writes through the backend it checked;
      - on a module used as a value, any module, this package's own included (`getattr(json, name)`);
      - on anything that can start a process (`subprocess`, `os.spawn*`, `os.exec*`, `os.fork*`,
        `multiprocessing`, `webbrowser`, `pipes` and the rest of its list) outside
@@ -194,7 +196,7 @@ enforces.
      agent-switchboard 2.6.0's `switchboard/client.py`, which the runtime imports, imports
      `subprocess` and can run `git` to derive an agent id; keyring imports the backend that an
      environment variable, its configuration file or an installed entry point names, when the host
-     first asks it for a password. Tests with an audit hook find that the host's pairing and sharing
+     first asks it for its backend. Tests with an audit hook find that the host's pairing and sharing
      calls, and `run`, start no process on the paths they take, against Switchboard's in-process hub
      ([CLAIMS.md](CLAIMS.md), C1), `run`'s events and lifeline included; a path no test takes is not
      checked;

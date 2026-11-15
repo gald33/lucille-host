@@ -24,8 +24,8 @@
   host's children never see it: they get a built environment (``_exec.py``). Read from the
   source, not tried on a desktop: keyring 25.7, and secretstorage 3.5 and jeepney 0.9, which it
   uses for the Secret Service on Linux, never read ``XDG_RUNTIME_DIR``; jeepney finds the session
-  bus from ``DBUS_SESSION_BUS_ADDRESS`` alone (its ``bus.py:41-43``). Other keyring backends were
-  not checked.
+  bus from ``DBUS_SESSION_BUS_ADDRESS`` alone (its ``bus.py:41-43``). The host keeps the item in no
+  other backend on Linux (``store.KNOWN_BACKENDS``).
 """
 
 from __future__ import annotations

@@ -24,8 +24,10 @@ release must have. The full design is [decisions/0001-host-design.md](decisions/
 - **The release you installed:** its operation catalog, which is reviewed in public, and its
   dependencies, among them agent-switchboard 2.6.x and keyring. CI runs against the exact versions
   pinned in `uv.lock`. The package itself declares ranges (`agent-switchboard==2.6.*`, `keyring>=25`),
-  and `pipx` or `uv tool` resolve those on the day they run, without reading the lock. How a release
-  carries exact pins to your install is not decided yet. The disk image of Capsule, the Mac app, is one
+  and `pipx` or `uv tool` resolve those on the day they run, without reading the lock. The host accepts
+  keyring's backend by its module and class name, so a keyring that moved that class would make such an
+  install refuse the system keyring, failing closed. How a release carries exact pins to your install is
+  not decided yet. The disk image of Capsule, the Mac app, is one
   way: its build installs the lock's exact pins, by hash. Its Swift sources are in `macos/` and its build
   scripts in `tools/macos/`, and it is not released yet.
 - **For Capsule, also what builds it.** The app embeds a CPython runtime from python-build-standalone,
