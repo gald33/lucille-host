@@ -1621,10 +1621,11 @@ def plan(out: Path, tag: str | None, build_number: str | None) -> None:
     print(f"xcode             {pins.xcode} ({developer_dir(pins)})")
     print(f"signature         ad hoc, {hardened} the hardened runtime")
     print(f"build backend     {len(constraints)} wheels, by hash, from {BUILD_CONSTRAINTS.name}")
+    # One image per slot. The 16 and 32 pixel images are each in two entries, RGB and its mask.
     pngs = len({source for _, _, source in icons.ICNS_ENTRIES})
     print(
-        f"app icon          {icons.ICNS_FILE}, {len(icons.ICNS_ENTRIES)} images from {pngs} PNGs "
-        "in macos/Icons"
+        f"app icon          {icons.ICNS_FILE}, {len(icons.iconset_files())} images in "
+        f"{len(icons.ICNS_ENTRIES)} entries from {pngs} PNGs in macos/Icons"
     )
     print(f"menu bar icons    {len(icons.GLYPH_FILES)} template PNGs from macos/Icons")
     print(f"unsigned tarball  {out / unsigned_tarball_name(pins.app_name)}")

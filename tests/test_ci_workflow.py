@@ -920,7 +920,9 @@ def _grey_glyph() -> bytes:
 # ten of the eleven names it wrote in CI from the icon file of PR 29's head (run 42620168506, in
 # macos-app and in both smoke jobs). The eleventh, icon_48x48.png, came from the icp6 entry the
 # build no longer writes (inferred: ic12 is the 32 point @2x type, which leaves icp6; see
-# icons.ICNS_SLOTS).
+# icons.ICNS_SLOTS). In that run PNG icp4 and icp5 filled the 16 and 32 point slots at 1x; now
+# is32 and il32 do, each with its mask, and that iconutil names their files icon_16x16.png and
+# icon_32x32.png as it did icp4's and icp5's is inferred.
 ICONSET = {
     "icon_16x16.png": 16,
     "icon_16x16@2x.png": 32,
