@@ -1064,8 +1064,8 @@ def open_link(
 ) -> Link:
     """The profile's stores, with ``XDG_RUNTIME_DIR`` pointed at its private runtime folder.
 
-    The keyring store takes only the keyring backend whose class is the one the host keeps the
-    item in on this system, and refuses every other, a chain of backends included
+    The keyring store uses the keyring backend the host builds for this system, and refuses it where
+    it cannot be used here, or where its class is not the one the host keeps the item in
     (``store.check_backend``): here, and again before each read and each write of the item.
     ``clock``, when given, is the time both the calls and the keyring item's write throttle go by.
     """

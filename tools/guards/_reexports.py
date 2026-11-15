@@ -2,9 +2,11 @@
 
 Written by ``python tools/guards/reexport_probe.py``, which says how. Probed:
 
-- CPython 3.11.17 on linux
+- CPython 3.11.15 on linux
+- CPython 3.11.18 on linux
 - CPython 3.12.3 on linux
-- CPython 3.13.16 on linux
+- CPython 3.13.14 on linux
+- CPython 3.13.18 on linux
 
 ``tests/guards/test_reexports.py`` fails if this table does not cover the interpreter
 running the tests.
@@ -22,6 +24,7 @@ SCANNED: frozenset[str] = frozenset(
         "base64",
         "binascii",
         "collections",
+        "configparser",
         "contextlib",
         "copy",
         "dataclasses",
@@ -68,6 +71,15 @@ REEXPORTS: Mapping[str, tuple[str, ...]] = {
     "collections._collections_abc": ("collections.abc",),
     "collections._sys": ("sys",),
     "collections.abc.sys": ("sys",),
+    "configparser.contextlib": ("contextlib",),
+    "configparser.functools": ("functools",),
+    "configparser.io": ("io",),
+    "configparser.itertools": ("itertools",),
+    "configparser.os": ("os",),
+    "configparser.re": ("re",),
+    "configparser.sys": ("sys",),
+    "configparser.types": ("types",),
+    "configparser.warnings": ("warnings",),
     "contextlib._collections_abc": ("collections.abc",),
     "contextlib.abc": ("abc",),
     "contextlib.os": ("os",),

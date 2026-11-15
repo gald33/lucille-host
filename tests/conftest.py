@@ -2,10 +2,14 @@
 
 No test reaches the system keyring: every test starts with keyring's ``fail`` backend in place,
 which stores nothing, and a test that needs a keyring asks for :func:`memory_keyring` (or
-:func:`host_env`, which includes it). The host keeps the pair only in the one backend it knows on
-each system (``store.KNOWN_BACKENDS``); in the tests, ``MemoryKeyring`` and every subclass of it
-is taken as that one too, through ``store._known``, never by widening the list. A test of the rule
-itself uses a backend that is not a ``MemoryKeyring``.
+:func:`host_env`, which includes it). A test puts its backend where keyring keeps the one in use,
+``keyring.core._keyring_backend``. The host never asks keyring for that one: it builds its own
+system's backend itself (``store._system_backend``), so here that function is replaced by one that
+returns what the test put there. The host keeps the pair only in the one backend it knows on each
+system (``store.KNOWN_BACKENDS``); in the tests, ``MemoryKeyring`` and every subclass of it is taken
+as that one too, through ``store._known``, never by widening the list. A test of the rule itself
+uses a backend that is not a ``MemoryKeyring``, and ``tests/test_keyring_backend.py`` runs the
+host's own ``store._system_backend``, in a process with none of this.
 """
 
 from __future__ import annotations
@@ -16,6 +20,7 @@ from pathlib import Path
 from types import MappingProxyType
 
 import pytest
+from keyring import core as keyring_core
 from keyring.backends.fail import Keyring as FailKeyring
 
 from lucille_host import paths, policy, store
@@ -33,7 +38,12 @@ TEST_UID = 1000
 
 @pytest.fixture(autouse=True)
 def _no_system_keyring(monkeypatch: pytest.MonkeyPatch) -> None:
+    # keyring's own off switch, which the host honours where it builds its own backend
+    # (store._build): a setting in the environment that runs the tests would otherwise turn off the
+    # keyring of every test that builds it. A test of the off switch sets it.
+    monkeypatch.delenv("PYTHON_KEYRING_BACKEND", raising=False)
     monkeypatch.setattr("keyring.core._keyring_backend", FailKeyring())
+    monkeypatch.setattr(store, "_system_backend", lambda: keyring_core._keyring_backend)
     known = store._known
     monkeypatch.setattr(
         store, "_known", lambda backend: isinstance(backend, MemoryKeyring) or known(backend)
