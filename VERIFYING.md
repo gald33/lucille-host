@@ -282,8 +282,9 @@ enforces.
      ```
 
      The value is the output of `gzip -9c list.txt | base64 | tr -d '\n'`, wherever it is set; the name
-     is `LUCILLE_HOST_PRIVATE_STRINGS_GZ`, and does not go into the value. To read it back:
-     `printf %s "$LUCILLE_HOST_PRIVATE_STRINGS_GZ" | base64 -d | gunzip`.
+     is `LUCILLE_HOST_PRIVATE_STRINGS_GZ`, and does not go into the value. To check a value against the
+     file without printing either:
+     `printf %s "$LUCILLE_HOST_PRIVATE_STRINGS_GZ" | base64 -d | gunzip | cmp -s - list.txt && echo same || echo differs`.
    - The list is one case-sensitive literal substring per line. Blank lines and lines starting with `#`
      are ignored.
    - It reads what `git ls-files` lists: every path, a gitlink to another repository included, and
