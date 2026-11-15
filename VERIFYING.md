@@ -260,9 +260,13 @@ enforces.
 4. **Private-string check** (`tools/guards/private_strings.py`, tested by
    `tests/guards/test_private_strings.py`). It fails if a file in the repository contains a string from a
    private list: strings private to Lucille that must never appear in this public repository.
-   - A committed list would publish the strings it protects. So the list lives in the repository secret
-     `LUCILLE_HOST_PRIVATE_STRINGS`, and reaches the check only through the environment variable of the
-     same name, on that one CI step.
+   - A committed list would publish the strings it protects. So the list lives in a repository secret,
+     and reaches the check only through the environment variable of the same name, on that one CI step:
+     `LUCILLE_HOST_PRIVATE_STRINGS_GZ`, the list compressed with gzip and then written in base64, so that
+     a list longer than a secret can hold (48 KB) still fits; else `LUCILLE_HOST_PRIVATE_STRINGS`, the
+     list as it is. When the first holds anything, the second is not read. A compressed value that cannot
+     be read (not base64, not one whole gzip stream, over 8 MiB unpacked, or not UTF-8) fails the check,
+     and the check's last line names the variable the list came from.
    - The list is one case-sensitive literal substring per line. Blank lines and lines starting with `#`
      are ignored.
    - It reads what `git ls-files` lists: every path, a gitlink to another repository included, and

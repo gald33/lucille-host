@@ -7,6 +7,8 @@ output means something: a report that printed part of an entry would publish par
 
 from __future__ import annotations
 
+import base64
+import gzip
 import os
 import secrets
 import subprocess
@@ -44,16 +46,24 @@ def assert_not_leaked(entry: str, output: str) -> None:
         assert piece not in output, f"characters {start}..{start + WINDOW} of the entry leaked"
 
 
+def packed(raw_list: str) -> str:
+    """``raw_list`` as the compressed variable holds it: gzip, then base64."""
+    return base64.b64encode(gzip.compress(raw_list.encode("utf-8"))).decode("ascii")
+
+
 def run_script(
-    root: Path, raw_list: str | None, fork: str | None = None
+    root: Path, raw_list: str | None, fork: str | None = None, *, gz: str | None = None
 ) -> subprocess.CompletedProcess[str]:
-    env = {
-        key: value
-        for key, value in os.environ.items()
-        if key not in (private_strings.LIST_VARIABLE, private_strings.FORK_VARIABLE)
-    }
+    names = (
+        private_strings.LIST_VARIABLE,
+        private_strings.GZ_VARIABLE,
+        private_strings.FORK_VARIABLE,
+    )
+    env = {key: value for key, value in os.environ.items() if key not in names}
     if raw_list is not None:
         env[private_strings.LIST_VARIABLE] = raw_list
+    if gz is not None:
+        env[private_strings.GZ_VARIABLE] = gz
     if fork is not None:
         env[private_strings.FORK_VARIABLE] = fork
     return subprocess.run(
@@ -252,6 +262,103 @@ def test_missing_list_outside_a_fork_fails_closed(tmp_path: Path) -> None:
         result = run_script(tmp_path, raw_list, fork)
         assert result.returncode == 1, (raw_list, fork)
         assert "not set or holds no entries" in result.stderr
+
+
+def test_the_compressed_list_is_read(tmp_path: Path) -> None:
+    entry = synthetic_entry()
+    (tmp_path / "file.txt").write_text(f"plain\nhere {entry} it is\n")
+    result = run_script(tmp_path, None, gz=packed(f"# list\n{entry}\n"))
+    assert result.returncode == 1
+    assert "file.txt:2" in result.stdout
+    assert "matches list entry 2" in result.stdout
+    assert f"1 list entries from {private_strings.GZ_VARIABLE}," in result.stdout
+    assert_not_leaked(entry, result.stdout + result.stderr)
+
+
+def test_the_compressed_list_replaces_the_plain_one(tmp_path: Path) -> None:
+    old, new = synthetic_entry(), synthetic_entry()
+    (tmp_path / "old.txt").write_text(f"{old}\n")
+    (tmp_path / "new.txt").write_text(f"{new}\n")
+    result = run_script(tmp_path, f"{old}\n", gz=packed(f"{new}\n"))
+    assert result.returncode == 1
+    assert "new.txt:1" in result.stdout
+    assert "old.txt" not in result.stdout
+    assert_not_leaked(old, result.stdout + result.stderr)
+    assert_not_leaked(new, result.stdout + result.stderr)
+
+
+def test_the_plain_list_is_read_when_the_compressed_one_is_empty(tmp_path: Path) -> None:
+    entry = synthetic_entry()
+    (tmp_path / "file.txt").write_text(f"{entry}\n")
+    for gz in (None, "", " \n "):
+        result = run_script(tmp_path, f"{entry}\n", gz=gz)
+        assert result.returncode == 1, repr(gz)
+        assert f"1 list entries from {private_strings.LIST_VARIABLE}," in result.stdout
+
+
+def test_whitespace_in_the_compressed_list_is_ignored(tmp_path: Path) -> None:
+    entry = synthetic_entry()
+    (tmp_path / "file.txt").write_text(f"{entry}\n")
+    value = packed(f"{entry}\n")
+    wrapped = "\n".join(value[i : i + 20] for i in range(0, len(value), 20)) + "\n"
+    result = run_script(tmp_path, None, gz=f"  {wrapped}\t")
+    assert result.returncode == 1
+    assert "file.txt:1" in result.stdout
+
+
+def _bad_values() -> list[tuple[str, str, str]]:
+    entry = synthetic_entry()
+    good = gzip.compress(f"{entry}\n".encode())
+    b64 = lambda data: base64.b64encode(data).decode("ascii")  # noqa: E731
+    return [
+        ("not-base64", f"{entry}!", "is not base64"),
+        ("not-gzip", b64(f"{entry}\n".encode()), "is not gzip"),
+        ("cut-short", b64(good[: len(good) // 2]), "cut short"),
+        ("trailing", b64(good + b"tail"), "data after its gzip stream"),
+        ("not-utf8", b64(gzip.compress(b"\xff\xfe" + entry.encode())), "is not UTF-8"),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("value", "reason"),
+    [case[1:] for case in _bad_values()],
+    ids=[case[0] for case in _bad_values()],
+)
+def test_a_compressed_list_that_cannot_be_read_fails_closed(
+    tmp_path: Path, value: str, reason: str
+) -> None:
+    entry = synthetic_entry()
+    (tmp_path / "file.txt").write_text("plain\n")
+    for fork in (None, "true"):
+        result = run_script(tmp_path, f"{entry}\n", fork, gz=value)
+        assert result.returncode == 1, fork
+        assert private_strings.GZ_VARIABLE in result.stderr
+        assert reason in result.stderr
+        assert result.stdout == ""
+        assert_not_leaked(entry, result.stdout + result.stderr)
+
+
+def test_a_compressed_list_that_unpacks_past_the_limit_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(private_strings, "GZ_LIMIT", 100)
+    with pytest.raises(private_strings.ListError, match="more than 100 bytes"):
+        private_strings.unpack(packed("x" * 101))
+    assert private_strings.unpack(packed("x" * 100)) == "x" * 100
+
+
+def test_a_compressed_list_of_no_entries_fails_closed(tmp_path: Path) -> None:
+    (tmp_path / "file.txt").write_text("plain\n")
+    result = run_script(tmp_path, None, gz=packed("# only a comment\n\n"))
+    assert result.returncode == 1
+    assert "not set or holds no entries" in result.stderr
+
+
+def test_a_fork_with_neither_list_is_still_skipped(tmp_path: Path) -> None:
+    (tmp_path / "file.txt").write_text("plain\n")
+    result = run_script(tmp_path, "", fork="true", gz="")
+    assert result.returncode == 0
+    assert "skipped" in result.stdout
 
 
 def test_clean_tree_passes(tmp_path: Path) -> None:
