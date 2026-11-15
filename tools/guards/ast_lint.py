@@ -130,12 +130,15 @@ In the runtime package, ``src/lucille_host/`` except ``src/lucille_host/conforma
   ``from logging.handlers import socket`` imports ``socket``, and ``from enum import bltns``
   imports ``builtins``. Widening the list is a reviewed change, and the re-export table is then
   written again;
-- [keyring-surface] of ``keyring``, only the members in :data:`KEYRING_SURFACE` (the backend in
-  use, the errors, and the backend classes the host must recognise), the members of those, and, as
-  an import or in a type annotation, the modules on the way to them. ``keyring.core.load_keyring``
-  imports a module a string names, and ``keyring.util.platform_.platform`` is ``platform``;
-  keyring's own ``get_password``, ``set_password`` and ``delete_password`` look the backend up
-  again, so the host gets and sets the item through the backend it checked instead;
+- [keyring-surface] of ``keyring``, only the members in :data:`KEYRING_SURFACE` (the errors, the
+  two backend classes the host builds, one on each system, and the backend classes it must
+  recognise), the members of those, and, as an import or in a type annotation, the modules on the
+  way to them. ``keyring.core.load_keyring`` imports a module a string names, and
+  ``keyring.util.platform_.platform`` is ``platform``; ``keyring.get_keyring``, and keyring's own
+  ``get_password``, ``set_password`` and ``delete_password``, which ask it for the backend it
+  chooses, are not on it: to choose one, keyring imports the backend an environment variable or its
+  configuration file names, or every backend its installed entry points name, and the host builds
+  its own instead and gets and sets the item through it;
 - [module-object] no module is used as a value, not only the watched ones: not an allowed
   standard-library module or one of its submodules or re-exports, not keyring, and not a module of
   this package. A module used as a value lets ``getattr`` search it with a string;
@@ -232,15 +235,16 @@ the ways the lint knows to make Python resolve them otherwise. Known blind spots
   those in the repository ([compiled]), and cannot see one installed anywhere else;
 - code outside this repository. The standard library and the dependencies can start processes,
   import by name or run strings on the code's behalf, and the lint does not trace calls into them:
-  agent-switchboard 2.6.0's client can run ``git``; keyring imports the backend an environment
-  variable, its configuration file or an installed entry point names, when the host first asks it
-  for its backend; ``platform`` runs ``uname`` and ``file``, and ``uuid.getnode`` runs ``ip`` or
-  ``ifconfig``. The allowlist keeps ``platform`` and ``uuid`` out of the runtime, also where an
-  allowed module re-exports them (keyring re-exports ``platform``; :data:`KEYRING_SURFACE` keeps
-  it out); it cannot keep an allowed module from doing what it does inside. The native-code list
-  was checked against the dependencies locked in ``uv.lock`` on 2026-10-28: ``cffi`` is the module
-  there that exists to call native code on every platform, and ``win32ctypes`` (pywin32-ctypes,
-  which keyring installs on Windows only) on Windows. Check it again when the lock changes;
+  agent-switchboard 2.6.0's client can run ``git``; keyring's Secret Service backend, which the host
+  builds on Linux, connects to the session bus through secretstorage and jeepney, and its Keychain
+  backend, which it builds on macOS, loads the Security framework through ``ctypes``; ``platform``
+  runs ``uname`` and ``file``, and ``uuid.getnode`` runs ``ip`` or ``ifconfig``. The allowlist keeps
+  ``platform`` and ``uuid`` out of the runtime, also where an allowed module re-exports them
+  (keyring re-exports ``platform``; :data:`KEYRING_SURFACE` keeps it out); it cannot keep an allowed
+  module from doing what it does inside. The native-code list was checked against the dependencies
+  locked in ``uv.lock`` on 2026-10-28: ``cffi`` is the module there that exists to call native code
+  on every platform, and ``win32ctypes`` (pywin32-ctypes, which keyring installs on Windows only) on
+  Windows. Check it again when the lock changes;
 - anything about the files it does not parse: configuration, data and shell scripts.
 
 Review covers the rest, and the tests of the code that is written.
@@ -305,6 +309,7 @@ RUNTIME_IMPORTS = frozenset(
         "base64",  # encodes bytes
         "binascii",  # encodes bytes
         "collections",  # containers; namedtuple builds its class from identifiers only
+        "configparser",  # reads keyringrc.cfg as text, for keyring's off switch; runs nothing
         "contextlib",  # context managers
         "copy",  # copies objects
         "dataclasses",  # builds methods from field names, which must be identifiers
@@ -350,13 +355,14 @@ RUNTIME_IMPORTS = frozenset(
 
 # Of keyring, the runtime may use only these members (and the members of these, which this lint
 # does not follow), the modules on the way to them, and nothing else: keyring.core.load_keyring,
-# for one, imports any module a string names. What keyring loads inside these calls (the backend an
-# environment variable, its configuration file or an installed entry point names) is outside this
-# lint. Not keyring.get_password, set_password or delete_password: each looks the backend up again,
-# and the host reads and writes the item through the backend store.check_backend returned.
+# for one, imports any module a string names. What the two backend modules the host imports load
+# inside is outside this lint. Not keyring.get_keyring, or keyring.get_password, set_password or
+# delete_password, which ask keyring for the backend it chooses: to choose one, it imports the
+# backend PYTHON_KEYRING_BACKEND or keyringrc.cfg names, or, with neither, every backend its
+# installed entry points name (on Linux, importing its macOS backend runs ldconfig, gcc and ld).
+# The host builds its own backend (store._build) and reads and writes the item through it.
 KEYRING_SURFACE = frozenset(
     {
-        "keyring.get_keyring",
         "keyring.errors.KeyringError",
         "keyring.errors.PasswordSetError",
         "keyring.errors.PasswordDeleteError",
@@ -368,6 +374,9 @@ KEYRING_SURFACE = frozenset(
         "keyring.backends.fail.Keyring",
         "keyring.backends.null.Keyring",
         "keyring.backends.chainer.ChainerBackend",
+        # The backends the host builds, one on each system (store.KNOWN_BACKENDS).
+        "keyring.backends.SecretService.Keyring",
+        "keyring.backends.macOS.Keyring",
     }
 )
 

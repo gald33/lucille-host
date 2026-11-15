@@ -35,6 +35,7 @@ from lucille_host.cli import ALREADY_PAIRING, PAIR_LOCK, main
 from tests import _audit_hook
 from tests._cli import HostCli, collecting, until
 from tests._host import HostEnv, lock_free, lock_held
+from tests._keyring import NULL_SENTENCE, no_session_bus, turned_off
 from tests._lucille import FakeLucille
 from tests.spec import _support
 
@@ -843,12 +844,17 @@ def test_pair_status_confirm_and_reject_work_while_pair_asks(cli: HostCli, verb:
     assert lock_free(lock)
 
 
+@pytest.mark.parametrize("no_keyring", ["fail-backend", "no-session-bus"])
 def test_store_file_pairs_where_the_keyring_stores_nothing(
-    cli: HostCli, monkeypatch: pytest.MonkeyPatch
+    no_keyring: str, cli: HostCli, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # A computer with no keyring to store in, such as a headless Linux box: the case
     # --store-file is for. Before, `pair --store-file` looked in the keyring first, and refused.
-    monkeypatch.setattr("keyring.core._keyring_backend", FailKeyring())
+    # Shown with keyring's fail backend, and with the host's own Linux backend and no session bus.
+    if no_keyring == "fail-backend":
+        monkeypatch.setattr("keyring.core._keyring_backend", FailKeyring())
+    else:
+        no_session_bus(monkeypatch)
     lucille = cli.lucille()
     ran = cli.run("pair", "--code-stdin", stdin=lucille.start() + "\n")
     assert ran.rc == 1 and "has no keyring to store in" in ran.err and "--store-file" in ran.err
@@ -860,6 +866,40 @@ def test_store_file_pairs_where_the_keyring_stores_nothing(
     assert any(cli.dirs.store_files.iterdir()) and cli.env.keyring.items == {}
     status = cli.run("status")
     assert status.rc == 0 and f"pair: confirmed: pair {lucille.name}" in status.out, status.text
+
+
+@pytest.mark.parametrize("setting", ["variable-null", "variable-fail", "configuration-null"])
+def test_keyrings_off_switch_refuses_the_keyring_as_storing_nothing(
+    setting: str, cli: HostCli, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # keyring's own off switch, PYTHON_KEYRING_BACKEND or what `keyring --disable` writes to
+    # keyringrc.cfg, honoured with the host's own backend as a real host builds it: every command
+    # says the keyring stores nothing, with insecure_keyring and its exit codes, and the sentence's
+    # --store-file still pairs.
+    turned_off(monkeypatch, cli.env.home, setting)
+    error = {"v": 1, "type": "error", "code": "insecure_keyring", "message": NULL_SENTENCE}
+    ran = cli.run("pair", "status")
+    assert ran.rc == 1 and ran.err == f"lucille-host: {NULL_SENTENCE}\n", ran.text
+    ran = cli.run("--json", "pair", "status")
+    assert ran.rc == 1 and _support.cli_objects(ran.out) == [error], ran.text
+    # status reports the pair it cannot read, and the rest, as where there is no keyring.
+    ran = cli.run("--json", "status")
+    assert ran.rc == 0, ran.text
+    [found] = _support.cli_objects(ran.out)
+    assert found["pair"] == {
+        "state": "unreadable",
+        "code": "insecure_keyring",
+        "message": NULL_SENTENCE,
+    }
+    lucille = cli.lucille()
+    ran = cli.run("pair", "--code-stdin", stdin=lucille.start() + "\n")
+    assert ran.rc == 1 and ran.err == f"lucille-host: {NULL_SENTENCE}\n", ran.text
+    assert cli.gate() is None
+    ran = cli.paired(lucille, "--store-file")
+    assert "weaker than the OS keyring" in ran.err
+    assert cli.run("pair", "confirm").rc == 0
+    assert cli.held() == [lucille.name]
+    assert any(cli.dirs.store_files.iterdir()) and cli.env.keyring.items == {}
 
 
 def test_code_never_in_argv(cli: HostCli) -> None:

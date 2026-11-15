@@ -8,6 +8,7 @@ test hub, with a fake Lucille on the other side.
 from __future__ import annotations
 
 import ast
+import configparser
 import contextlib
 import errno
 import json
@@ -18,12 +19,15 @@ import subprocess
 import sys
 import threading
 import time
+import types
 from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
 
+import keyring.core
 import pytest
 from keyring.backend import KeyringBackend
+from keyring.backends import SecretService
 from keyring.backends.chainer import ChainerBackend
 from keyring.backends.fail import Keyring as FailKeyring
 from keyring.backends.null import Keyring as NullKeyring
@@ -35,7 +39,18 @@ from lucille_host import link as link_module
 from lucille_host.controls import Controls
 from tests import _audit_hook
 from tests._host import HostEnv, lock_free, lock_held
-from tests._keyring import MemoryKeyring, NotesKeyring, notes_keyring
+from tests._keyring import (
+    DISABLED,
+    FAIL_BACKEND,
+    NULL_BACKEND,
+    NULL_SENTENCE,
+    MemoryKeyring,
+    NotesKeyring,
+    keyring_config,
+    notes_keyring,
+    planted_module,
+    write_keyring_config,
+)
 from tests._lucille import FakeLucille
 
 pytestmark = pytest.mark.filterwarnings(
@@ -44,6 +59,9 @@ pytestmark = pytest.mark.filterwarnings(
 
 KEYRING = state.HostConfig()
 FILE = state.HostConfig(store="file")
+# The host's own way to its keyring backend, as it is before tests/conftest.py replaces it in each
+# test.
+SYSTEM_BACKEND = store._system_backend
 
 
 @pytest.fixture
@@ -198,8 +216,8 @@ def _refused_everywhere(
     with pytest.raises(store.InsecureKeyring):
         _switchboard.open_link(host_env.dirs, KEYRING)
     assert _switchboard.open_link(host_env.dirs, FILE).warning is not None
-    # On load: the store opened over the keyring the tests stand in for, and then the backend in
-    # use changed.
+    # On load: the store opened over the keyring the tests stand in for, and then the backend the
+    # host gets changed (store._system_backend, which tests/conftest.py points here).
     monkeypatch.setattr("keyring.core._keyring_backend", stand_in)
     link = _switchboard.open_link(host_env.dirs, KEYRING)
     item = store.Item(host_env.dirs.state, host_env.dirs.profile)
@@ -207,7 +225,7 @@ def _refused_everywhere(
     for load in (item.read, link.pairs.names, link.rooms.load, lambda: item.change(_note)):
         with pytest.raises(store.InsecureKeyring, match="cannot keep its pair"):
             load()
-    # On save: the backend in use changes after the item is read and before it is written.
+    # On save: the backend the host gets changes after the item is read and before it is written.
     monkeypatch.setattr("keyring.core._keyring_backend", stand_in)
 
     def swapped(doc: dict[str, Any]) -> None:
@@ -222,9 +240,26 @@ def _refused_everywhere(
     return str(refusal.value)
 
 
+def _asked_for_members(
+    monkeypatch: pytest.MonkeyPatch, viable: Callable[[], list[Any]]
+) -> list[None]:
+    """Make ``viable()`` what keyring finds viable, which is what a chain holds, and return a list
+    that gets an entry each time keyring is asked for it: asking a chain what it holds asks that,
+    and loads every backend keyring's entry points name."""
+    asked: list[None] = []
+
+    def found() -> list[Any]:
+        asked.append(None)
+        return viable()
+
+    monkeypatch.setattr("keyring.backend.get_all_keyring", found)
+    return asked
+
+
 # keyrings.alt's backend that writes secrets unencrypted to a file of its own, as it is named
 # there (keyrings.alt 5.0.2, ``keyrings/alt/file.py``), where keyring would select it when
 # installed; it is not installed here. A stand-in that writes a plain file, under that name.
+PLAINTEXT_NAME = "keyrings.alt.file.PlaintextKeyring"
 Plaintext = notes_keyring(
     Path("/nonexistent/plaintext.json"), "keyrings.alt.file", "PlaintextKeyring"
 )
@@ -235,7 +270,7 @@ Plaintext = notes_keyring(
     [
         pytest.param(FailKeyring, list, "has no keyring to store in", id="fail"),
         pytest.param(NullKeyring, list, "stores nothing", id="null"),
-        pytest.param(ChainerBackend, list, "chains no keyring", id="empty-chain"),
+        pytest.param(ChainerBackend, list, "is a chain of keyring backends,", id="empty-chain"),
         pytest.param(Plaintext, list, "is keyrings.alt.file.PlaintextKeyring,", id="plaintext"),
         pytest.param(
             ChainerBackend,
@@ -253,14 +288,15 @@ def test_refuses_insecure_keyring_backend(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # The backends keyring finds viable, which is what a chain holds, for the whole test: keyring
-    # works a chain's members out again each time it is asked.
-    monkeypatch.setattr("keyring.backend.get_all_keyring", lambda: [NullKeyring(), *chained()])
+    # works a chain's members out again each time it is asked, and the host never asks.
+    asked = _asked_for_members(monkeypatch, lambda: [NullKeyring(), *chained()])
     monkeypatch.setattr("keyring.core._keyring_backend", backend())
     with pytest.raises(store.InsecureKeyring, match="cannot keep its pair") as refused:
         store.check_backend()
     assert f") {reason}" in str(refused.value)
     with pytest.raises(store.InsecureKeyring):
         _switchboard.open_link(host_env.dirs, KEYRING)
+    assert asked == []
     # The file store does not use the keyring, so it opens where the keyring stores nothing.
     assert _switchboard.open_link(host_env.dirs, FILE).warning is not None
 
@@ -274,6 +310,8 @@ def test_the_sentence_where_keyring_has_no_backend_is_unchanged(host_env: HostEn
     assert str(refused.value) == FAIL_SENTENCE.replace(
         "has no keyring to store in", "stores nothing"
     )
+    # The sentence where keyring's own settings turn the keyring off (tests/_keyring.py).
+    assert str(refused.value) == NULL_SENTENCE
     # A store of the host's own other than the pair's ends the refusal with its own words.
     with pytest.raises(store.InsecureKeyring) as refused:
         store.check_backend(NullKeyring(), refusal="so it cannot be used")
@@ -380,33 +418,39 @@ def test_a_chain_of_backends_is_refused_whatever_it_holds(
         if not isinstance(member, NotesKeyring):
             member.items[(store.SERVICE, host_env.dirs.profile)] = json.dumps(DOC)
     # Each is kept for the whole test: keyring works a chain's members out again each time.
-    monkeypatch.setattr("keyring.backend.get_all_keyring", lambda: chained)
+    asked = _asked_for_members(monkeypatch, lambda: chained)
     refused = chain()
     assert list(refused.backends) == chained
+    asked.clear()
 
     def seen() -> tuple[int, int]:
         return (sum(m.reads for m in chained), sum(m.writes for m in chained))
 
     message = _refused_everywhere(host_env, refused, seen, monkeypatch, (notes,))
-    assert f"({type(refused).__name__}) is a chain of keyring backends, and " in message
-    assert "lucille-host uses one keyring backend, not a chain of them" in message
-    assert f"keyringrc.cfg can name the system one, {_dotted(_system())})," in message
+    assert message.startswith(
+        f"the keyring backend here ({type(refused).__name__}) is a chain of keyring backends, and "
+        "lucille-host uses one keyring backend, not a chain of them, so lucille-host cannot keep "
+    )
+    # Never asked what it holds.
+    assert asked == []
 
 
 def test_a_chain_whose_members_cannot_be_worked_out_is_refused(
     host_env: HostEnv, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # A member that raises when keyring asks for its priority, as the Secret Service does when
-    # the session bus goes away: refused as a chain, the code a user can act on, not an error.
+    # the session bus goes away: refused as a chain, the code a user can act on, not an error,
+    # and without keyring being asked for the members.
     def gone() -> list[Any]:
         raise RuntimeError("the session bus went away")
 
-    monkeypatch.setattr("keyring.backend.get_all_keyring", gone)
+    asked = _asked_for_members(monkeypatch, gone)
     monkeypatch.setattr("keyring.core._keyring_backend", ChainerBackend())
     with pytest.raises(store.InsecureKeyring, match="not a chain of them"):
         store.check_backend()
     with pytest.raises(store.InsecureKeyring, match="not a chain of them"):
         _switchboard.open_link(host_env.dirs, KEYRING)
+    assert asked == []
 
 
 def test_a_backend_of_the_system_class_is_read_and_written(
@@ -434,8 +478,9 @@ def test_a_backend_of_the_system_class_is_read_and_written(
 def test_the_known_backends_are_keyrings_own_classes(
     family: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # Imported here, never by the host, which knows them by their names alone. On Linux, importing
-    # the macOS backend runs ldconfig and a compiler (ctypes' find_library), in this test only.
+    # Both imported here; the host imports its own system's alone (store._build). On Linux,
+    # importing the macOS backend runs ldconfig and a compiler (ctypes' find_library), in this test
+    # only.
     from keyring.backends import SecretService, macOS
 
     classes = {"linux": SecretService.Keyring, "macos": macOS.Keyring}
@@ -458,29 +503,596 @@ def test_the_known_backends_are_keyrings_own_classes(
         store.check_backend(ChainerBackend())
 
 
-def test_the_backend_keyring_detects_here_is_judged(tmp_path: Path) -> None:
-    # keyring's own detection, in a fresh interpreter with nothing in its environment but PATH and
-    # an empty HOME (no keyringrc.cfg, no PYTHON_KEYRING_BACKEND, no session bus address), and the
-    # host's check of what it found. Not in this process, where every test backend is registered
-    # with keyring, so that detection would chain them.
-    home = tmp_path / "home"
-    home.mkdir()
-    source = Path(store.__file__).resolve().parents[1]
-    code = (
-        "import json, sys\n"
-        f"sys.path.insert(0, {str(source)!r})\n"
-        "import keyring\n"
-        "from lucille_host import store\n"
-        "kind = type(keyring.get_keyring())\n"
-        "try:\n"
-        "    store.check_backend()\n"
-        "    refusal = None\n"
-        "except store.InsecureKeyring as refused:\n"
-        "    refusal = str(refused)\n"
-        "print(json.dumps([kind.__module__, kind.__qualname__, refusal]))\n"
+class _Bus:
+    """A connection to the session bus: all keyring's check does with one is close it."""
+
+    def close(self) -> None:
+        pass
+
+
+class _SecretStorageError(Exception):
+    """secretstorage's own error, ``secretstorage.exceptions.SecretStorageException``."""
+
+
+def _secretstorage(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    version: tuple[int, ...] = (3, 5, 0),
+    connect: Exception | None = None,
+    service: bool = True,
+) -> list[str]:
+    """Put a secretstorage of the test's own where keyring's Secret Service backend looks for it,
+    on either system (it is not installed on macOS), and return what keyring asks of it, in order.
+    Connecting to the session bus raises ``connect``, and ``service`` is whether a Secret Service
+    answers there."""
+    asked: list[str] = []
+
+    def dbus_init() -> _Bus:
+        asked.append("dbus_init")
+        if connect is not None:
+            raise connect
+        return _Bus()
+
+    def check_service_availability(connection: _Bus) -> bool:
+        asked.append("check_service_availability")
+        return service
+
+    fake = types.SimpleNamespace(
+        __name__="secretstorage",
+        __version_tuple__=version,
+        dbus_init=dbus_init,
+        check_service_availability=check_service_availability,
     )
+    monkeypatch.setattr(SecretService, "secretstorage", fake, raising=False)
+    errors = types.SimpleNamespace(SecretStorageException=_SecretStorageError)
+    monkeypatch.setattr(SecretService, "exceptions", errors, raising=False)
+    return asked
+
+
+def _never_detect(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Fail the test if keyring is asked for a backend, or to find one: that reads
+    ``PYTHON_KEYRING_BACKEND`` and ``keyringrc.cfg``, and loads every backend keyring's entry
+    points name."""
+
+    def detect(*_: Any) -> None:
+        raise AssertionError("keyring was asked to find a backend")
+
+    for name in ("get_keyring", "core.get_keyring", "core.init_backend", "backend.get_all_keyring"):
+        monkeypatch.setattr(f"keyring.{name}", detect)
+
+
+def _unimportable(monkeypatch: pytest.MonkeyPatch, module: str) -> None:
+    """Make ``module``, a backend module of keyring's, fail to import."""
+    package, _, name = module.rpartition(".")
+    monkeypatch.delattr(sys.modules[package], name, raising=False)
+    monkeypatch.setitem(sys.modules, module, None)
+
+
+def test_the_host_builds_its_linux_backend_itself(
+    home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # keyring's Secret Service backend, built by the host, once the class's own priority (keyring's
+    # test of whether a backend can be used here) found a Secret Service on the session bus.
+    # keyring is never asked to find a backend, so a backend its settings name is not taken (only
+    # its off switch is honoured: test_keyrings_off_switch_is_refused_as_storing_nothing).
+    _never_detect(monkeypatch)
+    monkeypatch.setenv("PYTHON_KEYRING_BACKEND", PLAINTEXT_NAME)
+    write_keyring_config(home, f"[backend]\ndefault-keyring={PLAINTEXT_NAME}\n")
+    asked = _secretstorage(monkeypatch)
+    built = store._build.__wrapped__("linux")
+    assert type(built) is SecretService.Keyring
+    assert asked == ["dbus_init", "check_service_availability"]
+    monkeypatch.setattr(paths, "os_family", lambda platform=None: "linux")
+    assert store.check_backend(built) is built
+
+
+def test_the_system_backend_is_built_once_per_process(
+    home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # As keyring kept the backend it found for the life of the process: the session bus is asked
+    # once, however often the item is read and written.
+    asked = _secretstorage(monkeypatch)
+    monkeypatch.setattr(paths, "os_family", lambda platform=None: "linux")
+    monkeypatch.setattr(store, "_system_backend", SYSTEM_BACKEND)
+    store._build.cache_clear()
+    try:
+        built = store.check_backend()
+        assert type(built) is SecretService.Keyring
+        assert store.check_backend() is built and SYSTEM_BACKEND() is built
+    finally:
+        store._build.cache_clear()
+    assert asked == ["dbus_init", "check_service_availability"]
+
+
+@pytest.mark.parametrize(
+    ("family", "setup"),
+    [
+        # Where secretstorage is installed (Linux): real, with no address, or one nothing answers
+        # at. Where it is not (macOS), the class's priority says so.
+        pytest.param(
+            "linux",
+            lambda m, t: m.delenv("DBUS_SESSION_BUS_ADDRESS", raising=False),
+            id="no-session-bus",
+        ),
+        pytest.param(
+            "linux",
+            lambda m, t: m.setenv("DBUS_SESSION_BUS_ADDRESS", f"unix:path={t / 'bus'}"),
+            id="nothing-at-the-session-bus-address",
+        ),
+        pytest.param(
+            "linux", lambda m, t: _secretstorage(m, service=False), id="no-secret-service"
+        ),
+        pytest.param(
+            "linux",
+            lambda m, t: _secretstorage(m, connect=_SecretStorageError("no session bus")),
+            id="secretstorage-refuses",
+        ),
+        pytest.param(
+            "linux",
+            lambda m, t: _secretstorage(
+                m, connect=PermissionError(errno.EACCES, "Permission denied")
+            ),
+            id="secretstorage-fails-otherwise",
+        ),
+        pytest.param(
+            "linux", lambda m, t: _secretstorage(m, version=(3, 1, 0)), id="secretstorage-too-old"
+        ),
+        pytest.param(
+            "linux",
+            lambda m, t: m.delattr(SecretService, "secretstorage", raising=False),
+            id="no-secretstorage",
+        ),
+        pytest.param(
+            "linux",
+            lambda m, t: _unimportable(m, "keyring.backends.SecretService"),
+            id="linux-module-does-not-import",
+        ),
+        pytest.param(
+            "macos",
+            lambda m, t: _unimportable(m, "keyring.backends.macOS"),
+            id="macos-module-does-not-import",
+        ),
+    ],
+)
+def test_a_system_backend_that_cannot_be_used_is_no_keyring(
+    family: str,
+    setup: Callable[[pytest.MonkeyPatch, Path], Any],
+    host_env: HostEnv,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Refused as keyring's fail backend always was where keyring found nothing it could use: the
+    # same sentence, the same refusal, and the file store still opens.
+    setup(monkeypatch, tmp_path)
+    built = store._build.__wrapped__(family)
+    assert type(built) is FailKeyring
+    with pytest.raises(store.InsecureKeyring) as refused:
+        store.check_backend(built)
+    assert str(refused.value) == FAIL_SENTENCE
+    monkeypatch.setattr(store, "_system_backend", lambda: built)
+    with pytest.raises(store.InsecureKeyring) as refused:
+        _switchboard.open_link(host_env.dirs, KEYRING)
+    assert str(refused.value) == FAIL_SENTENCE
+    assert _switchboard.open_link(host_env.dirs, FILE).warning is not None
+
+
+def _keyring_settings(
+    monkeypatch: pytest.MonkeyPatch,
+    home: Path,
+    tmp_path: Path,
+    variable: str | None,
+    text: str | bytes | None,
+    xdg: str | None,
+) -> Path:
+    """Set keyring's own settings: ``PYTHON_KEYRING_BACKEND`` to ``variable``, and keyringrc.cfg to
+    ``text`` (none when None), where keyring 25.7.0 reads it: under ``XDG_CONFIG_HOME`` when ``xdg``
+    names a folder under ``tmp_path``, and under ``home/.config`` when ``XDG_CONFIG_HOME`` is unset
+    (None) or empty (""). Returns where the file is."""
+    if variable is not None:
+        monkeypatch.setenv("PYTHON_KEYRING_BACKEND", variable)
+    if xdg is None:
+        monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+        where = keyring_config(home)
+    elif xdg == "":
+        monkeypatch.setenv("XDG_CONFIG_HOME", "")
+        where = keyring_config(home)
+    else:
+        monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / xdg))
+        where = tmp_path / xdg / "python_keyring" / "keyringrc.cfg"
+    if text is not None:
+        where.parent.mkdir(parents=True, exist_ok=True)
+        if isinstance(text, bytes):
+            where.write_bytes(text)
+        else:
+            where.write_text(text, encoding="utf-8")
+    return where
+
+
+def _naming(backend: str) -> str:
+    return f"[backend]\ndefault-keyring={backend}\n"
+
+
+# keyring's own off switch, as its maintainer documents it: PYTHON_KEYRING_BACKEND, or the
+# default-keyring of keyringrc.cfg, naming keyring's null backend (what `keyring --disable` writes)
+# or its fail backend. Each is (the variable, the text of keyringrc.cfg, XDG_CONFIG_HOME), as
+# _keyring_settings takes them.
+OFF_SWITCH_SETTINGS: dict[str, tuple[str | None, str | None, str | None]] = {
+    "variable-null": (NULL_BACKEND, None, None),
+    "variable-fail": (FAIL_BACKEND, None, None),
+    "configuration-null": (None, DISABLED, None),
+    "configuration-fail": (None, _naming(FAIL_BACKEND), None),
+    "configuration-null-under-xdg-config-home": (None, DISABLED, "xdg"),
+    "configuration-null-with-xdg-config-home-empty": (None, DISABLED, ""),
+    # Either is enough, though keyring itself reads the file only when the variable is unset.
+    "variable-other-configuration-null": (PLAINTEXT_NAME, DISABLED, None),
+    "variable-null-configuration-other": (NULL_BACKEND, _naming(PLAINTEXT_NAME), None),
+}
+
+
+@pytest.mark.parametrize("family", ["linux", "macos"])
+@pytest.mark.parametrize("setting", OFF_SWITCH_SETTINGS)
+def test_keyrings_off_switch_is_refused_as_storing_nothing(
+    setting: str,
+    family: str,
+    host_env: HostEnv,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The host takes keyring's null backend and refuses it as storing nothing, with the sentence
+    # that points to --store-file, before it asks anything of its own system's backend: a Secret
+    # Service answers on the session bus here, and is never asked. keyring is never asked to find a
+    # backend either.
+    _never_detect(monkeypatch)
+    asked = _secretstorage(monkeypatch)
+    _keyring_settings(monkeypatch, host_env.home, tmp_path, *OFF_SWITCH_SETTINGS[setting])
+    built = store._build.__wrapped__(family)
+    assert type(built) is NullKeyring
+    assert asked == []
+    with pytest.raises(store.InsecureKeyring) as refused:
+        store.check_backend(built)
+    assert str(refused.value) == NULL_SENTENCE
+    monkeypatch.setattr(store, "_system_backend", lambda: built)
+    with pytest.raises(store.InsecureKeyring) as refused:
+        _switchboard.open_link(host_env.dirs, KEYRING)
+    assert str(refused.value) == NULL_SENTENCE
+    # The file store, which the sentence points to, still opens.
+    assert _switchboard.open_link(host_env.dirs, FILE).warning is not None
+
+
+# Settings that name a backend that is not keyring's off switch. Each is as OFF_SWITCH_SETTINGS.
+OTHER_SETTINGS: dict[str, tuple[str | None, str | None, str | None]] = {
+    "variable": (PLAINTEXT_NAME, None, None),
+    "configuration": (None, _naming(PLAINTEXT_NAME), None),
+    "both": (PLAINTEXT_NAME, _naming(PLAINTEXT_NAME), None),
+    "variable-a-chain": ("keyring.backends.chainer.ChainerBackend", None, None),
+    "variable-the-null-module": ("keyring.backends.null", None, None),
+}
+
+
+@pytest.mark.parametrize("setting", OTHER_SETTINGS)
+def test_another_backend_keyrings_settings_name_is_not_consulted(
+    setting: str, host_env: HostEnv, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The backend named is not taken, and its module is not imported, though it could be: one is
+    # planted where an import would find it. The host builds its own system's backend as it does
+    # with no setting, which, with no session bus, it refuses with the sentence for no keyring.
+    marker = tmp_path / "imported"
+    planted = planted_module(tmp_path / "planted", "keyrings.alt.file", marker)
+    monkeypatch.syspath_prepend(str(planted))
+    monkeypatch.setattr("sys.path", list(sys.path))
+    path = list(sys.path)
+    _never_detect(monkeypatch)
+    monkeypatch.delenv("DBUS_SESSION_BUS_ADDRESS", raising=False)
+    _keyring_settings(monkeypatch, host_env.home, tmp_path, *OTHER_SETTINGS[setting])
+    built = store._build.__wrapped__("linux")
+    assert type(built) is FailKeyring
+    with pytest.raises(store.InsecureKeyring) as refused:
+        store.check_backend(built)
+    assert str(refused.value) == FAIL_SENTENCE
+    monkeypatch.setattr(store, "_system_backend", lambda: built)
+    with pytest.raises(store.InsecureKeyring) as refused:
+        _switchboard.open_link(host_env.dirs, KEYRING)
+    assert str(refused.value) == FAIL_SENTENCE
+    assert not marker.exists()
+    assert {"keyrings", "keyrings.alt", "keyrings.alt.file"} & set(sys.modules) == set()
+    assert sys.path == path
+
+
+@pytest.mark.parametrize("named", ["the-planted-module", "the-null-backend"])
+def test_the_keyring_path_of_keyrings_configuration_is_never_used(
+    named: str, home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # keyring puts the folder keyring-path names first on sys.path, and then imports the backend
+    # the file names (keyring/core.py, load_config and _load_keyring_path). The host does neither:
+    # sys.path is as it was, and the module planted in that folder, which the file names, is never
+    # imported, whether or not the file also turns the keyring off.
+    marker = tmp_path / "imported"
+    folder = planted_module(tmp_path / "keyring-path", "lucille_planted_backend", marker)
+    default = "lucille_planted_backend.Keyring" if named == "the-planted-module" else NULL_BACKEND
+    text = f"[backend]\ndefault-keyring={default}\nkeyring-path={folder}\n"
+    _keyring_settings(monkeypatch, home, tmp_path, None, text, None)
+    monkeypatch.delenv("DBUS_SESSION_BUS_ADDRESS", raising=False)
+    monkeypatch.setattr("sys.path", list(sys.path))
+    path = list(sys.path)
+    built = store._build.__wrapped__("linux")
+    assert sys.path == path
+    assert not marker.exists()
+    assert "lucille_planted_backend" not in sys.modules
+    assert type(built) is (FailKeyring if named == "the-planted-module" else NullKeyring)
+
+
+def _no_home() -> Path:
+    raise RuntimeError("Could not determine home directory.")
+
+
+# A keyringrc.cfg the host takes as no setting: each is what the file holds (bytes, text, a folder
+# in its place, or None for no file), and the last has no home folder to look in. Each that holds a
+# value names keyring's null backend, so that a setting read from it would turn the keyring off.
+NO_SETTING: dict[str, str | bytes | None] = {
+    "no-file": None,
+    "a-folder-in-its-place": "folder",
+    # A byte that is not UTF-8, in a comment, where configparser would take any text.
+    "not-utf-8": DISABLED.encode() + b"\n# caf\xe9\n",
+    "a-byte-order-mark": b"\xef\xbb\xbf" + DISABLED.encode(),
+    "no-section-header": "default-keyring=keyring.backends.null.Keyring\n",
+    "a-value-given-twice": DISABLED + "\n" + DISABLED.partition("\n")[2] + "\n",
+    "no-backend-section": "[other]\ndefault-keyring=keyring.backends.null.Keyring\n",
+    "no-default-keyring": "[backend]\nkeyring-path=/nonexistent\n",
+    "no-home-folder": None,
+}
+
+
+@pytest.mark.parametrize("case", NO_SETTING)
+def test_a_keyring_configuration_that_cannot_be_read_is_no_setting(
+    case: str, home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Missing, unreadable, malformed or without a default-keyring: the host goes on as with no
+    # setting, and builds its own system's backend, which, with no session bus, it refuses with the
+    # sentence for no keyring. Nothing is raised from reading the file.
+    content = NO_SETTING[case]
+    if content == "folder":
+        keyring_config(home).mkdir(parents=True)
+    else:
+        _keyring_settings(monkeypatch, home, tmp_path, None, content, None)
+    if case == "no-home-folder":
+        monkeypatch.setattr("pathlib.Path.home", _no_home)
+    monkeypatch.delenv("DBUS_SESSION_BUS_ADDRESS", raising=False)
+    built = store._build.__wrapped__("linux")
+    assert type(built) is FailKeyring
+    with pytest.raises(store.InsecureKeyring) as refused:
+        store.check_backend(built)
+    assert str(refused.value) == FAIL_SENTENCE
+
+
+@pytest.mark.parametrize("case", ["not-utf-8", "a-byte-order-mark", "a-value-given-twice"])
+def test_a_keyring_configuration_keyring_itself_fails_on_is_no_setting(
+    case: str, home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # keyring raises on each, and would store nothing; the host takes it as no setting.
+    monkeypatch.delenv("PYTHON_KEYRING_BACKEND", raising=False)
+    _keyring_settings(monkeypatch, home, tmp_path, None, NO_SETTING[case], None)
+    with pytest.raises((UnicodeDecodeError, configparser.Error)):
+        keyring.core.load_config()
+    assert store._configured_backend() is None
+    assert not store._turned_off()
+
+
+def _padded(size: int) -> bytes:
+    """What ``keyring --disable`` writes, then a comment line, ``size`` bytes in all."""
+    head = (DISABLED + "\n").encode()
+    return head + b"#" * (size - len(head) - 1) + b"\n"
+
+
+# keyringrc.cfg files that turn the keyring off, as keyring itself reads them: each holds keyring's
+# null backend, in a shape the host must read as keyring does (configparser, the value stripped,
+# opened as text with universal newlines).
+READ_AS_KEYRING: dict[str, bytes] = {
+    "a-continuation-line": b"[backend]\ndefault-keyring=\n  keyring.backends.null.Keyring\n",
+    "spaces-round-the-value": b"[backend]\ndefault-keyring =  keyring.backends.null.Keyring  \n",
+    "carriage-returns": DISABLED.replace("\n", "\r").encode() + b"\r",
+    "carriage-returns-and-newlines": DISABLED.replace("\n", "\r\n").encode() + b"\r\n",
+    "exactly-the-limit": _padded(store.CONFIG_LIMIT),
+    "the-default-section-as-fallback": (
+        b"[DEFAULT]\ndefault-keyring=keyring.backends.null.Keyring\n[backend]\n"
+    ),
+}
+
+
+@pytest.mark.parametrize("case", READ_AS_KEYRING)
+def test_keyrings_configuration_is_read_as_keyring_reads_it(
+    case: str, home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("PYTHON_KEYRING_BACKEND", raising=False)
+    _keyring_settings(monkeypatch, home, tmp_path, None, READ_AS_KEYRING[case], None)
+    # keyring itself takes its null backend from each (keyring/core.py, load_config).
+    assert type(keyring.core.load_config()) is NullKeyring
+    assert store._configured_backend() == NULL_BACKEND
+    assert store._turned_off()
+    assert type(store._build.__wrapped__("linux")) is NullKeyring
+
+
+def test_keyrings_configuration_is_read_through_a_symbolic_link(
+    home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # As a dotfile manager leaves it: keyringrc.cfg is a link to a file kept elsewhere.
+    monkeypatch.delenv("PYTHON_KEYRING_BACKEND", raising=False)
+    kept = tmp_path / "dotfiles" / "keyringrc.cfg"
+    kept.parent.mkdir()
+    kept.write_text(DISABLED, encoding="utf-8")
+    where = _keyring_settings(monkeypatch, home, tmp_path, None, None, None)
+    where.parent.mkdir(parents=True)
+    where.symlink_to(kept)
+    assert type(keyring.core.load_config()) is NullKeyring
+    assert store._configured_backend() == NULL_BACKEND
+    assert store._turned_off()
+
+
+def _keyrings_own_name(monkeypatch: pytest.MonkeyPatch) -> str | None:
+    """The backend name keyring 25.7 itself takes from keyringrc.cfg, or None where it takes none:
+    its ``load_config``, with the load of the backend it names left out."""
+    names: list[str] = []
+    with monkeypatch.context() as patched:
+        patched.setattr("keyring.core.load_keyring", names.append)
+        keyring.core.load_config()
+    return names[0] if names else None
+
+
+# keyringrc.cfg files keyring itself does not take its null backend from, though a reading unlike
+# keyring's would: the value is not interpolated, and the line breaks of str.splitlines that are not
+# universal newlines do not end a line, so the option after one stays on the section header's line,
+# where configparser ignores it.
+NOT_OFF_AS_KEYRING: dict[str, bytes] = {
+    "no-interpolation": b"[backend]\nx=keyring.backends.null.Keyring\ndefault-keyring=%(x)s\n",
+    **{
+        f"u{ord(mark):04x}-is-no-line-break": (
+            b"[backend]" + mark.encode() + b"default-keyring=keyring.backends.null.Keyring\n"
+        )
+        for mark in "\v\f\x1c\x1d\x1e\x85\u2028\u2029"
+    },
+}
+
+
+@pytest.mark.parametrize("case", NOT_OFF_AS_KEYRING)
+def test_keyrings_configuration_turns_nothing_off_where_keyring_takes_no_off_switch(
+    case: str, home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("PYTHON_KEYRING_BACKEND", raising=False)
+    _keyring_settings(monkeypatch, home, tmp_path, None, NOT_OFF_AS_KEYRING[case], None)
+    taken = _keyrings_own_name(monkeypatch)
+    assert taken not in store.OFF_SWITCH
+    assert store._configured_backend() == taken
+    assert not store._turned_off()
+
+
+def _counted_reads(monkeypatch: pytest.MonkeyPatch, most: int | None = None) -> list[int]:
+    """Count the bytes each ``os.read`` returns, returning at most ``most`` bytes a call when it is
+    given, as a file system may."""
+    real_read = os.read
+    returned: list[int] = []
+
+    def read(fd: int, size: int) -> bytes:
+        chunk = real_read(fd, size if most is None else min(size, most))
+        returned.append(len(chunk))
+        return chunk
+
+    monkeypatch.setattr("os.read", read)
+    return returned
+
+
+@pytest.mark.parametrize("size", [store.CONFIG_LIMIT + 1, 64 * store.CONFIG_LIMIT])
+def test_keyrings_configuration_longer_than_the_limit_is_no_setting(
+    size: int, home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # keyring itself would read the whole file and turn the keyring off. The host reads no more than
+    # one byte past the limit, parses none of it, and goes on as with no setting.
+    monkeypatch.delenv("PYTHON_KEYRING_BACKEND", raising=False)
+    monkeypatch.delenv("DBUS_SESSION_BUS_ADDRESS", raising=False)
+    _keyring_settings(monkeypatch, home, tmp_path, None, _padded(size), None)
+    returned = _counted_reads(monkeypatch)
+    assert store._configured_backend() is None
+    assert 0 < sum(returned) <= store.CONFIG_LIMIT + 1
+    assert not store._turned_off()
+    assert type(store._build.__wrapped__("linux")) is FailKeyring
+
+
+@pytest.mark.parametrize("size", [store.CONFIG_LIMIT, store.CONFIG_LIMIT + 1])
+def test_keyrings_configuration_is_read_to_the_limit_in_short_reads(
+    size: int, home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A file system may return less than was asked for at each read, as FUSE can.
+    monkeypatch.delenv("PYTHON_KEYRING_BACKEND", raising=False)
+    _keyring_settings(monkeypatch, home, tmp_path, None, _padded(size), None)
+    returned = _counted_reads(monkeypatch, most=1000)
+    expected = NULL_BACKEND if size <= store.CONFIG_LIMIT else None
+    assert store._configured_backend() == expected
+    assert len(returned) > 1
+    assert sum(returned) <= store.CONFIG_LIMIT + 1
+
+
+@pytest.mark.parametrize("shape", ["regular", "longer-than-the-limit", "fifo"])
+def test_keyrings_configuration_is_closed_once_looked_at(
+    shape: str, home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    where = _keyring_settings(monkeypatch, home, tmp_path, None, None, None)
+    where.parent.mkdir(parents=True)
+    if shape == "fifo":
+        os.mkfifo(where)
+    else:
+        size = store.CONFIG_LIMIT + (1 if shape == "longer-than-the-limit" else 0)
+        where.write_bytes(_padded(size))
+    real_open, real_close = os.open, os.close
+    opened: list[int] = []
+    closed: list[int] = []
+
+    def open_(*args: Any, **kwargs: Any) -> int:
+        fd = real_open(*args, **kwargs)
+        opened.append(fd)
+        return fd
+
+    def close(fd: int) -> None:
+        closed.append(fd)
+        real_close(fd)
+
+    with monkeypatch.context() as patched:
+        patched.setattr("os.open", open_)
+        patched.setattr("os.close", close)
+        store._configured_backend()
+    assert len(opened) == 1
+    assert closed == opened
+
+
+# Run as ``python -I -c TERMINAL_CHILD <source folder> <keyringrc.cfg>``: a session leader with no
+# controlling terminal, whose keyringrc.cfg is a link to a terminal. It prints whether it has a
+# controlling terminal before and after the host reads the file, and what the host read.
+TERMINAL_CHILD = """\
+import os
+import sys
+
+sys.path.insert(0, sys.argv[1])
+os.setsid()
+leader, follower = os.openpty()
+name = os.ttyname(follower)
+os.close(follower)
+os.symlink(name, sys.argv[2])
+
+
+def controlling():
+    try:
+        os.close(os.open("/dev/tty", os.O_RDWR | os.O_NOCTTY))
+    except OSError:
+        return False
+    return True
+
+
+from lucille_host import store
+
+before = controlling()
+read = store._configured_backend()
+print(before, read, controlling())
+"""
+
+
+@pytest.mark.skipif(
+    not sys.platform.startswith("linux"),
+    reason="checked on Linux only: how macOS's openpty treats a session leader is not checked",
+)
+def test_a_terminal_at_keyrings_configuration_does_not_become_the_controlling_one(
+    tmp_path: Path,
+) -> None:
+    # Opening a terminal makes it the controlling terminal of a session leader that has none,
+    # unless it is opened with O_NOCTTY.
+    home = tmp_path / "home"
+    config = keyring_config(home)
+    config.parent.mkdir(parents=True)
     done = subprocess.run(
-        [sys.executable, "-I", "-c", code],
+        [
+            sys.executable,
+            "-I",
+            "-c",
+            TERMINAL_CHILD,
+            str(Path(store.__file__).parents[1]),
+            str(config),
+        ],
         capture_output=True,
         text=True,
         env={"HOME": str(home), "PATH": os.defpath},
@@ -489,27 +1101,82 @@ def test_the_backend_keyring_detects_here_is_judged(tmp_path: Path) -> None:
         check=False,
     )
     assert done.returncode == 0, done.stderr
-    module, qualname, refusal = json.loads(done.stdout.splitlines()[-1])
-    if paths.os_family() == "macos":
-        # The backend the Mac app keeps the pair in, which nothing else in CI checks.
-        assert [module, qualname, refusal] == [*SYSTEM_BACKENDS["macos"], None]
-    else:
-        # The Secret Service needs a session bus, and there is none here.
-        assert [module, qualname, refusal] == ["keyring.backends.fail", "Keyring", FAIL_SENTENCE]
+    assert done.stdout.split() == ["False", "None", "False"]
 
 
-# Where, in src/lucille_host/, keyring may be asked for the backend in use, and the item read or
-# written: the check, and the item's one read and one write, which go through the backend the check
-# returned. Nothing deletes the item.
+def test_a_fifo_at_keyrings_configuration_is_not_waited_on(
+    home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Opening a FIFO for reading waits for a writer, forever if none comes. The host opens the file
+    # with O_NONBLOCK, which does not wait for one, finds it is not a regular file, and takes it as
+    # no setting.
+    where = _keyring_settings(monkeypatch, home, tmp_path, None, None, None)
+    where.parent.mkdir(parents=True)
+    os.mkfifo(where)
+    read: list[str | None] = []
+    reader = threading.Thread(target=lambda: read.append(store._configured_backend()), daemon=True)
+    reader.start()
+    reader.join(10)
+    try:
+        assert not reader.is_alive(), "opening keyringrc.cfg waited for a writer"
+    finally:
+        if reader.is_alive():
+            # A writer that comes and goes lets the waiting open return, so the thread ends.
+            with contextlib.suppress(OSError):
+                os.close(os.open(where, os.O_WRONLY | os.O_NONBLOCK))
+            reader.join(10)
+    assert read == [None]
+
+
+NOT_REGULAR = {
+    "fifo": stat.S_IFIFO,
+    "character-device": stat.S_IFCHR,
+    "block-device": stat.S_IFBLK,
+    "socket": stat.S_IFSOCK,
+    "folder": stat.S_IFDIR,
+}
+
+
+@pytest.mark.parametrize("kind", NOT_REGULAR)
+def test_what_is_not_a_regular_file_is_never_read(
+    kind: str, home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The file turns the keyring off while the system says it is a regular file. Said to be anything
+    # else, it is not read at all, and is no setting.
+    monkeypatch.delenv("PYTHON_KEYRING_BACKEND", raising=False)
+    _keyring_settings(monkeypatch, home, tmp_path, None, DISABLED, None)
+    assert store._configured_backend() == NULL_BACKEND
+    real_fstat, real_read = os.fstat, os.read
+    reads: list[int] = []
+
+    def fstat(fd: int) -> os.stat_result:
+        return os.stat_result((NOT_REGULAR[kind] | 0o600, *tuple(real_fstat(fd))[1:]))
+
+    def read(fd: int, size: int) -> bytes:
+        reads.append(fd)
+        return real_read(fd, size)
+
+    with monkeypatch.context() as patched:
+        patched.setattr("os.fstat", fstat)
+        patched.setattr("os.read", read)
+        assert store._configured_backend() is None
+    assert reads == []
+
+
+# Where, in src/lucille_host/, the item may be read or written: the item's one read and one write,
+# which go through the backend the check returned. Nothing deletes the item, and nothing asks
+# keyring for its backend.
 KEYRING_USES = {
-    "get_keyring": {"store.check_backend"},
+    # The host builds its backend itself, and never asks keyring for one (or to find one).
+    "get_keyring": set(),
     "get_password": {"store.Item._load"},
     "set_password": {"store.Item._save"},
     "delete_password": set(),
     # Two more ways to the item that bypass the check: a credential read, and a chain's members,
-    # which hand out live backends. A chain is asked only whether it holds any.
+    # which hand out live backends (and load every backend keyring's entry points name). A chain is
+    # refused without being asked what it holds.
     "get_credential": set(),
-    "backends": {"store._unfit"},
+    "backends": set(),
 }
 
 

@@ -838,6 +838,7 @@ def test_the_runtime_import_allowlist_is_pinned() -> None:
         "base64",
         "binascii",
         "collections",
+        "configparser",
         "contextlib",
         "copy",
         "dataclasses",
@@ -1348,8 +1349,11 @@ def test_the_runtime_may_use_a_modules_members(source: str, rel: str) -> None:
 
 
 KEYRING_ALLOWED = [
-    "import keyring\nbackend = keyring.get_keyring()\n",
-    "import keyring\nkeyring.get_keyring().get_password('lucille-host', 'pair')\n",
+    # The two backends the host builds itself, one on each system.
+    "from keyring.backends import SecretService\nbackend = SecretService.Keyring()\n",
+    "from keyring.backends import macOS\nbackend = macOS.Keyring()\n",
+    "import keyring.backends.SecretService\nok = keyring.backends.SecretService.Keyring.viable\n",
+    "from keyring.backends.macOS import Keyring\nKeyring().get_password('lucille-host', 'pair')\n",
     "from keyring import errors\ntry:\n    pass\nexcept errors.PasswordDeleteError:\n    pass\n",
     "import keyring.errors\nraise keyring.errors.KeyringError('x')\n",
     "from keyring.backends import fail, null\nisinstance(backend, (fail.Keyring, null.Keyring))\n",
@@ -1364,6 +1368,16 @@ def test_the_runtime_may_use_keyrings_surface(source: str, rel: str) -> None:
 
 
 KEYRING_DENIED = [
+    # keyring's own choice of backend: what PYTHON_KEYRING_BACKEND or keyringrc.cfg names, or, with
+    # neither, every backend its entry points name, imported (on Linux, its macOS backend runs
+    # ldconfig, gcc and ld as it is imported).
+    "import keyring\nbackend = keyring.get_keyring()\n",
+    "from keyring import get_keyring\n",
+    # The rest of the two backends' modules, and the other backends.
+    "from keyring.backends import SecretService\nSecretService.secretstorage.dbus_init()\n",
+    "from keyring.backends.macOS import api\n",
+    "from keyring.backends import kwallet\nkwallet.DBusKeyring()\n",
+    "from keyring.backends import libsecret\nlibsecret.Keyring()\n",
     # Each looks the backend up again, past the check of the one the host reads and writes through.
     "import keyring\nkeyring.get_password('lucille-host', 'pair')\n",
     "import keyring\nkeyring.set_password('lucille-host', 'pair', secret)\n",
@@ -1387,7 +1401,6 @@ def test_the_runtime_uses_nothing_else_of_keyring(source: str, rel: str) -> None
 
 def test_the_keyring_surface_is_pinned() -> None:
     assert ast_lint.KEYRING_SURFACE == {
-        "keyring.get_keyring",
         "keyring.errors.KeyringError",
         "keyring.errors.PasswordSetError",
         "keyring.errors.PasswordDeleteError",
@@ -1398,6 +1411,8 @@ def test_the_keyring_surface_is_pinned() -> None:
         "keyring.backends.fail.Keyring",
         "keyring.backends.null.Keyring",
         "keyring.backends.chainer.ChainerBackend",
+        "keyring.backends.SecretService.Keyring",
+        "keyring.backends.macOS.Keyring",
     }
 
 

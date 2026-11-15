@@ -26,23 +26,65 @@
   day. Those stamps only decide whether a pair has gone unread for days, and what is shown about
   a room, so an hour's delay changes neither. Every other change, and every delete, is written
   before the call returns, as Switchboard's store contract asks.
-- The host keeps the item in one keyring backend on each system, and knows it by its class:
-  keyring's Secret Service backend, ``keyring.backends.SecretService.Keyring``, on Linux, and its
-  Keychain backend, ``keyring.backends.macOS.Keyring``, on macOS (:data:`KNOWN_BACKENDS`). The class
-  of the backend in use must be that one exactly, as its ``(__module__, __qualname__)``, compared as
-  strings, so neither module is ever imported here. Every other backend is refused: keyring's
-  ``fail`` and ``null`` backends, a subclass of the known class, a class under any other name, one
-  that writes secrets in the clear to a file among them, and every chain of backends (keyring's
-  ``ChainerBackend``), whatever it holds: a chain is asked only whether it holds any backend, and
-  its members are neither judged nor named. :func:`check_backend` refuses them when the store is
-  opened, and again before each read and each write of the item, which go to the backend it checked.
-  What is checked is the class's identity, not how the backend keeps a secret: which service answers
-  on the session bus, and whether the collection that keeps the item is encrypted, are not checked;
-  nor are the settings keyring gives a backend from ``KEYRING_PROPERTY_*`` environment variables
-  (the Secret Service collection, a Keychain file); and code already running in the process could
-  give a class of its own those names. Before the check sees a backend, keyring has already imported
-  and built the one that an environment variable or its configuration file names, or, with neither,
-  imported every backend its installed entry points name and built every one it can use.
+- The host keeps the item in one keyring backend on each system, and builds it itself: keyring's
+  Secret Service backend, ``keyring.backends.SecretService.Keyring``, on Linux, and its Keychain
+  backend, ``keyring.backends.macOS.Keyring``, on macOS (:data:`KNOWN_BACKENDS`). :func:`_build`
+  imports that system's module alone, never the other's, and builds its class once a process. The
+  host never asks keyring for a backend, so keyring chooses none and the backends keyring's
+  installed entry points name are not loaded (on Linux, loading its macOS backend runs ``ldconfig``,
+  ``gcc`` and ``ld``, through ``ctypes.util.find_library``).
+- keyring's own off switch is kept. Before it imports its system's module, :func:`_build` reads
+  ``PYTHON_KEYRING_BACKEND``, and the ``default-keyring`` of the ``[backend]`` section of keyring's
+  configuration file, ``keyringrc.cfg``, as plain text, once a process with the backend it builds.
+  When either names keyring's ``null`` or ``fail`` backend, by the names in :data:`OFF_SWITCH`
+  (``keyring --disable`` writes ``default-keyring=keyring.backends.null.Keyring``), it takes
+  keyring's ``null`` backend, which :func:`check_backend` refuses as storing nothing, with the
+  sentence that points to ``--store-file``. Either is enough, though keyring itself reads the file
+  only when the variable is unset. Any other value is not consulted: the host builds its system's
+  backend as it does with neither set. Nothing either names is imported, the file's ``keyring-path``
+  is never looked up, and nothing is added to ``sys.path``. The variable is compared as it is, as
+  keyring takes it, and the file is read as keyring reads it (``configparser.RawConfigParser``,
+  UTF-8, universal newlines, the value stripped), from where keyring 25.7 reads it on both systems
+  (``config_root`` in ``keyring/util/platform_.py``, which macOS shares with Linux):
+  ``python_keyring/keyringrc.cfg`` under ``$XDG_CONFIG_HOME``, or under ``~/.config`` when that is
+  unset or empty. It is opened so that a FIFO there does not wait for a writer, and read only when
+  it is a regular file, and then no further than one byte past :data:`CONFIG_LIMIT`, so a FIFO or a
+  device there is never read; a regular file on a file system that does not answer (measured with
+  FUSE) is waited on, as keyring waits on it. The limit is far above what ``keyring
+  --disable`` writes (55 bytes) and small for a reason: Python 3.11's ``configparser`` took 0.14 s
+  to reject a 4 KiB line with no ``=`` or ``:``, and half a minute at 64 KiB, where 3.13 takes
+  milliseconds (measured on 3.11.15 and 3.13.14; keyring, which reads with no limit, takes as long).
+  A file that is missing, is not a regular file, is longer than that, cannot be read or does not
+  parse, or has no such value, and a home folder that cannot be found, are no setting: the host goes
+  on as with none, and nothing is raised. That includes a file keyring itself fails on (one that is
+  not UTF-8 or does not parse): keyring then stores nothing, and the host builds its system's
+  backend.
+- Before it builds the class, :func:`_build` asks for the class's ``priority``, keyring's own test
+  of whether a backend can be used here, which keyring asked of every backend before it chose one.
+  It is needed: a Secret Service backend built where there is no session bus raises secretstorage's
+  own error at the first read, which is not a keyring error. The Secret Service's ``priority``
+  connects to the session bus that ``DBUS_SESSION_BUS_ADDRESS`` names, a local socket (jeepney,
+  which secretstorage uses, connects to a ``unix:`` address only), and asks the bus whether a Secret
+  Service runs there or can be started, without starting it; the Keychain's asks only whether this
+  is macOS and its module loaded the Security framework. Neither starts a process: read from keyring
+  25.7, secretstorage 3.5 and jeepney 0.9; tests/test_keyring_backend.py checks it on Linux with no
+  session bus, and on macOS, and nothing checks it with a session bus. Where the class cannot be
+  used (there is no session bus, or no Secret Service on it, secretstorage is missing or fails, or
+  the module does not import), the host takes keyring's ``fail`` backend
+  instead, as keyring did where it found nothing it could use, and refuses it with the same
+  sentence.
+- :func:`check_backend` takes a backend only when its class is exactly the one this system's entry
+  in :data:`KNOWN_BACKENDS` names, as its ``(__module__, __qualname__)``, compared as strings. It
+  checks the backend the host built when the store is opened, and again before each read and each
+  write of the item, which go to the backend it checked, and refuses every other: keyring's ``fail``
+  and ``null`` backends, a subclass of the known class, a class under any other name, one that
+  writes secrets in the clear to a file among them, and every chain of backends (keyring's
+  ``ChainerBackend``), which it never asks what it holds: that would load every backend keyring's
+  entry points name. What is checked is the class's identity, not how the backend keeps a secret:
+  which service answers on the session bus, and whether the collection that keeps the item is
+  encrypted, are not checked; nor are the settings keyring gives a backend from
+  ``KEYRING_PROPERTY_*`` environment variables (the Secret Service collection, a Keychain file); and
+  code already running in the process could give a class of its own those names.
 
 A keyring failure, a backend's own ``OSError`` included, is a :class:`StoreError`, an ``OSError``,
 which is what Switchboard's stores raise for a storage failure; the wrapper never reads one as the
@@ -51,11 +93,15 @@ hub's (``_switchboard.py``). No error message holds anything read from the item.
 
 from __future__ import annotations
 
+import configparser
 import contextlib
 import copy
 import errno
+import functools
+import io
 import json
 import os
+import stat
 import threading
 import time
 from collections.abc import Callable, Iterator, Mapping
@@ -63,7 +109,6 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Final, TypeVar
 
-import keyring
 from keyring.backend import KeyringBackend
 from keyring.backends.chainer import ChainerBackend
 from keyring.backends.fail import Keyring as FailKeyring
@@ -74,6 +119,7 @@ from lucille_host import paths, state
 
 __all__ = [
     "KNOWN_BACKENDS",
+    "OFF_SWITCH",
     "PAIR_REFUSAL",
     "PAIR_STAMPS",
     "ROOM_STAMPS",
@@ -102,7 +148,8 @@ DEADLOCK_PAUSE: Final = 0.01
 DEADLOCK_PAUSE_MOST: Final = 0.5
 TABLES: Final = ("records", "pending", "verdicts")
 # The one keyring backend the host keeps the item in, by system, as its class's (__module__,
-# __qualname__): the module docstring says what that does and does not check.
+# __qualname__): the one _build builds. The module docstring says what the check of it does and does
+# not check.
 KNOWN_BACKENDS: Final[Mapping[str, tuple[str, str]]] = MappingProxyType(
     {
         "linux": ("keyring.backends.SecretService", "Keyring"),
@@ -110,6 +157,12 @@ KNOWN_BACKENDS: Final[Mapping[str, tuple[str, str]]] = MappingProxyType(
     }
 )
 SYSTEM_NAMES: Final[Mapping[str, str]] = MappingProxyType({"linux": "Linux", "macos": "macOS"})
+# keyring's own off switch: its null and fail backends, as PYTHON_KEYRING_BACKEND or keyringrc.cfg
+# names them. The module docstring says how each is read.
+OFF_SWITCH: Final = frozenset({"keyring.backends.null.Keyring", "keyring.backends.fail.Keyring"})
+# The most of keyringrc.cfg the host takes, in bytes; it reads at most one byte more, and a longer
+# file is no setting. The module docstring says why it is small.
+CONFIG_LIMIT: Final = 4 * 1024
 # The end of every refusal of the pair's keyring, after "the keyring backend here (X) <reason>, ".
 PAIR_REFUSAL: Final = (
     "so lucille-host cannot keep its pair in it; set up the system keyring, or pair with "
@@ -124,8 +177,92 @@ class StoreError(OSError):
 
 
 class InsecureKeyring(state.Refused):
-    """The keyring backend in use is not, by its class, the one the host keeps the item in on this
-    system (:data:`KNOWN_BACKENDS`)."""
+    """The keyring backend is not, by its class, the one the host keeps the item in on this system
+    (:data:`KNOWN_BACKENDS`), or that one cannot be used here."""
+
+
+def _system_backend() -> KeyringBackend:
+    """The keyring backend the host reads and writes the item through: the one :func:`_build` built
+    for this system. It is the one place the host gets a backend, and the one the tests replace
+    (tests/conftest.py)."""
+    return _build(paths.os_family())
+
+
+def _read_config(path: Path) -> bytes | None:
+    """The bytes of the regular file at ``path``, or None where it is not one or is longer than
+    :data:`CONFIG_LIMIT`. It is opened with ``O_NONBLOCK``, so a FIFO there does not block the open,
+    what is not a regular file is never read, and a regular file is read no further than one byte
+    past the limit."""
+    fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOCTTY | os.O_CLOEXEC)
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return None
+        chunks: list[bytes] = []
+        size = 0
+        while size <= CONFIG_LIMIT:
+            chunk = os.read(fd, CONFIG_LIMIT + 1 - size)
+            if not chunk:
+                return b"".join(chunks)
+            chunks.append(chunk)
+            size += len(chunk)
+        return None
+    finally:
+        os.close(fd)
+
+
+def _configured_backend() -> str | None:
+    """The ``default-keyring`` of the ``[backend]`` section of keyring's ``keyringrc.cfg``, as
+    text, or None: the module docstring says where the file is, how it is read, and when it is no
+    setting."""
+    try:
+        root = os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config"
+        data = _read_config(Path(root, "python_keyring", "keyringrc.cfg"))
+        if data is None:
+            return None
+        config = configparser.RawConfigParser()
+        # As keyring reads it: open(..., encoding="utf-8"), universal newlines and all.
+        config.read_file(io.TextIOWrapper(io.BytesIO(data), encoding="utf-8"))
+        return config.get("backend", "default-keyring").strip()
+    except (OSError, ValueError, RuntimeError, configparser.Error):
+        return None
+
+
+def _turned_off() -> bool:
+    """Whether keyring's own settings turn the keyring off: ``PYTHON_KEYRING_BACKEND``, or the
+    ``default-keyring`` of ``keyringrc.cfg``, names one of the backends in :data:`OFF_SWITCH`."""
+    return (
+        os.environ.get("PYTHON_KEYRING_BACKEND") in OFF_SWITCH
+        or _configured_backend() in OFF_SWITCH
+    )
+
+
+@functools.cache
+def _build(family: str) -> KeyringBackend:
+    """keyring's backend for ``family`` (:data:`KNOWN_BACKENDS`), built here with only its own
+    module imported, once a process, as keyring kept the backend it chose; keyring's ``null``
+    backend, without importing that module, when keyring's own settings turn the keyring off
+    (:func:`_turned_off`); keyring's ``fail`` backend when the system's cannot be used here (the
+    module docstring says when, and what asking tells)."""
+    if _turned_off():
+        return NullKeyring()
+    kind: type[KeyringBackend]
+    try:
+        if family == "linux":
+            from keyring.backends import SecretService
+
+            kind = SecretService.Keyring
+        elif family == "macos":
+            from keyring.backends import macOS
+
+            kind = macOS.Keyring
+        else:
+            return FailKeyring()
+        # The class's priority, which raises when it cannot be used here; viable is False then.
+        if kind.viable:
+            return kind()
+    except Exception:
+        pass
+    return FailKeyring()
 
 
 def _identity(backend: object) -> tuple[str, str]:
@@ -146,26 +283,17 @@ def _unfit(backend: object) -> str | None:
         return "has no keyring to store in"
     if isinstance(backend, NullKeyring):
         return "stores nothing"
-    family = paths.os_family()
-    system = ".".join(KNOWN_BACKENDS[family])
     if isinstance(backend, ChainerBackend):
-        # Asked only whether it holds anything, so that an empty one keeps its old reason. keyring
-        # works the members out again each time, from each backend's priority, which a backend
-        # may raise for (the Secret Service's does when it cannot reach its service, and other
-        # backends raise their own errors): a chain whose members cannot be worked out, for any
-        # reason, is still a chain, refused as one.
-        try:
-            empty = not backend.backends
-        except Exception:
-            empty = False
-        if empty:
-            return "chains no keyring"
+        # Never asked what it holds: keyring works that out from every backend its entry points
+        # name, which it loads to do so.
         return (
             "is a chain of keyring backends, and lucille-host uses one keyring backend, not a "
-            f"chain of them (keyring's keyringrc.cfg can name the system one, {system})"
+            "chain of them"
         )
     if _known(backend):
         return None
+    family = paths.os_family()
+    system = ".".join(KNOWN_BACKENDS[family])
     module, qualname = _identity(backend)
     return f"is {module}.{qualname}, and on {SYSTEM_NAMES[family]} lucille-host uses only {system}"
 
@@ -173,11 +301,12 @@ def _unfit(backend: object) -> str | None:
 def check_backend(
     backend: KeyringBackend | None = None, *, refusal: str = PAIR_REFUSAL
 ) -> KeyringBackend:
-    """The keyring backend in use (or ``backend``), when its class is the one the host keeps the
-    item in on this system; otherwise :class:`InsecureKeyring`, whose message ends with
-    ``refusal``. Read and write through the backend it returns, never through keyring's own
-    ``get_password`` and ``set_password``, which look the backend up again."""
-    current = keyring.get_keyring() if backend is None else backend
+    """The keyring backend the host built for this system (:func:`_system_backend`), or
+    ``backend``, when its class is the one the host keeps the item in on this system; otherwise
+    :class:`InsecureKeyring`, whose message ends with ``refusal``. Read and write through the
+    backend it returns, never through keyring's own ``get_password`` and ``set_password``, which
+    ask keyring for the backend it chooses."""
+    current = _system_backend() if backend is None else backend
     reason = _unfit(current)
     if reason is not None:
         raise InsecureKeyring(
