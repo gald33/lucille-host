@@ -267,6 +267,15 @@ enforces.
      list as it is. When the first holds anything, the second is not read. A compressed value that cannot
      be read (not base64, not one whole gzip stream, over 8 MiB unpacked, or not UTF-8) fails the check,
      and the check's last line names the variable the list came from.
+   - To set the compressed secret from a plain list file (one substring per line), with the GitHub CLI:
+
+     ```sh
+     gzip -9c list.txt | base64 | tr -d '\n' | gh secret set LUCILLE_HOST_PRIVATE_STRINGS_GZ --repo gald33/lucille-host
+     ```
+
+     The value is the output of `gzip -9c list.txt | base64 | tr -d '\n'`, wherever it is set; the name
+     is `LUCILLE_HOST_PRIVATE_STRINGS_GZ`, and does not go into the value. To read it back:
+     `printf %s "$LUCILLE_HOST_PRIVATE_STRINGS_GZ" | base64 -d | gunzip`.
    - The list is one case-sensitive literal substring per line. Blank lines and lines starting with `#`
      are ignored.
    - It reads what `git ls-files` lists: every path, a gitlink to another repository included, and

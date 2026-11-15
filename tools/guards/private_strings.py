@@ -10,9 +10,11 @@ check only through an environment variable of the same name, on the one CI step 
 - else ``LUCILLE_HOST_PRIVATE_STRINGS``, the list as it is.
 
 When the first holds anything, the second is not read: the compressed list replaces it, and is
-meant to hold every entry it held. A compressed value that is not base64, not one whole gzip
-stream with nothing after it, larger than 8 MiB once unpacked, or not UTF-8 then, fails the check
-(exit 1), and the message names only the variable and which of these it is.
+meant to hold every entry it held. Its value, from a plain list file, is the output of
+``gzip -9c list.txt | base64 | tr -d '\n'`` (VERIFYING.md gives the command that sets the
+secret). A compressed value that is not base64, not one whole gzip stream with nothing after it,
+larger than 8 MiB once unpacked, or not UTF-8 then, fails the check (exit 1), and the message
+names only the variable and which of these it is.
 
 The list: one case-sensitive literal substring per line. Leading and trailing whitespace is not
 part of an entry; blank lines and lines starting with ``#`` are ignored.
