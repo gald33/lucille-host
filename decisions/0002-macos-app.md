@@ -1656,19 +1656,28 @@ check from `tools/macos/check_app.py`:
 - the System Settings pages the app's one opener may show (§20; `places`): the check, not the app, opens
   each with `/usr/bin/open`, prints the names of System Settings' windows and takes a screenshot, then quits
   System Settings by its name; it gates on the window's title, which is not yet seen on a Mac;
-- only that copy acts (§13; `placement`): first the control, that copy opened starts the host on the app's
-  profile and the check sees it within 30 s: a host process whose command line `pgrep -f` or `ps` matches,
-  or, where `ps` can read the arguments of none of the app's children, a child whose arguments `ps` did
-  not read, which has the runtime's name and maps that copy's bundled runtime, by `lsof` (which does not
-  prove the pattern, and the check says so), not merely a child of the app; then the build's own copy, and
+- only that copy acts (§13; `placement`): first the control, that copy opened starts the host, or a child
+  that runs its runtime, and the check sees it within 30 s: by its arguments, a host process on the app's
+  profile whose command line `pgrep -f` or `ps` matches, or by its executable, where `ps` read the process
+  table and, from the watch's start to its end (up to 5 s after the check found the gate held, at the end
+  of the reading that showed it), read the arguments of no child of the app that the pattern did not
+  match: a child whose arguments `ps` did not read, which has the runtime's name (its first 15
+  characters, where `lsof -c` found it) and maps that copy's bundled runtime, by `lsof` (which proves
+  neither that the child is the host, which is inferred from the app's code, nor that the listers' pattern
+  matches, nor that the child ran on the app's profile: any
+  child of the app that runs that copy's runtime passes this way, whatever its arguments, and the check
+  says so), not merely a child of the app; neither way checks which of the host's commands ran; then the
+  build's own copy, and
   a copy named `Capsule 2.app` in `/Applications` with `/Applications/Capsule.app` there and then moved
   aside, each say why they can't run and how to fix that, start no host process of the app's profile, nor
-  any child, nor, whatever its parent, a process whose arguments `ps` cannot read that maps a copy's
-  bundled runtime or may, for 10 s, and
+  any child, nor, whatever its parent, a process `ps` shows only as `(lucille-host-run)`, its arguments
+  unreadable, whatever `lsof` says it maps (the check's own aside), for 10 s, and
   change nothing in its folder. The check says that nothing started only if `ps` read the process table and
   no stretch of more than 2 s went without a reading, counted from the start of one lister's call to the
-  end of the next one's, from the watch's first call on; a lister that fails is blind, never "none", and a
-  blind watch fails once, leaving unjudged whether the copy started anything, unless a reading saw that it
+  end of the next one's, from the watch's first call on; a lister that fails is blind, never "none" (so
+  the waits for no host process between steps take a look as clean only where `ps` read the process
+  table in it), and a blind watch fails once, leaving unjudged whether the copy started anything, unless a
+  reading saw that it
   did or that it stopped. Each stretch of more than 0.35 s is printed on its own, recorded, not a gate (in
   a refusing copy's watch, one of more than 2 s where it fails it). The 2 s are set from run 42681859860,
   the check's first run on all three images, with no lister error: the longest stretch was 0.30 to 0.37 s

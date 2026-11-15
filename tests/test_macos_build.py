@@ -8524,19 +8524,20 @@ def test_what_the_listers_and_diagnostics_read_need_not_be_utf8(
     [
         ([], ([], []), True),
         ("blind", ([], []), True),
-        ([], "blind", True),
+        ([], "blind", False),
         ("blind", "blind", False),
         ([4242], "blind", False),
         ("blind", ([4242], []), False),
         ([], ([], [(100, "S /bin/sleep 5")]), True),
     ],
 )
-def test_no_host_process_is_said_only_after_a_lister_read_the_table(
+def test_no_host_process_is_said_only_after_ps_read_the_table(
     monkeypatch: pytest.MonkeyPatch, pgrep: Any, ps: Any, none: bool
 ) -> None:
     # The waits for no host process of the app's profile ("before the control", after a copy
-    # stops) take a reading of none from either lister, never a blind one; a child of the app is
-    # not a host process for them (the app is stopped first).
+    # stops) take a look as clean only where ps read the process table in it and neither lister
+    # saw one, never on pgrep's none alone: only ps shows a process whose arguments it could not
+    # read. A child of the app is not a host process for them (the app is stopped first).
     def answer(given: Any) -> Callable[[], Any]:
         def lister() -> Any:
             if given == "blind":
@@ -9274,6 +9275,15 @@ def _case(said: str) -> str:
     return next(line for line in said.splitlines() if line.startswith("the case: "))
 
 
+# The control's expectation, as it is printed whichever way its gate held: by its arguments, the
+# host; by its executable, a child that runs the copy's runtime, which does not prove that the
+# child is the host (that is inferred from the app's code).
+_STARTS = (
+    "the control: it starts the host (by its arguments) or a child that runs its runtime (by its "
+    "executable), and the check sees it"
+)
+
+
 @pytest.mark.parametrize("marker_at", [1.0, None])
 def test_a_failed_control_says_whether_the_app_had_read_its_status(
     tmp_path: Path,
@@ -9305,7 +9315,11 @@ def test_a_failed_control_says_whether_the_app_had_read_its_status(
     assert argv[argv.index("--stdout") + 1] == str(tmp_path / "control-app-stdout.txt")
     assert argv[argv.index("--stderr") + 1] == str(tmp_path / "control-app-stderr.txt")
     assert world.snapshots == [tmp_path]
-    assert re.search(r"no host process seen 5\.[01]\d s after the open", said), said
+    assert re.search(
+        r"note: the gate does not hold 5\.[01]\d s after the open: the control takes its snapshot",
+        said,
+    ), said
+    assert "no host process seen" not in said, said
     [log] = world.logs
     # The watch's 60 s count from its start, a quarter of a second after the open.
     assert log is not None and 60.2 <= log < 61, world.logs
@@ -9326,7 +9340,9 @@ def test_a_failed_control_says_when_the_host_came_after_the_gate(
     assert len(world.snapshots) == 1 and len(world.logs) == 1
     # Its watch's line records the burst too, as far as the watch saw it.
     line = next(line for line in said.splitlines() if line.startswith("the control's watch"))
-    assert re.search(r"last seen by pgrep at 3\d\.\d\d s; ps at 3\d\.\d\d s", line), line
+    assert re.search(
+        r"last matched by its command line by pgrep at 3\d\.\d\d s; ps at 3\d\.\d\d s", line
+    ), line
     assert "and pgrep and ps still saw one at its last reading" in line, line
 
 
@@ -9405,8 +9421,9 @@ def test_a_failed_control_names_a_child_seen_before_the_host_appears(
 def test_the_control_passes_on_either_lister_and_says_which_saw_it(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    # Only ps sees the host's status, from 0.4 s after the open: the control passes, says pgrep
-    # never saw it, and leaves a note a log search finds.
+    # Only ps sees the host's status, from 0.4 s after the open: the control passes by its
+    # arguments, says pgrep never matched it by its command line, and leaves a note a log search
+    # finds. Its ok line is the expectation's, whichever way the gate held.
     world = _ListerWorld(pgrep=_none, ps=_ps_host_from(0.4), marker_at=1.5)
     checker, _ = _control_in(world, tmp_path, monkeypatch)
     said = capsys.readouterr().out
@@ -9414,7 +9431,11 @@ def test_the_control_passes_on_either_lister_and_says_which_saw_it(
     line = next(line for line in said.splitlines() if "the control's watch" in line)
     assert "pgrep never" in line and re.search(r"ps at 0\.4\d s", line), line
     assert re.search(r"status read had ended by 1\.[56]\d s", line), line
-    assert "note: the control passed, but pgrep never saw a host process" in said, said
+    assert (
+        "note: the control passed, but pgrep never matched a host process by its command line"
+        in said.splitlines()
+    ), said
+    assert f"ok: {_STARTS}" in said.splitlines(), said
     assert world.snapshots == [] and world.logs == []
 
 
@@ -9433,7 +9454,7 @@ def test_a_passing_control_notes_a_lister_that_was_blind(
     assert re.search(
         r"note: the control passed, but pgrep was blind \d+ times, first: pgrep exited 3", said
     ), said
-    assert "never saw" not in said, said
+    assert "never saw" not in said and "never matched" not in said, said
 
 
 def test_a_passing_control_records_both_listers_and_the_status_read(
@@ -9447,7 +9468,11 @@ def test_a_passing_control_records_both_listers_and_the_status_read(
     line = next(line for line in said.splitlines() if "the control's watch" in line)
     assert re.search(r"from 0\.2\d s;", line), line
     # The host on the app's profile is a child of the app too, and ps says so.
-    assert re.search(r"pgrep at 0\.4\d s; ps at 0\.4\d s; ps, a child of the app at 0\.4\d s", line)
+    assert re.search(
+        r"first matched by its command line by pgrep at 0\.4\d s; ps at 0\.4\d s; first seen by "
+        r"ps, a child of the app at 0\.4\d s",
+        line,
+    ), line
     assert "the first child of the app: '4242 S " in line, line
     assert "lister errors 0" in line and "status read had ended by 1." in line, line
     assert world.snapshots == [] and world.logs == []
@@ -9477,8 +9502,12 @@ def test_a_passing_control_records_the_last_sightings_and_the_burst(
     said = capsys.readouterr().out
     assert checker.failures == [], checker.failures
     line = next(line for line in said.splitlines() if line.startswith("the control's watch"))
-    first = re.search(r"first seen by pgrep at (0\.\d\d) s; ps at (0\.\d\d) s", line)
-    last = re.search(r"last seen by pgrep at (0\.\d\d) s; ps at (0\.\d\d) s", line)
+    first = re.search(
+        r"first matched by its command line by pgrep at (0\.\d\d) s; ps at (0\.\d\d) s", line
+    )
+    last = re.search(
+        r"last matched by its command line by pgrep at (0\.\d\d) s; ps at (0\.\d\d) s", line
+    )
     burst = re.search(r"the burst, from the first host sighting to the last, (0\.\d\d) s", line)
     assert first and last and burst, line
     assert 0.4 <= float(first.group(1)) < 0.5 and 0.8 < float(last.group(1)) < 0.9, line
@@ -9504,7 +9533,9 @@ def test_a_passing_control_whose_host_keeps_running_says_so(
     assert checker.failures == [], checker.failures
     line = next(line for line in said.splitlines() if line.startswith("the control's watch"))
     assert re.search(r"in 5\.\d s from 0\.2\d s", line), line
-    assert re.search(r"last seen by pgrep at 5\.\d\d s; ps at 5\.\d\d s", line), line
+    assert re.search(
+        r"last matched by its command line by pgrep at 5\.\d\d s; ps at 5\.\d\d s", line
+    ), line
     assert "and pgrep and ps still saw one at its last reading" in line, line
 
 
@@ -9545,11 +9576,7 @@ def test_a_control_records_its_long_stretches_and_does_not_gate_on_them(
     world = _ListerWorld(pgrep=_host_from(host), ps=_ps_host_from(host), marker_at=1.5, took=took)
     checker, _ = _control_in(world, tmp_path, monkeypatch)
     said = capsys.readouterr().out
-    assert checker.failures == (
-        []
-        if starts
-        else ["the control: it starts the host on the app's profile, and the check sees it"]
-    ), checker.failures
+    assert checker.failures == ([] if starts else [_STARTS]), checker.failures
     lengths = re.findall(
         r"^the control: recorded, not a gate: no reading from .* \((\d\.\d\d) s\)$",
         said,
@@ -9594,6 +9621,22 @@ _RUNTIME_NAME = Path(build_app.INTERPRETER).name
 # (dialects/darwin/libproc/dproc.c, process_text, read at 7a8a1b2), for an errno other than ESRCH
 # or EINVAL: its own message, not a file.
 _REGION_ERROR = "region info error: Operation not permitted"
+# What a control held by a child's executable needs of ps over the whole watch, counted from when
+# the check found the gate held, and what it does not prove, as its gate's line says them: that ps
+# read the process table, and the arguments of no child the pattern does not match; not that the
+# child is the host (inferred from the app's code), nor the pattern, nor the profile: any child of
+# the app that runs that copy's runtime holds it, whatever its arguments. Which of the host's
+# commands ran, neither way checks, and the line does not say it does.
+_GUARD = (
+    "from the watch's start to its end, up to 5 s after the check found the gate held (the end of "
+    "the reading that showed it), ps read the process table, and read the arguments of no child of "
+    "the app that the listers' pattern did not match"
+)
+_NOT_PROVEN = (
+    "this way does not prove that the child is the host, that the pattern matches the app's "
+    "command line, or that the child ran on the app's profile: any child of the app that runs this "
+    "copy's runtime passes it, whatever its arguments"
+)
 
 
 def _runtime_of(app: Path) -> str:
@@ -9667,6 +9710,7 @@ def test_the_ps_lister_asks_lsof_for_what_runs_where_it_cannot_read_the_argument
         "  108    99 S    /bin/sleep 5",
         "  109    99 U    (Capsule)",
         "  110    99 U    (Capsule)",
+        f"  111    99 R    {_SHORT}",
     ]
     texts = {
         100: ["/usr/lib/dyld", installed],
@@ -9688,13 +9732,23 @@ def test_the_ps_lister_asks_lsof_for_what_runs_where_it_cannot_read_the_argument
     before = time.monotonic()
     hosts, children, unread = check_app._ps_processes()
     assert hosts == [101]
-    assert [pid for pid, _ in children] == [100, 108, 109, 110]
+    assert [pid for pid, _ in children] == [100, 108, 109, 110, 111]
     [_, (lsof, kwargs)] = calls
-    assert lsof == ["lsof", "-w", "-a", "-p", "100,102,103,104,109,110", "-d", "txt", "-F", "pn"]
+    assert lsof == [
+        "lsof",
+        "-w",
+        "-a",
+        "-p",
+        "100,102,103,104,109,110,111",
+        "-d",
+        "txt",
+        "-F",
+        "pn",
+    ]
     assert 4 < kwargs["timeout"] <= 5 and kwargs.get("errors") == "replace", kwargs
     found = {u.pid: u for u in unread}
     assert all(before <= u.asked <= time.monotonic() and u.seen_by == "ps" for u in unread)
-    assert sorted(found) == [100, 102, 103, 104, 109, 110]
+    assert sorted(found) == [100, 102, 103, 104, 109, 110, 111]
     assert found[100].child and found[100].executable == installed and found[100].host
     assert found[100].said == f"R {_SHORT}" and found[100].parent == 99
     # Reparented, it runs another copy's runtime: a host by its executable, whatever its parent.
@@ -9704,12 +9758,19 @@ def test_the_ps_lister_asks_lsof_for_what_runs_where_it_cannot_read_the_argument
     assert "lsof listed no text file for it" in found[103].why, found[103].why
     assert found[103].why.endswith("; it had ended by the time lsof answered"), found[103].why
     assert found[110].why.endswith("; a process of that pid still ran once lsof had answered")
-    # Another program of that name, outside any copy: neither.
-    assert found[104].executable is None and not found[104].host and not found[104].maybe
+    # Another program of that name, outside any copy: lsof lists a file of it, but no copy's
+    # runtime. Possibly a host, to fail safe, as one of which lsof lists no file.
+    assert found[104].executable is None and not found[104].host and found[104].maybe
     # A child of the app in parentheses that runs the app itself: neither, but still its child.
     assert found[109].child and not found[109].host and not found[109].maybe
     # One of which lsof says nothing is possibly a host only where ps shows the runtime's name.
     assert found[110].child and found[110].texts == () and not found[110].maybe
+    # A child of the app shown by the runtime's name, of which lsof says nothing, is possibly a
+    # host too, whatever its parent; and every one that is, or may be, is counted, as a wait
+    # counts them.
+    assert found[111].child and found[111].texts == () and found[111].maybe
+    reading = check_app._Reading("ps", 0.0, 0.0, frozenset(), (), "", tuple(unread))
+    assert sorted(check_app._unread_hosts_in([reading])) == [100, 102, 103, 104, 111]
 
 
 @pytest.mark.parametrize(
@@ -9824,8 +9885,9 @@ def test_the_control_passes_on_a_child_that_runs_its_runtime_where_ps_cannot_rea
     # As in run 42700559897: from 0.4 s ps shows a child of the app only as '(lucille-host-run)',
     # and pgrep never matches. lsof says the child runs the copy's own bundled runtime: the gate
     # holds by its executable. The line says so, with the child's pid, what it runs and what ps
-    # showed, and that this run does not prove the listers' pattern; the app's children, as ps
-    # showed them, are recorded once. No snapshot or unified log: the gate held.
+    # showed, that ps read no child's arguments the pattern did not match, and that this way
+    # proves neither the listers' pattern nor the profile the host ran on; the app's children, as
+    # ps showed them, are recorded once. No snapshot or unified log: the gate held.
     runtime = _runtime_of(_installed_in(tmp_path))
     world = _child_world(tmp_path, {5555: [runtime]}, (0.4, 2.0, f" 5555    99 R    {_SHORT}"))
     checker, _ = _control_in(world, tmp_path, monkeypatch)
@@ -9834,26 +9896,48 @@ def test_the_control_passes_on_a_child_that_runs_its_runtime_where_ps_cannot_rea
     gate = next(line for line in said.splitlines() if line.startswith("the control's gate held"))
     assert re.fullmatch(
         r"the control's gate held by its executable, its arguments unreadable: pid 5555, a child "
-        rf"of the app, has the runtime's name and maps {re.escape(runtime)} \(by lsof, asked at "
-        rf"0\.4\d s\), and ps showed it as 'R {re.escape(_SHORT)}' at 0\.4\d s; ps read the "
-        r"arguments of none of the app's children, so this run does not prove that the listers' "
-        r"pattern matches the app's command line",
+        rf"of the app, has the runtime's name and maps {re.escape(runtime)} \(by ps's lsof lookup, "
+        r"asked at "
+        rf"0\.4\d s\), and ps showed it as 'R {re.escape(_SHORT)}' at 0\.4\d s; "
+        rf"{re.escape(_GUARD)}; {re.escape(_NOT_PROVEN)}",
         gate,
     ), gate
     record = [line for line in said.splitlines() if "the app's children, as ps first" in line]
     assert len(record) == 1 and re.fullmatch(
         rf"the control: the app's children, as ps first showed them: 5555 'R {re.escape(_SHORT)}', "
-        rf"its arguments unreadable, by lsof, asked at 0\.4\d s, it maps {re.escape(runtime)}",
+        rf"its arguments unreadable, by ps's lsof lookup, asked at 0\.4\d s, it maps "
+        rf"{re.escape(runtime)}",
         record[0],
     ), said
-    named = [line for line in said.splitlines() if line.startswith("the control: lsof, by name")]
+    named = [
+        line for line in said.splitlines() if line.startswith("the control: the reader by name")
+    ]
     assert len(named) == 1 and re.fullmatch(
-        r"the control: lsof, by name, recorded, not a gate: \d+ calls, longest 0\.00 s, lsof "
+        r"the control: the reader by name, recorded, not a gate: \d+ calls, longest 0\.00 s, lsof "
         r"errors 0; it saw no process of the runtime's name",
         named[0],
     ), named
     line = next(line for line in said.splitlines() if "the control's watch" in line)
-    assert re.search(r"ps, by executable \(its arguments unreadable\) at 0\.4\d s", line), line
+    # Neither lister matched a host process by its command line; ps saw a child, by its
+    # executable: the line says each under its own words, not that ps never saw one.
+    assert re.search(
+        r"first matched by its command line by pgrep never; ps never; first seen by ps, a child of "
+        r"the app at 0\.4\d s; ps, by executable \(its arguments unreadable\) at 0\.4\d s",
+        line,
+    ), line
+    # Its ok line is the expectation's, which claims no more than a child that runs the runtime.
+    # Neither lister matched a host process by its command line, and the notes and the burst say
+    # that, not that nothing was seen.
+    assert f"ok: {_STARTS}" in said.splitlines(), said
+    notes = [each for each in said.splitlines() if each.startswith("note: ")]
+    assert notes == [
+        f"note: the control passed, but {lister} never matched a host process by its command line"
+        for lister in check_app.LISTERS
+    ], notes
+    assert line.endswith(
+        "; recorded, not a gate: last matched by its command line by pgrep never; ps never; no "
+        "burst seen by the arguments"
+    ), line
     # The gate held at its first such reading, and the watch went on for the record for 5 s, not
     # to the gate's 30 s.
     assert re.search(r"lister calls \(.*\) in 5\.\d s from 0\.2\d s", line), line
@@ -9894,16 +9978,14 @@ def test_the_control_still_fails_unless_a_child_runs_that_copys_runtime(
         world.lsof = missing
     checker, _ = _control_in(world, tmp_path, monkeypatch)
     said = capsys.readouterr().out
-    assert checker.failures == [
-        "the control: it starts the host on the app's profile, and the check sees it"
-    ], checker.failures
+    assert checker.failures == [_STARTS], checker.failures
     assert "the control's gate held" not in said, said
     assert len(world.snapshots) == 1 and len(world.logs) == 1
     case = _case(said)
     expected = {
         "not a child": "but no reading saw a host process by 60.",
-        "elsewhere": "5555 maps /usr/bin/python3 and no copy's runtime (by lsof)",
-        "another copy": f"5555 maps {other} (by lsof), not that copy's runtime",
+        "elsewhere": "5555 maps /usr/bin/python3 and no copy's runtime (by ps's lsof lookup)",
+        "another copy": f"5555 maps {other} (by ps's lsof lookup), not that copy's runtime",
         "unknown": "5555: lsof gave no executable (lsof listed no text file for it",
         "an error": f"5555: lsof gave no executable (lsof said {_REGION_ERROR!r}; ",
         "no lsof": "5555: lsof gave no executable (lsof could not start",
@@ -9933,10 +10015,15 @@ def test_the_controls_gate_needs_every_child_ps_read_to_match_the_pattern(
     said = capsys.readouterr().out
     assert any("the control: it starts the host" in what for what in checker.failures)
     case = _case(said)
-    assert "5555 maps that copy's runtime (by lsof), from 0.4 s" in case, case
+    assert (
+        "of the app's children whose arguments ps did not read: 5555 maps that copy's runtime (by "
+        "ps's lsof lookup), from 0.4 s"
+    ) in case, case
+    # The gate held at first, and was decided at the end of the 5 s after it, inside the gate.
     assert re.search(
         r"ps read the arguments of a child of the app that the listers' pattern does not match "
-        r"\(5556 'S .*--profile default .*'\), so what a child maps does not pass the gate",
+        r"\(5556 'S .*--profile default .*'\), inside the gate, so what a child maps does not pass "
+        r"the gate$",
         case,
     ), case
 
@@ -9950,12 +10037,36 @@ def test_the_control_fails_on_a_child_that_runs_its_runtime_only_after_the_gate(
     world = _child_world(tmp_path, {5555: [runtime]}, (30.5, 32.0, f" 5555    99 R    {_SHORT}"))
     checker, _ = _control_in(world, tmp_path, monkeypatch)
     said = capsys.readouterr().out
-    assert checker.failures == [
-        "the control: it starts the host on the app's profile, and the check sees it"
-    ], checker.failures
+    assert checker.failures == [_STARTS], checker.failures
     assert "the control's gate held" not in said, said
     line = next(line for line in said.splitlines() if "the control's watch" in line)
     assert re.search(r"ps, by executable \(its arguments unreadable\) at 30\.\d\d s", line), line
+
+
+def test_the_case_gives_no_reason_from_inside_the_gate_for_a_child_that_ran_only_after_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Inside the gate ps reads the arguments of a child on another profile, which the pattern does
+    # not match; the only child that maps the copy's runtime runs from 40 s, after the gate. The
+    # gate was decided on the children that mapped it inside the gate, of which there were none:
+    # the case lists the late child, from 40 s, and does not give the other child as what kept it
+    # from the gate.
+    runtime = _runtime_of(_installed_in(tmp_path))
+    wrong = _HOST_COMMAND.replace(f"--profile {check_app.APP_PROFILE} ", "--profile default ")
+    world = _child_world(
+        tmp_path,
+        {5555: [runtime]},
+        (10.0, 1e9, f" 5556    99 S    {wrong}"),
+        (40.0, 1e9, f" 5555    99 R    {_SHORT}"),
+    )
+    checker, _ = _control_in(world, tmp_path, monkeypatch)
+    said = capsys.readouterr().out
+    assert checker.failures == [_STARTS], checker.failures
+    case = _case(said)
+    assert case.endswith(
+        "of the app's children whose arguments ps did not read: 5555 maps that copy's runtime (by "
+        "ps's lsof lookup), from 40.0 s"
+    ), case
 
 
 def test_the_controls_record_keeps_what_lsof_said_once_it_said_it(
@@ -9981,12 +10092,14 @@ def test_the_controls_record_keeps_what_lsof_said_once_it_said_it(
     said = capsys.readouterr().out
     assert checker.failures == [], checker.failures
     assert re.search(
-        r"\(by lsof, asked at 0\.[5-7]\d s\), and ps showed it as 'R \(lucille-host-run\)' at "
+        r"\(by ps's lsof lookup, asked at 0\.[5-7]\d s\), and ps showed it as "
+        r"'R \(lucille-host-run\)' at "
         r"0\.4\d s",
         said,
     ), said
     assert re.search(
-        rf"its arguments unreadable, by lsof, asked at 0\.[5-7]\d s, it maps {re.escape(runtime)}",
+        rf"its arguments unreadable, by ps's lsof lookup, asked at 0\.[5-7]\d s, it maps "
+        rf"{re.escape(runtime)}",
         said,
     ), said
     assert "its executable unknown" not in said, said
@@ -10121,7 +10234,8 @@ def test_a_passing_control_by_the_arguments_still_prints_its_lines_as_before(
     assert "by executable" not in line and "possibly a host" not in line, line
     assert re.search(
         r"the processes of the runtime's name it saw: 4242 \(parent 99, a running copy of the "
-        rf"app\) from 0\.4\d s, by lsof, by name, asked at 0\.4\d s, it maps {re.escape(runtime)}$",
+        rf"app\) from 0\.4\d s, by the reader by name, asked at 0\.4\d s, it maps "
+        rf"{re.escape(runtime)}$",
         said,
         re.MULTILINE,
     ), said
@@ -10133,9 +10247,16 @@ def test_a_passing_control_by_the_arguments_still_prints_its_lines_as_before(
         ([f"/x/{check_app.APP_NAME}.app/{build_app.RUNTIME_IN_APP}"], True),
         ([], True),
         ([_REGION_ERROR], True),
-        (["/opt/other/bin/lucille-host-runtime"], False),
+        (["/opt/other/bin/lucille-host-runtime"], True),
+        (["/opt/other/bin/lucille-host-runtime", "/usr/lib/dyld"], True),
     ],
-    ids=["a copy's runtime", "lsof says nothing", "lsof says only an error", "another program"],
+    ids=[
+        "a copy's runtime",
+        "lsof says nothing",
+        "lsof says only an error",
+        "another program",
+        "another program and dyld",
+    ],
 )
 def test_a_refusing_copy_fails_on_a_runtime_process_it_left_behind(
     tmp_path: Path,
@@ -10146,8 +10267,10 @@ def test_a_refusing_copy_fails_on_a_runtime_process_it_left_behind(
 ) -> None:
     # A process whose arguments ps cannot read, and whose parent is not the copy (its parent went,
     # and launchd took it): where lsof says it maps a copy's bundled runtime, the copy started it;
-    # where lsof lists nothing, or only its own error where a file's name goes, it may have, and
-    # the check fails safe. One that maps another program of that name is not counted.
+    # where lsof lists nothing, or only its own error where a file's name goes, or files but no
+    # copy's runtime (here another program of that name, alone or with dyld), it may have, and the
+    # check fails safe: what it says names the first file lsof listed. The watch's line names the
+    # two ways as printed, word for word.
     world = _ListerWorld(
         pgrep=_none,
         ps=_ps_with((2.0, 2.5, f" 7777     1 S    {_SHORT}")),
@@ -10159,10 +10282,16 @@ def test_a_refusing_copy_fails_on_a_runtime_process_it_left_behind(
         f"for {check_app.REFUSAL_WATCH} s it runs, and starts no host process of the app's profile"
     )
     assert checker.failures == ([started] if starts else []), checker.failures
-    read = bool(texts) and texts[0].startswith("/")
+    read = bool(texts) and texts[0].endswith(build_app.RUNTIME_IN_APP)
     if read:
         how = (
-            f"by its executable, its arguments unreadable: 7777 maps {texts[0]} (by lsof, asked at "
+            f"by its executable, its arguments unreadable: 7777 maps {texts[0]} (by ps's lsof "
+            "lookup, asked at "
+        )
+    elif texts and texts[0].startswith("/"):
+        how = (
+            f"possibly a host, its arguments unreadable: 7777 maps {texts[0]} and no copy's "
+            "runtime (by ps's lsof lookup, asked at "
         )
     elif texts:
         how = (
@@ -10177,8 +10306,16 @@ def test_a_refusing_copy_fails_on_a_runtime_process_it_left_behind(
     if starts:
         assert "seen: [7777]" in said, said
         line = next(line for line in said.splitlines() if "the watch of the app's profile" in line)
-        name = check_app.BY_EXECUTABLE if read else check_app.MAYBE_HOST
+        name = (
+            "ps, by executable (its arguments unreadable)"
+            if read
+            else "ps, possibly a host (its arguments unreadable, no copy's runtime by ps's lsof "
+            "lookup)"
+        )
         assert re.search(re.escape(name) + r" at \d\.\d\d s", line), line
+        # One that maps a copy's runtime is not also called possibly a host.
+        if read:
+            assert check_app.MAYBE_HOST not in line, line
 
 
 def _ps_rows_then(*tables: list[str]) -> Callable[..., subprocess.CompletedProcess[str]]:
@@ -10208,11 +10345,20 @@ def _ps_rows_then(*tables: list[str]) -> Callable[..., subprocess.CompletedProce
             [f"/x/{check_app.APP_NAME}.app/{build_app.RUNTIME_IN_APP}"],
             False,
         ),
-        # Another program of that name.
-        (f" 7777     1 S    {_SHORT}", ["/opt/other/bin/lucille-host-runtime"], True),
+        # Another program of that name: lsof lists no copy's runtime. Possibly a host: fail safe.
+        (f" 7777     1 S    {_SHORT}", ["/opt/other/bin/lucille-host-runtime"], False),
+        # The same, with dyld too: several files, none a copy's runtime. Possibly a host.
+        (
+            f" 7777     1 S    {_SHORT}",
+            ["/opt/other/bin/lucille-host-runtime", "/usr/lib/dyld"],
+            False,
+        ),
         # The check's own child, and the check itself, whatever they run: never a host here.
         ("OWN-CHILD", None, True),
         ("SELF", None, True),
+        # A child of the check's child: only the check's own process and its direct children are
+        # left out, so this one counts, possibly a host.
+        ("OWN-GRANDCHILD", None, False),
         # A host process of the app's profile that ps can read, the check's own child or not, is
         # one, as before, by its arguments.
         (f" 7777     1 S    {_HOST_COMMAND}", None, False),
@@ -10222,8 +10368,10 @@ def _ps_rows_then(*tables: list[str]) -> Callable[..., subprocess.CompletedProce
         "lsof says nothing",
         "a copy's runtime",
         "another program",
+        "another program and dyld",
         "the check's child",
         "the check",
+        "the check's grandchild",
         "a host by its arguments",
         "the check's host by its arguments",
     ],
@@ -10235,6 +10383,7 @@ def test_the_waits_for_no_host_count_what_runs_where_ps_cannot_read_the_argument
     row = {
         "OWN-CHILD": f" 7777 {own:>5} S    {_SHORT}",
         "SELF": f"{own:>5}     1 S    {_SHORT}",
+        "OWN-GRANDCHILD": f" 7776 {own:>5} S    /bin/sh -c x\n 7777  7776 S    {_SHORT}",
         "OWN-HOST": f" 7777 {own:>5} S    {_HOST_COMMAND}",
     }.get(row, row)
     base = _ps_rows_then(["    1     0 Ss   /sbin/launchd", row])
@@ -10249,7 +10398,8 @@ def test_the_waits_for_no_host_count_what_runs_where_ps_cannot_read_the_argument
     assert check_app._no_profile_process() is none
     said = check_app._profile_processes_said()
     if not none and row.endswith(_SHORT):
-        assert "7777" in said and ("possibly" in said) is (texts is None), said
+        runtime = texts is not None and texts[0].endswith(build_app.RUNTIME_IN_APP)
+        assert "7777" in said and ("possibly" in said) is not runtime, said
 
 
 def test_a_wait_for_no_host_holds_once_a_process_ps_cannot_read_has_gone(
@@ -10267,6 +10417,116 @@ def test_a_wait_for_no_host_holds_once_a_process_ps_cannot_read_has_gone(
     assert clock.now == pytest.approx(1001.5)
     monkeypatch.setattr("subprocess.run", _ps_rows_then(there))
     assert check_app._wait_until(check_app._no_profile_process, 30) is False
+
+
+def test_a_wait_for_no_host_does_not_pass_on_a_look_in_which_ps_was_blind(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A '(lucille-host-run)' whose parent went runs, and pgrep finds none on every call, as Apple's
+    # may where sysmond gives no command line. A look in which ps was blind is not clean, so the
+    # wait does not pass on pgrep's none: it looks again, counts the process once ps reads, and
+    # passes once it has gone. Where ps never reads, the wait fails at its deadline.
+    gone = ["    1     0 Ss   /sbin/launchd"]
+    there = [*gone, f" 7777     1 S    {_SHORT}"]
+    clock = _Clock()
+    monkeypatch.setattr(check_app.time, "monotonic", clock.monotonic)
+    monkeypatch.setattr(check_app.time, "sleep", clock.sleep)
+    # raising=False: so that this test also runs against a check that never asked.
+    monkeypatch.setattr(check_app, "_runs_now", lambda pid: True, raising=False)
+
+    def ps_then(*tables: list[str] | None) -> Callable[..., subprocess.CompletedProcess[str]]:
+        # ps gives each of ``tables`` in turn, the last one from then on; None is a blind call.
+        left = list(tables)
+
+        def run(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+            if argv[0] in ("pgrep", "lsof"):
+                return _done(argv, 1)
+            rows = left.pop(0) if len(left) > 1 else left[0]
+            if rows is None:
+                return _done(argv, 3, "", "sysmon request failed\n")
+            return _done(argv, 0, "".join(row + "\n" for row in rows))
+
+        return run
+
+    monkeypatch.setattr("subprocess.run", ps_then(None))
+    assert check_app._no_profile_process() is False
+    monkeypatch.setattr("subprocess.run", ps_then(None, None, there, gone))
+    assert check_app._wait_until(check_app._no_profile_process, 30) is True
+    assert clock.now == pytest.approx(1001.5)
+    monkeypatch.setattr("subprocess.run", ps_then(None))
+    began = clock.now
+    assert check_app._wait_until(check_app._no_profile_process, 30) is False
+    assert clock.now - began >= 30
+
+
+def test_a_wait_for_no_host_holds_once_a_process_lsof_gives_no_runtime_of_has_gone(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A '(lucille-host-run)' of which lsof lists a file, but no copy's runtime: here only dyld, as
+    # an answer that read some of its regions and not its program's might. It is possibly a host,
+    # as one of which lsof lists no file: the wait does not pass while it runs, and passes once it
+    # has gone; while it never goes, the wait fails, and what the check says names the file.
+    gone = ["    1     0 Ss   /sbin/launchd"]
+    there = [*gone, f" 7777     1 S    {_SHORT}"]
+    clock = _Clock()
+    monkeypatch.setattr(check_app.time, "monotonic", clock.monotonic)
+    monkeypatch.setattr(check_app.time, "sleep", clock.sleep)
+    # raising=False: so that this test also runs against a check that never asked.
+    monkeypatch.setattr(check_app, "_runs_now", lambda pid: True, raising=False)
+
+    def mapping_dyld(
+        tables: Callable[..., subprocess.CompletedProcess[str]],
+    ) -> Callable[..., subprocess.CompletedProcess[str]]:
+        def run(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+            if argv[0] == "lsof":
+                return _done(argv, *_lsof_giving({7777: ["/usr/lib/dyld"]})(None, [7777]))
+            return tables(argv, **kwargs)
+
+        return run
+
+    monkeypatch.setattr("subprocess.run", mapping_dyld(_ps_rows_then(there, there, there, gone)))
+    assert check_app._wait_until(check_app._no_profile_process, 30) is True
+    assert clock.now == pytest.approx(1001.5)
+    monkeypatch.setattr("subprocess.run", mapping_dyld(_ps_rows_then(there)))
+    assert check_app._wait_until(check_app._no_profile_process, 30) is False
+    said = check_app._profile_processes_said()
+    assert (
+        "possibly a host, its arguments unreadable: 7777 maps /usr/lib/dyld and no copy's runtime "
+        "(by ps's lsof lookup; parent 1)"
+    ) in said, said
+
+
+@pytest.mark.parametrize(("until", "starts"), [(2.5, True), (0.2, False)], ids=["runs", "gone"])
+def test_a_refusing_copy_counts_a_process_lsof_gives_no_runtime_of_while_it_runs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    until: float,
+    starts: bool,
+) -> None:
+    # A '(lucille-host-run)' whose parent went, of which lsof lists only dyld, no copy's runtime:
+    # possibly a host. A refusing copy whose watch sees it fails, to fail safe; one whose watch
+    # begins after it has gone (the watch's first call is about 0.25 s after the open) passes.
+    world = _ListerWorld(
+        pgrep=_none,
+        ps=_ps_with((0.0, until, f" 7777     1 S    {_SHORT}")),
+        lsof=_lsof_giving({7777: ["/usr/lib/dyld"]}),
+    )
+    checker = _refusing_in(world, tmp_path, monkeypatch)
+    said = capsys.readouterr().out
+    started = (
+        f"for {check_app.REFUSAL_WATCH} s it runs, and starts no host process of the app's profile"
+    )
+    assert checker.failures == ([started] if starts else []), checker.failures
+    assert ("seen: [7777]" in said) is starts, said
+    found = re.search(
+        r"possibly a host, its arguments unreadable: 7777 maps /usr/lib/dyld and no copy's runtime "
+        r"\(by ps's lsof lookup, asked at \d\.\d\d s; parent 1\)",
+        said,
+    )
+    assert (found is not None) is starts, said
+    line = next(line for line in said.splitlines() if "the watch of the app's profile" in line)
+    assert (check_app.MAYBE_HOST in line) is starts, line
 
 
 def _named_giving(
@@ -10337,22 +10597,39 @@ def test_a_wait_for_no_host_does_not_pass_on_a_process_lsof_says_it_cannot_read(
 
 
 @pytest.mark.parametrize(
-    ("runs", "said"),
+    ("runs", "answered", "stopped", "due"),
     [
-        (False, "it had ended by the time lsof answered"),
-        (True, "a process of that pid still ran once lsof had answered"),
-        (None, "whether it still ran once lsof had answered is not known"),
+        (
+            False,
+            "it had ended by the time lsof answered",
+            "it had ended by the time the check stopped waiting for lsof",
+            "it had ended by the time lsof was due",
+        ),
+        (
+            True,
+            "a process of that pid still ran once lsof had answered",
+            "a process of that pid still ran when the check stopped waiting for lsof",
+            "a process of that pid still ran when lsof was due",
+        ),
+        (
+            None,
+            "whether it still ran once lsof had answered is not known",
+            "whether it still ran when the check stopped waiting for lsof is not known",
+            "whether it still ran when lsof was due is not known",
+        ),
     ],
 )
 def test_where_lsof_gives_no_file_the_check_says_whether_the_process_still_ran(
-    monkeypatch: pytest.MonkeyPatch, runs: bool | None, said: str
+    monkeypatch: pytest.MonkeyPatch, runs: bool | None, answered: str, stopped: str, due: str
 ) -> None:
     # A lookup that came after the process had ended finds nothing, which says nothing of what it
     # mapped: why says which it was, after lsof listed none, did not answer, or had no time left.
+    # Where lsof did not answer, the time is when the check stopped waiting for it; where it was
+    # not run, when it was due: neither says lsof answered.
     monkeypatch.setattr(check_app, "_runs_now", lambda pid: runs)
     monkeypatch.setattr("subprocess.run", lambda argv, **kwargs: _done(argv, 1))
     assert check_app._texts_of([42]) == {
-        42: ((), f"lsof listed no text file for it (exit 1); {said}")
+        42: ((), f"lsof listed no text file for it (exit 1); {answered}")
     }
 
     def held(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
@@ -10360,11 +10637,31 @@ def test_where_lsof_gives_no_file_the_check_says_whether_the_process_still_ran(
         raise subprocess.TimeoutExpired(argv, kwargs["timeout"])
 
     monkeypatch.setattr("subprocess.run", held)
-    assert check_app._texts_of([42], 2.5) == {42: ((), f"lsof did not answer in 2.5 s; {said}")}
+    assert check_app._texts_of([42], 2.5) == {42: ((), f"lsof did not answer in 2.5 s; {stopped}")}
     monkeypatch.setattr("subprocess.run", lambda argv, **kwargs: pytest.fail(f"ran {argv}"))
     assert check_app._texts_of([42], 0.0) == {
-        42: ((), f"no time was left for lsof within the reading's 5 s; {said}")
+        42: ((), f"lsof was not run: no time was left of the reading's 5 s; {due}")
     }
+
+
+def test_where_lsof_was_not_run_the_record_says_when_it_was_due_not_asked(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # No time was left of the reading's 5 s, so lsof never ran: what ps's lsof lookup said, and
+    # why it gave no file, say when lsof was due, not when it was asked. Where lsof ran, asked.
+    monkeypatch.setattr(check_app, "_runs_now", lambda pid: True)
+    monkeypatch.setattr("subprocess.run", lambda argv, **kwargs: pytest.fail(f"ran {argv}"))
+    [(texts, why)] = check_app._texts_of([5555], 0.0).values()
+    own = check_app._Unread(5555, 99, "R", _SHORT, True, texts, why, 2.0)
+    assert (
+        check_app._own_lookup_said(own, 0.0) == f"ps's lsof lookup: no file, due at 2.00 s: {why}"
+    )
+    assert check_app._why_said(own, 0.0) == f"{why}; due at 2.00 s"
+    ran = dataclasses.replace(own, why="lsof listed no text file for it (exit 1)")
+    assert check_app._own_lookup_said(ran, 0.0) == (
+        "ps's lsof lookup: no file, asked at 2.00 s: lsof listed no text file for it (exit 1)"
+    )
+    assert check_app._why_said(ran, 0.0).endswith("; asked at 2.00 s")
 
 
 def test_whether_a_process_runs_now_is_asked_of_the_kernel(
@@ -10433,26 +10730,100 @@ def test_the_control_passes_where_its_reader_by_name_sees_a_child_ps_was_too_slo
     gate = next(line for line in said.splitlines() if line.startswith("the control's gate held"))
     assert re.fullmatch(
         r"the control's gate held by its executable, its arguments unreadable: pid 5555, a child "
-        rf"of the app, has the runtime's name and maps {re.escape(runtime)} \(by lsof, by name, "
-        r"asked at 1\.\d\d s\), and ps showed it as 'R \(lucille-host-run\)' at 1\.\d\d s; ps read "
-        r"the arguments of none of the app's children, so this run does not prove that the "
-        r"listers' pattern matches the app's command line",
+        r"of the app, has a name that begins as the runtime's \(its first 15 characters, as lsof "
+        rf"-c matches\) and maps {re.escape(runtime)} \(by the reader by name, "
+        r"asked at 1\.\d\d s\), and ps showed it as 'R \(lucille-host-run\)' at 1\.\d\d s; "
+        rf"{re.escape(_GUARD)}; {re.escape(_NOT_PROVEN)}",
         gate,
     ), gate
-    named = next(line for line in said.splitlines() if line.startswith("the control: lsof, by"))
+    named = next(
+        line for line in said.splitlines() if line.startswith("the control: the reader by name")
+    )
     assert re.search(
         r"the processes of the runtime's name it saw: 5555 \(parent 99, a running copy of the "
-        rf"app\) from 1\.\d\d s, by lsof, by name, asked at 1\.\d\d s, it maps "
+        rf"app\) from 1\.\d\d s, by the reader by name, asked at 1\.\d\d s, it maps "
         rf"{re.escape(runtime)}$",
         named,
     ), named
     children = next(line for line in said.splitlines() if "the app's children, as ps" in line)
     assert re.search(
-        rf"5555 'R {re.escape(_SHORT)}', its arguments unreadable, by lsof, by name, asked at "
+        rf"5555 'R {re.escape(_SHORT)}', its arguments unreadable, by the reader by name, asked "
+        r"at "
         rf"1\.\d\d s, it maps {re.escape(runtime)}",
         children,
     ), children
     assert world.named_calls > 0
+
+
+def test_a_passing_controls_record_says_what_ps_s_own_lookup_said_where_lsof_by_name_said_more(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # As in run 42733266924 on xcode-27 (from its log, as a review read it): the gate held by what
+    # the reader by name said, and the ps lister's own lookup, later, got no file of the child. The
+    # record keeps the answer that says the most and, recorded, not a gate, what ps's own lookup
+    # said, with when it asked and why it got no file. The gate's line does not change.
+    installed = _installed_in(tmp_path)
+    runtime = _runtime_of(installed)
+    world = _ListerWorld(
+        pgrep=_none,
+        ps=_ps_with((1.0, 2.2, f" 5555    99 R    {_SHORT}")),
+        ps_took=1.2,
+        lsof=_lsof_giving({}),
+        named=_named_giving(
+            _app_listed(installed),
+            (1.0, 2.2, 5555, 99, _RUNTIME_NAME, ["/usr/lib/dyld", runtime]),
+        ),
+        marker_at=2.0,
+    )
+    checker, _ = _control_in(world, tmp_path, monkeypatch)
+    said = capsys.readouterr().out
+    assert checker.failures == [], checker.failures
+    children = next(line for line in said.splitlines() if "the app's children, as ps" in line)
+    assert re.fullmatch(
+        rf"the control: the app's children, as ps first showed them: 5555 'R {re.escape(_SHORT)}', "
+        r"its arguments unreadable, by the reader by name, asked at 1\.\d\d s, it maps "
+        rf"{re.escape(runtime)} \(ps's lsof lookup: no file, asked at 2\.\d\d s: lsof listed no "
+        r"text file for it \(exit 1\); it had ended by the time lsof answered\)",
+        children,
+    ), children
+    gate = next(line for line in said.splitlines() if line.startswith("the control's gate held"))
+    assert "ps's lsof lookup" not in gate and "(by the reader by name, asked at 1." in gate, gate
+
+
+def test_the_controls_record_says_what_ps_s_own_lookup_said_only_where_it_said_less() -> None:
+    # Recorded, not a gate: where the record shows what the reader by name said of a child, the
+    # ps lister's own answer is given too, here a file but no copy's runtime; where ps's own said
+    # as much, the record shows it, and no more.
+    runtime = _runtime_of(Path("/Applications") / f"{check_app.APP_NAME}.app")
+    by_name = check_app._Unread(5555, 99, "", "", True, (runtime,), "", 1.14, check_app.NAMED)
+    named = check_app._Reading(check_app.NAMED, 1.1, 1.2, frozenset(), (), "", (by_name,))
+
+    def ps(*texts: str, why: str = "") -> Any:
+        own = check_app._Unread(5555, 99, "R", _SHORT, True, texts, why, 2.14)
+        return check_app._Reading("ps", 2.0, 2.2, frozenset(), ((5555, f"R {_SHORT}"),), "", (own,))
+
+    # Of two files, the record names the first that ps's lookup listed: dyld, not libSystem.
+    two = ps("/usr/lib/dyld", "/usr/lib/libSystem.B.dylib")
+    assert _watched(named, two).children_said() == (
+        f"the app's children, as ps first showed them: 5555 'R {_SHORT}', its arguments "
+        f"unreadable, by the reader by name, asked at 1.14 s, it maps {runtime} (ps's lsof lookup: "
+        "it maps /usr/lib/dyld and no copy's runtime, asked at 2.14 s)"
+    )
+    assert _watched(named, ps(runtime)).children_said() == (
+        f"the app's children, as ps first showed them: 5555 'R {_SHORT}', its arguments "
+        f"unreadable, by ps's lsof lookup, asked at 2.14 s, it maps {runtime}"
+    )
+    # Said more is not only a copy's runtime: where the reader by name gave a file, dyld, and ps's
+    # own lookup gave none, what ps's said is recorded too.
+    dyld = check_app._Unread(5555, 99, "", "", True, ("/usr/lib/dyld",), "", 1.14, check_app.NAMED)
+    by_dyld = check_app._Reading(check_app.NAMED, 1.1, 1.2, frozenset(), (), "", (dyld,))
+    nothing = ps(why="lsof listed no text file for it (exit 1)")
+    assert _watched(by_dyld, nothing).children_said() == (
+        f"the app's children, as ps first showed them: 5555 'R {_SHORT}', its arguments "
+        "unreadable, by the reader by name, asked at 1.14 s, it maps /usr/lib/dyld and no copy's "
+        "runtime (ps's lsof lookup: no file, asked at 2.14 s: lsof listed no text file for it "
+        "(exit 1))"
+    )
 
 
 def test_the_control_passes_on_a_child_its_reader_by_name_alone_saw(
@@ -10475,21 +10846,119 @@ def test_the_control_passes_on_a_child_its_reader_by_name_alone_saw(
     gate = next(line for line in said.splitlines() if line.startswith("the control's gate held"))
     assert gate.startswith(
         "the control's gate held by its executable, ps never read its arguments: pid 5555, a child "
-        f"of the app, has the runtime's name and maps {runtime} (by lsof, by name, asked at 0.4"
+        "of the app, has a name that begins as the runtime's (its first 15 characters, as lsof -c "
+        f"matches) and maps {runtime} (by the reader by name, asked at 0.4"
     ), gate
-    assert "and ps did not list it; ps read the arguments of none" in gate, gate
+    # ps did not list the child, so no reading of ps read the table while it ran (inferred), and
+    # the guard says nothing of that child's arguments: the line says so.
+    assert (
+        "and ps did not list it, so ps read nothing while that child ran (inferred: a reading of "
+        "ps lists every process of the table it reads), and the guard that follows says nothing "
+        f"of that child's arguments; {_GUARD}; {_NOT_PROVEN}"
+    ) in gate, gate
     assert "the control: ps saw no child of the app" in said, said
     assert re.search(
-        r"^the control: lsof, by name, recorded, not a gate: \d+ calls, longest 0\.00 s, lsof "
+        r"^the control: the reader by name, recorded, not a gate: \d+ calls, longest 0\.00 s, "
+        r"lsof "
         r"errors 0; the processes of the runtime's name it saw: 5555 \(parent 99, a running copy "
         r"of the "
-        rf"app\) from 0\.4\d s, by lsof, by name, asked at 0\.4\d s, it maps {re.escape(runtime)}$",
+        rf"app\) from 0\.4\d s, by the reader by name, asked at 0\.4\d s, it maps "
+        rf"{re.escape(runtime)}$",
         said,
         re.MULTILINE,
     ), said
 
 
-@pytest.mark.parametrize("seen", ["not a child", "another copy", "no file"])
+@pytest.mark.parametrize("maps", ["that copy's", "another copy's"])
+def test_the_control_fails_where_ps_never_read_the_table_though_its_reader_by_name_saw_a_child(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], maps: str
+) -> None:
+    # ps is blind on every call of the watch, and the reader by name sees a child of the app that
+    # maps the copy's runtime from 0.4 s. That ps read no child's arguments the pattern does not
+    # match is then no guard at all: a stale pattern would pass. The executable way needs ps to
+    # have read the process table at least once in the watch, so the control fails, and the case
+    # says that ps never read it, inside the gate or after it. A child that maps another copy's
+    # runtime could not have passed anyway: the case does not give that as the reason.
+    installed = _installed_in(tmp_path)
+    runtime = _runtime_of(installed)
+    other = _runtime_of(tmp_path / f"{check_app.RENAMED_COPY}.app")
+    mapped = runtime if maps == "that copy's" else other
+    world = _ListerWorld(
+        pgrep=_none,
+        ps=_blind_while(lambda at: True, _ps_none),
+        named=_named_giving(_app_listed(installed), (0.4, 2.0, 5555, 99, _RUNTIME_NAME, [mapped])),
+        marker_at=1.5,
+    )
+    checker, _ = _control_in(world, tmp_path, monkeypatch)
+    said = capsys.readouterr().out
+    assert checker.failures == [_STARTS], checker.failures
+    assert "the control's gate held" not in said, said
+    case = _case(said)
+    assert case.startswith(
+        "the case: a child of the app from 0.4 s (5555, seen by the reader by name alone), but no "
+        "host process the gate matches by 60."
+    ), case
+    if maps == "another copy's":
+        assert case.endswith(f"5555 maps {other} (by the reader by name), not that copy's runtime")
+        assert "ps never read the process table" not in case, case
+        return
+    assert case.endswith(
+        "5555 maps that copy's runtime (by the reader by name), from 0.4 s; ps never read the "
+        "process table inside the gate, nor after it, so what a child maps does not pass the gate"
+    ), case
+
+
+@pytest.mark.parametrize("lasts", [False, True], ids=["gone by then", "still running"])
+def test_the_case_says_where_ps_first_read_the_table_only_after_the_gate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], lasts: bool
+) -> None:
+    # ps is blind until 35 s, after the gate; the reader by name sees a child of the app that maps
+    # the copy's runtime from 0.4 s; from 36 s ps reads the arguments of another child, on another
+    # profile, which the pattern does not match. The gate was decided on the readings inside it,
+    # in which ps never read the table: the case gives that as the reason, with when ps first read
+    # it, and does not blame the child whose arguments ps read only after the gate. Where the
+    # child that maps the runtime still runs then, and ps reads its arguments, the case does not
+    # list it as one whose arguments ps did not read, and says ps read them after the gate was
+    # decided, not as a cause.
+    installed = _installed_in(tmp_path)
+    runtime = _runtime_of(installed)
+    wrong = _HOST_COMMAND.replace(f"--profile {check_app.APP_PROFILE} ", "--profile default ")
+    rows = [(36.0, 1e9, f" 5556    99 S    {wrong}")]
+    if lasts:
+        rows.append((0.4, 1e9, f" 5555    99 S    {wrong}"))
+    world = _ListerWorld(
+        pgrep=_none,
+        ps=_blind_while(lambda at: at < 35.0, _ps_with(*rows)),
+        named=_named_giving(
+            _app_listed(installed),
+            (0.4, 1e9 if lasts else 2.0, 5555, 99, _RUNTIME_NAME, [runtime]),
+        ),
+        marker_at=1.5,
+    )
+    checker, _ = _control_in(world, tmp_path, monkeypatch)
+    said = capsys.readouterr().out
+    assert checker.failures == [_STARTS], checker.failures
+    case = _case(said)
+    reason = (
+        r"; ps never read the process table inside the gate: it first read it only at 35\.\d s, "
+        r"after the gate was decided, so what a child maps does not pass the gate$"
+    )
+    if lasts:
+        assert "whose arguments ps did not read" not in case, case
+        assert re.search(
+            r"; 5555 maps that copy's runtime \(by the reader by name\), from 0\.4 s, but ps read "
+            r"its arguments at 35\.\d s, after the gate was decided, and the listers' pattern does "
+            r"not match them \('S [^']*--profile default [^']*'\)" + reason,
+            case,
+        ), case
+    else:
+        assert re.search(
+            r"5555 maps that copy's runtime \(by the reader by name\), from 0\.4 s" + reason, case
+        ), case
+    assert "ps read the arguments of a child" not in case, case
+
+
+@pytest.mark.parametrize("seen", ["not a child", "another copy", "no file", "two files"])
 def test_the_control_still_fails_on_what_its_reader_by_name_alone_saw_otherwise(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -10497,14 +10966,16 @@ def test_the_control_still_fails_on_what_its_reader_by_name_alone_saw_otherwise(
     seen: str,
 ) -> None:
     # The reader by name holds the gate only for a child of the app that maps that copy's
-    # runtime: not one whose parent is launchd, not one that maps another copy's runtime, and not
-    # one of which lsof gave only its error. The case says which, for a child of the app.
+    # runtime: not one whose parent is launchd, not one that maps another copy's runtime, not one
+    # of which lsof gave only its error, and not one that maps two other files. The case says
+    # which, for a child of the app, by the lookup that said so, naming the first file it listed.
     installed = _installed_in(tmp_path)
     other = _runtime_of(tmp_path / f"{check_app.RENAMED_COPY}.app")
     parent, files = {
         "not a child": (1, [_runtime_of(installed)]),
         "another copy": (99, [other]),
         "no file": (99, [_REGION_ERROR]),
+        "two files": (99, ["/usr/lib/dyld", "/usr/bin/python3"]),
     }[seen]
     world = _ListerWorld(
         pgrep=_none,
@@ -10514,20 +10985,21 @@ def test_the_control_still_fails_on_what_its_reader_by_name_alone_saw_otherwise(
     )
     checker, _ = _control_in(world, tmp_path, monkeypatch)
     said = capsys.readouterr().out
-    assert checker.failures == [
-        "the control: it starts the host on the app's profile, and the check sees it"
-    ], checker.failures
+    assert checker.failures == [_STARTS], checker.failures
     case = _case(said)
     if seen == "not a child":
         assert "but no reading saw a host process by 60." in case, case
         assert "5555 (parent 1) from 0.4" in said, said
         return
     assert case.startswith(
-        "the case: a child of the app from 0.4 s (5555, seen by lsof, by name alone), but no host "
-        "process the gate matches by 60."
+        "the case: a child of the app from 0.4 s (5555, seen by the reader by name alone), but no "
+        "host process the gate matches by 60."
     ), case
     if seen == "another copy":
-        assert f"5555 maps {other} (by lsof), not that copy's runtime" in case, case
+        assert f"5555 maps {other} (by the reader by name), not that copy's runtime" in case, case
+    elif seen == "two files":
+        assert "5555 maps /usr/lib/dyld and no copy's runtime (by the reader by name)" in case, case
+        assert "/usr/bin/python3" not in case, case
     else:
         assert f"5555: lsof gave no executable (lsof said {_REGION_ERROR!r}; " in case, case
         assert re.search(r"; it had ended by the time lsof answered; asked at 0\.4\d s\)", case), (
@@ -10555,7 +11027,7 @@ def test_the_reader_by_name_takes_a_child_that_ps_saw_where_lsof_did_not_list_th
     assert checker.failures == [], checker.failures
     gate = next(line for line in said.splitlines() if line.startswith("the control's gate held"))
     assert re.search(
-        r"pid 5555, a child of the app, .*\(by lsof, by name, asked at 1\.4\d s\)", gate
+        r"pid 5555, a child of the app, .*\(by the reader by name, asked at 1\.4\d s\)", gate
     )
     assert "5555 (parent 99, a running copy of the app) from 1.4" in said, said
 
@@ -10574,9 +11046,9 @@ def test_the_controls_record_of_its_reader_by_name_says_what_went_wrong_and_how_
     found = check_app._Reading(check_app.NAMED, 0.5, 0.6, frozenset(), (), "", seen)
     said = _watched(failed, found).named_said()
     assert said.startswith(
-        "lsof, by name, recorded, not a gate: 2 calls, longest 0.25 s, lsof errors 1 (lsof exited "
-        "2, x); the processes of the runtime's name it saw: 100 (parent 1) from 0.50 s, by lsof, "
-        f"by name, it maps {runtime}; 101 (parent 1)"
+        "the reader by name, recorded, not a gate: 2 calls, longest 0.25 s, lsof errors 1 (lsof "
+        "exited 2, x); the processes of the runtime's name it saw: 100 (parent 1) from 0.50 s, by "
+        f"the reader by name, it maps {runtime}; 101 (parent 1)"
     ), said
     assert said.endswith("; and 2 more") and "105 (parent 1)" not in said, said
     assert _watched(failed).named_said().endswith("; it saw no process of the runtime's name")
@@ -10599,7 +11071,8 @@ def test_the_controls_gate_needs_the_runtimes_name_as_well_as_what_a_child_maps(
     said = capsys.readouterr().out
     assert any("the control: it starts the host" in what for what in checker.failures)
     assert (
-        "5555 maps that copy's runtime (by lsof), from 0.4 s, but its name is not the runtime's "
+        "5555 maps that copy's runtime (by ps's lsof lookup), from 0.4 s, but its name is not the "
+        "runtime's "
         "('R (codesign)')"
     ) in _case(said), said
 
@@ -10621,27 +11094,119 @@ def test_a_child_whose_arguments_ps_reads_later_takes_the_executables_pass_away(
     )
     checker, _ = _control_in(world, tmp_path, monkeypatch)
     said = capsys.readouterr().out
-    assert checker.failures == [
-        "the control: it starts the host on the app's profile, and the check sees it"
-    ], checker.failures
+    assert checker.failures == [_STARTS], checker.failures
     assert "the control's gate held" not in said, said
+    # The child that held the gate is not listed as one whose arguments ps did not read: ps read
+    # them, inside the gate, and that is the cause the case names.
+    case = _case(said)
+    assert "whose arguments ps did not read" not in case, case
+    assert re.search(
+        r"; 5555 maps that copy's runtime \(by ps's lsof lookup\), from 0\.[34] s, but ps read its "
+        r"arguments at 0\.[56] s, inside the gate, and the listers' pattern does not match them "
+        r"\('S .*--profile default .*'\), so what it maps does not pass the gate$",
+        case,
+    ), case
+    assert "ps read the arguments of a child of the app" not in case, case
+    # Its snapshot came once the pass had been taken away: its note says the gate does not hold,
+    # not that no host process was seen, since a child held the gate by its executable.
+    assert re.search(r"note: the gate does not hold \d+\.\d\d s after the open", said), said
+    assert "no host process seen" not in said, said
+
+
+def test_a_child_whose_arguments_ps_reads_after_the_gate_takes_the_executables_pass_away(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # The children ps read count from the watch's start to its end, as the gate's line says, not
+    # only inside the gate: here the gate holds at 29 s on a child by its executable, and at
+    # 30.5 s, after the gate's 30 s but inside the 5 s the watch goes on once it held, ps reads the
+    # arguments of another child, on another profile, which the pattern does not match. The
+    # control fails, and the case names the child ps read.
+    runtime = _runtime_of(_installed_in(tmp_path))
+    wrong = _HOST_COMMAND.replace(f"--profile {check_app.APP_PROFILE} ", "--profile default ")
+    world = _child_world(
+        tmp_path,
+        {5555: [runtime]},
+        (29.0, 1e9, f" 5555    99 R    {_SHORT}"),
+        (30.5, 1e9, f" 5556    99 S    {wrong}"),
+    )
+    checker, _ = _control_in(world, tmp_path, monkeypatch)
+    said = capsys.readouterr().out
+    assert checker.failures == [_STARTS], checker.failures
+    assert "the control's gate held" not in said, said
+    # The child that held the gate, whose arguments ps never read, is listed as such; the other
+    # was read after the gate, inside the 5 s after it held, so the case says the gate was decided
+    # over the watch up to then, not inside the gate.
+    case = _case(said)
+    assert (
+        "of the app's children whose arguments ps did not read: 5555 maps that copy's runtime"
+    ) in case, case
     assert re.search(
         r"ps read the arguments of a child of the app that the listers' pattern does not match "
-        r"\(5555 'S .*--profile default .*'\), so what a child maps does not pass the gate",
-        _case(said),
-    ), said
+        r"\(5556 'S .*--profile default .*'\), in the watch up to when the gate was decided, at "
+        r"3[0-5]\.\d s, so what a child maps does not pass the gate$",
+        case,
+    ), case
+
+
+def test_the_case_names_the_child_that_held_the_gate_where_ps_read_its_arguments_later(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # ps shows a child only by its name from 27 s, and lsof says it maps the copy's runtime, so the
+    # gate holds; at 30.5 s, after the gate's 30 s but inside the 5 s the watch goes on once it
+    # held, ps reads the same child's arguments, which the pattern matches. Its arguments were
+    # readable, so what it maps does not stand in for them, and they were matched only after the
+    # gate: the control fails. The case does not list the child as one whose arguments ps did not
+    # read; it names the child's own arguments, read later, as the cause.
+    runtime = _runtime_of(_installed_in(tmp_path))
+    world = _child_world(
+        tmp_path,
+        {5555: [runtime]},
+        (27.0, 30.5, f" 5555    99 R    {_SHORT}"),
+        (30.5, 40.0, f" 5555    99 S    {_HOST_COMMAND}"),
+    )
+    checker, _ = _control_in(world, tmp_path, monkeypatch)
+    said = capsys.readouterr().out
+    assert checker.failures == [_STARTS], checker.failures
+    assert "the control's gate held" not in said, said
+    case = _case(said)
+    assert "whose arguments ps did not read" not in case, case
+    assert re.search(
+        r"; 5555 maps that copy's runtime \(by ps's lsof lookup\), from 27\.0 s, but ps read its "
+        r"arguments at 30\.\d s, in the watch up to when the gate was decided, at 3[0-5]\.\d s, "
+        r"and a lister matched them only after the gate \('S .*--profile "
+        + re.escape(check_app.APP_PROFILE)
+        + r" .*'\), so what it maps does not pass the gate$",
+        case,
+    ), case
 
 
 def test_the_controls_gate_never_takes_what_a_child_maps_once_ps_has_read_its_arguments() -> None:
-    # The reader by name sees a child that maps the copy's runtime at 0.4 s; ps reads its
-    # arguments, which the pattern matches, only at 30.5 s, past the gate. Its arguments were
-    # readable, so what it maps does not stand in for them, and the gate does not hold.
+    # The reader by name sees a child that maps the copy's runtime at 0.4 s; ps reads the table at
+    # 0.5 s, and the child's arguments, which the pattern matches, only at 30.5 s, past the gate.
+    # Its arguments were readable, so what it maps does not stand in for them, and the gate does
+    # not hold.
     runtime = _runtime_of(Path("/Applications") / f"{check_app.APP_NAME}.app")
     seen = check_app._Unread(5555, 99, "", "", True, (runtime,), "", 0.4, check_app.NAMED)
     named = check_app._Reading(check_app.NAMED, 0.4, 0.41, frozenset(), (), "", (seen,))
+    read = check_app._Reading("ps", 0.5, 0.51, frozenset())
     ps = check_app._Reading("ps", 30.5, 30.51, frozenset({5555}), ((5555, f"S {_HOST_COMMAND}"),))
-    assert _watched(named, ended=40.0).passed_by(runtime)[0] == "executable"
-    assert _watched(named, ps, ended=40.0).passed_by(runtime) == ("", "")
+    assert _watched(named, read, ended=40.0).passed_by(runtime)[0] == "executable"
+    assert _watched(named, read, ps, ended=40.0).passed_by(runtime) == ("", "")
+
+
+def test_the_controls_gate_by_the_executable_needs_ps_to_have_read_the_table() -> None:
+    # That ps read the arguments of no child the pattern does not match proves nothing where ps
+    # never read the process table: a stale pattern would pass. So the executable way holds only
+    # once a ps reading has read it, in the watch so far; a blind one does not count.
+    runtime = _runtime_of(Path("/Applications") / f"{check_app.APP_NAME}.app")
+    seen = check_app._Unread(5555, 99, "", "", True, (runtime,), "", 0.4, check_app.NAMED)
+    named = check_app._Reading(check_app.NAMED, 0.4, 0.41, frozenset(), (), "", (seen,))
+    blind = check_app._Reading("ps", 0.5, 0.6, None, (), "ps exited 3, with 'sysmon'")
+    pgrep = check_app._Reading("pgrep", 0.5, 0.6, frozenset())
+    read = check_app._Reading("ps", 0.7, 0.8, frozenset())
+    assert _watched(named, ended=40.0).passed_by(runtime) == ("", "")
+    assert _watched(named, blind, pgrep, ended=40.0).passed_by(runtime) == ("", "")
+    assert _watched(named, blind, pgrep, read, ended=40.0).passed_by(runtime)[0] == "executable"
 
 
 def test_the_controls_record_keeps_the_first_of_two_answers_that_say_as_much() -> None:
@@ -10869,8 +11434,9 @@ def test_the_pairing_checks_tidy_kills_a_runtime_process_and_names_one_it_cannot
 ) -> None:
     # Where ps could not read a process's arguments: one that lsof says maps the bundled runtime
     # of the copy this check opened is killed with the host processes the listers matched; one
-    # that maps another copy's runtime may be on another profile, and one of which lsof gave no
-    # file the check cannot tell: each is named, and left.
+    # that maps another copy's runtime may be on another profile, and one that only may be a host
+    # (lsof did not say it maps a copy's runtime, whatever it said: here dyld alone, and nothing)
+    # the check cannot tell: each is named, and left.
     pairing = object.__new__(check_app._PairingCheck)
     pairing.checker = check_app.Checker()
     pairing.owns_profile = True
@@ -10887,6 +11453,7 @@ def test_the_pairing_checks_tidy_kills_a_runtime_process_and_names_one_it_cannot
         check_app._Unread(7777, 1, "S", _SHORT, False, (runtime,)),
         check_app._Unread(7778, 1, "S", _SHORT, False, (), "lsof listed no text file for it"),
         check_app._Unread(7779, 1, "S", _SHORT, False, (other,)),
+        check_app._Unread(7780, 1, "S", _SHORT, False, ("/usr/lib/dyld",)),
     )
     seen = (
         check_app._Reading("pgrep", 0.0, 0.0, frozenset({4242})),
@@ -10904,8 +11471,8 @@ def test_the_pairing_checks_tidy_kills_a_runtime_process_and_names_one_it_cannot
     said = capsys.readouterr().out
     assert "still ran, and were killed: [4242, 7777]" in said, said
     assert (
-        "possibly host processes of the app's profile still ran, whose executables the check "
-        "could not read, and were left: [7778]"
+        "possibly host processes of the app's profile still ran, of which ps's lsof lookup gave no "
+        "copy's bundled runtime, and were left: [7778, 7780]"
     ) in said, said
     assert (
         "processes that map another copy's bundled runtime, whose arguments ps could not read, "
