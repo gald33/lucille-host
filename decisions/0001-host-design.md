@@ -254,7 +254,9 @@ The host:
   class under any other name, one that writes secrets unencrypted to a file among them, and every chain of
   backends, which is never asked what it holds. This checks the class's identity, not how the backend keeps a
   secret. `pair --store-file` pairs where the keyring backend is refused; a pair kept in a refused backend
-  before is left there and never read.
+  before is left there and never read. What that costs: a Linux desktop whose only keyring is KWallet, with no
+  Secret Service on the session bus, has no keyring to store in, and pairs with `--store-file`; one that runs
+  both gets the Secret Service, where keyring's own choice could form a chain of the two, which was refused.
 
 **Hazards neutralized,** each with a test:
 - **The signer socket.**
