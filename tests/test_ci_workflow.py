@@ -40,7 +40,10 @@ from tools.macos import build_app, check_app, payload
 
 CI = build_app.REPO_ROOT / ".github" / "workflows" / "ci.yml"
 PINS = build_app.load_pins()
-ALLOWED_SECRET = "${{ secrets.LUCILLE_HOST_PRIVATE_STRINGS }}"
+# The secrets ci.yml may name: each once, in the guards job, as the env variable of its own name.
+ALLOWED_SECRETS = ("LUCILLE_HOST_PRIVATE_STRINGS_GZ", "LUCILLE_HOST_PRIVATE_STRINGS")
+GZ_SECRET = ALLOWED_SECRETS[0]
+GZ_REF = "${{ secrets.LUCILLE_HOST_PRIVATE_STRINGS_GZ }}"
 APP_UPLOAD_IF = "${{ success() && github.event_name == 'workflow_dispatch' }}"
 LOGS_UPLOAD_IF = "${{ !cancelled() }}"
 LOG_PATH = re.compile(r"build/macos/check/(?:screens/)?\*\.(?:png|txt|json)")
@@ -108,11 +111,13 @@ def signing_secret_problems(doc: dict[Any, Any]) -> list[str]:
     allowed = [
         (path, text)
         for path, text in uses
-        if text == ALLOWED_SECRET
-        and path[:2] == ("jobs", "guards")
-        and path[-2:] == ("env", "LUCILLE_HOST_PRIVATE_STRINGS")
+        if path[:2] == ("jobs", "guards")
+        and path[-2] == "env"
+        and path[-1] in ALLOWED_SECRETS
+        and text == f"${{{{ secrets.{path[-1]} }}}}"
     ]
-    if uses != allowed or len(allowed) != 1:
+    named = sorted(path[-1] for path, _ in allowed)
+    if uses != allowed or named != sorted(ALLOWED_SECRETS):
         problems.append(f"secrets are named at {[path for path, _ in uses]}")
     on = _on(doc)
     triggers = set(on) if isinstance(on, dict) else set(on if isinstance(on, list) else [on])
@@ -229,6 +234,19 @@ def _set_trigger(name: str) -> Callable[[dict[Any, Any]], None]:
         lambda doc: doc["jobs"]["guards"]["steps"].append(
             {"env": {"OTHER": "${{ secrets.LUCILLE_HOST_PRIVATE_STRINGS }}"}}
         ),
+        lambda doc: doc["jobs"]["guards"]["steps"].append(
+            {"env": {"OTHER": "${{ secrets.LUCILLE_HOST_PRIVATE_STRINGS_GZ }}"}}
+        ),
+        lambda doc: doc["jobs"]["guards"]["steps"].append(
+            {
+                "env": {
+                    "LUCILLE_HOST_PRIVATE_STRINGS_GZ": "${{ secrets.LUCILLE_HOST_PRIVATE_STRINGS }}"
+                }
+            }
+        ),
+        # The compressed list named a second time in the guards job, or in another job.
+        lambda doc: doc["jobs"]["guards"]["steps"].append({"env": {GZ_SECRET: GZ_REF}}),
+        lambda doc: doc["jobs"]["macos-app"]["steps"].append({"env": {GZ_SECRET: GZ_REF}}),
     ],
 )
 def test_a_signing_secret_or_a_wider_grant_is_refused(

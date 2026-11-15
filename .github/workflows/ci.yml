@@ -75,9 +75,12 @@ jobs:
       - name: Private-string check
         if: ${{ !cancelled() }}
         env:
-          # Newline-separated literal strings that must never appear in this repository.
-          # Only this step sees the secret. GitHub gives fork pull requests no secrets; the check
-          # says it is skipped there, and fails closed anywhere else the list is empty.
+          # Newline-separated literal strings that must never appear in this repository: in the
+          # first, gzip then base64, so that a list longer than a secret can hold still fits; in
+          # the second, as it is, read only when the first is empty. Only this step sees either
+          # secret. GitHub gives fork pull requests no secrets; the check says it is skipped
+          # there, and fails closed anywhere else the list is empty.
+          LUCILLE_HOST_PRIVATE_STRINGS_GZ: ${{ secrets.LUCILLE_HOST_PRIVATE_STRINGS_GZ }}
           LUCILLE_HOST_PRIVATE_STRINGS: ${{ secrets.LUCILLE_HOST_PRIVATE_STRINGS }}
           IS_FORK_PR: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository }}
         run: uv run --no-sync python tools/guards/private_strings.py .
