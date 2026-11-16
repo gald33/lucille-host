@@ -104,7 +104,11 @@
   message names the error's class and a D-Bus error's name, never anything read from the item or
   said with the error; any other error is raised as it is. Those that say the service could not be
   reached or started are :class:`KeyringUnusable`, on which ``pair --store-file`` may fall back to
-  the file store; a locked collection or a dismissed unlock prompt is not.
+  the file store; a locked collection or a dismissed unlock prompt is not. keyring wraps some of
+  them in its own ``InitError`` (a service whose ``Exec`` names a program that does not exist
+  gives ``Spawn.ExecFailed``, which secretstorage turns into its own error, and keyring into
+  ``InitError``), so the cause chain is looked at, through those errors only and up to
+  :data:`CHAIN_LIMIT` links (:func:`keyring_failure`).
 - :func:`check_backend` takes a backend only when its class is exactly the one this system's entry
   in :data:`KNOWN_BACKENDS` names, as its ``(__module__, __qualname__)``, compared as strings. It
   checks the backend the host built when the store is opened, and again before each read and each
@@ -160,8 +164,10 @@ __all__ = [
     "SERVICE_ERRORS",
     "SPAWN_ERRORS",
     "STAMP_EVERY",
+    "UNUSABLE_REPLIES",
     "UNUSABLE_ERRORS",
     "CALL_TIMEOUT",
+    "CHAIN_LIMIT",
     "PROBE_TIMEOUT",
     "InsecureKeyring",
     "Item",
@@ -172,8 +178,8 @@ __all__ = [
     "check_backend",
     "file_lock",
     "keyring_call",
+    "keyring_failure",
     "pair_write_tried",
-    "service_failure",
     "stamps_only",
 ]
 
@@ -336,40 +342,105 @@ SERVICE_ERRORS: Final = frozenset(
     }
 )
 # Of those, the ones that say the Secret Service could not be reached or started
-# (:class:`KeyringUnusable`): secretstorage's error for no service, a bus that refused the
-# connection, a service that failed to exec or did not reply; and a D-Bus error reply whose name
-# is one of the bus's errors for a service it could not start (``Spawn.ChildExited``, say). The
-# others are not: a locked collection, a dismissed unlock prompt (the user said no), no collection
-# to keep the item in, or any other reply, which a service that runs gives.
+# (:class:`KeyringUnusable`), wherever they are in the error's cause chain (keyring wraps
+# secretstorage's error in its own ``InitError`` when it looks up the collection): secretstorage's
+# error for no service, a bus that refused the connection, a service that failed to exec or did
+# not reply; and a D-Bus error reply whose name is one of the bus's errors for a service it could
+# not start (``Spawn.ChildExited``, ``Spawn.ExecFailed``, say: :data:`SPAWN_ERRORS`) or reach
+# (:data:`UNUSABLE_REPLIES`). The others are not: a locked collection, a dismissed unlock prompt
+# (the user said no), no collection to keep the item in, or any other reply, which a service that
+# runs gives.
 UNUSABLE_ERRORS: Final = frozenset(
     {("secretstorage.exceptions", "SecretServiceNotAvailableException")}
 )
 _ERROR_REPLY: Final = ("jeepney.wrappers", "DBusErrorResponse")
 SPAWN_ERRORS: Final = "org.freedesktop.DBus.Error.Spawn."
+# The bus's other replies for a service it could not start or reach: none owns the name and none
+# could be started, or the service did not reply.
+UNUSABLE_REPLIES: Final = frozenset(
+    {"org.freedesktop.DBus.Error.ServiceUnknown", "org.freedesktop.DBus.Error.NoReply"}
+)
+# How many links of an error's cause chain (``__cause__``, else ``__context__``) are looked at:
+# keyring wraps secretstorage's error, which wraps jeepney's reply, so three are met in practice.
+CHAIN_LIMIT: Final = 8
 
 
 # A D-Bus error name, as the bus sends it: dotted, each element a name, 255 bytes at most.
 _DBUS_ERROR_NAME: Final = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)+")
 
 
-def service_failure(exc: Exception, what: str) -> StoreError | None:
-    """``exc`` as a :class:`StoreError`, when its class is one of :data:`SERVICE_ERRORS`, raised by
-    a ``what`` (read or write) of an item: a :class:`KeyringUnusable` when it says the service could
-    not be reached or started (:data:`UNUSABLE_ERRORS`, :data:`SPAWN_ERRORS`). None otherwise, for
-    the caller to raise as it is. A D-Bus error reply's error name is given when it is one; nothing
-    else said with the error is."""
-    kind = (type(exc).__module__, type(exc).__qualname__)
-    if kind not in SERVICE_ERRORS:
+def _kind(exc: BaseException) -> tuple[str, str]:
+    return (type(exc).__module__, type(exc).__qualname__)
+
+
+def _mapped(exc: BaseException) -> bool:
+    """Whether ``exc`` is one of the errors a keyring call is mapped by: keyring's, an ``OSError``,
+    or one of :data:`SERVICE_ERRORS`."""
+    return isinstance(exc, KeyringError | OSError) or _kind(exc) in SERVICE_ERRORS
+
+
+def _links(exc: BaseException) -> list[BaseException]:
+    """``exc`` and the errors it was raised from, each link its ``__cause__``, else its
+    ``__context__``: at most :data:`CHAIN_LIMIT`, each once, and only while each is one of the
+    errors :func:`_mapped` names. The walk stops at any other error, which is not looked into."""
+    links: list[BaseException] = []
+    link: BaseException | None = exc
+    while (
+        link is not None
+        and _mapped(link)
+        and len(links) < CHAIN_LIMIT
+        and all(link is not seen for seen in links)
+    ):
+        links.append(link)
+        link = link.__cause__ or link.__context__
+    return links
+
+
+def _reply_name(exc: BaseException) -> str | None:
+    """The error name of a D-Bus error reply, when ``exc`` is one and its name is one."""
+    if _kind(exc) != _ERROR_REPLY:
         return None
+    name = getattr(exc, "name", None)
+    if isinstance(name, str) and len(name) <= 255 and _DBUS_ERROR_NAME.fullmatch(name):
+        return name
+    return None
+
+
+def _says_unusable(exc: BaseException) -> bool:
+    """Whether ``exc`` says the Secret Service could not be reached or started."""
+    if _kind(exc) in UNUSABLE_ERRORS:
+        return True
+    name = _reply_name(exc)
+    return name is not None and (name.startswith(SPAWN_ERRORS) or name in UNUSABLE_REPLIES)
+
+
+def keyring_failure(exc: Exception, what: str) -> StoreError | None:
+    """``exc``, raised by a ``what`` (read or write) of an item through the keyring, as the
+    :class:`StoreError` the store raises for it; None when it is not one of the keyring's errors,
+    an ``OSError``, or one of :data:`SERVICE_ERRORS`, for the caller to raise as it is.
+
+    It is a :class:`KeyringUnusable` when any link of its cause chain (:func:`_links`, which stops
+    at the first link that is none of those errors) says the Secret Service could not be reached or
+    started. The message names its class, and a D-Bus
+    error's name; below a wrapping error, the Secret Service error it was raised from, the deepest
+    reply with a name first. Nothing else said with any of them is given."""
+    if not _mapped(exc):
+        return None
+    links = _links(exc)
     detail = type(exc).__name__
-    name = getattr(exc, "name", None) if kind == _ERROR_REPLY else None
-    if not (isinstance(name, str) and len(name) <= 255 and _DBUS_ERROR_NAME.fullmatch(name)):
-        name = None
+    name = _reply_name(exc)
     if name is not None:
         detail += f": {name}"
+    below = [link for link in links[1:] if _kind(link) in SERVICE_ERRORS]
+    named = [link for link in below if _reply_name(link) is not None]
+    if below:
+        source = named[-1] if named else below[0]
+        detail += f", from {type(source).__name__}"
+        if named:
+            detail += f": {_reply_name(source)}"
     verb = "read" if what == "read" else "written"
     message = f"the keyring could not be {verb} ({detail})"
-    if kind in UNUSABLE_ERRORS or (name is not None and name.startswith(SPAWN_ERRORS)):
+    if any(_says_unusable(link) for link in links):
         return KeyringUnusable(message)
     return StoreError(message)
 
@@ -661,13 +732,11 @@ class Item:
             raw = keyring_call(lambda: backend.get_password(self.service, self.username), "read")
         except StoreError:
             raise
-        except (KeyringError, OSError) as exc:
-            raise StoreError(f"the keyring could not be read ({type(exc).__name__})") from exc
         except Exception as exc:
-            unusable = service_failure(exc, "read")
-            if unusable is None:
+            failed = keyring_failure(exc, "read")
+            if failed is None:
                 raise
-            raise unusable from exc
+            raise failed from exc
         if raw is None:
             return _empty()
         try:
@@ -707,10 +776,8 @@ class Item:
             keyring_call(lambda: backend.set_password(self.service, self.username, text), "write")
         except StoreError:
             raise
-        except (KeyringError, OSError) as exc:
-            raise StoreError(f"the keyring could not be written ({type(exc).__name__})") from exc
         except Exception as exc:
-            unusable = service_failure(exc, "write")
-            if unusable is None:
+            failed = keyring_failure(exc, "write")
+            if failed is None:
                 raise
-            raise unusable from exc
+            raise failed from exc

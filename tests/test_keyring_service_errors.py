@@ -22,6 +22,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from keyring.errors import InitError
 from switchboard.testing import hub
 
 from lucille_host import credentials, store
@@ -194,6 +195,181 @@ def test_a_service_error_at_a_read_or_write_of_the_credential_item_is_a_store_er
     _check(written.value, unusable)
 
 
+def _chain(*errors: BaseException) -> Exception:
+    """The first error, each raised from the next, as ``raise ... from`` links them."""
+    for upper, lower in zip(errors, errors[1:], strict=False):
+        upper.__cause__ = lower
+    top = errors[0]
+    assert isinstance(top, Exception)
+    return top
+
+
+EXEC_FAILED = "org.freedesktop.DBus.Error.Spawn.ExecFailed"
+SERVICE_UNKNOWN = "org.freedesktop.DBus.Error.ServiceUnknown"
+NO_REPLY = "org.freedesktop.DBus.Error.NoReply"
+
+
+def _chained() -> list[Any]:
+    """Errors keyring raises wrapping the Secret Service's (its ``InitError``, from the collection
+    lookup), or others raised from them; what the message says; and whether it is unusable."""
+    errors = secretstorage_exceptions
+    unavailable = errors.SecretServiceNotAvailableException
+    cases = [
+        # A service whose Exec names a program that does not exist: keyring's InitError, from
+        # secretstorage's error, from the bus's reply (reproduced on dbus-daemon 1.14).
+        (
+            lambda: _chain(InitError("x"), unavailable("y"), _reply(EXEC_FAILED)),
+            f"InitError, from DBusErrorResponse: {EXEC_FAILED}",
+            True,
+        ),
+        # The same wrapping, exactly, for the bus's other activation failures: secretstorage maps
+        # each to its SecretServiceNotAvailableException, from the reply (secretstorage/util.py).
+        (
+            lambda: _chain(InitError("x"), unavailable("y"), _reply(SERVICE_UNKNOWN)),
+            f"InitError, from DBusErrorResponse: {SERVICE_UNKNOWN}",
+            True,
+        ),
+        (
+            lambda: _chain(InitError("x"), unavailable("y"), _reply(NO_REPLY)),
+            f"InitError, from DBusErrorResponse: {NO_REPLY}",
+            True,
+        ),
+        # Or with secretstorage's error left out.
+        (
+            lambda: _chain(InitError("x"), _reply(SERVICE_UNKNOWN)),
+            f"InitError, from DBusErrorResponse: {SERVICE_UNKNOWN}",
+            True,
+        ),
+        (
+            lambda: _chain(InitError("x"), _reply(NO_REPLY)),
+            f"InitError, from DBusErrorResponse: {NO_REPLY}",
+            True,
+        ),
+        (
+            lambda: _chain(InitError("x"), unavailable("[Errno 111] Connection refused")),
+            "InitError, from SecretServiceNotAvailableException",
+            True,
+        ),
+        (
+            lambda: _chain(unavailable("y"), _reply(EXEC_FAILED)),
+            f"SecretServiceNotAvailableException, from DBusErrorResponse: {EXEC_FAILED}",
+            True,
+        ),
+        # A service that runs, and says no, under keyring's error: not one to fall back from.
+        (
+            lambda: _chain(InitError("x"), errors.LockedException("Collection is locked!")),
+            "InitError, from LockedException",
+            False,
+        ),
+        (
+            lambda: _chain(InitError("x"), errors.PromptDismissedException("Prompt dismissed.")),
+            "InitError, from PromptDismissedException",
+            False,
+        ),
+        (
+            lambda: _chain(InitError("x"), _reply(ACCESS_DENIED)),
+            f"InitError, from DBusErrorResponse: {ACCESS_DENIED}",
+            False,
+        ),
+        (lambda: InitError("x"), "InitError", False),
+        (lambda: _chain(InitError("x"), ValueError("not the service's")), "InitError", False),
+        # The walk stops at an error that is none of the keyring's, an OSError or the service's,
+        # and does not look past it.
+        (
+            lambda: _chain(
+                InitError("x"),
+                ValueError("not the service's"),
+                unavailable("y"),
+                _reply(EXEC_FAILED),
+            ),
+            "InitError",
+            False,
+        ),
+    ]
+    ids = [
+        "exec-failed",
+        "service-unknown",
+        "no-reply",
+        "service-unknown-bare",
+        "no-reply-bare",
+        "connection-refused",
+        "unwrapped",
+        "locked",
+        "prompt-dismissed",
+        "access-denied",
+        "alone",
+        "other-cause",
+        "stops-at-other",
+    ]
+    return [pytest.param(*case, id=name) for case, name in zip(cases, ids, strict=True)]
+
+
+@pytest.mark.parametrize(("make", "detail", "unusable"), _chained())
+def test_an_error_is_classified_by_its_cause_chain(
+    raising: Raising,
+    host_env: HostEnv,
+    tmp_path: Path,
+    make: Callable[[], Exception],
+    detail: str,
+    unusable: bool,
+) -> None:
+    item = store.Item(host_env.dirs.state, host_env.dirs.profile)
+    creds = credentials.CredentialStore(tmp_path / "state", "default")
+    raising.on_read = make
+    for read in (item.read, creds.names):
+        with pytest.raises(store.StoreError) as raised:
+            read()
+        assert str(raised.value) == f"the keyring could not be read ({detail})"
+        _check(raised.value, unusable)
+        assert BODY not in str(raised.value) and "Errno" not in str(raised.value)
+    raising.on_read = None
+    raising.on_write = make
+    with pytest.raises(store.StoreError) as raised:
+        item.change(_edit)
+    assert str(raised.value) == f"the keyring could not be written ({detail})"
+    _check(raised.value, unusable)
+
+
+def test_a_chain_is_followed_through_context_too(raising: Raising, host_env: HostEnv) -> None:
+    # An OSError raised while handling the bus's reply: linked by __context__ only.
+    def make() -> Exception:
+        try:
+            raise _reply(EXEC_FAILED)
+        except Exception:
+            try:
+                raise OSError(5, "I/O error")  # noqa: TRY301 - the chain under test
+            except OSError as exc:
+                return exc
+
+    raising.on_read = make
+    with pytest.raises(store.KeyringUnusable) as raised:
+        store.Item(host_env.dirs.state, host_env.dirs.profile).read()
+    assert str(raised.value) == (
+        f"the keyring could not be read (OSError, from DBusErrorResponse: {EXEC_FAILED})"
+    )
+
+
+def test_a_chain_is_followed_only_so_far_and_each_link_once(
+    raising: Raising, host_env: HostEnv
+) -> None:
+    item = store.Item(host_env.dirs.state, host_env.dirs.profile)
+    # A reply further down than CHAIN_LIMIT links is not looked at.
+    deep = [InitError(f"wrap {n}") for n in range(store.CHAIN_LIMIT)]
+    raising.on_read = lambda: _chain(*deep, _reply(EXEC_FAILED))
+    with pytest.raises(store.StoreError) as raised:
+        item.read()
+    assert str(raised.value) == "the keyring could not be read (InitError)"
+    _check(raised.value, unusable=False)
+    # A chain that loops ends, each link taken once, before the limit.
+    first, second = InitError("a"), InitError("b")
+    first.__cause__, second.__cause__ = second, first
+    assert store._links(first) == [first, second]
+    raising.on_read = lambda: first
+    with pytest.raises(store.StoreError) as raised:
+        item.read()
+    assert str(raised.value) == "the keyring could not be read (InitError)"
+
+
 @pytest.mark.parametrize(
     "name",
     [None, 7, "", "Spawn", "org freedesktop", "org.freedesktop.\n", "a." + "b" * 300],
@@ -290,17 +466,41 @@ FALLBACK = (
 )
 
 
-@pytest.mark.parametrize("as_json", [False, True], ids=["text", "json"])
+@pytest.mark.parametrize(
+    ("as_json", "make", "detail"),
+    [
+        (False, lambda: _reply(SPAWN_FAILED), f"DBusErrorResponse: {SPAWN_FAILED}"),
+        (True, lambda: _reply(SPAWN_FAILED), f"DBusErrorResponse: {SPAWN_FAILED}"),
+        (
+            True,
+            lambda: _chain(
+                InitError("x"),
+                secretstorage_exceptions.SecretServiceNotAvailableException("y"),
+                _reply(EXEC_FAILED),
+            ),
+            f"InitError, from DBusErrorResponse: {EXEC_FAILED}",
+        ),
+    ],
+    ids=["text", "json", "wrapped"],
+)
 def test_pair_store_file_falls_back_when_the_service_fails_the_first_read(
-    cli: HostCli, raising: Raising, as_json: bool
+    cli: HostCli,
+    raising: Raising,
+    as_json: bool,
+    make: Callable[[], Exception],
+    detail: str,
 ) -> None:
-    # The keyring is accepted at open, and its service fails the first read: with --store-file,
-    # the pair is kept in the file store, and the command says so, and why, with nothing of what
-    # the bus said beside the error's name.
-    raising.on_read = lambda: _reply(SPAWN_FAILED)
+    # The keyring is accepted at open, and its service cannot be started at the first read, said
+    # directly or by keyring's own error raised from it: with --store-file, the pair is kept in the
+    # file store, and the command says so, and why, with nothing of what the bus said beside the
+    # error's name.
+    raising.on_read = make
     lucille = cli.lucille()
     ran = cli.paired(lucille, "--store-file", *(["--json"] if as_json else []))
-    assert ran.err.startswith(FALLBACK), ran.text
+    assert ran.err.startswith(
+        f"lucille-host: warning: the keyring could not be read ({detail}); "
+        "as --store-file asks, the pair is kept in a file instead\n"
+    ), ran.text
     assert BODY not in ran.text
     assert "weaker than the OS keyring" in ran.err
     assert cli.run("pair", "confirm").rc == 0

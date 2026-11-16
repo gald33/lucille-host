@@ -38,8 +38,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Final
 
-from keyring.errors import KeyringError
-
 from lucille_host import paths, store
 
 __all__ = [
@@ -178,13 +176,11 @@ class CredentialStore:
             )
         except store.StoreError:
             raise
-        except (KeyringError, OSError) as exc:
-            raise store.StoreError(f"the keyring could not be read ({type(exc).__name__})") from exc
         except Exception as exc:
-            unusable = store.service_failure(exc, "read")
-            if unusable is None:
+            failed = store.keyring_failure(exc, "read")
+            if failed is None:
                 raise
-            raise unusable from exc
+            raise failed from exc
         if raw is None:
             return _empty()
         try:
@@ -207,15 +203,11 @@ class CredentialStore:
             )
         except store.StoreError:
             raise
-        except (KeyringError, OSError) as exc:
-            raise store.StoreError(
-                f"the keyring could not be written ({type(exc).__name__})"
-            ) from exc
         except Exception as exc:
-            unusable = store.service_failure(exc, "write")
-            if unusable is None:
+            failed = store.keyring_failure(exc, "write")
+            if failed is None:
                 raise
-            raise unusable from exc
+            raise failed from exc
 
 
 def _well_formed(doc: object) -> bool:
