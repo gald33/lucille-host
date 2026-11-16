@@ -533,13 +533,15 @@ Notes:
   for a computer with no keyring; both are saved for the profile. With `--store-file`, a keyring the host
   refuses (`insecure_keyring`) is never read, and the pair is kept in the file store. So is a keyring whose
   Secret Service cannot be reached or started at the first read (one the session bus lists and that fails
-  to start, or whose program does not exist, or a bus that refuses the connection), whether the
-  Secret Service's own libraries say so or keyring does, from them: the host then warns on stderr that the keyring could not
-  be read, naming the error's class and D-Bus error name, and that the pair is kept in a file instead. It
-  does not fall back on any other `store_error`: a read the keyring did not answer in time, a locked
-  keyring, an unlock prompt the user dismissed, or any other error of a Secret Service that runs; nor once
-  that process has tried to write the pair to the keyring, which could leave one pair there and another in
-  the file.
+  to start, or whose program does not exist, or a bus that refuses the connection, or one whose service the
+  bus gives up on with `org.freedesktop.DBus.Error.NoReply`), whether the Secret Service's own libraries
+  say so or keyring does, from them: the host then warns on stderr that the keyring could not be read,
+  naming the error's class and D-Bus error name, and that the pair is kept in a file instead. It does not
+  fall back on any other `store_error`: a read that did not answer within the host's own 60 s deadline (a
+  `NoReply` the bus itself sends, after its own reply timeout, which can come sooner, is not that: it falls
+  back, as above), a locked keyring, an unlock prompt the user dismissed, or any other error of a Secret
+  Service that runs; nor once that process has tried to write the pair to the keyring, which could leave one
+  pair there and another in the file.
 - **Standard input of `pair --code-stdin`** is one line: the code, with or without a newline after it.
   The host reads that line and nothing more. It may exit before it reads anything (`code_in_argv`,
   `bad_hub`, `busy`, `held`, ...), so a shell writes the code at once, closes standard input, and ignores
