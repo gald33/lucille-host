@@ -256,14 +256,17 @@ The host:
   secret. `pair --store-file` pairs where the keyring backend is refused; a pair kept in a refused backend
   before is left there and never read. It also pairs in the file store when the backend is taken and its
   Secret Service then cannot be reached or started at the first read (issue 38): one the session bus lists
-  and that fails to start or whose program does not exist, or a bus that refuses the connection. The store
-  tells that from other failures by the error's cause chain, since keyring wraps the Secret Service's own
-  error in its `InitError`: it follows `__cause__`, else `__context__`, through keyring's, secretstorage's
-  and jeepney's errors and `OSError`s only, stopping at any other error, at a link seen before, or after 8.
-  It does not fall back on a locked keyring, a dismissed unlock prompt, a read that did not answer in time,
-  or once that process has tried to write the pair to the keyring. What that costs: a Linux desktop whose only keyring is KWallet, with no
-  Secret Service on the session bus, has no keyring to store in, and pairs with `--store-file`; one that runs
-  both gets the Secret Service, where keyring's own choice could form a chain of the two, which was refused.
+  and that fails to start or whose program does not exist, a bus that refuses the connection, or a service
+  the bus gives up on with `org.freedesktop.DBus.Error.NoReply`. The store tells that from other failures by
+  the error's cause chain, since keyring wraps the Secret Service's own error in its `InitError`: it follows
+  `__cause__`, else `__context__`, through keyring's, secretstorage's and jeepney's errors and `OSError`s
+  only, stopping at any other error, at a link seen before, or after 8. It does not fall back on a locked
+  keyring, a dismissed unlock prompt, a read that did not answer within the host's own 60 s deadline (a
+  `NoReply` the bus itself sends, after its own reply timeout, which can come sooner, is not that: it falls
+  back), or once that process has tried to write the pair to the keyring. What that costs: a Linux desktop
+  whose only keyring is KWallet, with no Secret Service on the session bus, has no keyring to store in, and
+  pairs with `--store-file`; one that runs both gets the Secret Service, where keyring's own choice could form
+  a chain of the two, which was refused.
 
 **Hazards neutralized,** each with a test:
 - **The signer socket.**
