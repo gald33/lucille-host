@@ -17,7 +17,7 @@ from keyring.backends.fail import Keyring as FailKeyring
 from keyring.backends.null import Keyring as NullKeyring
 
 from lucille_host import credentials, paths, store
-from tests._keyring import MemoryKeyring
+from tests._keyring import MemoryKeyring, turned_off
 
 PACKAGE = Path(__file__).resolve().parents[1] / "src" / "lucille_host"
 SECRET = "correct-horse-battery-staple"
@@ -157,6 +157,36 @@ def test_a_keyring_the_host_does_not_know_is_refused_for_every_use(
     if isinstance(backend, FileKeyring):
         assert backend.calls == 0
         assert not backend.path.exists()
+
+
+@pytest.mark.parametrize(
+    "setting", ["variable-null", "variable-fail", "configuration-null", "configuration-fail"]
+)
+def test_keyrings_off_switch_refuses_every_use_with_the_credentials_sentence(
+    setting: str, home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """keyring's own off switch, as PYTHON_KEYRING_BACKEND or keyringrc.cfg's default-keyring
+    names its null or fail backend: the host takes the null backend, as it does for the pair, and
+    refuses it with this module's sentence, not the pair's."""
+    turned_off(monkeypatch, home, setting)
+    creds = credentials.CredentialStore(tmp_path / "state", "default")
+    for use in _every_use(creds):
+        with pytest.raises(store.InsecureKeyring) as info:
+            use()
+        assert str(info.value) == (
+            f"the keyring backend here (Keyring) stores nothing, {credentials.REFUSAL}"
+        )
+
+
+def test_the_store_never_uses_the_pairs_item(
+    creds: credentials.CredentialStore, memory_keyring: MemoryKeyring
+) -> None:
+    """The item's service is the module's own, and the constructor takes no other."""
+    assert creds.service == credentials.SERVICE != store.SERVICE
+    with pytest.raises(TypeError):
+        credentials.CredentialStore(Path("unused"), "default", service=store.SERVICE)  # type: ignore[call-arg]
+    creds.save("gmail", "x", SECRET)
+    assert (store.SERVICE, "default") not in memory_keyring.items
 
 
 def test_a_keyring_that_changes_before_the_write_is_refused(

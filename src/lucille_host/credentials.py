@@ -98,11 +98,12 @@ class CredentialStore:
         lock_dir: Path,
         username: str,
         *,
-        service: str = SERVICE,
         clock: Callable[[], float] = time.time,
     ) -> None:
         paths.ensure_dir(lock_dir)
-        self.service = service
+        # Always this module's own service, never the pair's (store.SERVICE): there is no way to
+        # point the store at another item.
+        self.service = SERVICE
         self.username = username
         self._clock = clock
         self._lock_path = lock_dir / LOCK

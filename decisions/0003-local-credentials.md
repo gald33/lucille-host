@@ -1,8 +1,8 @@
 # 0003: Local credentials (draft)
 
-**Status: storage built; entry and use chosen, not built.** `src/lucille_host/credentials.py` can save, list and remove a credential
-for an online service, kept only on this computer. Nothing yet writes to it from the command line, and
-nothing Lucille sends can reach it. This record says what was built, and what is still to be decided
+**Status: storage built; entry and use chosen, not built.** `src/lucille_host/credentials.py` can save, list, read (`value()`) and
+remove a credential for an online service, kept only on this computer. Nothing yet writes to it from the
+command line, nothing yet calls `value()`, and nothing Lucille sends can reach it. This record says what was built, and what is still to be decided
 before a credential kept here can be used.
 
 ## Why

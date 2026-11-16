@@ -45,7 +45,8 @@ def write_keyring_config(home: Path, text: str) -> Path:
 def turned_off(monkeypatch: pytest.MonkeyPatch, home: Path, setting: str) -> None:
     """Turn the keyring off the way keyring's own settings do, under the private ``home``:
     ``variable-null`` and ``variable-fail`` set ``PYTHON_KEYRING_BACKEND`` to keyring's null or fail
-    backend, and ``configuration-null`` writes what ``keyring --disable`` writes to keyringrc.cfg.
+    backend, ``configuration-null`` writes what ``keyring --disable`` writes to keyringrc.cfg, and
+    ``configuration-fail`` writes keyringrc.cfg naming the fail backend.
     Then give the host its own backend, built as a real host builds it (``store._build``, past its
     once-a-process cache), with no session bus, so that a host that did not honour the setting
     would refuse with the sentence for no keyring instead."""
@@ -58,6 +59,8 @@ def turned_off(monkeypatch: pytest.MonkeyPatch, home: Path, setting: str) -> Non
         monkeypatch.setenv("PYTHON_KEYRING_BACKEND", FAIL_BACKEND)
     elif setting == "configuration-null":
         write_keyring_config(home, DISABLED)
+    elif setting == "configuration-fail":
+        write_keyring_config(home, f"[backend]\ndefault-keyring = {FAIL_BACKEND}\n")
     else:
         raise AssertionError(setting)
     monkeypatch.setattr(
