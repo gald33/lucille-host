@@ -118,7 +118,10 @@ release must have. The full design is [decisions/0001-host-design.md](decisions/
   `run` runs only the thread that handles requests and a loader thread of its own load it, never the one
   that drains. A start check of
   `run` that waits (a state file on a stalled mount, or on macOS a Keychain prompt) is not cut short by the
-  end of standard input either.
+  end of standard input either. On Linux the keyring is not such a wait: a session bus that takes the
+  connection and never answers is given up on after 5 s at the start (`insecure_keyring`), and each read
+  or write of the keyring item after 60 s (`store_error`), when that process stops asking the keyring
+  anything.
 - A process an operation starts that leaves the operation's process group (by calling `setpgid` or
   `setsid` itself) is not killed with the operation. The v0.1 operations start no such process.
 - Exact dependency pins reach CI through `uv.lock`, but not yet a user's install (see "Who the host

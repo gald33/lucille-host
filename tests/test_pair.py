@@ -30,7 +30,7 @@ from keyring.backends.fail import Keyring as FailKeyring
 from switchboard import client, pairing
 from switchboard.testing import hub
 
-from lucille_host import _switchboard, gate, link, loop, paths, policy, spec, state
+from lucille_host import _switchboard, gate, link, loop, paths, policy, spec, state, store
 from lucille_host.cli import ALREADY_PAIRING, PAIR_LOCK, main
 from tests import _audit_hook
 from tests._cli import HostCli, collecting, until
@@ -900,6 +900,35 @@ def test_keyrings_off_switch_refuses_the_keyring_as_storing_nothing(
     assert cli.run("pair", "confirm").rc == 0
     assert cli.held() == [lucille.name]
     assert any(cli.dirs.store_files.iterdir()) and cli.env.keyring.items == {}
+
+
+def test_a_session_bus_that_did_not_answer_refuses_the_keyring(
+    cli: HostCli, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The Secret Service's check never answered within its deadline (issue 39): every command
+    # refuses with insecure_keyring and the sentence that says so, status reports the pair it cannot
+    # read and the rest, and the sentence's --store-file still pairs.
+    monkeypatch.setattr(store, "_system_backend", store.NoAnswer)
+    sentence = (
+        "the keyring backend here (NoAnswer) has no keyring to store in: the session bus did not "
+        f"answer within {store.PROBE_TIMEOUT:g} s, {store.PAIR_REFUSAL}"
+    )
+    ran = cli.run("pair", "status")
+    assert ran.rc == 1 and ran.err == f"lucille-host: {sentence}\n", ran.text
+    ran = cli.run("--json", "pair", "status")
+    assert ran.rc == 1, ran.text
+    assert _support.cli_objects(ran.out) == [
+        {"v": 1, "type": "error", "code": "insecure_keyring", "message": sentence}
+    ]
+    ran = cli.run("--json", "status")
+    assert ran.rc == 0, ran.text
+    [found] = _support.cli_objects(ran.out)
+    assert found["pair"] == {"state": "unreadable", "code": "insecure_keyring", "message": sentence}
+    lucille = cli.lucille()
+    ran = cli.paired(lucille, "--store-file")
+    assert "weaker than the OS keyring" in ran.err
+    assert cli.run("pair", "confirm").rc == 0
+    assert cli.held() == [lucille.name]
 
 
 def test_code_never_in_argv(cli: HostCli) -> None:

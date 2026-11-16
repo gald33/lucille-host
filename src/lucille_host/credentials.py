@@ -20,7 +20,8 @@
   backend under any other name, one that writes to a plain file among them, is refused, and is
   never read or written. Reads and writes go through the backend that check returns, never
   through keyring's own ``get_password`` and ``set_password``, which would ask keyring to choose
-  one. The refusal is this module's own (:data:`REFUSAL`): a file fallback, like the pair's
+  one, and each is bounded on Linux as the pair item's are (:func:`store.keyring_call`). The
+  refusal is this module's own (:data:`REFUSAL`): a file fallback, like the pair's
   ``--store-file``, is deliberately not offered, and the refusal does not point at one.
 - ``.credentials.lock`` in the state folder is taken around each read and each read-modify-write
   of the item, the same kind of lock as the store's own (:func:`store.file_lock`).
@@ -172,7 +173,11 @@ class CredentialStore:
     def _load(self) -> dict[str, Any]:
         backend = store.check_backend(refusal=REFUSAL)
         try:
-            raw = backend.get_password(self.service, self.username)
+            raw = store.keyring_call(
+                lambda: backend.get_password(self.service, self.username), "read"
+            )
+        except store.StoreError:
+            raise
         except (KeyringError, OSError) as exc:
             raise store.StoreError(f"the keyring could not be read ({type(exc).__name__})") from exc
         if raw is None:
@@ -192,7 +197,11 @@ class CredentialStore:
         backend = store.check_backend(refusal=REFUSAL)
         text = json.dumps(doc, sort_keys=True, separators=(",", ":"))
         try:
-            backend.set_password(self.service, self.username, text)
+            store.keyring_call(
+                lambda: backend.set_password(self.service, self.username, text), "write"
+            )
+        except store.StoreError:
+            raise
         except (KeyringError, OSError) as exc:
             raise store.StoreError(
                 f"the keyring could not be written ({type(exc).__name__})"
