@@ -19,7 +19,7 @@ import select
 import termios
 import threading
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
 
@@ -35,7 +35,7 @@ from lucille_host.cli import ALREADY_PAIRING, PAIR_LOCK, main
 from tests import _audit_hook
 from tests._cli import HostCli, collecting, until
 from tests._host import HostEnv, lock_free, lock_held
-from tests._keyring import NULL_SENTENCE, no_session_bus, turned_off
+from tests._keyring import NULL_SENTENCE, MemoryKeyring, no_session_bus, turned_off
 from tests._lucille import FakeLucille
 from tests.spec import _support
 
@@ -929,6 +929,157 @@ def test_a_session_bus_that_did_not_answer_refuses_the_keyring(
     assert "weaker than the OS keyring" in ran.err
     assert cli.run("pair", "confirm").rc == 0
     assert cli.held() == [lucille.name]
+
+
+# How long a test waits for a late write, or for Lucille to collect.
+LATE_WAIT = 10.0
+
+
+class LateWriter(MemoryKeyring):
+    """A keyring in memory whose first write once ``armed`` says so waits until ``release`` is
+    set, then lands, or is dropped when ``lost`` is set; ``done`` is set once it has finished
+    either way. Every other write lands at once."""
+
+    def __init__(self, armed: Callable[[], bool]) -> None:
+        super().__init__()
+        self.armed = armed
+        self.release = threading.Event()
+        self.lost = threading.Event()
+        self.done = threading.Event()
+
+    def set_password(self, service: str, username: str, password: str) -> None:
+        if not self.armed() or self.done.is_set():
+            super().set_password(service, username, password)
+            return
+        self.release.wait()
+        if not self.lost.is_set():
+            super().set_password(service, username, password)
+        self.done.set()
+
+
+def _late_writer(
+    cli: HostCli, monkeypatch: pytest.MonkeyPatch, armed: Callable[[], bool]
+) -> LateWriter:
+    """This system's keyring calls bounded by a short deadline, through a :class:`LateWriter`."""
+    monkeypatch.setattr(store, "BOUNDED", frozenset({paths.os_family()}))
+    monkeypatch.setattr(store, "CALL_TIMEOUT", 0.2)
+    monkeypatch.setattr(store, "_UNANSWERED", threading.Event())
+    backend = LateWriter(armed)
+    monkeypatch.setattr("keyring.core._keyring_backend", backend)
+    return backend
+
+
+UNKNOWN_WRITE = {
+    "v": 1,
+    "type": "error",
+    "code": "store_error",
+    "message": (
+        "the keyring did not answer a write within 0.2 s; whether it was saved is not known, "
+        "and the next start reads it again"
+    ),
+}
+
+
+@pytest.mark.parametrize("lands", [True, False], ids=["lands-late", "never-lands"])
+def test_a_write_the_keyring_did_not_answer_in_time_is_read_again_by_the_next_start(
+    cli: HostCli, monkeypatch: pytest.MonkeyPatch, lands: bool
+) -> None:
+    # Issue 39: the pair the library saves within the answer is a keyring write the Secret Service
+    # does not answer in time. That is store_error, saying the write's result is not known: the
+    # thread left waiting on it can still finish it. The host deletes nothing of its own on the
+    # assumption that it failed, and the gate's record stays. The write then lands late, or never,
+    # and the next start (a new process) reads the keyring afresh: it carries on to the SAS and
+    # confirms, or finds no pair and pairs anew.
+    backend = _late_writer(cli, monkeypatch, cli.dirs.gate_file.exists)
+    lucille = cli.lucille()
+    code = lucille.start()
+    try:
+        ran = cli.run("--json", "pair", "--code-stdin", stdin=code + "\n")
+    finally:
+        if not lands:
+            backend.lost.set()
+        backend.release.set()
+    assert ran.rc == 1, ran.text
+    assert _objects(ran)[-1] == UNKNOWN_WRITE
+    kept = cli.gate()
+    assert kept is not None and kept.pair == lucille.name
+    assert backend.done.wait(LATE_WAIT)
+    # The next start: a new process, which asks the keyring again.
+    monkeypatch.setattr(store, "_UNANSWERED", threading.Event())
+    if lands:
+        assert cli.held() == [lucille.name]
+        with collecting(lucille):
+            deadline = time.monotonic() + LATE_WAIT
+            while True:
+                ran = cli.run("pair", "status")
+                assert ran.rc == 0, ran.text
+                if ran.out.startswith("sas_pending:") or time.monotonic() > deadline:
+                    break
+                time.sleep(0.05)
+        assert ran.out.startswith(f"sas_pending: pair {lucille.name}:"), ran.text
+        assert cli.run("pair", "confirm").rc == 0
+        assert cli.held() == [lucille.name]
+        # The same record, stamped as the pairing went on.
+        found = cli.gate()
+        assert found is not None and (found.pair, found.created_at) == (kept.pair, kept.created_at)
+    else:
+        assert cli.held() == []
+        ran = cli.run("pair", "status")
+        assert (ran.rc, ran.out) == (0, "none: this computer holds no pair\n"), ran.text
+        assert cli.gate() == kept
+        other = cli.lucille()
+        cli.paired(other)
+        assert cli.run("pair", "confirm").rc == 0
+        assert cli.held() == [other.name]
+        found = cli.gate()
+        assert found is not None and found.pair == other.name
+
+
+@pytest.mark.parametrize("lands", [True, False], ids=["lands-late", "never-lands"])
+def test_a_forget_whose_write_did_not_answer_in_time_keeps_the_gate_record(
+    cli: HostCli, monkeypatch: pytest.MonkeyPatch, lands: bool
+) -> None:
+    # Issue 39: forget's keyring write is not answered in time. Whether the pair was forgotten is
+    # not known, so the gate's record is not deleted on the assumption that it was. The next start
+    # reads the keyring afresh: a pair the late write forgot is gone, and one it never reached is
+    # still held, and forgotten by the next forget.
+    arm = threading.Event()
+    backend = _late_writer(cli, monkeypatch, arm.is_set)
+    lucille = cli.lucille()
+    cli.paired(lucille)
+    assert cli.run("pair", "confirm").rc == 0
+    kept = cli.gate()
+    assert kept is not None
+    arm.set()
+    try:
+        ran = cli.run("--json", "forget")
+    finally:
+        if not lands:
+            backend.lost.set()
+        backend.release.set()
+    assert ran.rc == 1, ran.text
+    assert _objects(ran)[-1] == UNKNOWN_WRITE
+    assert cli.gate() == kept
+    assert backend.done.wait(LATE_WAIT)
+    # The next start: a new process, which asks the keyring again.
+    monkeypatch.setattr(store, "_UNANSWERED", threading.Event())
+    if lands:
+        # Forgotten here; every command says no pair is held, and the record left is replaced by
+        # the next pairing's.
+        assert cli.held() == []
+        ran = cli.run("pair", "status")
+        assert (ran.rc, ran.out) == (0, "none: this computer holds no pair\n"), ran.text
+        other = cli.lucille()
+        cli.paired(other)
+        assert cli.run("pair", "confirm").rc == 0
+        assert cli.held() == [other.name]
+        found = cli.gate()
+        assert found is not None and found.pair == other.name
+    else:
+        # Still held, with its record: the next forget forgets both.
+        assert cli.held() == [lucille.name]
+        assert cli.run("forget").rc == 0
+        assert cli.held() == [] and cli.gate() is None
 
 
 def test_code_never_in_argv(cli: HostCli) -> None:

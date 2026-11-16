@@ -86,10 +86,14 @@
 - Each read and each write of an item through the Secret Service, on Linux, is bounded too, by
   :data:`CALL_TIMEOUT` (:func:`keyring_call`): it opens a connection of its own, with the same
   unbounded ``Hello``, and it may also wait, rightly, on the user at the collection's unlock
-  prompt, so its bound is the longer. Past it the call is a :class:`StoreError` that says so, and
-  that process asks the keyring nothing more: every later read and write fails at once, so that no
-  thread is left waiting for each, and no write is sent that could land after a newer one. The
-  macOS Keychain, which talks to no bus and may wait on its own prompt, is not bounded.
+  prompt, so its bound is the longer. Past it the call is a :class:`StoreError`
+  (:class:`Unanswered`) that says so, and that process asks the keyring nothing more: every later
+  read and write fails at once, so that no thread is left waiting for each, and no write is sent
+  that could land after a newer one. The thread left waiting is not stopped, and can finish its
+  call until the process exits: a write past the bound may still land, so its result is not known,
+  the host changes none of its own files on the assumption that it failed, and the next process
+  reads the item afresh.
+  The macOS Keychain, which talks to no bus and may wait on its own prompt, is not bounded.
 - :func:`check_backend` takes a backend only when its class is exactly the one this system's entry
   in :data:`KNOWN_BACKENDS` names, as its ``(__module__, __qualname__)``, compared as strings. It
   checks the backend the host built when the store is opened, and again before each read and each
@@ -148,6 +152,7 @@ __all__ = [
     "Item",
     "NoAnswer",
     "StoreError",
+    "Unanswered",
     "check_backend",
     "file_lock",
     "keyring_call",
@@ -206,6 +211,14 @@ class StoreError(OSError):
     """The keyring item could not be read or written."""
 
 
+class Unanswered(StoreError):
+    """A keyring call that did not answer within :data:`CALL_TIMEOUT`, or one not made because an
+    earlier call in this process did not answer. A write that did not answer may still land,
+    from the thread left waiting on it, until the process exits: whether it was saved is not
+    known, and nothing kept beside the item is changed on the assumption that it was not. The next
+    process reads the item afresh."""
+
+
 class NoAnswer(FailKeyring):
     """keyring's ``fail`` backend, taken where the session bus did not answer the Secret Service's
     check within :data:`PROBE_TIMEOUT`. It is refused as no keyring is, with a sentence of its
@@ -248,11 +261,11 @@ def keyring_call(call: Callable[[], T], what: str) -> T:
     returned (``what`` says which, for the message). On Linux it is bounded by
     :data:`CALL_TIMEOUT`, and once one has not answered in this process none is made again (the
     module docstring says why); past the bound, or after one that did not answer, it is a
-    :class:`StoreError`. Elsewhere it is ``call()``."""
+    :class:`Unanswered`, a :class:`StoreError`. Elsewhere it is ``call()``."""
     if paths.os_family() not in BOUNDED:
         return call()
     if _UNANSWERED.is_set():
-        raise StoreError(
+        raise Unanswered(
             "the keyring did not answer earlier in this process, so it is not asked again; "
             "try again in a new one"
         )
@@ -260,7 +273,11 @@ def keyring_call(call: Callable[[], T], what: str) -> T:
         return _within(CALL_TIMEOUT, call, f"keyring {what}")
     except _NotAnswered:
         _UNANSWERED.set()
-        raise StoreError(f"the keyring did not answer a {what} within {CALL_TIMEOUT:g} s") from None
+        message = f"the keyring did not answer a {what} within {CALL_TIMEOUT:g} s"
+        if what == "write":
+            # The thread left waiting may still finish it.
+            message += "; whether it was saved is not known, and the next start reads it again"
+        raise Unanswered(message) from None
 
 
 class InsecureKeyring(state.Refused):

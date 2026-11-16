@@ -83,7 +83,7 @@ def test_a_read_that_does_not_answer_is_a_store_error(
 ) -> None:
     item = store.Item(host_env.dirs.state, host_env.dirs.profile)
     started = time.monotonic()
-    with pytest.raises(store.StoreError, match="did not answer a read within 0.2 s"):
+    with pytest.raises(store.Unanswered, match=r"did not answer a read within 0.2 s$"):
         item.read()
     assert time.monotonic() - started < WITHIN
     # The process asks the keyring nothing more: the next read fails at once, unasked.
@@ -103,8 +103,9 @@ def test_a_write_that_does_not_answer_is_a_store_error(
     def edit(doc: dict[str, object]) -> None:
         doc["shared"] = {"seq": 1}
 
-    with pytest.raises(store.StoreError, match="did not answer a write within 0.2 s"):
+    with pytest.raises(store.Unanswered, match="did not answer a write within 0.2 s") as info:
         item.change(edit)
+    assert "whether it was saved is not known" in str(info.value)
     calls = unanswering.calls
     # Nothing more is sent, a write that could land after a newer one least of all.
     with pytest.raises(store.StoreError, match="not asked again"):
@@ -112,6 +113,32 @@ def test_a_write_that_does_not_answer_is_a_store_error(
     with pytest.raises(store.StoreError, match="not asked again"):
         item.read()
     assert unanswering.calls == calls
+
+
+def test_a_write_that_lands_after_its_deadline_is_read_whole_by_the_next_process(
+    unanswering: Unanswering, host_env: HostEnv, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The thread left waiting on a write can finish it after the deadline, before the process
+    # exits. The next process reads the item afresh: the whole document the late write saved.
+    unanswering.read_gate.set()
+    item = store.Item(host_env.dirs.state, host_env.dirs.profile)
+
+    def edit(doc: dict[str, object]) -> None:
+        doc["shared"] = {"seq": 1}
+
+    with pytest.raises(store.Unanswered, match="whether it was saved is not known"):
+        item.change(edit)
+    writes = unanswering.writes
+    unanswering.write_gate.set()
+    deadline = time.monotonic() + WITHIN
+    while unanswering.writes == writes and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert unanswering.writes == writes + 1
+    # A new process, which asks the keyring again.
+    monkeypatch.setattr(store, "_UNANSWERED", threading.Event())
+    doc = store.Item(host_env.dirs.state, host_env.dirs.profile).read()
+    assert doc["shared"] == {"seq": 1}
+    assert doc["pairs"]["records"] == {}
 
 
 def test_a_credential_read_or_write_that_does_not_answer_is_a_store_error(

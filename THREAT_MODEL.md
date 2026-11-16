@@ -121,7 +121,10 @@ release must have. The full design is [decisions/0001-host-design.md](decisions/
   end of standard input either. On Linux the keyring is not such a wait: a session bus that takes the
   connection and never answers is given up on after 5 s at the start (`insecure_keyring`), and each read
   or write of the keyring item after 60 s (`store_error`), when that process stops asking the keyring
-  anything.
+  anything. The thread left waiting on that call is not stopped: it can outlive the timeout until the
+  process exits, and a write it was making can still land. So the host treats such a write's result as
+  not known, deletes or rewrites none of its own files on the assumption that it failed, and the next
+  start reads the keyring item afresh.
 - A process an operation starts that leaves the operation's process group (by calling `setpgid` or
   `setsid` itself) is not killed with the operation. The v0.1 operations start no such process.
 - Exact dependency pins reach CI through `uv.lock`, but not yet a user's install (see "Who the host
