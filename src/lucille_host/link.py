@@ -743,9 +743,14 @@ class Session:
         holds, and delete its gate record ``found``. A room that cannot be left stays held, and
         the record is deleted all the same, since the pair cannot come back: that raises
         :class:`Stopped` (``error``), saying that ``forget`` leaves the room
-        (:meth:`leave_left_over`). Under the record lock."""
+        (:meth:`leave_left_over`). A keyring call that did not answer (:class:`store.Unanswered`)
+        is raised as it is, since whether the room was left is not known; the record is deleted
+        all the same, as the pair was gone before the leave began. Under the record lock."""
         try:
             self._leave_all(name)
+        except store.Unanswered:
+            # Whether the leave was saved is not known; the next start reads the store again.
+            raise
         except (Stopped, store.StoreError):
             raise Stopped("error", _STRANDED.format(name=name), code="room_not_left") from None
         finally:
@@ -758,9 +763,16 @@ class Session:
         library drop a pair whose pair room says this side ended it (sb ``pairing.py:2312-2319``).
         A room that cannot be left after that keeps nothing, as in :meth:`_leave_left`: the gate
         record ``found`` is deleted all the same, and :class:`Stopped` (``error``) says that
-        ``forget`` leaves the room. Under the record lock."""
+        ``forget`` leaves the room. A keyring call that did not answer (:class:`store.Unanswered`)
+        is raised as it is and the record kept: whether the leave was saved, or the pair dropped
+        within it, is not known, and the next start reads the store again. Under the record
+        lock."""
         try:
             self._leave_all(name)
+        except store.Unanswered:
+            # Whether the leave was saved, and whether the library dropped the pair within it, is
+            # not known: the gate record stays, and the next start reads the store again.
+            raise
         except (Stopped, store.StoreError):
             if name in self.held():
                 raise

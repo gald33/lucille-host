@@ -73,6 +73,27 @@
   the module does not import), the host takes keyring's ``fail`` backend
   instead, as keyring did where it found nothing it could use, and refuses it with the same
   sentence.
+- On Linux that check runs under a deadline, :data:`PROBE_TIMEOUT` (issue 39). jeepney bounds the
+  connect and the authentication, but sends the bus's ``Hello`` with no timeout, and neither
+  secretstorage nor keyring lets a caller pass one, so a socket at that address that authenticates
+  and then never answers (a relay whose other side is gone, a stuck bus daemon) would make every
+  command that opens the store wait without end, ``run`` past its signals and its lifeline. The
+  check is asked on a thread of its own; past the deadline, the host takes :class:`NoAnswer`,
+  keyring's ``fail`` backend marked as such, and refuses it with the sentence that says the session
+  bus did not answer and points to ``--store-file``, once a process with the backend it builds. The
+  thread is left waiting on its socket, a daemon thread, which the process does not wait for at
+  exit. A real bus answers the whole check in about a millisecond (measured on dbus-daemon 1.14).
+- Each read and each write of an item through the Secret Service, on Linux, is bounded too, by
+  :data:`CALL_TIMEOUT` (:func:`keyring_call`): it opens a connection of its own, with the same
+  unbounded ``Hello``, and it may also wait, rightly, on the user at the collection's unlock
+  prompt, so its bound is the longer. Past it the call is a :class:`StoreError`
+  (:class:`Unanswered`) that says so, and that process asks the keyring nothing more: every later
+  read and write fails at once, so that no thread is left waiting for each, and no write is sent
+  that could land after a newer one. The thread left waiting is not stopped, and can finish its
+  call until the process exits: a write past the bound may still land, so its result is not known,
+  the host changes none of its own files on the assumption that it failed, and the next process
+  reads the item afresh.
+  The macOS Keychain, which talks to no bus and may wait on its own prompt, is not bounded.
 - :func:`check_backend` takes a backend only when its class is exactly the one this system's entry
   in :data:`KNOWN_BACKENDS` names, as its ``(__module__, __qualname__)``, compared as strings. It
   checks the backend the host built when the store is opened, and again before each read and each
@@ -125,11 +146,16 @@ __all__ = [
     "ROOM_STAMPS",
     "SERVICE",
     "STAMP_EVERY",
+    "CALL_TIMEOUT",
+    "PROBE_TIMEOUT",
     "InsecureKeyring",
     "Item",
+    "NoAnswer",
     "StoreError",
+    "Unanswered",
     "check_backend",
     "file_lock",
+    "keyring_call",
     "stamps_only",
 ]
 
@@ -163,6 +189,15 @@ OFF_SWITCH: Final = frozenset({"keyring.backends.null.Keyring", "keyring.backend
 # The most of keyringrc.cfg the host takes, in bytes; it reads at most one byte more, and a longer
 # file is no setting. The module docstring says why it is small.
 CONFIG_LIMIT: Final = 4 * 1024
+# How long, in seconds, the host waits for the session bus to answer the Secret Service's check of
+# whether it can be used here, on Linux (the module docstring says why). A real bus answers it in
+# about a millisecond.
+PROBE_TIMEOUT: Final = 5.0
+# How long, in seconds, the host waits for one read or one write of an item through the Secret
+# Service, on Linux: longer, as one may wait on the user at the collection's unlock prompt.
+CALL_TIMEOUT: Final = 60.0
+# The systems whose keyring calls are bounded (keyring_call): the Secret Service's.
+BOUNDED: Final = frozenset({"linux"})
 # The end of every refusal of the pair's keyring, after "the keyring backend here (X) <reason>, ".
 PAIR_REFUSAL: Final = (
     "so lucille-host cannot keep its pair in it; set up the system keyring, or pair with "
@@ -174,6 +209,75 @@ T = TypeVar("T")
 
 class StoreError(OSError):
     """The keyring item could not be read or written."""
+
+
+class Unanswered(StoreError):
+    """A keyring call that did not answer within :data:`CALL_TIMEOUT`, or one not made because an
+    earlier call in this process did not answer. A write that did not answer may still land,
+    from the thread left waiting on it, until the process exits: whether it was saved is not
+    known, and nothing kept beside the item is changed on the assumption that it was not. The next
+    process reads the item afresh."""
+
+
+class NoAnswer(FailKeyring):
+    """keyring's ``fail`` backend, taken where the session bus did not answer the Secret Service's
+    check within :data:`PROBE_TIMEOUT`. It is refused as no keyring is, with a sentence of its
+    own."""
+
+
+class _NotAnswered(Exception):
+    """A bounded call did not return within its deadline."""
+
+
+# Set once a read or write of the keyring has not answered within CALL_TIMEOUT in this process:
+# every later one then fails at once (the module docstring says why).
+_UNANSWERED = threading.Event()
+
+
+def _within(seconds: float, call: Callable[[], T], name: str) -> T:
+    """``call()``, made on a daemon thread of its own and waited for no longer than ``seconds``;
+    :class:`_NotAnswered` past that, leaving the thread waiting where it is. What ``call`` raises is
+    raised here."""
+    done: dict[str, Any] = {}
+
+    def run() -> None:
+        try:
+            done["value"] = call()
+        except BaseException as exc:  # noqa: BLE001 - handed back to the caller as it is
+            done["error"] = exc
+
+    worker = threading.Thread(target=run, name=f"lucille-host {name}", daemon=True)
+    worker.start()
+    worker.join(seconds)
+    if worker.is_alive():
+        raise _NotAnswered(name)
+    if "error" in done:
+        raise done["error"]
+    return done["value"]
+
+
+def keyring_call(call: Callable[[], T], what: str) -> T:
+    """``call()``, one read or one write of an item through the backend :func:`check_backend`
+    returned (``what`` says which, for the message). On Linux it is bounded by
+    :data:`CALL_TIMEOUT`, and once one has not answered in this process none is made again (the
+    module docstring says why); past the bound, or after one that did not answer, it is a
+    :class:`Unanswered`, a :class:`StoreError`. Elsewhere it is ``call()``."""
+    if paths.os_family() not in BOUNDED:
+        return call()
+    if _UNANSWERED.is_set():
+        raise Unanswered(
+            "the keyring did not answer earlier in this process, so it is not asked again; "
+            "try again in a new one"
+        )
+    try:
+        return _within(CALL_TIMEOUT, call, f"keyring {what}")
+    except _NotAnswered:
+        _UNANSWERED.set()
+        message = f"the keyring did not answer a {what} within {CALL_TIMEOUT:g} s"
+        if what == "write":
+            # The thread left waiting may still finish it.
+            message += "; whether it was saved is not known, and the next start reads it again"
+        raise Unanswered(message) from None
 
 
 class InsecureKeyring(state.Refused):
@@ -251,6 +355,12 @@ def _build(family: str) -> KeyringBackend:
             from keyring.backends import SecretService
 
             kind = SecretService.Keyring
+            # Bounded: the bus may authenticate and then never answer (the module docstring).
+            try:
+                usable = _within(PROBE_TIMEOUT, lambda: kind.viable, "keyring check")
+            except _NotAnswered:
+                return NoAnswer()
+            return kind() if usable else FailKeyring()
         elif family == "macos":
             from keyring.backends import macOS
 
@@ -279,6 +389,10 @@ def _known(backend: object) -> bool:
 
 def _unfit(backend: object) -> str | None:
     """Why ``backend`` is not the backend the host keeps the item in, or None when it is."""
+    if isinstance(backend, NoAnswer):
+        return (
+            f"has no keyring to store in: the session bus did not answer within {PROBE_TIMEOUT:g} s"
+        )
     if isinstance(backend, FailKeyring):
         return "has no keyring to store in"
     if isinstance(backend, NullKeyring):
@@ -450,7 +564,9 @@ class Item:
     def _load(self) -> dict[str, Any]:
         backend = check_backend()
         try:
-            raw = backend.get_password(self.service, self.username)
+            raw = keyring_call(lambda: backend.get_password(self.service, self.username), "read")
+        except StoreError:
+            raise
         except (KeyringError, OSError) as exc:
             raise StoreError(f"the keyring could not be read ({type(exc).__name__})") from exc
         if raw is None:
@@ -488,6 +604,8 @@ class Item:
         after["written_at"] = now
         text = json.dumps(after, sort_keys=True, separators=(",", ":"))
         try:
-            backend.set_password(self.service, self.username, text)
+            keyring_call(lambda: backend.set_password(self.service, self.username, text), "write")
+        except StoreError:
+            raise
         except (KeyringError, OSError) as exc:
             raise StoreError(f"the keyring could not be written ({type(exc).__name__})") from exc
