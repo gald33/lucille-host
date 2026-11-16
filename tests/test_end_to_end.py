@@ -21,7 +21,7 @@ import pytest
 from switchboard import pairing
 from switchboard.testing import hub
 
-from lucille_host import _switchboard, cli, jobs
+from lucille_host import _switchboard, cli, credentials, jobs, store
 from lucille_host.controls import Controls
 from tests import _audit_hook
 from tests._cli import HostCli
@@ -137,6 +137,20 @@ def _pair_run_forget(flow: Flow, env: HostEnv, *options: str) -> dict[str, Any]:
     seen["lucille"] = lucille
     seen["request"] = request
     return seen
+
+
+def test_forget_leaves_the_credential_item_alone(flow: Flow, host_env: HostEnv) -> None:
+    # forget ends the pair; the user's credentials are their own item, and stay as they were.
+    profile = host_env.dirs.profile
+    creds = credentials.CredentialStore(host_env.dirs.state, profile)
+    creds.save("gmail", "app-password", "correct-horse-battery-staple")
+    item = (credentials.SERVICE, profile)
+    before = host_env.keyring.items[item]
+    seen = _pair_run_forget(flow, host_env)
+    assert seen["forget"].rc == 0, seen["forget"].text
+    assert (store.SERVICE, profile) in host_env.keyring.items
+    assert host_env.keyring.items[item] == before
+    assert creds.value("gmail", "app-password") == "correct-horse-battery-staple"
 
 
 def test_end_to_end_pair_run_forget(flow: Flow, host_env: HostEnv) -> None:

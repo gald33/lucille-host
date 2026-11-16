@@ -1163,14 +1163,14 @@ def test_what_is_not_a_regular_file_is_never_read(
     assert reads == []
 
 
-# Where, in src/lucille_host/, the item may be read or written: the item's one read and one write,
-# which go through the backend the check returned. Nothing deletes the item, and nothing asks
-# keyring for its backend.
+# Where, in src/lucille_host/, an item may be read or written: the pair's item's one read and one
+# write, and the credential item's (credentials.py), each through the backend the same check
+# returned. Nothing deletes an item, and nothing asks keyring for its backend.
 KEYRING_USES = {
     # The host builds its backend itself, and never asks keyring for one (or to find one).
     "get_keyring": set(),
-    "get_password": {"store.Item._load"},
-    "set_password": {"store.Item._save"},
+    "get_password": {"store.Item._load", "credentials.CredentialStore._load"},
+    "set_password": {"store.Item._save", "credentials.CredentialStore._save"},
     "delete_password": set(),
     # Two more ways to the item that bypass the check: a credential read, and a chain's members,
     # which hand out live backends (and load every backend keyring's entry points name). A chain is
