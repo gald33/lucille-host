@@ -180,6 +180,11 @@ class CredentialStore:
             raise
         except (KeyringError, OSError) as exc:
             raise store.StoreError(f"the keyring could not be read ({type(exc).__name__})") from exc
+        except Exception as exc:
+            unusable = store.service_failure(exc, "read")
+            if unusable is None:
+                raise
+            raise unusable from exc
         if raw is None:
             return _empty()
         try:
@@ -206,6 +211,11 @@ class CredentialStore:
             raise store.StoreError(
                 f"the keyring could not be written ({type(exc).__name__})"
             ) from exc
+        except Exception as exc:
+            unusable = store.service_failure(exc, "write")
+            if unusable is None:
+                raise
+            raise unusable from exc
 
 
 def _well_formed(doc: object) -> bool:
