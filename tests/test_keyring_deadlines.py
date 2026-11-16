@@ -10,8 +10,9 @@ from __future__ import annotations
 
 import threading
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
+from typing import Any, TypeVar
 
 import pytest
 
@@ -23,6 +24,7 @@ from tests._keyring import MemoryKeyring
 DEADLINE = 0.2
 WITHIN = 10.0
 SECRET = "correct-horse-battery-staple"
+T = TypeVar("T")
 
 
 class Unanswering(MemoryKeyring):
@@ -59,6 +61,28 @@ class _Both:
             event.set()
 
 
+def _in_time(call: Callable[[], T]) -> T:
+    """``call()``, on a thread of its own: a call that has not returned within :data:`WITHIN`, as
+    one with no deadline would not, fails the test rather than hang it. The backend is let answer
+    when the test ends (:func:`unanswering`), so the thread ends then."""
+    done: dict[str, Any] = {}
+
+    def run() -> None:
+        try:
+            done["value"] = call()
+        except BaseException as exc:  # noqa: BLE001 - handed to the test thread
+            done["error"] = exc
+
+    thread = threading.Thread(target=run, daemon=True)
+    thread.start()
+    thread.join(WITHIN)
+    if thread.is_alive():
+        pytest.fail(f"the keyring call did not return within {WITHIN:g} s: it has no deadline")
+    if "error" in done:
+        raise done["error"]
+    return done["value"]
+
+
 @pytest.fixture(autouse=True)
 def _bounded_here(monkeypatch: pytest.MonkeyPatch) -> None:
     """This system's keyring calls bounded by a short deadline, with no call yet unanswered."""
@@ -84,11 +108,11 @@ def test_a_read_that_does_not_answer_is_a_store_error(
     item = store.Item(host_env.dirs.state, host_env.dirs.profile)
     started = time.monotonic()
     with pytest.raises(store.Unanswered, match=r"did not answer a read within 0.2 s$"):
-        item.read()
+        _in_time(item.read)
     assert time.monotonic() - started < WITHIN
     # The process asks the keyring nothing more: the next read fails at once, unasked.
     with pytest.raises(store.StoreError, match="not asked again"):
-        item.read()
+        _in_time(item.read)
     assert unanswering.calls == 1
 
 
@@ -98,20 +122,20 @@ def test_a_write_that_does_not_answer_is_a_store_error(
     # Reads answer; writes do not.
     unanswering.read_gate.set()
     item = store.Item(host_env.dirs.state, host_env.dirs.profile)
-    assert item.read()["pairs"]["records"] == {}
+    assert _in_time(item.read)["pairs"]["records"] == {}
 
     def edit(doc: dict[str, object]) -> None:
         doc["shared"] = {"seq": 1}
 
     with pytest.raises(store.Unanswered, match="did not answer a write within 0.2 s") as info:
-        item.change(edit)
+        _in_time(lambda: item.change(edit))
     assert "whether it was saved is not known" in str(info.value)
     calls = unanswering.calls
     # Nothing more is sent, a write that could land after a newer one least of all.
     with pytest.raises(store.StoreError, match="not asked again"):
-        item.change(edit)
+        _in_time(lambda: item.change(edit))
     with pytest.raises(store.StoreError, match="not asked again"):
-        item.read()
+        _in_time(item.read)
     assert unanswering.calls == calls
 
 
@@ -127,7 +151,7 @@ def test_a_write_that_lands_after_its_deadline_is_read_whole_by_the_next_process
         doc["shared"] = {"seq": 1}
 
     with pytest.raises(store.Unanswered, match="whether it was saved is not known"):
-        item.change(edit)
+        _in_time(lambda: item.change(edit))
     writes = unanswering.writes
     unanswering.write_gate.set()
     deadline = time.monotonic() + WITHIN
@@ -136,7 +160,7 @@ def test_a_write_that_lands_after_its_deadline_is_read_whole_by_the_next_process
     assert unanswering.writes == writes + 1
     # A new process, which asks the keyring again.
     monkeypatch.setattr(store, "_UNANSWERED", threading.Event())
-    doc = store.Item(host_env.dirs.state, host_env.dirs.profile).read()
+    doc = _in_time(store.Item(host_env.dirs.state, host_env.dirs.profile).read)
     assert doc["shared"] == {"seq": 1}
     assert doc["pairs"]["records"] == {}
 
@@ -146,10 +170,27 @@ def test_a_credential_read_or_write_that_does_not_answer_is_a_store_error(
 ) -> None:
     creds = credentials.CredentialStore(tmp_path / "state", "default")
     with pytest.raises(store.StoreError, match="did not answer a read") as info:
-        creds.save("gmail", "x", SECRET)
+        _in_time(lambda: creds.save("gmail", "x", SECRET))
     assert SECRET not in str(info.value)
     with pytest.raises(store.StoreError, match="not asked again"):
-        creds.names()
+        _in_time(creds.names)
+
+
+def test_a_credential_write_that_does_not_answer_is_a_store_error(
+    unanswering: Unanswering, tmp_path: Path
+) -> None:
+    # Reads answer; writes do not.
+    unanswering.read_gate.set()
+    creds = credentials.CredentialStore(tmp_path / "state", "default")
+    assert _in_time(creds.names) == []
+    with pytest.raises(store.Unanswered, match="did not answer a write within 0.2 s") as info:
+        _in_time(lambda: creds.save("gmail", "x", SECRET))
+    assert "whether it was saved is not known" in str(info.value)
+    assert SECRET not in str(info.value)
+    calls = unanswering.calls
+    with pytest.raises(store.Unanswered, match="not asked again"):
+        _in_time(creds.names)
+    assert unanswering.calls == calls
 
 
 def test_a_call_that_answers_in_time_is_unchanged(
@@ -161,8 +202,8 @@ def test_a_call_that_answers_in_time_is_unchanged(
     def edit(doc: dict[str, object]) -> None:
         doc["shared"] = {"seq": 1}
 
-    item.change(edit)
-    assert item.read()["shared"] == {"seq": 1}
+    _in_time(lambda: item.change(edit))
+    assert _in_time(item.read)["shared"] == {"seq": 1}
 
 
 def test_what_a_call_raises_is_raised_as_before(
@@ -184,7 +225,8 @@ def test_on_a_system_whose_calls_are_not_bounded_a_slow_call_is_waited_for(
     # The macOS Keychain may wait on its own prompt, and is not bounded.
     monkeypatch.setattr(store, "BOUNDED", frozenset())
     threading.Timer(DEADLINE * 3, unanswering.answer.set).start()
-    assert store.Item(host_env.dirs.state, host_env.dirs.profile).read()["shared"] == {}
+    item = store.Item(host_env.dirs.state, host_env.dirs.profile)
+    assert _in_time(item.read)["shared"] == {}
 
 
 @pytest.mark.parametrize(
