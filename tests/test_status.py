@@ -1378,6 +1378,51 @@ def test_forget_whose_leave_the_keyring_did_not_answer_keeps_the_gate_record(
     assert host.opened.names() == [] and host.gate() is None
 
 
+def test_forget_of_a_dropped_pair_whose_leave_the_keyring_did_not_answer_says_so(
+    host: RunHost, command: Commands, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Issue 39: the library dropped the pair, and a keyring write within the leave of a room still
+    # held over it is not answered in time. Whether the room was left is not known, so forget says
+    # that, not that the room could not be left. The gate's record is deleted all the same: the
+    # pair was gone before the leave began, so it is not deleted on the assumption that the leave
+    # failed. The next start reads the store afresh, and forget leaves the room.
+    host.start()
+    host.offer("work-1")
+    host.stop()
+    assert host.gate() is not None
+    with host.opened.pairs.lock():
+        host.opened.pairs.delete(host.name)  # the library's drop, and nothing after it
+    monkeypatch.setattr(store, "BOUNDED", frozenset({paths.os_family()}))
+    monkeypatch.setattr(store, "_UNANSWERED", threading.Event())
+    real = _switchboard.Link.leave_room
+    unknown = (
+        "the keyring did not answer a write within 60 s; whether it was saved is not known, and "
+        "the next start reads it again"
+    )
+
+    def unanswered(opened: _switchboard.Link, name: str) -> _switchboard.RoomLeft:
+        store._UNANSWERED.set()
+        raise store.Unanswered(unknown)
+
+    monkeypatch.setattr(_switchboard.Link, "leave_room", unanswered)
+    ran = command("--json", "forget")
+    assert ran.rc == 1, ran.text
+    assert _objects(ran.out) == [
+        {"v": 1, "type": "error", "code": "store_error", "message": unknown}
+    ]
+    assert host.gate() is None
+    # The next start: a new process, which asks the keyring again.
+    monkeypatch.setattr(store, "_UNANSWERED", threading.Event())
+    monkeypatch.setattr(_switchboard.Link, "leave_room", real)
+    ran = command("forget")
+    assert ran.rc == 0, ran.err
+    assert ran.out == (
+        f"left: pair {host.name} was gone from this computer already, and the work rooms still "
+        "held over it are left now\n"
+    )
+    assert host.opened.names() == []
+
+
 def test_forget_verb_with_nothing_left_of_a_dropped_pair_says_no_pair_is_held(
     host: RunHost, command: Commands
 ) -> None:

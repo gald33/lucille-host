@@ -530,7 +530,16 @@ Notes:
   with a fresh code, and share it with nobody), `expired` (it did not finish in time: start again), `ended`
   or `none`, and exits 1. `pair` refuses while a pair is held (`held`: disconnect first) and while another
   `pair` of the profile runs (`busy`). `--hub` and `--store-file` are for testing against a local hub, and
-  for a computer with no keyring; both are saved for the profile.
+  for a computer with no keyring; both are saved for the profile. With `--store-file`, a keyring the host
+  refuses (`insecure_keyring`) is never read, and the pair is kept in the file store. So is a keyring whose
+  Secret Service cannot be reached or started at the first read (one the session bus lists and that fails
+  to start, or whose program does not exist, or a bus that refuses the connection), whether the
+  Secret Service's own libraries say so or keyring does, from them: the host then warns on stderr that the keyring could not
+  be read, naming the error's class and D-Bus error name, and that the pair is kept in a file instead. It
+  does not fall back on any other `store_error`: a read the keyring did not answer in time, a locked
+  keyring, an unlock prompt the user dismissed, or any other error of a Secret Service that runs; nor once
+  that process has tried to write the pair to the keyring, which could leave one pair there and another in
+  the file.
 - **Standard input of `pair --code-stdin`** is one line: the code, with or without a newline after it.
   The host reads that line and nothing more. It may exit before it reads anything (`code_in_argv`,
   `bad_hub`, `busy`, `held`, ...), so a shell writes the code at once, closes standard input, and ignores
@@ -657,7 +666,7 @@ limit, as it runs every verb, and stops it when the limit passes.
 | `os_error` | A file the host needed could not be read or written; the message names it. |
 | `startup_refused` | The host does not start here: it runs as root, or `SWITCHBOARD_*` variables are set. |
 | `insecure_keyring` | The keyring backend the host keeps the pair in cannot be used here, and the message says it has no keyring to store in: keyring's Secret Service backend on Linux (no session bus, or no Secret Service on it), its Keychain backend on macOS. The host builds that backend itself and takes no other, so a Linux desktop whose only keyring is KWallet, with no Secret Service on the session bus, now sees that it has no keyring to store in, and one that runs both KWallet and a Secret Service gets the Secret Service. Or the session bus did not answer the Secret Service's check within 5 s (it took the connection and never replied), and the message says it has no keyring to store in: the session bus did not answer within 5 s; the check is not asked again in that process. Or keyring's own off switch is set, and the message says the keyring backend stores nothing: `PYTHON_KEYRING_BACKEND`, or the `default-keyring` of keyring's `keyringrc.cfg`, names keyring's null backend, `keyring.backends.null.Keyring` (what `keyring --disable` writes), or its fail backend, `keyring.backends.fail.Keyring`. Both messages point to `--store-file`. Any other value of either is not consulted, and nothing either names is imported. |
-| `store_error` | The store that keeps the pair could not be used. On Linux that includes a read or a write of the keyring item that the Secret Service did not answer within 60 s, and the message says so: the keyring did not answer a read (or a write) within 60 s. For a write it also says that whether it was saved is not known: it may still land before the process exits, so the host removes or rewrites none of its own files on the assumption that it failed, and the next start reads the item again. That process then asks the keyring nothing more, and every later read and write in it fails at once, with a message that says to try again in a new process. |
+| `store_error` | The store that keeps the pair could not be used. On Linux that includes a read or a write of the keyring item that the Secret Service did not answer within 60 s, and the message says so: the keyring did not answer a read (or a write) within 60 s. For a write it also says that whether it was saved is not known: it may still land before the process exits, so the host removes or rewrites none of its own files on the assumption that it failed, and the next start reads the item again. That process then asks the keyring nothing more, and every later read and write in it fails at once, with a message that says to try again in a new process. It also includes a read or a write that the Secret Service's own libraries fail, past keyring: a service the session bus lists as one it can start, which then fails to start, or a bus that went away. The message names the error's class and, for a D-Bus error, its name, and below a keyring error the Secret Service error it was raised from, for example: the keyring could not be read (DBusErrorResponse: org.freedesktop.DBus.Error.Spawn.ChildExited), or (InitError, from DBusErrorResponse: org.freedesktop.DBus.Error.Spawn.ExecFailed). |
 | `runtime_folder` | The host's private runtime folder is missing, or is not private. |
 | `state_invalid` | A file of the host's own holds something else. |
 | `policy_invalid` | The local policy file is invalid. Nothing changes it but a verb. |

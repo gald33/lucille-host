@@ -1089,7 +1089,21 @@ def _answer(
         # is looked in.
         session = link.open_session(dirs, wanted, say=_say, warn=_warn)
         opened = wanted
-    if session.held():
+    try:
+        held = session.held()
+    except store.KeyringUnusable as exc:
+        # The keyring was accepted, and then its Secret Service could not be reached or started at
+        # the first read (issue 38).
+        # With --store-file, the file store is looked in instead, as for a keyring refused at
+        # open; never once this process has tried to write the pair item to the keyring, which
+        # could leave one pair there and another in the file.
+        if wanted.store != "file" or opened.store == "file" or store.pair_write_tried():
+            raise
+        _warn(f"{exc}; as --store-file asks, the pair is kept in a file instead")
+        session = link.open_session(dirs, wanted, say=_say, warn=_warn)
+        opened = wanted
+        held = session.held()
+    if held:
         raise _Refused(
             "held",
             "Disconnect first: this computer already holds a pair (`lucille-host pair reject` "

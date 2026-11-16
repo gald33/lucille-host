@@ -994,7 +994,8 @@ def test_a_write_the_keyring_did_not_answer_in_time_is_read_again_by_the_next_st
     lucille = cli.lucille()
     code = lucille.start()
     try:
-        ran = cli.run("--json", "pair", "--code-stdin", stdin=code + "\n")
+        # A write with no deadline would wait for the release below: it fails here instead.
+        ran = cli.run("--json", "pair", "--code-stdin", stdin=code + "\n", timeout=LATE_WAIT)
     finally:
         if not lands:
             backend.lost.set()
@@ -1052,7 +1053,7 @@ def test_a_forget_whose_write_did_not_answer_in_time_keeps_the_gate_record(
     assert kept is not None
     arm.set()
     try:
-        ran = cli.run("--json", "forget")
+        ran = cli.run("--json", "forget", timeout=LATE_WAIT)
     finally:
         if not lands:
             backend.lost.set()
