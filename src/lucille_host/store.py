@@ -100,9 +100,11 @@
   after the backend was built fails each later call (issue 38). secretstorage turns only some D-Bus
   errors into its own, and keyring wraps neither, so these reach the store as secretstorage's
   errors or jeepney's ``DBusErrorResponse``, neither a keyring error nor an ``OSError``. The store
-  gives the classes :data:`SERVICE_ERRORS` names as :class:`KeyringUnusable`, a
-  :class:`StoreError` (``store_error``), whose message names the error's class and a D-Bus error's
-  name, never anything read from the item; any other error is raised as it is.
+  gives the classes :data:`SERVICE_ERRORS` names as a :class:`StoreError` (``store_error``), whose
+  message names the error's class and a D-Bus error's name, never anything read from the item or
+  said with the error; any other error is raised as it is. Those that say the service could not be
+  reached or started are :class:`KeyringUnusable`, on which ``pair --store-file`` may fall back to
+  the file store; a locked collection or a dismissed unlock prompt is not.
 - :func:`check_backend` takes a backend only when its class is exactly the one this system's entry
   in :data:`KNOWN_BACKENDS` names, as its ``(__module__, __qualname__)``, compared as strings. It
   checks the backend the host built when the store is opened, and again before each read and each
@@ -156,7 +158,9 @@ __all__ = [
     "ROOM_STAMPS",
     "SERVICE",
     "SERVICE_ERRORS",
+    "SPAWN_ERRORS",
     "STAMP_EVERY",
+    "UNUSABLE_ERRORS",
     "CALL_TIMEOUT",
     "PROBE_TIMEOUT",
     "InsecureKeyring",
@@ -168,6 +172,7 @@ __all__ = [
     "check_backend",
     "file_lock",
     "keyring_call",
+    "pair_write_tried",
     "service_failure",
     "stamps_only",
 ]
@@ -233,11 +238,13 @@ class Unanswered(StoreError):
 
 
 class KeyringUnusable(StoreError):
-    """A read or write of an item that the Secret Service failed with an error of its own, not
-    keyring's: secretstorage's, or a D-Bus error reply jeepney raises (issue 38). Its service can
-    be listed as one the bus starts on demand and then fail to start, or its bus can go away after
-    the backend was built. The message names the error's class, and a D-Bus error's name, never
-    anything read from the item."""
+    """A read or write of an item that the Secret Service could not be reached or started for, said
+    by an error of its own libraries rather than keyring's (issue 38): its service can be listed as
+    one the bus starts on demand and then fail to start, or its bus can go away after the backend
+    was built. ``pair --store-file`` may fall back to the file store on it. Its own libraries'
+    other errors (:data:`SERVICE_ERRORS`) are a plain :class:`StoreError`. The message names the
+    error's class, and a D-Bus error's name, never anything read from the item or said with the
+    error."""
 
 
 class NoAnswer(FailKeyring):
@@ -253,6 +260,17 @@ class _NotAnswered(Exception):
 # Set once a read or write of the keyring has not answered within CALL_TIMEOUT in this process:
 # every later one then fails at once (the module docstring says why).
 _UNANSWERED = threading.Event()
+
+# Set once this process has sent, or tried to send, a write of the pair item to the keyring
+# (:func:`pair_write_tried`).
+_PAIR_WRITE_TRIED = threading.Event()
+
+
+def pair_write_tried() -> bool:
+    """Whether this process has tried to write the pair item to the keyring, whether or not the
+    write landed: ``pair --store-file`` then never falls back to the file store, which could leave
+    one pair in the keyring and another in the file."""
+    return _PAIR_WRITE_TRIED.is_set()
 
 
 def _within(seconds: float, call: Callable[[], T], name: str) -> T:
@@ -301,11 +319,12 @@ def keyring_call(call: Callable[[], T], what: str) -> T:
         raise Unanswered(message) from None
 
 
-# The errors the Secret Service's own libraries raise past keyring, at a read or write of an item
-# (:class:`KeyringUnusable`), by their class's ``(__module__, __qualname__)``, compared as strings
-# as :data:`KNOWN_BACKENDS` is: so that neither library is imported here, and macOS, which has
-# neither, needs nothing. Every error class secretstorage 3.5 defines, and jeepney's D-Bus error
-# reply. Any other error, a subclass of one of these among them, is raised as it is.
+# The errors the Secret Service's own libraries raise past keyring, at a read or write of an item,
+# by their class's ``(__module__, __qualname__)``, compared as strings as :data:`KNOWN_BACKENDS`
+# is: so that neither library is imported here, and macOS, which has neither, needs nothing. Each
+# is a :class:`StoreError`: every error class secretstorage 3.5 defines (its base, and each of its
+# subclasses named, since the class is matched exactly), and jeepney's D-Bus error reply. Any other
+# error, a subclass of one of these among them, is raised as it is.
 SERVICE_ERRORS: Final = frozenset(
     {
         ("secretstorage.exceptions", "SecretStorageException"),
@@ -316,26 +335,43 @@ SERVICE_ERRORS: Final = frozenset(
         ("jeepney.wrappers", "DBusErrorResponse"),
     }
 )
+# Of those, the ones that say the Secret Service could not be reached or started
+# (:class:`KeyringUnusable`): secretstorage's error for no service, a bus that refused the
+# connection, a service that failed to exec or did not reply; and a D-Bus error reply whose name
+# is one of the bus's errors for a service it could not start (``Spawn.ChildExited``, say). The
+# others are not: a locked collection, a dismissed unlock prompt (the user said no), no collection
+# to keep the item in, or any other reply, which a service that runs gives.
+UNUSABLE_ERRORS: Final = frozenset(
+    {("secretstorage.exceptions", "SecretServiceNotAvailableException")}
+)
 _ERROR_REPLY: Final = ("jeepney.wrappers", "DBusErrorResponse")
+SPAWN_ERRORS: Final = "org.freedesktop.DBus.Error.Spawn."
 
 
 # A D-Bus error name, as the bus sends it: dotted, each element a name, 255 bytes at most.
 _DBUS_ERROR_NAME: Final = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)+")
 
 
-def service_failure(exc: Exception, what: str) -> KeyringUnusable | None:
-    """``exc`` as a :class:`KeyringUnusable`, when its class is one of :data:`SERVICE_ERRORS`,
-    raised by a ``what`` (read or write) of an item; None otherwise, for the caller to raise as it
-    is. A D-Bus error reply's error name is given when it is one."""
+def service_failure(exc: Exception, what: str) -> StoreError | None:
+    """``exc`` as a :class:`StoreError`, when its class is one of :data:`SERVICE_ERRORS`, raised by
+    a ``what`` (read or write) of an item: a :class:`KeyringUnusable` when it says the service could
+    not be reached or started (:data:`UNUSABLE_ERRORS`, :data:`SPAWN_ERRORS`). None otherwise, for
+    the caller to raise as it is. A D-Bus error reply's error name is given when it is one; nothing
+    else said with the error is."""
     kind = (type(exc).__module__, type(exc).__qualname__)
     if kind not in SERVICE_ERRORS:
         return None
     detail = type(exc).__name__
     name = getattr(exc, "name", None) if kind == _ERROR_REPLY else None
-    if isinstance(name, str) and len(name) <= 255 and _DBUS_ERROR_NAME.fullmatch(name):
+    if not (isinstance(name, str) and len(name) <= 255 and _DBUS_ERROR_NAME.fullmatch(name)):
+        name = None
+    if name is not None:
         detail += f": {name}"
     verb = "read" if what == "read" else "written"
-    return KeyringUnusable(f"the keyring could not be {verb} ({detail})")
+    message = f"the keyring could not be {verb} ({detail})"
+    if kind in UNUSABLE_ERRORS or (name is not None and name.startswith(SPAWN_ERRORS)):
+        return KeyringUnusable(message)
+    return StoreError(message)
 
 
 class InsecureKeyring(state.Refused):
@@ -666,6 +702,7 @@ class Item:
         backend = check_backend()
         after["written_at"] = now
         text = json.dumps(after, sort_keys=True, separators=(",", ":"))
+        _PAIR_WRITE_TRIED.set()
         try:
             keyring_call(lambda: backend.set_password(self.service, self.username, text), "write")
         except StoreError:

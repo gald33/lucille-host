@@ -14,6 +14,8 @@ These raise the real classes, from a backend in memory, so they need both librar
 
 from __future__ import annotations
 
+import inspect
+import threading
 from collections.abc import Callable, Iterator
 from pathlib import Path
 from types import SimpleNamespace
@@ -45,20 +47,74 @@ def _reply(name: object) -> Exception:
     return wrappers.DBusErrorResponse(message)
 
 
-def _raised() -> list[tuple[Callable[[], Exception], str]]:
-    """Each error, and what the store's message says of it."""
+ACCESS_DENIED = "org.freedesktop.DBus.Error.AccessDenied"
+
+
+def _raised() -> list[Any]:
+    """Each error, what the store's message says of it, and whether it says the service could not
+    be reached or started (:class:`store.KeyringUnusable`) or is a plain store error."""
     errors = secretstorage_exceptions
-    return [
-        (lambda: _reply(SPAWN_FAILED), f"DBusErrorResponse: {SPAWN_FAILED}"),
+    unusable, plain = True, False
+    cases = [
+        (lambda: _reply(SPAWN_FAILED), f"DBusErrorResponse: {SPAWN_FAILED}", unusable),
+        (
+            lambda: _reply("org.freedesktop.DBus.Error.Spawn.ChildSignaled"),
+            "DBusErrorResponse: org.freedesktop.DBus.Error.Spawn.ChildSignaled",
+            unusable,
+        ),
         (
             lambda: errors.SecretServiceNotAvailableException("[Errno 111] Connection refused"),
             "SecretServiceNotAvailableException",
+            unusable,
         ),
-        (lambda: errors.LockedException("the collection is locked"), "LockedException"),
-        (lambda: errors.PromptDismissedException("dismissed"), "PromptDismissedException"),
-        (lambda: errors.ItemNotFoundException("gone"), "ItemNotFoundException"),
-        (lambda: errors.SecretStorageException("other"), "SecretStorageException"),
+        # A service that runs, and says no: not one to fall back from.
+        (lambda: _reply(ACCESS_DENIED), f"DBusErrorResponse: {ACCESS_DENIED}", plain),
+        (lambda: errors.LockedException("Collection is locked!"), "LockedException", plain),
+        (
+            lambda: errors.PromptDismissedException("Prompt dismissed."),
+            "PromptDismissedException",
+            plain,
+        ),
+        (
+            lambda: errors.ItemNotFoundException("No collections found."),
+            "ItemNotFoundException",
+            plain,
+        ),
+        (lambda: errors.SecretStorageException("other"), "SecretStorageException", plain),
     ]
+    ids = [
+        "spawn-child-exited",
+        "spawn-child-signaled",
+        "not-available",
+        "access-denied",
+        "locked",
+        "prompt-dismissed",
+        "item-not-found",
+        "base",
+    ]
+    return [pytest.param(*case, id=name) for case, name in zip(cases, ids, strict=True)]
+
+
+def _check(raised: BaseException, unusable: bool) -> None:
+    assert isinstance(raised, store.StoreError)
+    assert isinstance(raised, store.KeyringUnusable) is unusable
+    assert not isinstance(raised, store.Unanswered)
+
+
+def test_every_error_class_secretstorage_defines_is_named() -> None:
+    # The store matches classes exactly, by name, so a class a later secretstorage adds would
+    # reach a command as `internal`: this fails first, for the list to be extended, with a case
+    # of its own.
+    defined = {
+        (kind.__module__, kind.__qualname__)
+        for _, kind in inspect.getmembers(secretstorage_exceptions, inspect.isclass)
+        if issubclass(kind, Exception) and kind.__module__ == "secretstorage.exceptions"
+    }
+    named = {kind for kind in store.SERVICE_ERRORS if kind[0] == "secretstorage.exceptions"}
+    assert defined == named
+    # And each named class has a case of its own in _raised().
+    cased = {case.values[1].split(":")[0] for case in _raised()}
+    assert {qualname for _, qualname in store.SERVICE_ERRORS} <= cased
 
 
 class Raising(MemoryKeyring):
@@ -92,38 +148,50 @@ def _edit(doc: dict[str, object]) -> None:
     doc["shared"] = {"seq": 1}
 
 
-@pytest.mark.parametrize(("make", "detail"), _raised())
+@pytest.mark.parametrize(("make", "detail", "unusable"), _raised())
 def test_a_service_error_at_a_read_or_write_of_the_pair_item_is_a_store_error(
-    raising: Raising, host_env: HostEnv, make: Callable[[], Exception], detail: str
+    raising: Raising,
+    host_env: HostEnv,
+    make: Callable[[], Exception],
+    detail: str,
+    unusable: bool,
 ) -> None:
     item = store.Item(host_env.dirs.state, host_env.dirs.profile)
     raising.on_read = make
-    with pytest.raises(store.KeyringUnusable) as read:
+    with pytest.raises(store.StoreError) as read:
         item.read()
     assert str(read.value) == f"the keyring could not be read ({detail})"
-    assert isinstance(read.value, store.StoreError)
+    _check(read.value, unusable)
     raising.on_read = None
     raising.on_write = make
-    with pytest.raises(store.KeyringUnusable) as written:
+    with pytest.raises(store.StoreError) as written:
         item.change(_edit)
     assert str(written.value) == f"the keyring could not be written ({detail})"
+    _check(written.value, unusable)
     for message in (str(read.value), str(written.value)):
-        assert BODY not in message and "Errno" not in message
+        assert BODY not in message and "Errno" not in message and "!" not in message
 
 
-@pytest.mark.parametrize(("make", "detail"), _raised())
+@pytest.mark.parametrize(("make", "detail", "unusable"), _raised())
 def test_a_service_error_at_a_read_or_write_of_the_credential_item_is_a_store_error(
-    raising: Raising, tmp_path: Path, make: Callable[[], Exception], detail: str
+    raising: Raising,
+    tmp_path: Path,
+    make: Callable[[], Exception],
+    detail: str,
+    unusable: bool,
 ) -> None:
     creds = credentials.CredentialStore(tmp_path / "state", "default")
     raising.on_read = make
-    with pytest.raises(store.KeyringUnusable, match=r"^the keyring could not be read \("):
+    with pytest.raises(store.StoreError) as read:
         creds.names()
+    assert str(read.value) == f"the keyring could not be read ({detail})"
+    _check(read.value, unusable)
     raising.on_read = None
     raising.on_write = make
-    with pytest.raises(store.KeyringUnusable) as written:
+    with pytest.raises(store.StoreError) as written:
         creds.save("gmail", "x", "correct-horse-battery-staple")
     assert str(written.value) == f"the keyring could not be written ({detail})"
+    _check(written.value, unusable)
 
 
 @pytest.mark.parametrize(
@@ -135,9 +203,11 @@ def test_an_error_reply_s_name_is_given_only_when_it_is_a_d_bus_error_name(
     raising: Raising, host_env: HostEnv, name: object
 ) -> None:
     raising.on_read = lambda: _reply(name)
-    with pytest.raises(store.KeyringUnusable) as read:
+    with pytest.raises(store.StoreError) as read:
         store.Item(host_env.dirs.state, host_env.dirs.profile).read()
     assert str(read.value) == "the keyring could not be read (DBusErrorResponse)"
+    # With no name it can be read by, it does not say the service could not be started.
+    _check(read.value, unusable=False)
 
 
 class _Wider(Exception):
@@ -183,6 +253,8 @@ def cli(
     capsys: pytest.CaptureFixture[str],
     monkeypatch: pytest.MonkeyPatch,
 ) -> Iterator[HostCli]:
+    # No write of the pair item tried yet in this process, whatever earlier tests wrote.
+    monkeypatch.setattr(store, "_PAIR_WRITE_TRIED", threading.Event())
     host = HostCli(h, host_env, tmp_path, capsys, monkeypatch)
     yield host
     host.stopping.set()
@@ -210,3 +282,120 @@ def test_no_command_reports_a_service_error_as_internal(cli: HostCli, raising: R
     assert _support.cli_objects(ran.out) == [{"v": 1, "type": "stopped", "reason": "store_error"}]
     assert ran.err == f"lucille-host: {message}\n"
     assert "Traceback" not in ran.text and "internal" not in ran.text
+
+
+FALLBACK = (
+    f"lucille-host: warning: the keyring could not be read (DBusErrorResponse: {SPAWN_FAILED}); "
+    "as --store-file asks, the pair is kept in a file instead\n"
+)
+
+
+@pytest.mark.parametrize("as_json", [False, True], ids=["text", "json"])
+def test_pair_store_file_falls_back_when_the_service_fails_the_first_read(
+    cli: HostCli, raising: Raising, as_json: bool
+) -> None:
+    # The keyring is accepted at open, and its service fails the first read: with --store-file,
+    # the pair is kept in the file store, and the command says so, and why, with nothing of what
+    # the bus said beside the error's name.
+    raising.on_read = lambda: _reply(SPAWN_FAILED)
+    lucille = cli.lucille()
+    ran = cli.paired(lucille, "--store-file", *(["--json"] if as_json else []))
+    assert ran.err.startswith(FALLBACK), ran.text
+    assert BODY not in ran.text
+    assert "weaker than the OS keyring" in ran.err
+    assert cli.run("pair", "confirm").rc == 0
+    assert cli.held() == [lucille.name]
+    # Nothing was written to the keyring.
+    assert raising.writes == 0 and raising.items == {}
+
+
+def test_pair_without_store_file_does_not_fall_back(cli: HostCli, raising: Raising) -> None:
+    raising.on_read = lambda: _reply(SPAWN_FAILED)
+    lucille = cli.lucille()
+    ran = cli.run("--json", "pair", "--code-stdin", stdin=lucille.start() + "\n")
+    assert ran.rc == 1, ran.text
+    assert _support.cli_objects(ran.out) == [
+        {
+            "v": 1,
+            "type": "error",
+            "code": "store_error",
+            "message": f"the keyring could not be read (DBusErrorResponse: {SPAWN_FAILED})",
+        }
+    ]
+    assert "kept in a file" not in ran.text and not cli.dirs.store_files.exists()
+
+
+def _not_answered() -> Exception:
+    return store.Unanswered("the keyring did not answer a read within 60 s")
+
+
+@pytest.mark.parametrize(
+    ("make", "message"),
+    [
+        (_not_answered, "the keyring did not answer a read within 60 s"),
+        (lambda: OSError(5, "I/O error"), "the keyring could not be read (OSError)"),
+        (
+            lambda: secretstorage_exceptions.PromptDismissedException("Prompt dismissed."),
+            "the keyring could not be read (PromptDismissedException)",
+        ),
+        (
+            lambda: secretstorage_exceptions.LockedException("Collection is locked!"),
+            "the keyring could not be read (LockedException)",
+        ),
+        (
+            lambda: secretstorage_exceptions.ItemNotFoundException("No collections found."),
+            "the keyring could not be read (ItemNotFoundException)",
+        ),
+        (
+            lambda: _reply(ACCESS_DENIED),
+            f"the keyring could not be read (DBusErrorResponse: {ACCESS_DENIED})",
+        ),
+    ],
+    ids=["unanswered", "os-error", "prompt-dismissed", "locked", "item-not-found", "access-denied"],
+)
+def test_pair_store_file_does_not_fall_back_on_any_other_store_error(
+    cli: HostCli, raising: Raising, make: Callable[[], Exception], message: str
+) -> None:
+    # A read that did not answer may be followed by a write of it that lands; a service that runs
+    # and says no (the user dismissed its unlock prompt, say) is not one to fall back from; any
+    # other store error is not the service failing. None moves the pair to the file store.
+    raising.on_read = make
+    lucille = cli.lucille()
+    ran = cli.run("--json", "pair", "--code-stdin", "--store-file", stdin=lucille.start() + "\n")
+    assert ran.rc == 1, ran.text
+    [error] = _support.cli_objects(ran.out)
+    assert (error["code"], error["message"]) == ("store_error", message)
+    assert "kept in a file" not in ran.text and not cli.dirs.store_files.exists()
+
+
+def test_a_write_of_the_pair_item_tried_is_remembered_whether_or_not_it_landed(
+    raising: Raising, host_env: HostEnv, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(store, "_PAIR_WRITE_TRIED", threading.Event())
+    item = store.Item(host_env.dirs.state, host_env.dirs.profile)
+    item.read()
+    assert not store.pair_write_tried()
+    raising.on_write = lambda: _reply(SPAWN_FAILED)
+    with pytest.raises(store.KeyringUnusable):
+        item.change(_edit)
+    assert store.pair_write_tried()
+    # The credential item is another item: its writes are not the pair's.
+    monkeypatch.setattr(store, "_PAIR_WRITE_TRIED", threading.Event())
+    raising.on_write = None
+    credentials.CredentialStore(host_env.dirs.state, "default").save("gmail", "x", "a-secret")
+    assert not store.pair_write_tried()
+
+
+def test_pair_store_file_never_falls_back_once_a_write_of_the_pair_item_was_tried(
+    cli: HostCli, raising: Raising
+) -> None:
+    # A write tried in this process may have landed: falling back could leave one pair in the
+    # keyring and another in the file.
+    store._PAIR_WRITE_TRIED.set()
+    raising.on_read = lambda: _reply(SPAWN_FAILED)
+    lucille = cli.lucille()
+    ran = cli.run("--json", "pair", "--code-stdin", "--store-file", stdin=lucille.start() + "\n")
+    assert ran.rc == 1, ran.text
+    [error] = _support.cli_objects(ran.out)
+    assert error["code"] == "store_error"
+    assert "kept in a file" not in ran.text and not cli.dirs.store_files.exists()
