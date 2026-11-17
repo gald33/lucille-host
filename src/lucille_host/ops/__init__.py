@@ -27,15 +27,21 @@ changes an enabled entry disables it until the user enables it again.
 An entry is one of three kinds: an argv template (it runs a child), :class:`InProcess` (it calls a
 reviewed module-level function in the host's own process), or neither (``host.describe``, whose
 reply the host builds itself). An in-process entry is for an operation whose inputs cannot go in an
-argv, such as a token held by the process that embeds the host. Its definition hash covers its code
-path: the function's module and qualified name, and the name and SHA-256 of each source file the
-entry names as on its path (its own module's among them), read when the entry is defined. A release
-that changes any of that code turns an enabled entry off, as a changed argv does. The function gets
-a :class:`Call` (read-only arguments, its time limit and deadline, and a ``stop`` it must poll) and
-returns a :class:`Result`; it raises :class:`TimedOut` when it ran past its deadline and
-:class:`Stopped` when ``stop`` said so. The host cannot kill a thread, so an in-process function
-that ignores its deadline and ``stop`` runs on: its review is what bounds it. No in-process entry
-takes a folder alias.
+argv, such as a token held by the process that embeds the host. Its definition hash covers the
+function's module and qualified name, and the name and SHA-256 of each source file the entry names
+as on its path, its own module's among them, read when the entry is defined. A release that
+changes any of those files turns an enabled entry off, as a changed argv does. What the hash does
+NOT cover is any code the entry does not name: a module it imports and leaves out of ``files``, an
+installed library and its version, ``lucille_host`` itself, the interpreter. Naming every file on
+the path is the review's job; the host checks only that the function's own module is among them.
+
+The function gets a :class:`Call` (read-only arguments, its time limit and deadline, and a ``stop``
+it should poll) and returns a :class:`Result`; it raises :class:`TimedOut` when it ran past its
+deadline and :class:`Stopped` when ``stop`` said so. The host runs it on a thread of its own and
+bounds it whether or not it polls (``jobs._call_in_process``): past its deadline, or once killed or
+abandoned, it gets a short grace to return, and then the host replies without it. A thread cannot
+be killed, so a function that ignores ``stop`` runs on after that reply, and what it does then
+still happens. No in-process entry takes a folder alias.
 
 Each entry also carries what a shell shows of it (:class:`About`, ``spec/CLI.md`` section 8): a few
 plain words for what it does, what Lucille gets when it runs, whether a reply can carry the
@@ -147,7 +153,9 @@ class InProcess:
     ``Path(__file__)``). Each is read and hashed here, when the entry is defined, so the hash
     describes the code the process loaded; the hash holds each file's name and digest, never where
     it is, so it is the same on every computer. Which files are on the path is the review's to
-    check: the host can only see that the function's own module is named."""
+    check. The host checks that one file's path ends with the function's dotted module path
+    (``a/b/c.py`` or ``a/b/c/__init__.py`` for ``a.b.c``); it cannot see the module's file itself
+    without the reflection the runtime does not use."""
 
     function: Callable[[Call], Result]
     files: tuple[Path, ...]
@@ -162,10 +170,15 @@ class InProcess:
             raise ValueError("an in-process operation is a named module-level function")
         if not qualname.isidentifier():
             raise ValueError("an in-process operation is a named module-level function")
-        names = {path.name for path in self.files}
-        own = module.rpartition(".")[2] + ".py"
-        if own not in names and "__init__.py" not in names:
-            raise ValueError(f"the files of {module}:{qualname} do not include its module, {own}")
+        parts = module.split(".")
+        endings = ((*parts[:-1], parts[-1] + ".py"), (*parts, "__init__.py"))
+        if not any(
+            path.parts[-len(ending) :] == ending for path in self.files for ending in endings
+        ):
+            raise ValueError(
+                f"the files of {module}:{qualname} do not include its module, "
+                f"{'/'.join(endings[0])}"
+            )
         sources = []
         for path in self.files:
             try:
