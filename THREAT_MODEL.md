@@ -74,6 +74,11 @@ release must have. The full design is [decisions/0001-host-design.md](decisions/
   runs from one, and when. It holds no argument, folder, credential, request or reply, and is kept at
   mode 0600 in a folder of mode 0700, but it still tells anyone who can read your files which of the
   host's commands ran, and when. It is there for the Mac app's checks; nothing reads it at run time.
+  Any process running as you can also write a line of its own in the right shape, and the Mac app's
+  placement check would take it as the app's own host: the record is the host's word only as far as
+  your account is. And any command counts for that check, `--version` and `status` as much as `run`.
+  Every command, `--version` included, also makes the profile's state folder, and each missing folder
+  above it, at mode 0700, and sets the state folder to mode 0700 where it was there already.
 - Switchboard's signer-socket hazard is shown for one user. That another local user could exploit it on
   Linux with `XDG_RUNTIME_DIR` unset is inferred, not tested.
 - The leak-path analysis above has not been repeated for the offered work rooms.

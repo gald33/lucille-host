@@ -18,66 +18,104 @@ word, without catching a process that may run for a fraction of a second (spec/C
 Nothing reads it at run time, and nothing sends it anywhere.
 
 The record is written before the command's work starts, and it never fails the command: a record
-that cannot be written is skipped, and nothing is said. The file is appended to, one line at a
-time; once it holds more than :data:`MAX_BYTES`, the command that finds it so keeps the last
-:data:`KEEP` lines, under the file's own lock, which it only tries for.
+that cannot be written is skipped, and nothing is said. It is only ever a regular file: a FIFO,
+a device, a symbolic link or a file with another name linked to it is left alone. Each line is
+appended under the record's lock, waited for at most :data:`LOCK_WAIT` seconds, only while
+another command holds it. Once the record holds more than :data:`MAX_BYTES`, the command that
+finds it so replaces it by its last :data:`KEEP_BYTES` bytes, from the first whole line in them,
+written beside it and renamed over it, so no line written after the cut is lost and a reader
+never finds the record empty or half written.
+
+Any process of the same user can write a line of its own, in the right shape; the record is the
+host's word only as far as the user's own account is trusted (THREAT_MODEL.md, Known gaps).
 """
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
+import stat
 import sys
+import tempfile
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Final
 
 from lucille_host import paths
 
-__all__ = ["FILE", "KEEP", "MAX_BYTES", "RUNTIME_IN_APP", "command_of", "record"]
+__all__ = ["FILE", "KEEP_BYTES", "MAX_BYTES", "MAX_LINE", "RUNTIME_IN_APP", "command_of", "record"]
 
 FILE: Final = "runs.jsonl"
 VERSION: Final = 1
-# The record is cut back to its last KEEP lines once it is larger than MAX_BYTES. A line is about
-# 150 bytes, so the file stays under 64 KiB and holds the last few hundred commands.
+# The record is cut back to its last KEEP_BYTES bytes (whole lines) once it is larger than
+# MAX_BYTES, so it is never larger than MAX_BYTES and one line. A line is about 150 bytes, and
+# never more than MAX_LINE: the record holds the last few hundred commands.
 MAX_BYTES: Final = 64 * 1024
-KEEP: Final = 200
+KEEP_BYTES: Final = MAX_BYTES // 2
+MAX_LINE: Final = 1024
+# How long a command waits, at most, for the record's lock while another command holds it, and
+# how often it tries; past that, its line is skipped.
+LOCK_WAIT: Final = 0.2
+LOCK_RETRY: Final = 0.002
+_FLAGS: Final = (
+    os.O_RDWR
+    | os.O_APPEND
+    | os.O_CREAT
+    | os.O_NOFOLLOW
+    | os.O_NONBLOCK
+    | os.O_NOCTTY
+    | os.O_CLOEXEC
+)
 # Where an app bundle keeps the runtime (tools/macos/build_app.py, RUNTIME_IN_APP).
 RUNTIME_IN_APP: Final = "/Contents/Resources/runtime/bin/lucille-host-runtime"
 
 
 def command_of(words: Sequence[str], verbs: Sequence[str]) -> tuple[str, str] | None:
-    """The profile and the command a command line names, read without parsing it: the first word
-    before ``--`` that is neither an option nor an option's value, where it is one of ``verbs``;
-    else ``version`` where there is no such word, or the line asks for ``--version``. None where
-    the line names neither, or asks for help, so that no other word is ever recorded."""
+    """The profile and the command a command line names, read as the parser reads it but without
+    parsing it. The options before the first plain word are the parser's own (``--profile``,
+    ``--version``, ``--help``, ``--json``, each also by an abbreviation the parser takes, such as
+    ``--prof``); after ``--`` every word is plain. The command is the first plain word, where it
+    is one of ``verbs``; else ``version`` where no plain word comes before ``--version``, or there
+    is none and no help is asked for. None where the line names neither, so that no other word is
+    ever recorded."""
     profile = paths.DEFAULT_PROFILE
-    command = None
-    plain = []
-    given = list(words[: words.index("--")] if "--" in words else words)
-    skip = False
-    for index, word in enumerate(given):
-        if skip:
-            skip = False
-            continue
-        if word == "--profile":
-            skip = True
-            if index + 1 < len(given):
-                profile = given[index + 1]
-            continue
-        if word.startswith("--profile="):
-            profile = word.removeprefix("--profile=")
-            continue
-        if word.startswith("-"):
-            continue
-        plain.append(word)
-        if len(plain) == 1 and word in verbs:
-            command = word
-    asks_help = "-h" in given or "--help" in given
-    if command is None and not asks_help and ("--version" in given or not plain):
-        command = "version"
-    return None if command is None else (profile, command)
+    asks_help = False
+    given = list(words)
+    index = 0
+    while index < len(given):
+        word = given[index]
+        index += 1
+        if word == "--":
+            first = given[index] if index < len(given) else None
+            break
+        if not word.startswith("-") or word == "-":
+            first = word
+            break
+        name, equals, value = word.partition("=")
+        if _abbreviates(name, "--profile"):
+            if equals:
+                profile = value
+            elif index < len(given):
+                profile = given[index]
+                index += 1
+        elif _abbreviates(name, "--version"):
+            return profile, "version"
+        elif name == "-h" or _abbreviates(name, "--help"):
+            asks_help = True
+    else:
+        first = None
+    if first is not None:
+        return (profile, first) if first in verbs else None
+    return None if asks_help else (profile, "version")
+
+
+def _abbreviates(word: str, option: str) -> bool:
+    """Whether the parser takes ``word`` for the long option ``option``: the option itself, or a
+    prefix of it no other option of the parser shares (``--p``, ``--v``, ``--h`` and ``--j`` are
+    each one option's)."""
+    return len(word) >= 3 and option.startswith(word)
 
 
 def record(
@@ -98,21 +136,28 @@ def record(
         if not paths.valid_profile(profile):
             return
         state = paths.ensure_dir(paths.dirs(profile).state)
-        line = json.dumps(
-            {
-                "v": VERSION,
-                "command": command,
-                "pid": os.getpid(),
-                "ppid": os.getppid(),
-                "executable": _in_app(sys.executable if executable is None else executable),
-                "started": clock(),
-            },
-            sort_keys=True,
-            separators=(",", ":"),
-        )
-        _append(state / FILE, line + "\n")
+        fields: dict[str, object] = {
+            "v": VERSION,
+            "command": command,
+            "pid": os.getpid(),
+            "ppid": os.getppid(),
+            "executable": _in_app(sys.executable if executable is None else executable),
+            "started": clock(),
+        }
+        line = _line(fields)
+        if len(line) > MAX_LINE:
+            # Only a very long app path makes a line this long: it is kept without the path.
+            line = _line({**fields, "executable": None})
+        if len(line) <= MAX_LINE:
+            _append(state / FILE, line)
     except Exception:  # never fails the command (module docstring)
         return
+
+
+def _line(fields: Mapping[str, object]) -> bytes:
+    return (
+        json.dumps(fields, sort_keys=True, separators=(",", ":"), allow_nan=False) + "\n"
+    ).encode("utf-8")
 
 
 def _in_app(executable: str) -> str | None:
@@ -121,21 +166,77 @@ def _in_app(executable: str) -> str | None:
     return real if real.endswith(RUNTIME_IN_APP) and ".app/" in real else None
 
 
-def _append(path: Path, line: str) -> None:
-    flags = os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW
-    descriptor = os.open(path, flags, 0o600)
-    try:
-        os.write(descriptor, line.encode("utf-8"))
-        if os.fstat(descriptor).st_size <= MAX_BYTES:
-            return
+def _append(path: Path, line: bytes) -> None:
+    """Append ``line`` to the record at ``path``, under the record's lock, which it waits for at
+    most :data:`LOCK_WAIT` seconds; then, where the record is larger than :data:`MAX_BYTES`, cut it
+    (:func:`_cut`). Only a regular file is written: the open never blocks (a FIFO with no reader
+    refuses it, ENXIO; one with a reader is opened and refused), follows no symbolic link, and
+    makes no terminal the process's own. A record replaced since it was opened, by another
+    command's cut, is opened again."""
+    give_up = time.monotonic() + LOCK_WAIT
+    while time.monotonic() < give_up:
+        descriptor = os.open(path, _FLAGS, 0o600)
         try:
-            # Only tried for: a command never waits on its record.
-            os.lockf(descriptor, os.F_TLOCK, 0)
-        except OSError:
+            opened = os.fstat(descriptor)
+            # A file with another name linked to it is left alone. One with none was replaced by
+            # a cut since it was opened: the check below opens the new record.
+            if not stat.S_ISREG(opened.st_mode) or opened.st_nlink > 1:
+                return
+            if not _lock(descriptor, give_up):
+                return
+            now = os.stat(path, follow_symlinks=False)
+            if (now.st_dev, now.st_ino) != (opened.st_dev, opened.st_ino):
+                continue  # cut and replaced since it was opened: the new record is the one
+            size = now.st_size
+            if size and os.pread(descriptor, 1, size - 1) != b"\n":
+                line = b"\n" + line  # a line of its own, whatever was left unended before it
+            _write(descriptor, line)
+            if os.fstat(descriptor).st_size > MAX_BYTES:
+                _cut(path, descriptor)
             return
-        with open(path, encoding="utf-8", errors="replace") as handle:
-            kept = handle.read().splitlines(keepends=True)[-KEEP:]
-        os.ftruncate(descriptor, 0)
-        os.write(descriptor, "".join(kept).encode("utf-8"))
-    finally:
-        os.close(descriptor)
+        finally:
+            os.close(descriptor)  # and with it the lock
+
+
+def _lock(descriptor: int, give_up: float) -> bool:
+    """Take the record's lock (a POSIX lock on the whole file), trying until ``give_up``. Each
+    command holds it for one short write, or for a cut of :data:`KEEP_BYTES` bytes."""
+    os.lseek(descriptor, 0, os.SEEK_SET)  # the lock covers the file from here on: all of it
+    while True:
+        try:
+            os.lockf(descriptor, os.F_TLOCK, 0)
+            return True
+        except OSError:
+            if time.monotonic() >= give_up:
+                return False
+            time.sleep(LOCK_RETRY)
+
+
+def _cut(path: Path, descriptor: int) -> None:
+    """Replace the record, under its lock, by its last :data:`KEEP_BYTES` bytes at most, from the
+    first line that starts in them, written to a new file beside it and renamed over it: a reader
+    sees the old record or the new one, never a part of either, and a crash leaves the old one.
+    Only those bytes are read, however large the record has grown."""
+    size = os.fstat(descriptor).st_size
+    start = max(0, size - KEEP_BYTES)
+    kept = os.pread(descriptor, size - start, start)
+    if start:
+        newline = kept.find(b"\n")
+        kept = kept[newline + 1 :] if newline >= 0 else b""
+    handle, temporary = tempfile.mkstemp(prefix=f".{FILE}.", suffix=".cut", dir=path.parent)
+    try:
+        try:
+            _write(handle, kept)
+        finally:
+            os.close(handle)
+        os.replace(temporary, path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(temporary)
+        raise
+
+
+def _write(descriptor: int, data: bytes) -> None:
+    view = memoryview(data)
+    while view:
+        view = view[os.write(descriptor, view) :]

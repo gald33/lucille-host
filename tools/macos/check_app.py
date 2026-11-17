@@ -248,6 +248,7 @@ import csv
 import fnmatch
 import hashlib
 import json
+import math
 import os
 import plistlib
 import re
@@ -6520,13 +6521,21 @@ def _record_gate(
     near = []
     for entry in records:
         started = entry.get("started")
-        if entry.get("v") != 1 or not isinstance(started, int | float):
+        # A time that is no finite number (json reads NaN and Infinity, and NaN fails every
+        # comparison) or a boolean is no time: such a line is not read.
+        if (
+            entry.get("v") != 1
+            or isinstance(started, bool)
+            or not isinstance(started, int | float)
+            or not math.isfinite(started)
+        ):
             continue
         at = started - opened
         why = []
         if entry.get("executable") != runtime:
             why.append(f"its executable is {entry.get('executable')!r}, not the copy's runtime")
-        if entry.get("ppid") not in apps:
+        ppid = entry.get("ppid")
+        if isinstance(ppid, bool) or not isinstance(ppid, int) or ppid not in apps:
             why.append(f"its parent {entry.get('ppid')} is not the app ({list(apps)})")
         if started < opened:
             why.append("it is from before the open")

@@ -571,7 +571,8 @@ Notes:
   forget. A shell disconnecting takes that as done.
 - **`log`** writes no object, and exits 0, when the audit log has no lines yet; standard error says so.
 - **`policy reset`** sets aside a policy file that is invalid, and only such a file. With a valid file, or
-  none, it changes nothing and refuses `not_invalid`; a shell resetting takes that as done. It never touches
+  none, it changes nothing but its line in the run record (section 16), and refuses `not_invalid`; a shell
+  resetting takes that as done. It never touches
   the policy a pairing set aside.
 - **`run --json-events`** writes no `error` object but for a usage error. Every other way it ends is a
   `stopped` object and an exit code of section 13.3.
@@ -872,7 +873,8 @@ lucille-host --profile <name> run --json-events --exit-on-stdin-eof
   damaged file makes `failed` `state_invalid` (1); the policy digest key, which a damaged file makes
   `failed` `state_invalid` rather than an invalid policy (1); the pair, its record in the store and its gate
   record, read on this computer (20, or 23 for a record the store cannot read); then `ready`, and the first
-  hub call. So root writes nothing, a second `run` changes nothing, and an older release reads no secret.
+  hub call. So root writes nothing, a second `run` writes nothing but its line in the run record (section
+  16), and an older release reads no secret.
 - A pair whose SAS is not confirmed yet is not refused at start: `run` serves it, and waits for `pair
   confirm` (section 13.1). Of the gate, only a pair with no gate record, which can never be confirmed here,
   gives 20 at start (`no_gate`). While `run` waits, `expired` comes once the SAS deadline passes, and
@@ -1086,30 +1088,46 @@ Keychain on macOS, the Secret Service on Linux.
 
 Every command, before its work starts, appends one line to the run record of its profile: `runs.jsonl`
 in the profile's state folder (`~/Library/Application Support/lucille-host/<profile>/state` on macOS,
-`$XDG_STATE_HOME/lucille-host/<profile>` on Linux), mode 0600, in a folder of mode 0700. That includes
-`status`, `roots list`, `roots check`, `roots add --suggest-alias`, `--version` and a command that then
-refuses. It is kept on this computer only: nothing reads it at run time, and nothing sends it anywhere.
+`$XDG_STATE_HOME/lucille-host/<profile>` on Linux), mode 0600. That includes `status`, `roots list`,
+`roots check`, `roots add --suggest-alias`, `--version`, a second `run` that finds the profile running,
+and a command that then refuses. So any command, `--version` included, also makes the profile's state
+folder, and each folder above it that is missing, at mode 0700, and sets the state folder to mode 0700
+where it was there already.
+Where this document says that a command writes or changes nothing, it means nothing but this.
+
+The run record is kept on this computer only: nothing reads it at run time, and nothing sends it anywhere.
 It is there so that the Mac app's checks can prove that the app started its own host
 ([macos/README.md](../macos/README.md), placement), from the host's own word, without catching a process
-that may run for a fraction of a second.
+that may run for a fraction of a second. Any command counts for that, not only `run`.
 
-Each line is one JSON object:
+Each line is one JSON object, of at most 1,024 bytes:
 
 | Field | What it holds |
 |---|---|
 | `v` | `1`. |
-| `command` | The verb the command line names (`status`, `run`, `credential`, …), or `version` for `--version` or no verb. Never an argument: a line whose first plain word is not a verb, or that asks for help, writes no line, so a value typed on the command line by mistake never lands here. |
+| `command` | The verb the command line names (`status`, `run`, `credential`, …), or `version` for `--version` or no verb. The command line is read as the parser reads it: an option the parser takes by an abbreviation (`--prof`) counts as that option, and every word after `--` is a plain word. Never an argument: a line whose first plain word is not a verb, or that asks for help, writes no line, so a value typed on the command line by mistake never lands here. |
 | `pid` | The command's process. |
 | `ppid` | The process that started it. |
-| `executable` | The real path of the interpreter that runs the command where it is an app bundle's runtime (`…/Contents/Resources/runtime/bin/lucille-host-runtime`); `null` otherwise, so that no path outside an app is kept. |
-| `started` | When the command started, in seconds since the epoch. |
+| `executable` | The real path of the interpreter that runs the command where it is an app bundle's runtime (`…/Contents/Resources/runtime/bin/lucille-host-runtime`); `null` otherwise, so that no path outside an app is kept, and `null` where the path would make the line longer than 1,024 bytes. |
+| `started` | When the command started, in seconds since the epoch: a finite number. |
 
-- **It never fails the command.** A line that cannot be written (a full disk, a folder where the file
-  goes, a symbolic link in its place, which is not followed) is skipped, and nothing is said. Nothing is
-  written as root, or for a profile name that is not valid. The file is not synced to disk.
-- **It is capped.** Once the file is larger than 64 KiB, the command that finds it so keeps its last 200
-  lines, under the file's own lock. It only tries for that lock: when another command holds it, its line
-  is still appended, and the cut is left to a later command.
+- **It never fails the command, and never blocks it.** A line that cannot be written is skipped, and
+  nothing is said: a full disk, a folder where the file goes, or a symbolic link in its place, which is
+  not followed. The record is only ever a regular file with one name: a FIFO, a device or a file with
+  another name linked to it is left alone, and opening it never waits for a reader. Nothing is written
+  as root, or for a profile name that is not valid. The file is not synced to disk.
+- **One line at a time.** Each line is appended under the record's lock (a POSIX lock on the whole file),
+  which a command holds for one short write. While another command holds it, a command waits for it at
+  most 0.2 s, then skips its line.
+- **It is capped by bytes.** Once the record is larger than 64 KiB, the command that finds it so replaces
+  it by its last 32 KiB, from the first whole line in them: written to a new file beside it, then renamed
+  over it, under the lock. So the record is never larger than 64 KiB and one line, and a command reads
+  at most 32 KiB of it, however large it was made. No line written after a cut is lost, a reader finds the
+  old record or the new one and never an empty or half-written one, and a crash during a cut leaves the
+  old record (and, at worst, a file named `.runs.jsonl.*.cut` beside it).
+- **It is the host's word as far as your account is trusted.** Any process running as you can write a
+  line of its own, in the right shape, and the Mac app's check would take it. That is no wider than what
+  such a process can do already: run the host itself.
 - **What it holds about you:** which commands ran on this computer, when, and from which app, but no
   argument, folder, credential, request or reply.
 

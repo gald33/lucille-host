@@ -957,7 +957,8 @@ login ─► Capsule (menu bar; an "Open at Login" item)
   child, drops the app's write end, and sees the stand-in end while the other child lives. The hardware
   tests check that a force-quit leaves no host process.
 - **One host per profile.** `run` holds `state/.run.lock` (`os.lockf`). A relaunched app, or a `run` from
-  Terminal, finds it held: `run` exits 21 (`already_running`) and changes nothing.
+  Terminal, finds it held: `run` exits 21 (`already_running`) and changes nothing but its line in the run record
+  ([spec/CLI.md](../spec/CLI.md) section 16).
 - **The app's own profile.** The app runs every verb with `--profile mac-app`, and so does the Terminal
   wrapper inside it (§6). A `pipx` install on the same Mac keeps the `default` profile: its own folder under
   `~/Library/Application Support/lucille-host`, its own Keychain item, its own `.run.lock` and its own record

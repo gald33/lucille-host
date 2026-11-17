@@ -6,6 +6,12 @@ from __future__ import annotations
 import io
 import json
 import os
+import signal
+import subprocess
+import sys
+import threading
+import time
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -42,7 +48,14 @@ def _lines(profile: str = paths.DEFAULT_PROFILE) -> list[dict[str, object]]:
         (["credential", "-h"], ("default", "credential")),
         # The profile's value is not taken for the verb.
         (["--profile", "status"], ("status", "version")),
-        (["--", "status"], ("default", "version")),
+        # After `--` every word is plain, as the parser reads it.
+        (["--", "status"], ("default", "status")),
+        (["--", "s3cret-value"], None),
+        # The parser takes an abbreviation of a long option: so does the record.
+        (["--prof=mac-app", "status"], ("mac-app", "status")),
+        (["--prof", "mac-app", "status"], ("mac-app", "status")),
+        (["--vers", "s3cret-value"], ("default", "version")),
+        (["--he"], None),
         # Only the first plain word can be the verb.
         (["s3cret-value", "status"], None),
     ],
@@ -131,40 +144,228 @@ def test_a_symbolic_link_in_the_records_place_is_not_followed(
     assert target.read_text(encoding="utf-8") == "untouched\n"
 
 
-def test_the_record_is_cut_back_to_its_last_lines_once_too_large(
+@pytest.fixture
+def alarm() -> Iterator[None]:
+    """Ends a test that blocks, rather than hanging the run, after 10 s."""
+
+    def ring(signum: int, frame: object) -> None:
+        raise TimeoutError("blocked for 10 s")
+
+    before = signal.signal(signal.SIGALRM, ring)
+    signal.alarm(10)
+    try:
+        yield
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, before)
+
+
+def test_a_fifo_in_the_records_place_neither_blocks_nor_is_written(
+    host_env: HostEnv, alarm: None
+) -> None:
+    state = paths.ensure_dir(paths.dirs().state)
+    fifo = state / runs.FILE
+    os.mkfifo(fifo)
+    # With no reader, opening a FIFO to write would block: the record never waits for one.
+    started = time.monotonic()
+    with pytest.raises(SystemExit):
+        cli.main(["--version"])
+    assert time.monotonic() - started < 1
+    # With a reader, it opens at once, and is left alone: it is no regular file.
+    reader = os.open(fifo, os.O_RDONLY | os.O_NONBLOCK)
+    try:
+        started = time.monotonic()
+        runs.record(["status"], VERBS)
+        assert time.monotonic() - started < 1
+        assert os.read(reader, 100) == b""  # the end, with no writer: nothing was written to it
+    finally:
+        os.close(reader)
+    assert fifo.is_fifo()
+    # Opened to read and write, a FIFO does not wait for a reader on Linux or macOS; O_NONBLOCK
+    # makes sure where that is not so.
+    assert runs._FLAGS & os.O_NONBLOCK and runs._FLAGS & os.O_NOFOLLOW
+
+
+def test_a_file_linked_elsewhere_is_not_written(host_env: HostEnv, tmp_path: Path) -> None:
+    state = paths.ensure_dir(paths.dirs().state)
+    elsewhere = tmp_path / "elsewhere.txt"
+    elsewhere.write_text("untouched\n", encoding="utf-8")
+    os.link(elsewhere, state / runs.FILE)
+    runs.record(["status"], VERBS)
+    assert elsewhere.read_text(encoding="utf-8") == "untouched\n"
+
+
+def test_the_record_is_cut_back_by_bytes_once_too_large(
     host_env: HostEnv, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(runs, "MAX_BYTES", 2000)
-    monkeypatch.setattr(runs, "KEEP", 5)
-    for n in range(40):
-        runs.record(["status"], VERBS, clock=lambda n=n: float(n))
-    lines = _lines()
+    monkeypatch.setattr(runs, "KEEP_BYTES", 1000)
     path = paths.dirs().state / runs.FILE
-    # Cut back to 5 lines each time it passed 2000 bytes: never more than that and one line, and
-    # far fewer lines than were written.
-    longest = max(len(line) for line in path.read_text(encoding="utf-8").splitlines()) + 1
-    assert path.stat().st_size <= 2000 + longest
-    assert len(lines) < 40
-    # The newest are the ones kept, in order, each whole.
-    assert [line["started"] for line in lines][-1] == 39.0
+    sizes = []
+    for n in range(100):
+        runs.record(["status"], VERBS, clock=lambda n=n: float(n))
+        sizes.append(path.stat().st_size)
+    lines = _lines()
+    # Never larger than MAX_BYTES and one line; cut to KEEP_BYTES at most, whole lines only.
+    longest = max(len(line) for line in path.read_bytes().splitlines(keepends=True))
+    assert max(sizes) <= 2000 and min(sizes[20:]) <= 1000 + longest
+    assert any(after < before for before, after in zip(sizes, sizes[1:], strict=False))
+    # The newest are the ones kept, in order, each whole, with none missing after the first.
     starts = [line["started"] for line in lines]
-    assert starts == sorted(starts)
+    assert starts == [float(n) for n in range(int(starts[0]), 100)]
+    assert path.stat().st_mode & 0o777 == 0o600
+    # The cut leaves nothing beside the record.
+    assert sorted(entry.name for entry in path.parent.iterdir()) == [runs.FILE]
 
 
-def test_a_cut_while_another_holds_the_lock_waits_for_none(
-    host_env: HostEnv, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize(
+    "planted",
+    [
+        pytest.param(b"x" * 5_000_000 + b"\n", id="one 5 MB line"),
+        pytest.param((b"y" * 1_000_000 + b"\n") * 20, id="20 lines of 1 MB"),
+        pytest.param(b"z" * 3_000_000, id="3 MB with no newline"),
+    ],
+)
+def test_a_planted_large_record_costs_one_cut_of_its_tail(
+    host_env: HostEnv, planted: bytes
 ) -> None:
-    # The lock is only tried for: held elsewhere, the line is still written, and the cut left to
-    # a later command.
-    monkeypatch.setattr(runs, "MAX_BYTES", 10)
+    state = paths.ensure_dir(paths.dirs().state)
+    path = state / runs.FILE
+    path.write_bytes(planted)
+    path.chmod(0o600)
+    started = time.monotonic()
+    with pytest.raises(SystemExit):
+        cli.main(["--version"])
+    first = time.monotonic() - started
+    assert path.stat().st_size <= runs.KEEP_BYTES
+    assert [line["command"] for line in _lines()][-1:] == ["version"]
+    started = time.monotonic()
+    with pytest.raises(SystemExit):
+        cli.main(["--version"])
+    assert max(first, time.monotonic() - started) < 0.5
+    assert [line["command"] for line in _lines()][-2:] == ["version", "version"]
+
+
+def test_a_line_is_never_longer_than_its_cap(host_env: HostEnv, tmp_path: Path) -> None:
+    # Only an app at a very long path makes a line this long: it is kept without the path.
+    deep = tmp_path.joinpath(*(letter * 250 for letter in "defgh"), "Capsule.app")
+    runtime = Path(str(deep) + runs.RUNTIME_IN_APP)
+    runtime.parent.mkdir(parents=True)
+    runtime.write_text("", encoding="utf-8")
+    runs.record(["status"], VERBS, executable=str(runtime))
+    [line] = _lines()
+    assert line["executable"] is None and line["command"] == "status"
+    text = (paths.dirs().state / runs.FILE).read_bytes()
+    assert len(text) <= runs.MAX_LINE
+
+
+def test_a_start_time_that_is_not_a_number_writes_no_line(host_env: HostEnv) -> None:
+    runs.record(["status"], VERBS, clock=lambda: float("nan"))
+    runs.record(["status"], VERBS, clock=lambda: float("inf"))
+    assert _lines() == []
+
+
+def test_a_lock_held_elsewhere_is_waited_for_briefly_then_the_line_is_skipped(
+    host_env: HostEnv, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(runs, "LOCK_WAIT", 0.05)
 
     def held(descriptor: int, command: int, length: int) -> None:
         raise BlockingIOError(11, "Resource temporarily unavailable")
 
     monkeypatch.setattr("os.lockf", held)
-    runs.record(["status"], VERBS)
-    runs.record(["pause"], VERBS)
-    assert [line["command"] for line in _lines()] == ["status", "pause"]
+    started = time.monotonic()
+    assert cli.main(["pause"]) == 0
+    assert time.monotonic() - started < 1
+    assert "paused" in capsys.readouterr().out
+    assert _lines() == []
+
+
+_WRITER = """
+import json, os, sys
+from pathlib import Path
+from lucille_host import runs
+runs.MAX_BYTES, runs.KEEP_BYTES, runs.LOCK_WAIT = 400, 200, 30.0
+path, archive = Path(sys.argv[1]), Path(sys.argv[2])
+worker, count = int(sys.argv[3]), int(sys.argv[4])
+cut = runs._cut
+
+
+def archived(path, descriptor):
+    # Each record a cut replaces is kept whole in the archive first, read through the cut's own
+    # descriptor (closing another would let go of the lock), so that every line ever written is
+    # either there or in the record.
+    with open(archive, "ab") as kept:
+        kept.write(os.pread(descriptor, os.fstat(descriptor).st_size, 0))
+    cut(path, descriptor)
+
+
+runs._cut = archived
+print("ready", flush=True)
+sys.stdin.readline()  # all start together
+for index in range(count):
+    runs._append(path, (json.dumps({"w": worker, "i": index}) + "\\n").encode())
+"""
+
+
+def test_concurrent_commands_lose_no_line_after_a_cut_and_a_reader_never_finds_it_empty(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / runs.FILE
+    path.write_bytes(b'{"w": -1, "i": 0}\n')
+    path.chmod(0o600)
+    archive = tmp_path / "archive"
+    empty: list[int] = []
+    reads: list[int] = []
+    done = threading.Event()
+
+    def read() -> None:
+        while not done.is_set():
+            data = path.read_bytes()
+            reads.append(1)
+            if not data or not data.endswith(b"\n"):
+                empty.append(len(data))
+
+    reader = threading.Thread(target=read)
+    reader.start()
+    workers, count = 8, 1500
+    try:
+        writers = [
+            subprocess.Popen(
+                [sys.executable, "-c", _WRITER, str(path), str(archive), str(w), str(count)],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                text=True,
+            )
+            for w in range(workers)
+        ]
+        for writer in writers:
+            assert writer.stdout is not None and writer.stdout.readline() == "ready\n"
+        for writer in writers:
+            assert writer.stdin is not None
+            writer.stdin.write("go\n")
+            writer.stdin.flush()  # communicate closes it (on 3.11 it fails on one closed already)
+        for writer in writers:
+            writer.communicate(timeout=120)
+            assert writer.returncode == 0
+    finally:
+        done.set()
+        reader.join()
+    lines = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+    # Every line written is in the record or in a record a cut replaced: none was lost.
+    seen = {
+        (line["w"], line["i"])
+        for line in map(json.loads, (archive.read_bytes() + path.read_bytes()).splitlines())
+    }
+    assert {(w, i) for w in range(workers) for i in range(count)} <= seen
+    assert len(path.read_bytes()) <= 400 + 100
+    # The record was cut many times; what it keeps is, for each writer, every line it wrote from
+    # its oldest kept one to its last.
+    for w in range(workers):
+        kept = [line["i"] for line in lines if line["w"] == w]
+        assert kept == list(range(count - len(kept), count)), w
+    assert empty == [] and len(reads) > 10
+    assert sorted(entry.name for entry in tmp_path.iterdir()) == ["archive", runs.FILE]
 
 
 def test_every_command_records_itself_before_its_work(

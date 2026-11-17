@@ -14664,6 +14664,8 @@ _RUNTIME = _a_record()["executable"]
         ),
         ({"executable": None}, "its executable is None"),
         ({"ppid": 7}, "its parent 7 is not the app ([99])"),
+        ({"ppid": None}, "its parent None is not the app ([99])"),
+        ({"ppid": 99.0}, "its parent 99.0 is not the app ([99])"),
         ({"started": 999.9}, "it is from before the open"),
         ({"started": 1031.0}, "it is from after the 30 s gate"),
     ],
@@ -14689,6 +14691,16 @@ def test_the_record_gate_fails_with_no_record_and_skips_lines_it_does_not_know()
     unknown = [{"v": 2, "started": 1000.5}, {"v": 1, "started": "soon"}, {"v": 1}]
     held, said = check_app._record_gate(unknown, _RUNTIME, [99], 1000.0, 1030.0)
     assert not held and "none from the minute before the open on" in said, said
+    # A time that is no finite number is no time, as json reads it from the file: NaN fails
+    # every comparison, and would otherwise pass both bounds.
+    for started in ("NaN", "Infinity", "-Infinity", "true"):
+        line = json.loads(json.dumps(_a_record()).replace("1000.5", started))
+        held, said = check_app._record_gate([line], _RUNTIME, [99], 1000.0, 1030.0)
+        assert not held and "none from the minute before the open on" in said, (started, said)
+    # true is 1 to Python: a gate open from 0 s would take it for a time.
+    assert not check_app._record_gate([_a_record(started=True)], _RUNTIME, [99], 0.0, 30.0)[0]
+    held, said = check_app._record_gate([_a_record(ppid=True)], _RUNTIME, [1], 1000.0, 1030.0)
+    assert not held and "its parent True is not the app ([1])" in said, said
     # One that holds among many that do not is enough.
     mixed = [_a_record(ppid=7), _a_record(started=999.0), _a_record(pid=5000)]
     assert check_app._record_gate(mixed, _RUNTIME, [99], 1000.0, 1030.0)[0]
