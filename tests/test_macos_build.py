@@ -9837,20 +9837,29 @@ def test_the_real_lsof_names_the_program_a_process_runs() -> None:
 
 @contextlib.contextmanager
 def _stand_in(runtime: Path, duration: str = "30") -> Iterator[subprocess.Popen[str]]:
-    """A copy of /bin/sleep at ``runtime``, run for ``duration`` by a bash of its own, in a session
-    of its own; the bash, once the copy runs. The copy runs with argv[0] "sleep": where /bin/sleep
-    is one program of a multi-call coreutils, which runs as the program its argv[0] names, a copy
-    called by the runtime's name exits at once ("coreutils: unknown program", Ubuntu 26.04's). The
-    process's name, which lsof matches, is the executed file's own, the runtime's, whatever argv[0]
-    says. bash, not sh, since dash has no `exec -a`; the subshell's exec keeps bash as the parent.
-    A copy that is not running a moment later fails the test here, with what it wrote, never as a
-    process lsof did not find. The session is killed when the block ends, if any of it is left."""
-    # copyfile and chmod, not copy2: copy2 also copies /bin/sleep's file flags, which macOS refuses
-    # to set on a copy of a system binary (seen in CI, job 129545633292: PermissionError, errno 1).
-    shutil.copyfile("/bin/sleep", runtime)
+    """A copy of /bin/bash at ``runtime`` that runs ``sleep`` for ``duration`` and stays running
+    while it does, started by a shell in a session of its own; that shell, once the copy runs.
+
+    The copy is bash's, not sleep's: where /bin/sleep is one program of a multi-call coreutils, a
+    copy of it at the runtime's path exits at once whatever its argv[0] ("coreutils: unknown
+    program 'lucille-host-runtime'", on Ubuntu 26.04's runner, with argv[0] "sleep" too). bash runs
+    the same under any name. Its script ends with `:`, so bash does not exec its last command and
+    give the process to sleep: the process stays the copy, whose name, the runtime's, lsof matches,
+    and its parent stays the shell. A copy that is not running a moment later fails the test here,
+    with what it wrote, never as a process lsof did not find. The session is killed when the
+    block ends, if any of it is left."""
+    # copyfile and chmod, not copy2: copy2 also copies a system binary's file flags, which macOS
+    # refuses to set on a copy of one (seen in CI, job 129545633292: PermissionError, errno 1).
+    shutil.copyfile("/bin/bash", runtime)
     runtime.chmod(0o755)
     shell = subprocess.Popen(
-        ["/bin/bash", "-c", '(exec -a sleep "$0" "$1") & echo "$!"; wait', str(runtime), duration],
+        [
+            "/bin/sh",
+            "-c",
+            '"$0" -c \'sleep "$1"; :\' stand-in "$1" & echo "$!"; wait',
+            str(runtime),
+            duration,
+        ],
         start_new_session=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -9865,7 +9874,7 @@ def _stand_in(runtime: Path, duration: str = "30") -> Iterator[subprocess.Popen[
         os.kill(stand_in, 0)
         yield shell
     finally:
-        # A session whose bash has ended, and been waited for, is gone already.
+        # A session whose shell has ended, and been waited for, is gone already.
         with contextlib.suppress(ProcessLookupError):
             os.killpg(shell.pid, signal.SIGKILL)
         shell.communicate()
@@ -9874,10 +9883,11 @@ def _stand_in(runtime: Path, duration: str = "30") -> Iterator[subprocess.Popen[
 def test_the_real_lsof_finds_a_process_by_the_runtimes_name_with_its_parent(
     tmp_path: Path,
 ) -> None:
-    # lsof as it is on this machine, asked as the control's reader by name asks it: a copy of
-    # /bin/sleep at a copy's runtime path, started by a shell, is found by its name, with the
-    # shell as its parent and the copy among the files it maps. Its parent maps no copy of the
-    # app, so it is no child of one. Seen here with Linux's lsof; on a Mac, Apple's.
+    # lsof as it is on this machine, asked as the control's reader by name asks it: a running
+    # program at a copy's runtime path (a copy of bash, :func:`_stand_in`), started by a shell, is
+    # found by its name, with the shell as its parent and the copy among the files it maps. Its
+    # parent maps no copy of the app, so it is no child of one. Seen here with Linux's lsof; on a
+    # Mac, Apple's.
     if shutil.which("lsof") is None:
         pytest.skip("no lsof here")
     if not os.path.exists("/bin/bash"):
@@ -9900,8 +9910,9 @@ def test_the_real_lsof_finds_a_process_by_the_runtimes_name_with_its_parent(
 
 
 def test_a_stand_in_that_exits_at_once_fails_with_what_it_wrote(tmp_path: Path) -> None:
-    # The copy is given a duration no sleep takes, so it exits at once, wherever it runs: the test
-    # fails with the stand-in's own message, and the session left behind is no other error.
+    # The copy is given a duration no sleep takes, so its sleep fails and it ends at once,
+    # wherever it runs: the test fails with the stand-in's own message, and the session left
+    # behind is no other error.
     if not os.path.exists("/bin/bash"):
         pytest.skip("no /bin/bash here")
     runtime = Path(_runtime_of(tmp_path / f"{check_app.APP_NAME}.app"))
