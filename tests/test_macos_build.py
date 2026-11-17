@@ -9835,6 +9835,42 @@ def test_the_real_lsof_names_the_program_a_process_runs() -> None:
     assert why.endswith("; it had ended by the time lsof answered"), why
 
 
+@contextlib.contextmanager
+def _stand_in(runtime: Path, duration: str = "30") -> Iterator[subprocess.Popen[str]]:
+    """A copy of /bin/sleep at ``runtime``, run for ``duration`` by a bash of its own, in a session
+    of its own; the bash, once the copy runs. The copy runs with argv[0] "sleep": where /bin/sleep
+    is one program of a multi-call coreutils, which runs as the program its argv[0] names, a copy
+    called by the runtime's name exits at once ("coreutils: unknown program", Ubuntu 26.04's). The
+    process's name, which lsof matches, is the executed file's own, the runtime's, whatever argv[0]
+    says. bash, not sh, since dash has no `exec -a`; the subshell's exec keeps bash as the parent.
+    A copy that is not running a moment later fails the test here, with what it wrote, never as a
+    process lsof did not find. The session is killed when the block ends, if any of it is left."""
+    # copyfile and chmod, not copy2: copy2 also copies /bin/sleep's file flags, which macOS refuses
+    # to set on a copy of a system binary (seen in CI, job 129545633292: PermissionError, errno 1).
+    shutil.copyfile("/bin/sleep", runtime)
+    runtime.chmod(0o755)
+    shell = subprocess.Popen(
+        ["/bin/bash", "-c", '(exec -a sleep "$0" "$1") & echo "$!"; wait', str(runtime), duration],
+        start_new_session=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        assert shell.stdout is not None and shell.stderr is not None
+        stand_in = int(shell.stdout.readline())
+        time.sleep(0.2)
+        if shell.poll() is not None:
+            pytest.fail(f"the stand-in exited at once: {shell.stderr.read().strip()!r}")
+        os.kill(stand_in, 0)
+        yield shell
+    finally:
+        # A session whose bash has ended, and been waited for, is gone already.
+        with contextlib.suppress(ProcessLookupError):
+            os.killpg(shell.pid, signal.SIGKILL)
+        shell.communicate()
+
+
 def test_the_real_lsof_finds_a_process_by_the_runtimes_name_with_its_parent(
     tmp_path: Path,
 ) -> None:
@@ -9848,31 +9884,7 @@ def test_the_real_lsof_finds_a_process_by_the_runtimes_name_with_its_parent(
         pytest.skip("no /bin/bash here")
     runtime = Path(_runtime_of(tmp_path / f"{check_app.APP_NAME}.app"))
     runtime.parent.mkdir(parents=True)
-    # copyfile and chmod, not copy2: copy2 also copies /bin/sleep's file flags, which macOS refuses
-    # to set on a copy of a system binary (seen in CI, job 129545633292: PermissionError, errno 1).
-    shutil.copyfile("/bin/sleep", runtime)
-    runtime.chmod(0o755)
-    # The copy runs with argv[0] "sleep": where /bin/sleep is one program of a multi-call
-    # coreutils, which runs as the program its argv[0] names, a copy called by the runtime's name
-    # exits at once ("coreutils: unknown program", Ubuntu 26.04's). The process's name, which lsof
-    # matches, is the executed file's own, the runtime's, whatever argv[0] says. bash, not sh,
-    # since dash has no `exec -a`; the subshell's exec keeps bash as the parent.
-    shell = subprocess.Popen(
-        ["/bin/bash", "-c", '(exec -a sleep "$0" 30) & echo "$!"; wait', str(runtime)],
-        start_new_session=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-    )
-    try:
-        assert shell.stdout is not None and shell.stderr is not None
-        stand_in = int(shell.stdout.readline())
-        # The stand-in runs before lsof is asked, so one that exits at once fails here, saying
-        # why, and never as a process lsof did not find.
-        time.sleep(0.2)
-        if shell.poll() is not None:
-            pytest.fail(f"the stand-in exited at once: {shell.stderr.read().strip()!r}")
-        os.kill(stand_in, 0)
+    with _stand_in(runtime) as shell:
         found: list[Any] = []
         error = ""
         deadline = time.monotonic() + 10
@@ -9885,9 +9897,20 @@ def test_the_real_lsof_finds_a_process_by_the_runtimes_name_with_its_parent(
         assert each.seen_by == check_app.NAMED and each.named and not each.child, each
         assert any(_names(path, runtime) for path in each.texts), each
         assert each.executable is not None and _names(each.executable, runtime), each
-    finally:
-        os.killpg(shell.pid, signal.SIGKILL)
-        shell.communicate()
+
+
+def test_a_stand_in_that_exits_at_once_fails_with_what_it_wrote(tmp_path: Path) -> None:
+    # The copy is given a duration no sleep takes, so it exits at once, wherever it runs: the test
+    # fails with the stand-in's own message, and the session left behind is no other error.
+    if not os.path.exists("/bin/bash"):
+        pytest.skip("no /bin/bash here")
+    runtime = Path(_runtime_of(tmp_path / f"{check_app.APP_NAME}.app"))
+    runtime.parent.mkdir(parents=True)
+    with pytest.raises(pytest.fail.Exception) as failed, _stand_in(runtime, "not-a-duration"):
+        pytest.fail("the stand-in ran")
+    message = str(failed.value)
+    assert message.startswith("the stand-in exited at once: "), message
+    assert "the stand-in ran" not in message
 
 
 def _child_world(
