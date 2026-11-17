@@ -3108,6 +3108,15 @@ LISTER_LIMIT: Final = 5
 RECORDED_GAP: Final = 0.35
 BLIND_LIMIT: Final = 2.0
 POLL_PAUSE: Final = 0.05
+# How a watch keeps reading while a call is slow: a reader with a call out starts another once
+# the newest has run STAGGER seconds, up to OVERLAP at once, so a slow call does not leave the
+# reader without a reading for its whole length. In run 44007894856 (xcode-27, 27.0.1) single
+# calls took up to 1.61 s, and the control's watch had no reading from 0.31 s to 2.25 s, in which
+# the app's first status read began and ended unseen: the welcome note, which follows only that
+# read, was up at 5 s. A call that answers within STAGGER seconds is never overlapped, so a watch
+# on a machine that is not slow reads as before.
+STAGGER: Final = 0.5
+OVERLAP: Final = 3
 # What the listers match: the host's processes on the app's profile, as pgrep -f matches them,
 # with the profile's name followed by a space or the end of the command line (POSIX extended
 # syntax with no backslash, which Python's re reads the same way; Linux's pgrep compiles it, seen,
@@ -3203,6 +3212,9 @@ CONTROL_GATE: Final = 30
 CONTROL_SNAPSHOT_AT: Final = 5
 CONTROL_DIAGNOSIS: Final = 60
 CONTROL_AFTER: Final = 5
+# How long the check waits, once the control's watch has ended, for the `open` it started to
+# return.
+OPEN_LIMIT: Final = 30
 STATUS_READ_MARKER: Final = "login item: "
 # The time limit of each of the control's diagnostics, of its snapshot as a whole, and of the
 # unified log; how much of the log is kept, and of which processes.
@@ -5622,15 +5634,27 @@ class _Watch:
     named: list[_Reading] = field(default_factory=list)
     named_seen: dict[int, tuple[float, _Unread]] = field(default_factory=dict)
     decided: tuple[int, float] | None = None
+    before_open: list[tuple[float, str]] = field(default_factory=list)
 
     def add(self, reading: _Reading) -> None:
+        # Readings come as they end, which may not be the order they started in
+        # (:func:`_watch_profile`): each first sighting keeps the earliest start, each last the
+        # latest, and what a first sighting said goes with the earliest.
         at = reading.started - self.since
+        if at < 0:
+            # Started before the open: it ended before it too (it saw only what was there before
+            # the app), or it straddles the open, and what it saw may be either side of it.
+            self._before_open(at, reading, ended_before=reading.ended < self.since)
+            return
         if reading.lister == NAMED:
             self.named.append(reading)
             for each in reading.unread:
                 first, known = self.named_seen.get(each.pid, (at, each))
-                # What lsof said of it that says the most, the first time it said it.
-                self.named_seen[each.pid] = (first, each if _told(each) > _told(known) else known)
+                # What lsof said of it that says the most, whenever it said it.
+                self.named_seen[each.pid] = (
+                    min(first, at),
+                    each if _told(each) > _told(known) else known,
+                )
                 if each.host:
                     self.runs.append((at, each))
             return
@@ -5638,32 +5662,66 @@ class _Watch:
         self.ended = max(self.ended, reading.ended)
         if reading.hosts:
             self.hosts |= reading.hosts
-            self.first.setdefault(reading.lister, at)
+            self.first[reading.lister] = min(self.first.get(reading.lister, at), at)
             self.last[reading.lister] = max(self.last.get(reading.lister, at), at)
-        if reading.children and CHILD not in self.first:
+        if reading.children and at < self.first.get(CHILD, float("inf")):
             self.first[CHILD] = at
             pid, said = reading.children[0]
             self.first_child = f"{pid} {said}"
         for pid, said in reading.children:
             self.children.setdefault(pid, said)
         for each in reading.unread:
-            # What lsof said of it that says the most, the first time it said it: that it maps a
-            # copy's runtime, then any file, then nothing.
+            # What lsof said of it that says the most, whenever it said it: that it maps a copy's
+            # runtime, then any file, then nothing.
             known = self.unread.get(each.pid)
             if known is None or _told(each) > _told(known):
                 self.unread[each.pid] = each
-            self.shown.setdefault(each.pid, (at, each.said))
+            shown = self.shown.get(each.pid)
+            if shown is None or at < shown[0]:
+                self.shown[each.pid] = (at, each.said)
             if each.host:
-                self.by_executable.setdefault(each.pid, at)
-                self.first.setdefault(BY_EXECUTABLE, at)
+                self.by_executable[each.pid] = min(self.by_executable.get(each.pid, at), at)
+                self.first[BY_EXECUTABLE] = min(self.first.get(BY_EXECUTABLE, at), at)
                 self.runs.append((at, each))
             elif each.maybe:
-                self.maybe.setdefault(each.pid, at)
-                self.first.setdefault(MAYBE_HOST, at)
+                self.maybe[each.pid] = min(self.maybe.get(each.pid, at), at)
+                self.first[MAYBE_HOST] = min(self.first.get(MAYBE_HOST, at), at)
         unread = {each.pid for each in reading.unread}
         for pid, said in reading.children:
             if pid not in unread:
                 self.read_children.setdefault(pid, said)
+
+    def _before_open(self, at: float, reading: _Reading, *, ended_before: bool) -> None:
+        """A reading that started before the open (the control's watch starts just before it,
+        :func:`_placement_control`): it counts for the stretches with no reading, but no gate
+        counts what it saw, since the app was not open when it began. Where it also ended before
+        the open (``ended_before``), it saw only what was there before the app: what it saw that
+        only the app should have started is kept in ``before_open``, a host process matched by its
+        command line, a process that maps a copy's bundled runtime, or a child of a running copy
+        of the app, and any of them fails the control (:func:`_watch_control`), since what came
+        after proves nothing of what the app started. A reading that straddles the open may have
+        seen the app's own host, after the open: it neither passes nor fails the control."""
+        if reading.lister == NAMED:
+            self.named.append(reading)
+        else:
+            self.readings.append(reading)
+            self.ended = max(self.ended, reading.ended)
+        if not ended_before:
+            return
+        for pid in sorted(reading.hosts or ()):
+            self.before_open.append((at, f"{pid}, matched by its command line by {reading.lister}"))
+        for pid, said in reading.children:
+            self.before_open.append((at, f"{pid}, a child of a running copy of the app ({said!r})"))
+        for each in reading.unread:
+            if each.host:
+                self.before_open.append(
+                    (at, f"{each.pid}, which maps {each.executable} ({reading.lister})")
+                )
+
+    def before_open_said(self) -> str:
+        """What ``before_open`` holds, the first :data:`CHILDREN_SHOWN` of it, with when."""
+        shown = sorted(set(self.before_open))[:CHILDREN_SHOWN]
+        return "; ".join(f"{what}, at {at:.2f} s" for at, what in shown)
 
     @property
     def seen(self) -> set[int]:
@@ -5914,13 +5972,9 @@ class _Watch:
                 )
                 + (", so what it maps does not pass the gate" if pid in read_then else "")
             )
-        if inside and not any(r.lister == "ps" and r.hosts is not None for r in decided):
+        if inside and not any(self.table_read(r, "ps") for r in decided):
             later = min(
-                (
-                    r.started - self.since
-                    for r in self.readings[count:]
-                    if r.lister == "ps" and r.hosts is not None
-                ),
+                (r.started - self.since for r in self.readings[count:] if self.table_read(r, "ps")),
                 default=None,
             )
             text += (
@@ -5953,9 +6007,19 @@ class _Watch:
         """When a lister first matched a host process, or None."""
         return min((self.first[lister] for lister in LISTERS if lister in self.first), default=None)
 
+    def table_read(self, reading: _Reading, lister: str) -> bool:
+        """Whether ``reading`` is one of ``lister``'s that read the process table, from ``since``
+        on: the control's watch starts just before the open (:func:`_placement_control`), and a
+        reading that started before it may have read the table before the app was in it, even one
+        that ended after it, so it shows nothing of what ps can read of the app's children."""
+        return (
+            reading.lister == lister and reading.hosts is not None and reading.started >= self.since
+        )
+
     def read_by(self, lister: str) -> bool:
-        """Whether ``lister`` read the process table at least once."""
-        return any(r.lister == lister and r.hosts is not None for r in self.readings)
+        """Whether ``lister`` read the process table at least once, from ``since`` on
+        (:meth:`table_read`)."""
+        return any(self.table_read(r, lister) for r in self.readings)
 
     def saw_last(self, lister: str) -> bool:
         """Whether the last reading of ``lister`` that read the process table saw a host
@@ -6171,9 +6235,10 @@ def _same_file(path: str | None, expected: str | Path) -> bool:
 
 
 def _lister_pool() -> concurrent.futures.Executor:
-    """The threads the listers run on, one each, and one for :data:`NAMED`."""
+    """The threads the listers run on, and :data:`NAMED`: :data:`OVERLAP` each, for the calls
+    a watch has out at once (:func:`_watch_profile`)."""
     return concurrent.futures.ThreadPoolExecutor(
-        max_workers=len(LISTERS) + 1, thread_name_prefix="lister"
+        max_workers=(len(LISTERS) + 1) * OVERLAP, thread_name_prefix="lister"
     )
 
 
@@ -6185,46 +6250,64 @@ def _watch_profile(
     watch: _Watch | None = None,
     since: float | None = None,
     named: bool = False,
+    start: Callable[[], float] | None = None,
 ) -> _Watch:
-    """Read the process table with both listers, each on a thread of its own and called again
-    :data:`POLL_PAUSE` seconds after its last call ended, so that one held never holds back the
-    other, until ``seconds`` after the watch's start or until ``stop`` says so; ``each`` runs after
-    every reading. With ``named``, :data:`NAMED` runs too, the same way, on a thread of its own;
-    the listers' readings are counted as before, and its own are kept apart (:class:`_Watch`).
-    With ``watch``, go on with it; ``since`` is what a new watch counts its times from (its start
-    by default). A call still running when the watch stops is not waited for."""
+    """Read the process table with both listers, each on threads of its own, so that one held
+    never holds back the other, until ``seconds`` after the watch's start or until ``stop`` says
+    so; ``each`` runs after every reading. A lister with no call out is called again
+    :data:`POLL_PAUSE` seconds after its last call ended; one whose newest call has run
+    :data:`STAGGER` seconds is called again at once, with up to :data:`OVERLAP` calls out, so that
+    a slow call does not leave it without a reading for its whole length. Readings are added as
+    they end, which may not be the order they started in (:class:`_Watch` counts stretches by
+    each reading's start and end). With ``named``, :data:`NAMED` runs too, the same way; the
+    listers' readings are counted as before, and its own are kept apart (:class:`_Watch`). With
+    ``watch``, go on with it; ``since`` is what a new watch counts its times from (its start by
+    default). ``start``, where given, runs once, as soon as the first calls are out, before any
+    reading is added, and must not block, since the watch reads nothing while it runs: what it
+    returns is what the watch counts its times from from then on, so a reading that started before
+    it counts from a time below zero. A call still running when the watch stops is not waited
+    for."""
     if watch is None:
         began = time.monotonic()
         watch = _Watch(began=began, since=began if since is None else since)
     deadline = watch.began + seconds
     readers = (*LISTERS, NAMED) if named else LISTERS
     pool = _lister_pool()
-    pending: dict[str, concurrent.futures.Future[_Reading]] = {}
+    pending: dict[str, list[concurrent.futures.Future[_Reading]]] = {name: [] for name in readers}
+    newest = dict.fromkeys(readers, 0.0)
     ready = dict.fromkeys(readers, time.monotonic())
     try:
         while True:
-            for lister in readers:
-                if lister not in pending and time.monotonic() >= ready[lister]:
-                    pending[lister] = pool.submit(_read, lister)
             now = time.monotonic()
-            pause = max(
-                0.0,
-                min([POLL_PAUSE, *(ready[name] - now for name in readers if name not in pending)]),
-            )
-            if pending:
+            for lister in readers:
+                out = pending[lister]
+                due = now >= ready[lister] if not out else now >= newest[lister] + STAGGER
+                if due and len(out) < OVERLAP:
+                    out.append(pool.submit(_read, lister))
+                    newest[lister] = now
+            if start is not None:
+                watch.since = start()
+                start = None
+            now = time.monotonic()
+            nexts = [
+                ready[name] - now if not pending[name] else newest[name] + STAGGER - now
+                for name in readers
+                if len(pending[name]) < OVERLAP
+            ]
+            pause = max(0.0, min([POLL_PAUSE, *nexts]))
+            out_now = [future for futures in pending.values() for future in futures]
+            if out_now:
                 concurrent.futures.wait(
-                    list(pending.values()),
-                    timeout=pause,
-                    return_when=concurrent.futures.FIRST_COMPLETED,
+                    out_now, timeout=pause, return_when=concurrent.futures.FIRST_COMPLETED
                 )
             else:
                 time.sleep(pause)
-            for lister, future in list(pending.items()):
-                if future.done():
-                    del pending[lister]
+            for lister in readers:
+                for future in [future for future in pending[lister] if future.done()]:
+                    pending[lister].remove(future)
                     reading = future.result()
                     watch.add(reading)
-                    ready[lister] = reading.ended + POLL_PAUSE
+                    ready[lister] = max(ready[lister], reading.ended + POLL_PAUSE)
                     if each is not None:
                         each(watch)
             if (stop is not None and stop(watch)) or time.monotonic() >= deadline:
@@ -6277,19 +6360,43 @@ def _placement_control(checker: Checker, work: Path, require_driven: bool) -> bo
     err_log = work / "control-app-stderr.txt"
     for log in (out_log, err_log):
         log.write_text("", encoding="utf-8")
-    opened, opened_wall = time.monotonic(), time.time()
-    done = subprocess.run(
-        ["open", "--stdout", str(out_log), "--stderr", str(err_log), str(installed)],
-        capture_output=True,
-        text=True,
-        check=False,
+    launched: list[subprocess.Popen[str]] = []
+
+    def open_app() -> float:
+        # Started, not waited for: `open` can take seconds to return on a slow runner, and the
+        # watch must read on while it does (in run 44015279534, on xcode-27, an open made inside
+        # the watch and waited for left it without a reading from 0.23 s to 2.41 s, though no
+        # lister call took more than 0.41 s).
+        opened = time.monotonic()
+        launched.append(
+            _start_open(
+                ["open", "--stdout", str(out_log), "--stderr", str(err_log), str(installed)]
+            )
+        )
+        return opened
+
+    # The watch starts before the open, which it starts once its first readings are out and does
+    # not wait for, so that the listers are already reading, and go on reading, while the app
+    # starts: in run 44007894856 (xcode-27) a watch started once open had returned first read at
+    # 0.31 s and then not until 2.25 s, and the app's first status read began and ended in
+    # between. Its times count from when the open was started; a reading that started before it
+    # counts from below zero.
+    gated, detail = _watch_control(
+        work, err_log, time.monotonic(), time.time(), python_in(installed), start=open_app
     )
+    [process] = launched
+    try:
+        out, err = process.communicate(timeout=OPEN_LIMIT)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        out, err = process.communicate()
+        err += f"\n(open had not returned in {OPEN_LIMIT} s)"
+    done = subprocess.CompletedProcess(process.args, process.returncode, out, err)
     checker.expect(
         done.returncode == 0 and _wait_until(lambda: bool(_running(APP_NAME)), 15),
         f"the control: open starts the copy at {installed}",
         _shown(done),
     )
-    gated, detail = _watch_control(work, err_log, opened, opened_wall, python_in(installed))
     checker.expect(
         gated,
         "the control: it starts the host (by its arguments) or a child that runs its runtime (by "
@@ -6318,6 +6425,13 @@ def _placement_control(checker: Checker, work: Path, require_driven: bool) -> bo
     return driven
 
 
+def _start_open(argv: list[str]) -> subprocess.Popen[str]:
+    """Start ``argv``, an ``open`` of the app, and do not wait for it: the caller collects its exit
+    and output with ``communicate``. The control's watch reads on meanwhile
+    (:func:`_placement_control`)."""
+    return subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+
+
 def _text_of(path: Path) -> str:
     """What ``path`` holds, or nothing if it cannot be read."""
     try:
@@ -6327,7 +6441,12 @@ def _text_of(path: Path) -> str:
 
 
 def _watch_control(
-    work: Path, err_log: Path, opened: float, opened_wall: float, runtime: Path
+    work: Path,
+    err_log: Path,
+    opened: float,
+    opened_wall: float,
+    runtime: Path,
+    start: Callable[[], float] | None = None,
 ) -> tuple[bool, str]:
     """The control's watch, with its times counted from the open (macos/README.md, placement). The
     gate (:meth:`_Watch.passed_by`), within :data:`CONTROL_GATE` seconds of the watch's start: a
@@ -6358,7 +6477,11 @@ def _watch_control(
     way it prints, once, the app's children as ps first showed them (:meth:`_Watch.children_said`),
     what :data:`NAMED` saw (:meth:`_Watch.named_said`), and each stretch with no reading longer than
     :data:`RECORDED_GAP` seconds (:meth:`_Watch.recorded`). Returns whether the gate held, and the
-    detail for when it did not."""
+    detail for when it did not. ``start``, where given, starts the open of the app once the
+    watch's first readings are out, without waiting for it, so that the watch reads on while the
+    app starts, and returns when it started it, which the watch's times then count from in place
+    of ``opened``. ``opened_wall``, where the unified
+    log starts from (less 5 s), is taken just before the watch then."""
     snapshot: list[threading.Thread] = []
 
     def each(watch: _Watch) -> None:
@@ -6383,6 +6506,7 @@ def _watch_control(
         each=each,
         since=opened,
         named=True,
+        start=start,
     )
     if watch.passed_by(runtime)[0]:
         until = time.monotonic() + CONTROL_AFTER
@@ -6412,6 +6536,17 @@ def _watch_control(
     said = f"the control's watch: {watch.summary()}; {watch.burst()}"
     children = [f"the control: {watch.children_said()}", f"the control: {watch.named_said()}"]
     stretches = [f"the control: {line}" for line in watch.recorded()]
+    if watch.before_open:
+        # Contamination, not proof: whatever the watch saw after the open may be what was there
+        # before it.
+        lines = [
+            "a host process was running before the app was opened, so what the watch saw after "
+            f"the open proves nothing of what the app started: {watch.before_open_said()}",
+            said,
+            *children,
+            *stretches,
+        ]
+        return False, "\n".join(lines)
     if how:
         print(
             "\n".join([said, f"the control's gate held {held}", *children, *stretches]), flush=True
