@@ -33,7 +33,7 @@ verbs:
   computer, and tells Lucille nothing (``left``);
 - ``ops list|enable|disable``: which catalog operations the local policy enables;
 - ``roots list|add|remove|check``: which folders the operations may work in, by alias.
-  ``roots add --suggest-alias PATH`` suggests an alias for a folder and changes nothing; ``roots
+  ``roots add --suggest-alias PATH`` suggests an alias for a folder and changes no setting; ``roots
   check`` says whether the host can open each folder and read an entry in it;
 - ``policy previous``: the operations and folders of the last policy a pairing set aside (a
   pairing sets aside only a policy that is not the fresh one); ``policy reset``: set an invalid
@@ -87,6 +87,7 @@ from lucille_host import (
     paths,
     policy,
     report,
+    runs,
     store,
 )
 from lucille_host import state as host_state
@@ -524,7 +525,7 @@ def build_parser() -> argparse.ArgumentParser:
     add.add_argument(
         "--suggest-alias",
         metavar="PATH",
-        help="only suggest an alias for the folder PATH, which no folder has yet; change nothing",
+        help="only suggest an alias for the folder PATH, which no folder has yet; set nothing",
     )
     remove = roots_verbs.add_parser("remove", help="stop operations working in a folder")
     _json_option(remove)
@@ -929,7 +930,8 @@ def _roots(args: argparse.Namespace, dirs: paths.Dirs, out: _Out) -> None:
 
 def _check(args: argparse.Namespace, roots: dict[str, policy.Root], out: _Out) -> None:
     """``roots check``: open each folder and read one entry, writing each answer as it is known.
-    It takes no lock, opens no session, and sends and writes nothing."""
+    It takes no lock, opens no session, and sends nothing. It writes nothing but the line of the
+    run record that :func:`main` writes for every command (:mod:`lucille_host.runs`)."""
     if args.alias is not None and args.alias not in roots:
         raise _Refused("no_such_alias", f"no folder alias {args.alias!r}")
     family = paths.os_family()
@@ -1476,7 +1478,8 @@ def _ops_verb(args: argparse.Namespace, dirs: paths.Dirs, out: _Out) -> None:
 
 
 def _roots_verb(args: argparse.Namespace, dirs: paths.Dirs, out: _Out) -> None:
-    # Listing, checking and suggesting change nothing, and take no lock.
+    # Listing, checking and suggesting change no setting, and take no lock: they write nothing but
+    # the run record's line, which main writes for every command.
     reads = args.roots_verb in ("list", "check") or (
         args.roots_verb == "add" and args.suggest_alias is not None
     )
@@ -1738,6 +1741,8 @@ def _usage_said(
 def main(argv: Sequence[str] | None = None) -> int:
     """Entry point for the ``lucille-host`` console script and ``python -m lucille_host``."""
     words = list(sys.argv[1:] if argv is None else argv)
+    # Before anything else the command does, and never failing it (spec/CLI.md section 16).
+    runs.record(words, tuple(VERBS))
     wanted = _wants_json(words)
     parser = build_parser()
     if isinstance(parser, _Parser):

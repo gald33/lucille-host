@@ -45,6 +45,7 @@ from lucille_host import (
     paths,
     policy,
     rooms,
+    runs,
     spec,
     store,
 )
@@ -1252,8 +1253,11 @@ def test_second_run_exits_21(
     counted.items = dict(host.env.keyring.items)
     monkeypatch.setattr("keyring.core._keyring_backend", counted)
     lock = host.dirs.state / loop.RUN_LOCK
-    # Another process holds the lock: the second `run` changes nothing at all.
+    # Another process holds the lock: the second `run` changes nothing but its line in the run
+    # record (spec/CLI.md section 16).
     lines = len(host.audit())
+    record = host.dirs.state / runs.FILE
+    before = record.read_bytes() if record.exists() else b""
     with lock_held(lock), monkeypatch.context() as patch:
         refused = Supervised(patch, ("run", "--json-events"), host=host)
         assert refused.wait(20) == 21
@@ -1263,6 +1267,10 @@ def test_second_run_exits_21(
     assert len(host.audit()) == lines
     assert _recorded(host.dirs) is None
     assert counted.calls == 0
+    written = record.read_bytes()
+    assert written.startswith(before)
+    [line] = written[len(before) :].splitlines()
+    assert json.loads(line)["command"] == "run"
     # A `run` of the profile going in this process: the second refuses too, and the first goes on
     # answering.
     first = Supervised(monkeypatch, EVENTS, host=host)
