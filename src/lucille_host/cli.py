@@ -71,6 +71,7 @@ import re
 import sys
 import termios
 import threading
+import time
 from collections.abc import Callable, Iterator, Sequence
 from dataclasses import replace
 from types import MappingProxyType
@@ -190,6 +191,9 @@ class _Parser(argparse.ArgumentParser):
     json_wanted = False
     # The parsers of the verbs whose forms are checked once the line is parsed, by name.
     forms: dict[str, argparse.ArgumentParser] = {}
+    # The ``credential`` verb's parser and its actions': a usage error any of them raises
+    # repeats nothing typed (:func:`_usage_said`).
+    credential_parsers: frozenset[argparse.ArgumentParser] = frozenset()
 
     def error(self, message: str) -> NoReturn:
         raise _Usage(self, message)
@@ -645,7 +649,58 @@ def build_parser() -> argparse.ArgumentParser:
     _json_option(verbs.add_parser("pause", help="start nothing until resume; refuse new requests"))
     _json_option(verbs.add_parser("resume", help="clear pause and any kill request"))
     _json_option(verbs.add_parser("kill", help="kill the operation in flight, and pause"))
-    parser.forms = {"run": run, "pair": pair, "roots add": add}
+
+    # No --json: the verb has no JSON form in contract version 1 (spec/CLI.md section 14).
+    credential = verbs.add_parser(
+        "credential",
+        help="save, list or remove credentials for online services, kept only on this computer",
+        description=(
+            "Keeps credentials for online services (a password, an app token) in the system "
+            "keyring of this computer, each bound to the hosts it may be sent to. The value is "
+            "typed here, never given on the command line, and is never shown. Nothing uses a "
+            "saved credential yet, and nothing Lucille sends can read, list or change them."
+        ),
+    )
+    credential_verbs = credential.add_subparsers(
+        dest="credential_verb", metavar="ACTION", required=True
+    )
+    credential_set = credential_verbs.add_parser(
+        "set",
+        help="save or replace a credential: its value is asked for, and not shown",
+    )
+    for argument, what in (
+        ("service", "the service, such as gmail or github.com"),
+        ("name", "the credential's name, such as app-password"),
+    ):
+        credential_set.add_argument(argument, help=what)
+    credential_set.add_argument(
+        "--host",
+        dest="hosts",
+        action="append",
+        required=True,
+        metavar="HOST",
+        help="a host the credential may be sent to, such as imap.gmail.com; once for each host",
+    )
+    credential_set.add_argument(
+        "--value-stdin",
+        action="store_true",
+        help="read the value from one line of stdin, without asking (stdin must not be a terminal)",
+    )
+    credential_set.add_argument(
+        "--replace",
+        action="store_true",
+        help="replace a credential saved already: its value, and its hosts with the ones given now",
+    )
+    credential_list = credential_verbs.add_parser(
+        "list", help="show each credential's name, its hosts and when it was saved, never its value"
+    )
+    credential_remove = credential_verbs.add_parser("remove", help="delete one credential")
+    credential_remove.add_argument("service", help="the service")
+    credential_remove.add_argument("name", help="the credential's name")
+    parser.forms = {"run": run, "pair": pair, "roots add": add, "credential": credential}
+    parser.credential_parsers = frozenset(
+        {credential, credential_set, credential_list, credential_remove}
+    )
     return parser
 
 
@@ -667,6 +722,8 @@ def _check_usage(parser: argparse.ArgumentParser, args: argparse.Namespace) -> N
     forms = getattr(parser, "forms", {})
     if args.verb == "run" and as_json and not args.json_events:
         forms["run"].error("run writes its JSON with --json-events")
+    if args.verb == "credential" and as_json:
+        forms["credential"].error("credential has no JSON form in contract version 1")
     if args.verb == "pair" and as_json and args.code is None and not args.code_stdin:
         forms["pair"].error("with --json, pair reads the code with --code-stdin")
     if args.verb == "roots" and args.roots_verb == "add":
@@ -1427,6 +1484,153 @@ def _roots_verb(args: argparse.Namespace, dirs: paths.Dirs, out: _Out) -> None:
         _roots(args, dirs, out)
 
 
+def _read_value_line() -> str:
+    """One line of stdin. A line that is not text in stdin's encoding is refused, without the
+    decoder's error, which names the bytes it could not decode: bytes of the value."""
+    try:
+        return sys.stdin.readline()
+    except UnicodeDecodeError:
+        pass
+    # Raised outside the except clause, so that the decoder's error is not its context.
+    raise _Refused(
+        "bad_value", "the value is not text in this terminal's encoding; nothing was saved"
+    )
+
+
+def _read_hidden(prompt: str) -> str:
+    """One line typed at the terminal on stdin, with the terminal's echo off while it is typed,
+    after a prompt on stderr; what was typed ahead of the prompt is discarded. EOFError at the end
+    of stdin."""
+    descriptor = sys.stdin.fileno()
+    before = termios.tcgetattr(descriptor)
+    hidden = termios.tcgetattr(descriptor)
+    hidden[3] &= ~termios.ECHO
+    print(prompt, end="", file=sys.stderr, flush=True)
+    try:
+        termios.tcsetattr(descriptor, termios.TCSAFLUSH, hidden)
+        line = _read_value_line()
+    finally:
+        termios.tcsetattr(descriptor, termios.TCSADRAIN, before)
+        print(file=sys.stderr, flush=True)
+    if not line:
+        raise EOFError
+    return line[:-1] if line.endswith("\n") else line
+
+
+def _credential_value(args: argparse.Namespace, key: str) -> str:
+    """The value to save: one line of stdin with ``--value-stdin``, otherwise typed twice at a
+    prompt that does not echo it, which needs a terminal."""
+    if args.value_stdin:
+        if sys.stdin.isatty():
+            raise _Refused(
+                "no_value",
+                "with --value-stdin, standard input is a terminal, where the value would show as "
+                "it is typed; leave out --value-stdin to type it at a prompt that hides it",
+            )
+        line = _read_value_line()
+        value = line[:-1] if line.endswith("\n") else line
+        if value.endswith("\r"):
+            value = value[:-1]
+        if not value:
+            raise _Refused("no_value", "no value was given on standard input; nothing was saved")
+        return value
+    if not sys.stdin.isatty():
+        raise _Refused(
+            "no_value",
+            "standard input is not a terminal: run this in a terminal to type the value, or "
+            "pass --value-stdin and write it on standard input",
+        )
+    first = _read_hidden(f"value of {key} (not shown): ")
+    if not first:
+        raise _Refused("no_value", "no value was typed; nothing was saved")
+    again = _read_hidden("the same value again: ")
+    if again != first:
+        raise _Refused("values_differ", "the two values differ; nothing was saved")
+    return first
+
+
+def _credential(args: argparse.Namespace, dirs: paths.Dirs, out: _Out) -> None:
+    """``credential set``, ``list`` and ``remove``. An error none of the verb's own refusals
+    names is not shown as it is: its message, its notes, its cause and its context could carry
+    a credential's value. :func:`main` shows an error of its own instead, with its traceback,
+    which names the place the verb was in and nothing the error said."""
+    unexpected = ""
+    interrupted = False
+    try:
+        _credential_verb(args, dirs, out)
+    except _FAILURES:
+        raise
+    except KeyboardInterrupt:
+        interrupted = True
+    except Exception as exc:
+        unexpected = type(exc).__name__
+    # Each raised again outside the except clause, so that the error caught is not its context:
+    # a Ctrl-C while the store handled a keyring's error would otherwise carry that error.
+    if interrupted:
+        raise KeyboardInterrupt
+    if unexpected:
+        raise RuntimeError(
+            f"an unexpected error ({unexpected}) in the credential verb; its message is not "
+            "shown, since it may hold a credential's value"
+        )
+
+
+def _credential_verb(args: argparse.Namespace, dirs: paths.Dirs, out: _Out) -> None:
+    """The verb's work. This function is the only place in the runtime, but the module itself,
+    that names the credential store (tests/test_credentials.py), so a process that does not run
+    this verb never imports it."""
+    from lucille_host import credentials  # noqa: PLC0415 - kept out of every other verb
+
+    host_state.startup_checks()
+    creds = credentials.CredentialStore(paths.ensure_dir(dirs.state), dirs.profile)
+    try:
+        if args.credential_verb == "list":
+            saved = creds.names()
+            if not saved:
+                print("lucille-host: no credentials are saved on this computer", file=sys.stderr)
+            for each in saved:
+                hosts = ", ".join(each.hosts) if each.hosts else "no host (saved without hosts)"
+                when = time.strftime("%Y-%m-%d %H:%M:%SZ", time.gmtime(each.saved_at))
+                out.text(f"{each.service}/{each.name}: sent only to {hosts}; saved {when}")
+            return
+        key = f"{args.service}/{args.name}"
+        if args.credential_verb == "remove":
+            if not creds.remove(args.service, args.name):
+                raise _Refused("no_such_credential", f"no credential {key} is saved")
+            out.text(f"removed {key}")
+            return
+        # Every check that needs no value comes first, so nothing is typed for a refusal.
+        hosts = credentials.hosts_of(args.hosts)
+        before = creds.saved(args.service, args.name)
+        if before is not None and not args.replace:
+            raise credentials.CredentialExists(f"credential {key} is saved already")
+        try:
+            value = _credential_value(args, key)
+        except (EOFError, KeyboardInterrupt) as exc:
+            raise _Refused("interrupted", "nothing was saved") from exc
+        if any(0xD800 <= ord(char) <= 0xDFFF for char in value):
+            # What stdin decodes undecodable bytes to under the C or POSIX locale, or with
+            # PYTHONUTF8=1 (surrogateescape): not text, and not to be stored.
+            raise _Refused(
+                "bad_value", "the value is not text in this terminal's encoding; nothing was saved"
+            )
+        if any(ord(char) < 0x20 or ord(char) == 0x7F for char in value):
+            raise _Refused("bad_value", "the value holds a control character; nothing was saved")
+        saved = creds.save(args.service, args.name, value, hosts, replace=args.replace)
+        out.text(
+            f"{'replaced' if before else 'saved'} {key}, to be sent only to "
+            f"{', '.join(saved.hosts)}. Nothing uses saved credentials yet."
+        )
+    except credentials.CredentialExists as exc:
+        raise _Refused(
+            "credential_exists",
+            f"{exc}; nothing was changed. Pass --replace to replace its value, and its hosts with "
+            "the ones given now",
+        ) from exc
+    except credentials.CredentialError as exc:
+        raise _Refused("bad_credential", str(exc)) from exc
+
+
 def _control(verb: str) -> Callable[[argparse.Namespace, paths.Dirs, _Out], None]:
     return lambda args, dirs, out: _controls(verb, dirs, out)
 
@@ -1445,6 +1649,7 @@ VERBS: Final[dict[str, Callable[..., Any]]] = {
     "pause": _control("pause"),
     "resume": _control("resume"),
     "kill": _control("kill"),
+    "credential": _credential,
 }
 
 # What --json calls each failure that carries no code of its own, the first class that matches
@@ -1488,6 +1693,48 @@ def _failure(exc: BaseException) -> tuple[str, str, str, dict[str, str]]:
     return f"lucille-host: {said}", code, said, extra
 
 
+# argparse's usage errors of a credential command line that repeat nothing typed on it: the
+# arguments a form needs, by name, and options that need a word after them.
+_CREDENTIAL_REQUIRED: Final = "the following arguments are required: "
+_CREDENTIAL_ARGUMENTS: Final = frozenset({"service", "name", "--host", "ACTION"})
+_CREDENTIAL_USAGE: Final = frozenset(
+    {
+        "argument --host: expected one argument",
+        "credential has no JSON form in contract version 1",
+    }
+)
+
+
+def _usage_said(
+    parser: argparse.ArgumentParser,
+    raised_by: argparse.ArgumentParser,
+    words: Sequence[str],
+    message: str,
+) -> str:
+    """argparse's ``message`` for a usage error, unless the credential verb's parser or one of
+    its actions' raised it (``raised_by``), or the line names the verb anywhere, ``--`` or not:
+    then only a message that repeats nothing typed on it, since a word there may be a value
+    typed by mistake, in any form argparse writes it (quoted, escaped). That is argparse's
+    message only where it names the verb's own arguments and options; an unknown action is
+    "unknown credential subcommand"; anything else is a message that says where a value given
+    on the command line has gone."""
+    ours = raised_by in getattr(parser, "credential_parsers", frozenset())
+    if not ours and "credential" not in words:
+        return message
+    if message.startswith("argument ACTION: invalid choice:"):
+        return "unknown credential subcommand: it is set, list or remove"
+    if message in _CREDENTIAL_USAGE or message.startswith(_CREDENTIAL_REQUIRED):
+        own = message.removeprefix(_CREDENTIAL_REQUIRED)
+        if all(name in _CREDENTIAL_ARGUMENTS for name in own.split(", ")) or own == message:
+            return message
+    return (
+        "the credential command line could not be parsed, and its words are not repeated here, "
+        "since one may be a credential's value. A value is never given on the command line: "
+        "`credential set` asks for it. If one was typed there, it is in your shell's history now: "
+        "remove it there, and change the credential where it was issued"
+    )
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     """Entry point for the ``lucille-host`` console script and ``python -m lucille_host``."""
     words = list(sys.argv[1:] if argv is None else argv)
@@ -1496,11 +1743,19 @@ def main(argv: Sequence[str] | None = None) -> int:
     if isinstance(parser, _Parser):
         parser.json_wanted = wanted
     try:
-        args = parser.parse_args(words)
+        args, extras = parser.parse_known_args(words)
+        if extras:
+            # What parse_args says of them, said by the parser of the verb that took them, so
+            # that a credential line's are refused as its own (_usage_said).
+            forms = getattr(parser, "forms", {})
+            credential = getattr(args, "verb", None) == "credential"
+            owner = forms["credential"] if credential else parser
+            owner.error(f"unrecognized arguments: {' '.join(extras)}")
         _check_usage(parser, args)
     except _Usage as exc:
         _Out(wanted).error("usage", USAGE_MESSAGE)
-        argparse.ArgumentParser.error(exc.parser, exc.message)
+        said = _usage_said(parser, exc.parser, words, exc.message)
+        argparse.ArgumentParser.error(exc.parser, said)
     out = _Out(bool(getattr(args, "json", False)))
     if args.verb is None:
         out.version()

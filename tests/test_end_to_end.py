@@ -143,7 +143,7 @@ def test_forget_leaves_the_credential_item_alone(flow: Flow, host_env: HostEnv) 
     # forget ends the pair; the user's credentials are their own item, and stay as they were.
     profile = host_env.dirs.profile
     creds = credentials.CredentialStore(host_env.dirs.state, profile)
-    creds.save("gmail", "app-password", "correct-horse-battery-staple")
+    creds.save("gmail", "app-password", "correct-horse-battery-staple", ("imap.gmail.com",))
     item = (credentials.SERVICE, profile)
     before = host_env.keyring.items[item]
     seen = _pair_run_forget(flow, host_env)

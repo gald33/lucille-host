@@ -190,7 +190,7 @@ def test_a_service_error_at_a_read_or_write_of_the_credential_item_is_a_store_er
     raising.on_read = None
     raising.on_write = make
     with pytest.raises(store.StoreError) as written:
-        creds.save("gmail", "x", "correct-horse-battery-staple")
+        creds.save("gmail", "x", "correct-horse-battery-staple", ("imap.gmail.com",))
     assert str(written.value) == f"the keyring could not be written ({detail})"
     _check(written.value, unusable)
 
@@ -582,7 +582,9 @@ def test_a_write_of_the_pair_item_tried_is_remembered_whether_or_not_it_landed(
     # The credential item is another item: its writes are not the pair's.
     monkeypatch.setattr(store, "_PAIR_WRITE_TRIED", threading.Event())
     raising.on_write = None
-    credentials.CredentialStore(host_env.dirs.state, "default").save("gmail", "x", "a-secret")
+    credentials.CredentialStore(host_env.dirs.state, "default").save(
+        "gmail", "x", "a-secret", ("imap.gmail.com",)
+    )
     assert not store.pair_write_tried()
 
 

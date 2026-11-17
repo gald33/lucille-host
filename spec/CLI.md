@@ -708,10 +708,16 @@ limit, as it runs every verb, and stops it when the limit passes.
 | `none` | This computer holds no pair, or another command forgot it meanwhile. |
 | `waiting` | No resolve has seen Lucille collect this computer's answer, so there is no SAS to confirm: Lucille has not collected it, or the hub could not be reached to ask. The message says which. |
 | `sas_ready` | This computer has not shown the SAS yet: `pair status` shows it. |
-| `interrupted` | Ctrl-C while `pair` waited. The pair is kept; `pair status` resumes. |
+| `interrupted` | Ctrl-C while `pair` waited. The pair is kept; `pair status` resumes. Or Ctrl-C, or the end of standard input, while `credential set` asked for a value: nothing was stored. |
 | `pair_unusable` | The pairing library refused the pair here, or the store holds a SAS for it that is not four digits, `-`, four digits. |
 | `room_not_left` | A work room could not be left, so its keys would stay behind; the command can be tried again, or `forget` leaves it. |
 | `several_pairs` | The profile holds more than one pair, and the host keeps one. |
+| `bad_credential` | `credential`: a service or credential name, a host, or a value the store does not take (section 15). Nothing was stored. |
+| `credential_exists` | `credential set`: a credential is stored under that service and name already, and `--replace` was not given. Nothing changed. |
+| `no_such_credential` | `credential remove`: no credential is stored under that service and name. |
+| `no_value` | `credential set`: no value was given, or standard input is of the wrong kind to give one: not a terminal without `--value-stdin`, or a terminal with it. Nothing was stored. |
+| `values_differ` | `credential set`: the value typed twice differed. Nothing was stored. |
+| `bad_value` | `credential set`: the value holds a control character, or is not text in standard input's encoding (a line that does not decode, or one holding a lone surrogate). Nothing was stored. |
 
 ## 11. Golden fixtures
 
@@ -978,9 +984,100 @@ lucille-host --profile <name> run --json-events --exit-on-stdin-eof
   shell shows as it is.
 - During pairing, whether the hub could be reached and whether it refuses this computer's clock, beside
   `waiting`. They can be added to `waiting` as fields within version 1.
+- `credential set`, `list` and `remove` with `--json` (section 15). In version 1 the verb writes text
+  only, and `--json`, before the verb or after it, is a usage error. Its JSON form will come with the Mac
+  app's dialog for it. The codes its refusals carry are in section 10 already, for that form.
 - `pair` stopping on its own when its standard input closes, so that a shell that dies cannot leave a
   `pair` holding the profile's pairing lock until the code expires. Meanwhile a shell stops its `pair`
   before it exits.
+
+## 15. `credential`: credentials kept on this computer
+
+`credential` stores credentials for online services (a password, an app token) in the system keyring of
+this computer ([decisions/0003-local-credentials.md](../decisions/0003-local-credentials.md)). Nothing
+uses a stored credential yet: no operation reads one, and nothing Lucille sends can read, list or change
+one. The verb writes text only in version 1 (section 14).
+
+| Form | What it does |
+|---|---|
+| `credential set <service> <name> --host <host> [--host <host> ...] [--value-stdin] [--replace]` | Stores one credential, bound to the hosts given. |
+| `credential list` | One line per credential, by service then name: its service and name, its hosts and when it was stored. Never its value. With none stored, nothing on standard output, a line on standard error, and exit 0. |
+| `credential remove <service> <name>` | Deletes that credential and no other. One not stored is refused, exit 1. |
+
+**Names.** A service and a credential name are each 1 to 64 characters of `a`-`z`, `0`-`9`, `.`, `_` and
+`-`, starting with a letter or a digit: `gmail`, `github.com`, `app-password`. The whole name is matched:
+a name with a newline at its end is refused.
+
+**Hosts.** Each credential is bound to the hosts given with `--host`, the only hosts it may ever be sent
+to, once something uses credentials (decisions/0003, "Use", rule 1). That use will enforce exactly what is
+stored here:
+- A host is an exact DNS name: two labels or more, separated by `.`, each label 1 to 63 characters of
+  `a`-`z`, `0`-`9` and `-`, not starting or ending with `-`, the last starting with a letter; 253
+  characters at most. The whole host is matched: a host with a newline at its end is refused.
+- It is ASCII as given. A character that lowercases to an ASCII letter, such as the Kelvin sign (U+212A),
+  is refused, since ASCII is checked before lowercasing. A name in another script is written in its
+  `xn--` form, and a label that starts with `xn--` must decode as IDNA writes one; one that does not
+  (`xn--abc`) is refused.
+- What is given is lowercased, and one trailing `.` is taken off. A host given twice is kept once. The
+  hosts are kept in the order given.
+- Refused: a wildcard (`*.example.com`), a scheme (`https://`), a path, a port (`:443`), an IP address
+  (IPv4 or IPv6), a single label (`localhost`, `gmail`), and a name of this computer, of a local network,
+  or one that resolves nowhere on the internet: `localhost`, `localdomain`, `local`, `lan`, `internal`,
+  `home.arpa`, `arpa`, `test` and `invalid`, and any name ending in `.` and one of them
+  (`localhost.localdomain`, `printer.test`). A host is matched exactly, never as a pattern: `gmail.com`
+  does not cover `imap.gmail.com`.
+- One host at least, and 16 at most.
+- A refusal names a host by its place (`host 2`), and does not repeat it.
+
+**The value.**
+- It is never an argument. Without `--value-stdin`, standard input must be a terminal: the value is asked
+  for twice, at a prompt on standard error that turns the terminal's echo off while it is typed, and two
+  values that differ are refused. With `--value-stdin`, standard input must not be a terminal; the verb
+  reads one line, the value, and nothing more, taking off the line break (LF, or CR and LF) that ends it.
+- Refused, with nothing stored: an empty value (an empty line, or standard input that ends at once), a
+  value holding a control character (U+0000 to U+001F, or U+007F), one longer than 65536 characters, and
+  one that is not text in standard input's encoding (`bad_value`, without the bytes it could not decode):
+  a line that does not decode, or one holding a lone surrogate (U+D800 to U+DFFF), which is what
+  standard input decodes undecodable bytes to under the C or POSIX locale or with `PYTHONUTF8=1`. Both
+  are refused at the prompt and with `--value-stdin`.
+- The names and hosts are checked, and a credential already stored without `--replace` is refused, before
+  the value is asked for or read.
+- The value is written to the keyring and nowhere else. No output, error message, traceback or file of
+  the host's holds it, nor any other stored credential's value.
+- A usage error of a `credential` command line repeats nothing typed on it, since a word there may be a
+  value typed by mistake. That is any usage error the verb's parser, or one of its actions', raises, and
+  any usage error of a line that names the verb anywhere, before `--` or after it
+  (`lucille-host -- credential list <word>`), whichever parser raised it. It is argparse's own message
+  only where that names the verb's arguments and options (`the following arguments are required: name`). An unknown action is
+  `unknown credential subcommand: it is set, list or remove`, after the verb's usage. Any other says that
+  a value is never given on the command line, and that one typed there is now in the shell's history.
+
+**Replacing.** A credential already stored under that service and name is refused (exit 1), and nothing
+changes, unless `--replace` is given. `--replace` replaces its value, and replaces its hosts with the hosts
+given now: the hosts it had before are dropped. `--replace` with none stored stores it. Whether one is
+stored is decided again under the store's lock when it is written, so one stored meanwhile by another
+command is not replaced without `--replace`.
+
+**The keyring.** A credential is stored only in the keyring backend the host builds for this system: the
+Keychain on macOS, the Secret Service on Linux.
+- A keyring the host refuses, or one turned off by keyring's own setting, is refused with the store's own
+  message (`insecure_keyring`), exit 1. So is one that cannot be read or written for a reason the store
+  has words for, such as a Secret Service that cannot be started (`store_error`): those words are the
+  host's, with the error's class and D-Bus name, never its message.
+- Any other error of a read or a write of the keyring is `store_error` with a fixed sentence: "the keyring
+  refused to read (or write) the credentials item; its error is not shown, since it may hold a
+  credential's value". Nothing of the keyring's error is shown: not its message, its notes, nor the error
+  as a cause or context. The item holds every credential, written whole, so the error could carry any of
+  them.
+- An error of the verb's own that none of its refusals names is `internal`: its traceback shows where the
+  verb was, and an error of the host's own in place of the one raised, whose message, notes, cause and
+  context are not shown.
+- A Ctrl-C on the verb's path, where no prompt catches it (`interrupted`), is raised again as a bare
+  `KeyboardInterrupt`, which carries nothing of an error it interrupted the handling of.
+- An item whose service, credential names or hosts this version would not write (a newline at the end
+  of one, `a.example.com/x`) is not read, and is left as it is (`store_error`).
+- There is no file fallback, as there is for the pair (`pair --store-file`), and `--store-file` is a usage
+  error. The verb refuses to run as root.
 
 ## Changes
 

@@ -6,7 +6,8 @@ There is no release. This repository holds version `0.1.0.dev0`: the guards, CI,
 ([spec/PROTOCOL.md](spec/PROTOCOL.md)), the draft `--json` contract of the command line for apps that
 drive it ([spec/CLI.md](spec/CLI.md)), the catalog, the executor, the local policy, the audit log,
 `pause`, `resume` and `kill`, and the parts that reach Lucille: `pair`, `run`, `status`, `log` and
-`forget`, with `run`'s event stream and exit codes for an app that supervises it, and `policy reset`.
+`forget`, with `run`'s event stream and exit codes for an app that supervises it, `policy reset`, and
+`credential`, which stores credentials for online services on this computer; nothing uses them yet.
 Those are tested against Switchboard's in-process hub and a stand-in for Lucille, not against Lucille
 itself. Do not install it.
 
