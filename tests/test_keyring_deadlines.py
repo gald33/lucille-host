@@ -170,7 +170,7 @@ def test_a_credential_read_or_write_that_does_not_answer_is_a_store_error(
 ) -> None:
     creds = credentials.CredentialStore(tmp_path / "state", "default")
     with pytest.raises(store.StoreError, match="did not answer a read") as info:
-        _in_time(lambda: creds.save("gmail", "x", SECRET))
+        _in_time(lambda: creds.save("gmail", "x", SECRET, ("imap.gmail.com",)))
     assert SECRET not in str(info.value)
     with pytest.raises(store.StoreError, match="not asked again"):
         _in_time(creds.names)
@@ -184,7 +184,7 @@ def test_a_credential_write_that_does_not_answer_is_a_store_error(
     creds = credentials.CredentialStore(tmp_path / "state", "default")
     assert _in_time(creds.names) == []
     with pytest.raises(store.Unanswered, match="did not answer a write within 0.2 s") as info:
-        _in_time(lambda: creds.save("gmail", "x", SECRET))
+        _in_time(lambda: creds.save("gmail", "x", SECRET, ("imap.gmail.com",)))
     assert "whether it was saved is not known" in str(info.value)
     assert SECRET not in str(info.value)
     calls = unanswering.calls

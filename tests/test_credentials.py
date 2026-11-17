@@ -7,6 +7,8 @@ from __future__ import annotations
 
 import ast
 import json
+import subprocess
+import sys
 from collections.abc import Callable, Iterator
 from pathlib import Path
 
@@ -21,6 +23,7 @@ from tests._keyring import MemoryKeyring, turned_off
 
 PACKAGE = Path(__file__).resolve().parents[1] / "src" / "lucille_host"
 SECRET = "correct-horse-battery-staple"
+HOSTS = ("imap.gmail.com",)
 
 
 class FileKeyring(KeyringBackend):
@@ -72,15 +75,18 @@ def creds(tmp_path: Path, memory_keyring: MemoryKeyring) -> credentials.Credenti
 
 
 def test_save_list_value_remove(creds: credentials.CredentialStore) -> None:
-    saved = creds.save("gmail", "app-password", SECRET)
-    assert saved == credentials.SavedCredential("gmail", "app-password", 1000.0)
-    creds.save("bank", "login", "x")
+    saved = creds.save("gmail", "app-password", SECRET, HOSTS)
+    assert saved == credentials.SavedCredential("gmail", "app-password", 1000.0, HOSTS)
+    creds.save("bank", "login", "x", HOSTS)
     assert [(c.service, c.name) for c in creds.names()] == [
         ("bank", "login"),
         ("gmail", "app-password"),
     ]
     assert creds.value("gmail", "app-password") == SECRET
-    creds.save("gmail", "app-password", "replaced")
+    with pytest.raises(credentials.CredentialExists):
+        creds.save("gmail", "app-password", "replaced", HOSTS)
+    assert creds.value("gmail", "app-password") == SECRET
+    creds.save("gmail", "app-password", "replaced", HOSTS, replace=True)
     assert creds.value("gmail", "app-password") == "replaced"
     assert creds.remove("gmail", "app-password") is True
     assert creds.remove("gmail", "app-password") is False
@@ -91,34 +97,34 @@ def test_save_list_value_remove(creds: credentials.CredentialStore) -> None:
 def test_own_item_beside_the_pair(
     creds: credentials.CredentialStore, memory_keyring: MemoryKeyring
 ) -> None:
-    creds.save("gmail", "x", SECRET)
+    creds.save("gmail", "x", SECRET, HOSTS)
     assert list(memory_keyring.items) == [(credentials.SERVICE, "default")]
     assert credentials.SERVICE != store.SERVICE
 
 
 def test_names_never_carry_the_value(creds: credentials.CredentialStore) -> None:
-    creds.save("gmail", "x", SECRET)
+    creds.save("gmail", "x", SECRET, HOSTS)
     assert SECRET not in repr(creds.names())
 
 
 @pytest.mark.parametrize("name", ["", "Gmail", "a b", "a/b", "-x", "x" * 65])
 def test_bad_names_refused(creds: credentials.CredentialStore, name: str) -> None:
     with pytest.raises(credentials.CredentialError):
-        creds.save(name, "ok", SECRET)
+        creds.save(name, "ok", SECRET, HOSTS)
     with pytest.raises(credentials.CredentialError):
-        creds.save("ok", name, SECRET)
+        creds.save("ok", name, SECRET, HOSTS)
 
 
 @pytest.mark.parametrize("value", ["", "a\x00b", "x" * (credentials.MAX_VALUE_CHARS + 1)])
 def test_bad_values_refused(creds: credentials.CredentialStore, value: str) -> None:
     with pytest.raises(credentials.CredentialError) as info:
-        creds.save("gmail", "x", value)
+        creds.save("gmail", "x", value, HOSTS)
     if value:
         assert value not in str(info.value)
 
 
 def _every_use(creds: credentials.CredentialStore) -> Iterator[Callable[[], object]]:
-    yield lambda: creds.save("gmail", "y", SECRET)
+    yield lambda: creds.save("gmail", "y", SECRET, HOSTS)
     yield creds.names
     yield lambda: creds.value("gmail", "x")
     yield lambda: creds.remove("gmail", "x")
@@ -185,7 +191,7 @@ def test_the_store_never_uses_the_pairs_item(
     assert creds.service == credentials.SERVICE != store.SERVICE
     with pytest.raises(TypeError):
         credentials.CredentialStore(Path("unused"), "default", service=store.SERVICE)  # type: ignore[call-arg]
-    creds.save("gmail", "x", SECRET)
+    creds.save("gmail", "x", SECRET, HOSTS)
     assert (store.SERVICE, "default") not in memory_keyring.items
 
 
@@ -198,7 +204,7 @@ def test_a_keyring_that_changes_before_the_write_is_refused(
     monkeypatch.setattr(store, "_system_backend", lambda: next(built))
     creds = credentials.CredentialStore(tmp_path / "state", "default")
     with pytest.raises(store.InsecureKeyring, match="cannot keep credentials"):
-        creds.save("gmail", "x", SECRET)
+        creds.save("gmail", "x", SECRET, HOSTS)
     assert plain.calls == 0
     assert not plain.path.exists()
     assert good.items == {}
@@ -217,7 +223,7 @@ def test_the_systems_own_backend_is_the_one_used(
     for name in ("get_keyring", "get_password", "set_password", "delete_password"):
         monkeypatch.setattr(keyring, name, chosen_by_keyring)
     creds = credentials.CredentialStore(tmp_path / "state", "default")
-    creds.save("gmail", "x", SECRET)
+    creds.save("gmail", "x", SECRET, HOSTS)
     assert creds.value("gmail", "x") == SECRET
     assert list(memory_keyring.items) == [(credentials.SERVICE, "default")]
 
@@ -227,26 +233,134 @@ def test_foreign_item_left_alone(
 ) -> None:
     memory_keyring.items[(credentials.SERVICE, "default")] = json.dumps({"v": 99, "secret": SECRET})
     with pytest.raises(store.StoreError) as info:
-        creds.save("gmail", "x", "new")
+        creds.save("gmail", "x", "new", HOSTS)
     assert SECRET not in str(info.value)
     assert json.loads(memory_keyring.items[(credentials.SERVICE, "default")])["v"] == 99
 
 
-def test_nothing_else_in_the_runtime_imports_it() -> None:
-    """No request handler, operation or reply can reach a credential: no runtime module but this
-    one names the module. When an operation is allowed to use one, this test changes with the
-    design record."""
-    importers = []
+def _importers() -> list[tuple[str, str]]:
+    """Each runtime module but this one that names the credential store, with the function the
+    import is in ("" at module level)."""
+    found: list[tuple[str, str]] = []
     for path in PACKAGE.rglob("*.py"):
         if path.name == "credentials.py":
             continue
         tree = ast.parse(path.read_text(encoding="utf-8"))
-        for node in ast.walk(tree):
-            names: list[str] = []
-            if isinstance(node, ast.ImportFrom):
-                names = [node.module or ""] + [a.name for a in node.names]
-            elif isinstance(node, ast.Import):
-                names = [a.name for a in node.names]
-            if any(n == "credentials" or n.endswith(".credentials") for n in names):
-                importers.append(str(path.relative_to(PACKAGE)))
-    assert importers == []
+        where = str(path.relative_to(PACKAGE))
+
+        def visit(node: ast.AST, function: str, where: str = where) -> None:
+            for child in ast.iter_child_nodes(node):
+                inner = function
+                if isinstance(child, ast.FunctionDef | ast.AsyncFunctionDef):
+                    inner = child.name if not function else f"{function}.{child.name}"
+                names: list[str] = []
+                if isinstance(child, ast.ImportFrom):
+                    names = [child.module or ""] + [a.name for a in child.names]
+                elif isinstance(child, ast.Import):
+                    names = [a.name for a in child.names]
+                if any(n == "credentials" or n.endswith(".credentials") for n in names):
+                    found.append((where, function))
+                visit(child, inner, where)
+
+        visit(tree, "")
+    return sorted(found)
+
+
+def test_only_the_credential_verb_imports_it() -> None:
+    """No request handler, operation or reply can reach a credential: no runtime module but this
+    one names the module, except the command line's ``credential`` verb, in its own function, so
+    that no other verb's process (``run`` among them) loads it. When an operation is allowed to
+    use one, this test changes with the design record."""
+    assert _importers() == [("cli.py", "_credential")]
+
+
+def test_the_credential_verb_never_reads_a_value() -> None:
+    """The verb saves, lists and removes; it never reads a value back (nothing uses one yet)."""
+    tree = ast.parse((PACKAGE / "cli.py").read_text(encoding="utf-8"))
+    [verb] = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef) and node.name == "_credential"
+    ]
+    read = [
+        node.lineno
+        for node in ast.walk(verb)
+        if isinstance(node, ast.Attribute) and node.attr == "value"
+    ]
+    assert read == []
+
+
+def test_importing_the_command_line_does_not_load_it() -> None:
+    """``run`` and every other verb but ``credential`` run without the module loaded."""
+    code = "import sys, lucille_host.cli; print('lucille_host.credentials' in sys.modules)"
+    done = subprocess.run(
+        [sys.executable, "-I", "-c", code], capture_output=True, text=True, check=True
+    )
+    assert done.stdout.strip() == "False", done.stdout + done.stderr
+
+
+@pytest.mark.parametrize(
+    "hosts",
+    [
+        ("localhost",),
+        ("gmail",),
+        ("1.2.3.4",),
+        ("[::1]",),
+        ("gmail.com:443",),
+        ("https://gmail.com",),
+        ("mail.gmail.com/inbox",),
+        ("printer.local",),
+        ("router.lan",),
+        ("nas.home.arpa",),
+        ("db.internal",),
+        ("dev.localhost",),
+        ("bücher.de",),
+        ("a..b.com",),
+        ("-a.com",),
+        ("a.123",),
+        (),
+        tuple(f"h{n}.example.com" for n in range(credentials.MAX_HOSTS + 1)),
+    ],
+)
+def test_hosts_that_are_not_internet_names_are_refused(
+    creds: credentials.CredentialStore, hosts: tuple[str, ...]
+) -> None:
+    with pytest.raises(credentials.CredentialError):
+        creds.save("gmail", "x", SECRET, hosts)
+    assert creds.names() == []
+
+
+def test_hosts_are_kept_lowercased_once_each_in_order(creds: credentials.CredentialStore) -> None:
+    saved = creds.save(
+        "gmail", "x", SECRET, ["SMTP.Gmail.com.", "imap.gmail.com", "smtp.gmail.com"]
+    )
+    assert saved.hosts == ("smtp.gmail.com", "imap.gmail.com")
+    assert creds.names()[0].hosts == ("smtp.gmail.com", "imap.gmail.com")
+    assert creds.saved("gmail", "x") == saved
+    assert creds.saved("gmail", "y") is None
+    # Replacing a credential replaces its hosts.
+    creds.save("gmail", "x", SECRET, ["xn--bcher-kva.example"], replace=True)
+    assert creds.names()[0].hosts == ("xn--bcher-kva.example",)
+
+
+def test_an_entry_saved_without_hosts_is_read_with_none(
+    creds: credentials.CredentialStore, memory_keyring: MemoryKeyring
+) -> None:
+    # Saved before hosts were kept (no release did): it is read, bound to no host, and may be
+    # sent nowhere once something uses credentials.
+    entry = {"service": "gmail", "name": "x", "value": SECRET, "saved_at": 5.0}
+    doc = {"v": 1, "credentials": {"gmail/x": entry}}
+    memory_keyring.items[(credentials.SERVICE, "default")] = json.dumps(doc)
+    assert creds.names() == [credentials.SavedCredential("gmail", "x", 5.0, ())]
+
+
+@pytest.mark.parametrize("hosts", ["imap.gmail.com", ["Gmail.com"], [1], ["localhost"]])
+def test_an_item_with_hosts_this_version_would_not_write_is_left_alone(
+    creds: credentials.CredentialStore, memory_keyring: MemoryKeyring, hosts: object
+) -> None:
+    entry = {"service": "gmail", "name": "x", "value": SECRET, "saved_at": 5.0, "hosts": hosts}
+    text = json.dumps({"v": 1, "credentials": {"gmail/x": entry}})
+    memory_keyring.items[(credentials.SERVICE, "default")] = text
+    with pytest.raises(store.StoreError):
+        creds.names()
+    assert memory_keyring.items[(credentials.SERVICE, "default")] == text

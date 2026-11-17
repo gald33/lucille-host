@@ -86,7 +86,13 @@
             "interrupted",
             "pair_unusable",
             "room_not_left",
-            "several_pairs"
+            "several_pairs",
+            "bad_credential",
+            "credential_exists",
+            "no_such_credential",
+            "no_value",
+            "values_differ",
+            "bad_value"
           ]
         },
         "message": {

@@ -1,9 +1,12 @@
 # 0003: Local credentials (draft)
 
-**Status: storage built; entry and use chosen, not built.** `src/lucille_host/credentials.py` can save, list, read (`value()`) and
-remove a credential for an online service, kept only on this computer. Nothing yet writes to it from the
-command line, nothing yet calls `value()`, and nothing Lucille sends can reach it. This record says what was built, and what is still to be decided
-before a credential kept here can be used.
+**Status: storage, and entry from the command line, built; entry at Lucille's request and use chosen,
+not built.** `src/lucille_host/credentials.py` can save, list, read (`value()`) and remove a credential for
+an online service, kept only on this computer. `lucille-host credential set`, `list` and `remove` write
+to it from the command line, each credential bound to the hosts it may be sent to (spec/CLI.md §15).
+Nothing uses a stored credential yet: nothing calls `value()`, and nothing Lucille sends can reach it.
+This record says what was built, and what is still to be decided before a credential kept here can be
+used.
 
 ## Why
 
@@ -41,9 +44,12 @@ This repository builds only the first. The other two belong to Lucille's backend
   value is returned only by `value()`.
 - **An item this version did not write is left as it is.** It may hold the only copy of the user's
   credentials.
-- **Unreachable from Lucille.** No runtime module but `credentials.py` imports it
-  (`tests/test_credentials.py`, `test_nothing_else_in_the_runtime_imports_it`). No request, operation or
-  reply can write, read or list it.
+- **Unreachable from Lucille.** No runtime module but `credentials.py` and the command line's
+  `credential` verb, in its own function, imports it, so no other verb's process, `run` among them,
+  loads it, and the verb never reads a value back (`tests/test_credentials.py`,
+  `test_only_the_credential_verb_imports_it`, `test_importing_the_command_line_does_not_load_it`,
+  `test_the_credential_verb_never_reads_a_value`). No request, operation or reply can write, read or
+  list it.
 
 ## What was open, and how it was decided
 
@@ -98,8 +104,8 @@ off Lucille's servers) would expose that logic to the user; obfuscation slows a 
 ## Entry: Lucille asks, the user types it here (chosen 2026-11-11, not built)
 
 Lucille may ask the host to collect a credential. For example: "ask the user for `gmail/app-password`,
-for hosts `imap.gmail.com` and `smtp.gmail.com`". The request carries no value. Once this is built, the
-user would also be able to add one unprompted, with a `credential set` command that does not exist yet.
+for hosts `imap.gmail.com` and `smtp.gmail.com`". The request carries no value. The user can also add
+one unprompted, with `lucille-host credential set` (spec/CLI.md §15).
 
 **The risk this creates is phishing through our own program.** A request Lucille sends is just a
 request. If Lucille, or anyone who controls Lucille's account or servers, could ask for "your bank
