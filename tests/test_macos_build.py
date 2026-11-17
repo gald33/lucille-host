@@ -11474,6 +11474,144 @@ def test_a_host_process_running_before_the_open_fails_the_control(
     assert "the control's gate held" not in said, said
 
 
+def test_a_reading_that_straddles_the_open_holds_no_gate_and_is_not_kept_apart() -> None:
+    # A ps reading started just before the open and ended 1.3 s after it, as a first call can on a
+    # slow runner: what it saw may be the app's own host, after the open, or a process from before
+    # it. No gate counts it, not as a first sighting, nor as ps having read the table, and it is
+    # not kept in ``before_open``, which would fail the control; it counts for the stretches only.
+    runtime = _runtime_of(Path("/Applications") / f"{check_app.APP_NAME}.app")
+    unread = check_app._Unread(5555, 99, "S", "(other)", True, (runtime,))
+    straddling = check_app._Reading(
+        "ps", -0.01, 1.30, frozenset({4242}), ((4242, f"S {_HOST_COMMAND}"),), "", (unread,)
+    )
+    watch = check_app._Watch(began=-0.05, since=0.0)
+    watch.add(straddling)
+    assert watch.before_open == []
+    assert watch.first == {} and watch.hosts == set() and watch.seen == set()
+    assert watch.readings == [straddling] and watch.ended == pytest.approx(1.30)
+    watch.ended = 40.0
+    assert not watch.read_by("ps")
+    assert watch.passed_by(runtime) == ("", "")
+
+
+@pytest.mark.parametrize("seen_after", [True, False])
+def test_a_first_call_that_straddles_the_open_neither_passes_nor_fails_the_control(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    seen_after: bool,
+) -> None:
+    # Each lister's first call starts before the open and ends 1.3 s after it, having seen a host
+    # process (the app's own, by then). The control holds or fails on what the later readings see,
+    # as if that first call had seen nothing: it passes where they see the host from 0.4 s, and
+    # fails, for want of a sighting and not for a host from before the open, where they never do.
+    if seen_after:
+        world = _ListerWorld(pgrep=_host_from(0.4), ps=_ps_host_from(0.4), marker_at=1.5)
+    else:
+        world = _ListerWorld(pgrep=_none, ps=_ps_none, marker_at=1.5)
+    real_read = check_app._read
+
+    def read(lister: str) -> Any:
+        before = world.opened_at is None
+        reading = real_read(lister)
+        if not before or lister == check_app.NAMED:
+            return reading
+        children = ((4242, f"S {_HOST_COMMAND}"),) if lister == "ps" else ()
+        return dataclasses.replace(
+            reading, ended=reading.started + 1.3, hosts=frozenset({4242}), children=children
+        )
+
+    monkeypatch.setattr(check_app, "_read", read)
+    # The check before the control, that no host process runs, reads with the same listers: it is
+    # stood in for, so that it sees nothing of what the first calls are made to see here.
+    monkeypatch.setattr(check_app, "_no_profile_process", lambda: True)
+    checker, _ = _control_in(world, tmp_path, monkeypatch)
+    said = capsys.readouterr().out
+    assert "before the app was opened" not in said, said
+    if seen_after:
+        assert checker.failures == [], checker.failures
+        assert "the control's gate held" in said, said
+    else:
+        assert checker.failures == [_STARTS], checker.failures
+        assert "no host process of the app's profile was seen in 30 s" in said, said
+
+
+def test_a_child_of_the_app_from_before_the_open_is_kept_apart_and_fails_the_control(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # A reading that ended before the open saw a child of a running copy of the app, whose
+    # arguments ps could not read: it holds no gate and is kept in ``before_open``. In the control,
+    # a copy runs, by ps, before the open, with that child under it: the control fails with that
+    # reason, though both listers match a host process after the open.
+    before = check_app._Reading("ps", -0.04, -0.02, frozenset(), ((4243, "S (other)"),))
+    watch = check_app._Watch(began=-0.05, since=0.0)
+    watch.add(before)
+    assert watch.first == {} and watch.children == {}
+    assert watch.before_open == [
+        (pytest.approx(-0.04), "4243, a child of a running copy of the app ('S (other)')")
+    ]
+    real_read = check_app._read
+
+    def read(lister: str) -> Any:
+        reading = real_read(lister)
+        if world.opened_at is None and lister == "ps":
+            # Ended before the open: ps is the last lister called before it, here.
+            reading = dataclasses.replace(
+                reading, ended=reading.started + 0.01, children=((4243, "S (other)"),)
+            )
+        return reading
+
+    world = _ListerWorld(pgrep=_host_from(0.4), ps=_ps_host_from(0.4), marker_at=1.5)
+    monkeypatch.setattr(check_app, "_read", read)
+    # The check before the control, that no host process runs, reads with the same listers: it is
+    # stood in for, so that it sees nothing of what the first calls are made to see here.
+    monkeypatch.setattr(check_app, "_no_profile_process", lambda: True)
+    checker, _ = _control_in(world, tmp_path, monkeypatch)
+    said = capsys.readouterr().out
+    assert checker.failures == [_STARTS], checker.failures
+    assert re.search(
+        r"before the app was opened, so what the watch saw after the open proves nothing of what "
+        r"the app started: 4243, a child of a running copy of the app \('S \(other\)'\), at "
+        r"-0\.0\d s",
+        said,
+    ), said
+
+
+def test_a_process_mapping_the_runtime_from_before_the_open_is_kept_apart_and_fails_the_control(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # A reading that ended before the open saw a process, no child of the app, that lsof says maps
+    # a copy's bundled runtime: it holds no gate and is kept in ``before_open``; in the control it
+    # fails the control, though both listers match a host process after the open.
+    runtime = _runtime_of(Path("/Applications") / f"{check_app.APP_NAME}.app")
+    unread = check_app._Unread(5556, 1, "S", "(other)", False, (runtime,))
+    before = check_app._Reading("ps", -0.04, -0.02, frozenset(), (), "", (unread,))
+    watch = check_app._Watch(began=-0.05, since=0.0)
+    watch.add(before)
+    assert watch.first == {} and watch.by_executable == {} and watch.seen == set()
+    assert watch.before_open == [(pytest.approx(-0.04), f"5556, which maps {runtime} (ps)")]
+    real_read = check_app._read
+
+    def read(lister: str) -> Any:
+        reading = real_read(lister)
+        if world.opened_at is None and lister == "ps":
+            # Ended before the open: ps is the last lister called before it, here.
+            reading = dataclasses.replace(reading, ended=reading.started + 0.01, unread=(unread,))
+        return reading
+
+    world = _ListerWorld(pgrep=_host_from(0.4), ps=_ps_host_from(0.4), marker_at=1.5)
+    monkeypatch.setattr(check_app, "_read", read)
+    # The check before the control, that no host process runs, reads with the same listers: it is
+    # stood in for, so that it sees nothing of what the first calls are made to see here.
+    monkeypatch.setattr(check_app, "_no_profile_process", lambda: True)
+    checker, _ = _control_in(world, tmp_path, monkeypatch)
+    said = capsys.readouterr().out
+    assert checker.failures == [_STARTS], checker.failures
+    assert re.search(
+        r"proves nothing of what the app started: 5556, which maps \S+ \(ps\), at -0\.0\d s", said
+    ), said
+
+
 def test_the_controls_record_keeps_the_first_of_two_answers_that_say_as_much() -> None:
     # Two answers of lsof that say as much, a file each and neither a copy's runtime: the record
     # keeps the first.

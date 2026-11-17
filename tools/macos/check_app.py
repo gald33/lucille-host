@@ -5642,7 +5642,9 @@ class _Watch:
         # latest, and what a first sighting said goes with the earliest.
         at = reading.started - self.since
         if at < 0:
-            self._before_open(at, reading)
+            # Started before the open: it ended before it too (it saw only what was there before
+            # the app), or it straddles the open, and what it saw may be either side of it.
+            self._before_open(at, reading, ended_before=reading.ended < self.since)
             return
         if reading.lister == NAMED:
             self.named.append(reading)
@@ -5689,19 +5691,23 @@ class _Watch:
             if pid not in unread:
                 self.read_children.setdefault(pid, said)
 
-    def _before_open(self, at: float, reading: _Reading) -> None:
+    def _before_open(self, at: float, reading: _Reading, *, ended_before: bool) -> None:
         """A reading that started before the open (the control's watch starts just before it,
         :func:`_placement_control`): it counts for the stretches with no reading, but no gate
-        counts what it saw, since the app was not open yet. What it saw that only the app should
-        have started is kept in ``before_open``: a host process matched by its command line, a
-        process that maps a copy's bundled runtime, or a child of a running copy of the app. Any of
-        them fails the control (:func:`_watch_control`): the host's processes were there before
-        the app, so what came after proves nothing of what the app started."""
+        counts what it saw, since the app was not open when it began. Where it also ended before
+        the open (``ended_before``), it saw only what was there before the app: what it saw that
+        only the app should have started is kept in ``before_open``, a host process matched by its
+        command line, a process that maps a copy's bundled runtime, or a child of a running copy
+        of the app, and any of them fails the control (:func:`_watch_control`), since what came
+        after proves nothing of what the app started. A reading that straddles the open may have
+        seen the app's own host, after the open: it neither passes nor fails the control."""
         if reading.lister == NAMED:
             self.named.append(reading)
         else:
             self.readings.append(reading)
             self.ended = max(self.ended, reading.ended)
+        if not ended_before:
+            return
         for pid in sorted(reading.hosts or ()):
             self.before_open.append((at, f"{pid}, matched by its command line by {reading.lister}"))
         for pid, said in reading.children:
@@ -6004,8 +6010,8 @@ class _Watch:
     def table_read(self, reading: _Reading, lister: str) -> bool:
         """Whether ``reading`` is one of ``lister``'s that read the process table, from ``since``
         on: the control's watch starts just before the open (:func:`_placement_control`), and a
-        reading that started before it read a table the app was not in yet, so it shows nothing
-        of what ps can read of the app's children."""
+        reading that started before it may have read the table before the app was in it, even one
+        that ended after it, so it shows nothing of what ps can read of the app's children."""
         return (
             reading.lister == lister and reading.hosts is not None and reading.started >= self.since
         )
