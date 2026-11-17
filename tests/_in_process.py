@@ -64,3 +64,27 @@ calls: list[Call] = []
 def record(call: Call) -> Result:
     calls.append(call)
     return Result()
+
+
+# Set by a test to let `blocks` return.
+release = threading.Event()
+
+
+def blocks(call: Call) -> Result:
+    """Never polls ``stop``: stands in for a call stuck in a read with no timeout."""
+    release.wait(30)
+    return Result(stdout="ran on")
+
+
+def ignores_stop(call: Call) -> Result:
+    time.sleep(0.1)
+    return Result(stdout="ran on")
+
+
+def sleeps_then_returns(call: Call) -> Result:
+    time.sleep(1.3)
+    return Result(stdout="late")
+
+
+def exits_the_interpreter(call: Call) -> Result:
+    raise SystemExit(3)

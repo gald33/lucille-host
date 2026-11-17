@@ -95,7 +95,8 @@ def test_the_definition_hash_covers_the_code_path(tmp_path: Path) -> None:
     """Changing the operation's own module, or a file it names as on its path, changes the hash:
     an upgrade that changes what an enabled in-process entry runs turns it off. The same bytes in
     another folder are the same hash."""
-    own = tmp_path / "_in_process.py"
+    (tmp_path / "tests").mkdir()
+    own = tmp_path / "tests" / "_in_process.py"
     helper = tmp_path / "helper.py"
     shutil.copy(OWN[0], own)
     helper.write_text("def shout(word):\n    return word.upper()\n")
@@ -107,10 +108,10 @@ def test_the_definition_hash_covers_the_code_path(tmp_path: Path) -> None:
     first = entry_hash()
     assert first != _op(_in_process.echo).definition_hash  # helper.py is on the path
     moved = tmp_path / "elsewhere"
-    moved.mkdir()
-    shutil.copy(own, moved / own.name)
+    (moved / "tests").mkdir(parents=True)
+    shutil.copy(own, moved / "tests" / own.name)
     shutil.copy(helper, moved / helper.name)
-    entry = InProcess(_in_process.echo, (moved / own.name, moved / helper.name))
+    entry = InProcess(_in_process.echo, (moved / "tests" / own.name, moved / helper.name))
     assert dataclasses.replace(_op(_in_process.echo), in_process=entry).definition_hash == first
     own.write_text(own.read_text() + "\n# changed\n")
     second = entry_hash()
@@ -131,6 +132,17 @@ def test_only_a_named_module_level_function_can_be_an_entry(tmp_path: Path) -> N
         InProcess(print, OWN)  # type: ignore[arg-type]
     with pytest.raises(ValueError, match="do not include its module"):
         InProcess(_in_process.echo, (tmp_path / "other.py",))
+    # Neither a file of the same name elsewhere nor an unrelated package's __init__.py stands in
+    # for it: the path must end with the module's dotted path.
+    for stand_in in (tmp_path / "_in_process.py", tmp_path / "pkg" / "__init__.py"):
+        stand_in.parent.mkdir(parents=True, exist_ok=True)
+        stand_in.write_text("")
+        with pytest.raises(ValueError, match="do not include its module"):
+            InProcess(_in_process.echo, (stand_in,))
+    package = tmp_path / "tests" / "_in_process"
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_text("")
+    InProcess(_in_process.echo, (package / "__init__.py",))  # a package module: accepted
     with pytest.raises(ValueError, match="cannot be read"):
         InProcess(_in_process.echo, (*OWN, tmp_path / "missing.py"))
 
@@ -320,3 +332,93 @@ def test_a_request_for_one_goes_through_every_check(
     assert (reply["status"], reply["stdout"]) == ("done", "said hi")
     kinds = [line["kind"] for line in _lines(ctx)]
     assert kinds == ["received", "decision", "start", "execution", "sent"]
+
+
+# --- a function that does not cooperate -----------------------------------------------------------
+
+
+@pytest.fixture
+def short_grace(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("lucille_host.jobs.IN_PROCESS_GRACE", 0.2)
+
+
+def test_a_call_that_returns_after_its_deadline_is_failed_timeout(
+    make_context: MakeContext, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Even when the host does not look before it returns: a late result is never done."""
+    monkeypatch.setattr("lucille_host.jobs._IN_PROCESS_POLL", 30.0)
+    ctx = make_context(log_results=True)
+    op = dataclasses.replace(_op(_in_process.sleeps_then_returns), timeout_s=1)
+    outcome = execute(_ready(op), ctx)
+    assert (outcome.status, outcome.code) == ("failed", "timeout")
+    execution = _lines(ctx)[-1]
+    assert execution["ended"] == "timeout" and "detached" not in execution
+
+
+def test_a_call_that_ignores_its_deadline_is_left_behind(
+    make_context: MakeContext, short_grace: None
+) -> None:
+    _in_process.release.clear()
+    ctx = make_context()
+    op = dataclasses.replace(_op(_in_process.blocks), timeout_s=1)
+    began = time.monotonic()
+    outcome = execute(_ready(op), ctx)
+    assert time.monotonic() - began < 3
+    assert (outcome.status, outcome.code) == ("failed", "timeout")
+    execution = _lines(ctx)[-1]
+    assert (execution["ended"], execution["detached"]) == ("timeout", True)
+    _in_process.release.set()
+
+
+def test_a_kill_the_call_ignores_is_killed_locally_and_consumed(
+    make_context: MakeContext, monkeypatch: pytest.MonkeyPatch, short_grace: None
+) -> None:
+    """The kill decides the reply, not what the function returned, and it is consumed: it does
+    not reach the next request."""
+    _in_process.release.clear()
+    ctx = make_context()
+    killed = threading.Event()
+    monkeypatch.setattr(ctx.controls, "kill_requested", killed.is_set)
+    monkeypatch.setattr(ctx.controls, "kill_done", killed.clear)
+    killed.set()
+    began = time.monotonic()
+    outcome = execute(_ready(_op(_in_process.blocks)), ctx)
+    assert time.monotonic() - began < 3
+    assert (outcome.status, outcome.code) == ("failed", "killed_locally")
+    assert not killed.is_set()
+    assert _lines(ctx)[-1]["detached"] is True
+    _in_process.release.set()
+    # A function that returns a result after a kill is still killed.
+    killed.set()
+    outcome = execute(_ready(_op(_in_process.ignores_stop)), ctx)
+    assert (outcome.status, outcome.code) == ("failed", "killed_locally")
+    assert not killed.is_set()
+    # And the next request runs.
+    assert execute(_ready(_op(_in_process.record)), ctx).status == "done"
+
+
+def test_an_abandoned_room_whose_call_ignores_it_gets_no_reply(
+    make_context: MakeContext, short_grace: None
+) -> None:
+    _in_process.release.clear()
+    stop = threading.Event()
+    ctx = dataclasses.replace(make_context(), stop=stop.is_set)
+    timer = threading.Timer(0.2, stop.set)
+    timer.start()
+    with pytest.raises(Abandoned):
+        execute(_ready(_op(_in_process.blocks)), ctx)
+    execution = _lines(ctx)[-1]
+    assert (execution["ended"], execution["abandoned"], execution["detached"]) == (
+        "killed",
+        True,
+        True,
+    )
+    _in_process.release.set()
+
+
+def test_a_base_exception_is_reported_by_type(make_context: MakeContext) -> None:
+    ctx = make_context()
+    outcome = execute(_ready(_op(_in_process.exits_the_interpreter)), ctx)
+    assert (outcome.status, outcome.exit_code) == ("done", 1)
+    assert outcome.stderr == "the operation raised SystemExit"
+    assert _lines(ctx)[-1]["raised"] == "SystemExit"
