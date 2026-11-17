@@ -126,8 +126,9 @@ The host:
    - **refuses while another `pair` of the profile runs.** It holds `state/.pair.lock` (`os.lockf`,
      taken without waiting) from before it looks for a pair held until it returns, its question
      included, so two `pair`s at once cannot both answer a code. The second refuses at once (exit 1)
-     and changes nothing. `pair status`, `pair confirm` and `pair reject` take no such lock: the SAS
-     can be shown, confirmed or rejected in another shell while `pair` asks;
+     and changes nothing but its line in the run record ([spec/CLI.md](../spec/CLI.md) section 16).
+     `pair status`, `pair confirm` and `pair reject` take no such lock: the SAS can be shown, confirmed
+     or rejected in another shell while `pair` asks;
    - **decodes** the code (`pairing.PairingCode.decode`). It refuses the wrong hub or a carried token, and
      shows the pair's note only after sanitizing it. With `--code-stdin`, the code is read from stdin,
      never from the command line;
@@ -639,8 +640,8 @@ where there is one (`waiting`, `sas_pending`, `confirmed`, `leaked`, `expired`, 
   state past ±300 s.
 - `log` prints the last lines of the audit log, oldest first, across its rotated files.
 - `run` holds `state/.run.lock` (`os.lockf`, taken without waiting) for as long as it runs: a second `run`
-  of the profile, in another shell or the same process, refuses at once (exit 21) and changes nothing,
-  since two would each read and answer every request. `run` refuses a pair with no gate record, which
+  of the profile, in another shell or the same process, refuses at once (exit 21) and changes nothing but its line in the run record
+  ([spec/CLI.md](../spec/CLI.md) section 16), since two would each read and answer every request. `run` refuses a pair with no gate record, which
   can never be confirmed on the host, as `pair status` and `pair confirm` do (exit 20).
 - `forget` leaves the pair's work rooms, then calls `pairing.forget`, which deletes the pair from the
   store and then tells Lucille, best effort. It prints whether Lucille was told. It marks every room
@@ -1089,7 +1090,8 @@ each could be made another way in a later pull request that updates this list.
   (24), the run lock (21), the version record (25), the private runtime folder (1) and the store (23), how
   far each room was read (`state/cursors.json`, 1, which the runner reads as it is made), the digest key
   (1), the pair, its record in the store and its gate record (20, or 23 for a record the store cannot read).
-  So root writes nothing, a second `run` changes nothing, and an older release reads no secret. Reading the
+  So root writes nothing, a second `run` writes nothing but its line in the run record
+  ([spec/CLI.md](../spec/CLI.md) section 16), and an older release reads no secret. Reading the
   pair's record here, as `status` does with no hub call, makes a damaged file store a refusal at start, not
   a `failed` after `ready` at every start. The first SIGTERM, SIGHUP or Ctrl-C during the checks drains, as
   the lifeline's end does: the command installs handlers once the profile's name is checked, writing nothing
