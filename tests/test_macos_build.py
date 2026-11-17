@@ -29,6 +29,7 @@ import types
 import warnings
 import zlib
 from collections.abc import Callable, Iterator, Mapping, Sequence
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -9518,7 +9519,25 @@ def test_the_control_passes_on_either_lister_and_says_which_saw_it(
         in said.splitlines()
     ), said
     assert f"ok: {_STARTS}" in said.splitlines(), said
-    assert world.snapshots == [] and world.logs == []
+    # No snapshot on a pass; the unified log is saved on every run.
+    assert world.snapshots == [] and len(world.logs) == 1
+
+
+def test_the_control_saves_the_unified_log_on_every_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Passed, failed, or failed for a host process from before the open: once the watch is over,
+    # the log is saved once, and the output says where.
+    worlds = {
+        "passed": _ListerWorld(pgrep=_host_from(0.4), ps=_ps_host_from(0.4), marker_at=1.5),
+        "failed": _ListerWorld(pgrep=_none, ps=_ps_none, marker_at=1.5),
+    }
+    for name, world in worlds.items():
+        checker, _ = _control_in(world, tmp_path / name, monkeypatch)
+        said = capsys.readouterr().out
+        assert len(world.logs) == 1, (name, world.logs)
+        assert "control-log.txt: a stand-in" in said.splitlines(), (name, said)
+        assert (checker.failures == []) == (name == "passed"), checker.failures
 
 
 def test_a_passing_control_notes_a_lister_that_was_blind(
@@ -9558,7 +9577,8 @@ def test_a_passing_control_records_both_listers_and_the_status_read(
     ), line
     assert "the first child of the app: '4242 S " in line, line
     assert "lister errors 0" in line and "status read had ended by 1." in line, line
-    assert world.snapshots == [] and world.logs == []
+    # No snapshot on a pass; the unified log is saved on every run.
+    assert world.snapshots == [] and len(world.logs) == 1
     assert "the listers: stand-in" in said and "note: the control passed" not in said
 
 
@@ -10079,7 +10099,8 @@ def test_the_control_passes_on_a_child_that_runs_its_runtime_where_ps_cannot_rea
     # The gate held at its first such reading, and the watch went on for the record for 5 s, not
     # to the gate's 30 s.
     assert re.search(r"lister calls \(.*\) in 5\.\d s from -0\.0\d s", line), line
-    assert world.snapshots == [] and world.logs == []
+    # No snapshot on a pass; the unified log is saved on every run.
+    assert world.snapshots == [] and len(world.logs) == 1
 
 
 @pytest.mark.parametrize(
@@ -11842,12 +11863,67 @@ def test_the_control_log_keeps_its_first_lines_in_both_styles(
     ndjson = (tmp_path / "control-log-ndjson.txt").read_text(encoding="utf-8").splitlines()
     assert compact == [f"compact line {n}" for n in range(100)]
     assert ndjson == [f"ndjson line {n}" for n in range(100)]
-    assert said.splitlines() == [
+    saved = [line for line in said.splitlines() if line.startswith("the unified log")]
+    assert saved == [
         f"the unified log ({style}) since {start}, 100 lines, the first 100 of 250, is in {name}"
         for style, name in check_app.CONTROL_LOG_STYLES
     ]
+    # And, from the ndjson, what the runtime's processes wrote: here, nothing.
+    assert (
+        "recorded, not a gate: no process of the runtime's executable wrote to the log"
+        in said.splitlines()
+    )
     # Both files are ones the CI workflow uploads.
     assert all(name.endswith(".txt") for _, name in check_app.CONTROL_LOG_STYLES)
+
+
+def _log_entry(path: str, uuid: str, pid: int, stamp: str) -> str:
+    return json.dumps(
+        {
+            "processImagePath": path,
+            "processImageUUID": uuid,
+            "processID": pid,
+            "timestamp": stamp,
+            "eventMessage": "a line",
+        }
+    )
+
+
+def test_the_runtimes_log_lines_are_recorded_by_image_uuid_and_pid_not_path() -> None:
+    # Two copies of one build log their runtime under one UUID, and the log may name either
+    # copy's path for both: the record names the UUID and each pid, with its first line's time
+    # from the open, and never says which copy.
+    opened = datetime.strptime("2026-11-17 12:44:39.510000+0000", "%Y-%m-%d %H:%M:%S.%f%z")
+    bundle = f"/Users/runner/work/build/macos/{check_app.APP_NAME}.app"
+    build = f"{bundle}/Contents/Resources/runtime/bin/{check_app.RUNTIME_NAME}"
+    app = f"/Applications/{check_app.APP_NAME}.app/Contents/MacOS/{check_app.APP_NAME}"
+    lines = [
+        "Filtering the log data using a predicate",
+        _log_entry(build, "4C4C", 8038, "2026-11-17 12:44:38.300000+0000"),
+        _log_entry(app, "F684", 8216, "2026-11-17 12:44:39.900000+0000"),
+        _log_entry(build, "4C4C", 8248, "2026-11-17 12:44:41.264000+0000"),
+        _log_entry(build, "4C4C", 8248, "2026-11-17 12:44:41.300000+0000"),
+        _log_entry(build, "4C4C", 8242, "2026-11-17 12:44:40.200000+0000"),
+        "{not json",
+    ]
+    said = check_app._log_runtime_said(lines, opened.timestamp())
+    assert said == (
+        "recorded, not a gate: processes of the runtime's executable that wrote to the log: "
+        "image UUID 4C4C: pid 8038 from -1.21 s, pid 8242 from +0.69 s, pid 8248 from +1.75 s "
+        "(the log's image path cannot tell copies of one build apart)"
+    ), said
+    assert "/Applications" not in said and "/Users/" not in said
+
+
+def test_the_runtimes_log_record_names_at_most_a_dozen_pids() -> None:
+    runtime = f"/x/{check_app.RUNTIME_NAME}"
+    lines = [
+        _log_entry(runtime, "AB", 100 + n, f"2026-11-17 12:00:{n:02d}.000000+0000")
+        for n in range(check_app.LOG_RUNTIME_SHOWN + 3)
+    ]
+    said = check_app._log_runtime_said(lines, 0.0)
+    assert said.count("pid ") == check_app.LOG_RUNTIME_SHOWN, said
+    assert ", and 3 more (the log's image path" in said, said
 
 
 def test_the_control_log_says_which_style_it_could_not_save(
