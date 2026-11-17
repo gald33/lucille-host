@@ -3221,7 +3221,14 @@ STATUS_READ_MARKER: Final = "login item: "
 DIAGNOSIS_LIMIT: Final = 30
 SNAPSHOT_LIMIT: Final = 3 * DIAGNOSIS_LIMIT + 10
 CONTROL_LOG_LIMIT: Final = 90
-CONTROL_LOG_LINES: Final = 300
+# The most lines of the unified log kept of each style, the first ones: from five seconds before
+# the open on, so that the moments around the app's launch are never the ones cut. (Kept from
+# the end, 300 lines began 7 s after the open in run 44051526894, after the stall they were for.)
+CONTROL_LOG_LINES: Final = 50_000
+# The two styles saved: ndjson, whose lines carry the process's image path, its pid and the time
+# in microseconds, and compact, to read. The ndjson file's name ends in .txt, as the files the CI
+# workflow uploads do.
+CONTROL_LOG_STYLES: Final = (("ndjson", "control-log-ndjson.txt"), ("compact", "control-log.txt"))
 CONTROL_LOG_PROCESSES: Final = (
     APP_NAME,
     Path(build_app.INTERPRETER).name,
@@ -6711,28 +6718,39 @@ def _save_app_processes(path: Path) -> list[int]:
 
 def _save_control_log(path: Path, opened_wall: float) -> str:
     """The unified log of the app, its interpreter and the parts of macOS that start, check or
-    list processes, from just before the control's open, its last :data:`CONTROL_LOG_LINES` lines
-    into ``path``. Never raises; returns what it did."""
+    list processes, from five seconds before the control's open to now, the end of the control,
+    in each of :data:`CONTROL_LOG_STYLES`: its first :data:`CONTROL_LOG_LINES` lines, into the
+    style's file in ``path``'s folder (``path`` names the compact one). Never raises; returns
+    what it did."""
     start = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(opened_wall - 5))
     predicate = " OR ".join(f'process == "{name}"' for name in CONTROL_LOG_PROCESSES)
-    shown = ["log", "show", "--start", start, "--style", "compact", "--info", "--predicate"]
-    try:
-        done = subprocess.run(
-            [*shown, predicate],
-            capture_output=True,
-            text=True,
-            errors="replace",
-            timeout=CONTROL_LOG_LIMIT,
-            check=False,
+    said = []
+    for style, name in CONTROL_LOG_STYLES:
+        target = path if name == path.name else path.with_name(name)
+        shown = ["log", "show", "--start", start, "--style", style, "--info", "--predicate"]
+        try:
+            done = subprocess.run(
+                [*shown, predicate],
+                capture_output=True,
+                text=True,
+                errors="replace",
+                timeout=CONTROL_LOG_LIMIT,
+                check=False,
+            )
+            lines = done.stdout.splitlines()
+            kept = lines[:CONTROL_LOG_LINES]
+            target.write_text("\n".join(kept) + "\n", encoding="utf-8")
+        except (OSError, subprocess.SubprocessError) as exc:
+            said.append(f"the unified log ({style}) was not saved: {exc!r}")
+            continue
+        cut = f", the first {len(kept)} of {len(lines)}" if len(kept) < len(lines) else ""
+        line = (
+            f"the unified log ({style}) since {start}, {len(kept)} lines{cut}, is in {target.name}"
         )
-        lines = done.stdout.splitlines()[-CONTROL_LOG_LINES:]
-        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-    except (OSError, subprocess.SubprocessError) as exc:
-        return f"the unified log was not saved: {exc!r}"
-    said = f"the unified log since {start}, its last {len(lines)} lines, is in {path.name}"
-    if done.returncode == 0:
-        return said
-    return f"{said}; log exited {done.returncode}: {done.stderr.strip()[-300:]!r}"
+        if done.returncode != 0:
+            line += f"; log exited {done.returncode}: {done.stderr.strip()[-300:]!r}"
+        said.append(line)
+    return "\n".join(said)
 
 
 def _lister_libraries() -> str:

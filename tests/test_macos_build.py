@@ -11807,23 +11807,62 @@ def test_the_controls_diagnostics_have_time_limits_and_never_raise(
     ]
     assert (tmp_path / "control-ps.txt").read_text(encoding="utf-8").count(_APP_COMMAND) == 1
     # The unified log, from five seconds before the open, of the app, its interpreter and the
-    # parts of macOS named.
-    [log] = [argv for argv, _ in calls if argv[0] == "log"]
+    # parts of macOS named: once as ndjson (each line with the process's image path, pid and
+    # time), once compact.
+    logs = [argv for argv, _ in calls if argv[0] == "log"]
     start = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(opened - 5))
-    assert log[:-1] == [
-        "log",
-        "show",
-        "--start",
-        start,
-        "--style",
-        "compact",
-        "--info",
-        "--predicate",
+    assert [log[:-1] for log in logs] == [
+        ["log", "show", "--start", start, "--style", style, "--info", "--predicate"]
+        for style in ("ndjson", "compact")
     ]
-    assert log[-1] == " OR ".join(
-        f'process == "{name}"' for name in check_app.CONTROL_LOG_PROCESSES
-    )
+    for log in logs:
+        assert log[-1] == " OR ".join(
+            f'process == "{name}"' for name in check_app.CONTROL_LOG_PROCESSES
+        )
     capsys.readouterr()
+
+
+def test_the_control_log_keeps_its_first_lines_in_both_styles(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # More lines than the cap: the first ones are kept, from five seconds before the open, so the
+    # moments around the app's launch are never the ones cut (kept from the end, they were, in
+    # run 44051526894). Each style goes to its own file, the ndjson one named for the upload.
+    monkeypatch.setattr(check_app, "CONTROL_LOG_LINES", 100)
+
+    def run(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        style = argv[argv.index("--style") + 1]
+        return _done(argv, 0, "".join(f"{style} line {n}\n" for n in range(250)))
+
+    monkeypatch.setattr("subprocess.run", run)
+    opened = time.time()
+    start = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(opened - 5))
+    said = check_app._save_control_log(tmp_path / "control-log.txt", opened)
+    compact = (tmp_path / "control-log.txt").read_text(encoding="utf-8").splitlines()
+    ndjson = (tmp_path / "control-log-ndjson.txt").read_text(encoding="utf-8").splitlines()
+    assert compact == [f"compact line {n}" for n in range(100)]
+    assert ndjson == [f"ndjson line {n}" for n in range(100)]
+    assert said.splitlines() == [
+        f"the unified log ({style}) since {start}, 100 lines, the first 100 of 250, is in {name}"
+        for style, name in check_app.CONTROL_LOG_STYLES
+    ]
+    # Both files are ones the CI workflow uploads.
+    assert all(name.endswith(".txt") for _, name in check_app.CONTROL_LOG_STYLES)
+
+
+def test_the_control_log_says_which_style_it_could_not_save(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def run(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        if argv[argv.index("--style") + 1] == "ndjson":
+            raise subprocess.TimeoutExpired(argv, kwargs.get("timeout") or 0)
+        return _done(argv, 0, "a line\n")
+
+    monkeypatch.setattr("subprocess.run", run)
+    said = check_app._save_control_log(tmp_path / "control-log.txt", time.time()).splitlines()
+    assert said[0].startswith("the unified log (ndjson) was not saved: TimeoutExpired"), said
+    assert said[1].endswith(", 1 lines, is in control-log.txt"), said
+    assert not (tmp_path / "control-log-ndjson.txt").exists()
 
 
 def test_the_pairing_checks_tidy_kills_the_host_processes_still_running(
