@@ -8805,6 +8805,74 @@ class _Clock:
 
 
 @dataclasses.dataclass
+class _Waited:
+    """An ``open`` the check started, made by whatever stands in for ``subprocess.run`` in the
+    test, and so already over: what ``communicate`` gives is what that run gave."""
+
+    done: subprocess.CompletedProcess[str]
+
+    @property
+    def args(self) -> Any:
+        return self.done.args
+
+    @property
+    def returncode(self) -> int:
+        return self.done.returncode
+
+    def communicate(self, timeout: float | None = None) -> tuple[str, str]:
+        return self.done.stdout or "", self.done.stderr or ""
+
+    def kill(self) -> None:
+        return None
+
+
+def _open_by_run(argv: list[str]) -> _Waited:
+    return _Waited(subprocess.run(argv, capture_output=True, text=True, check=False))
+
+
+# The real one, for the one test that runs it.
+_REAL_START_OPEN = getattr(check_app, "_start_open", None)
+
+
+@pytest.fixture(autouse=True)
+def _open_by_the_tests_run(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The control starts its open and does not wait for it (check_app._start_open). Here it goes
+    through whatever the test puts in place of ``subprocess.run``, and is over at once, as before;
+    a :class:`_ListerWorld` puts its own in place, which takes its time."""
+    # raising=False: so that these tests also run against a check that waited for its open.
+    monkeypatch.setattr(check_app, "_start_open", _open_by_run, raising=False)
+
+
+def test_the_controls_open_is_started_and_not_waited_for() -> None:
+    # The real _start_open starts the program and returns at once; its output comes later.
+    assert _REAL_START_OPEN is not None
+    started = time.monotonic()
+    handle = _REAL_START_OPEN(["/bin/sh", "-c", "sleep 0.5; echo opened"])
+    assert time.monotonic() - started < 0.4
+    out, err = handle.communicate(timeout=10)
+    assert (handle.returncode, out, err) == (0, "opened\n", "")
+
+
+@dataclasses.dataclass
+class _Opening:
+    """``open``, started and not waited for, in a :class:`_ListerWorld`: it returns, with exit 0,
+    at ``done_at`` on the world's clock."""
+
+    clock: _Clock
+    args: list[str]
+    done_at: float
+    returncode: int | None = None
+
+    def communicate(self, timeout: float | None = None) -> tuple[str, str]:
+        self.clock.now = max(self.clock.now, self.done_at)
+        self.returncode = 0
+        return "", ""
+
+    def kill(self) -> None:
+        return None
+
+
+@dataclasses.dataclass
 class _ListerWorld:
     """The process table as the placement check's two listers read it, made up. ``pgrep(t)`` and
     ``ps(t)`` give (exit, stdout, stderr) ``t`` seconds after ``open`` ran (None before), and each
@@ -8815,7 +8883,9 @@ class _ListerWorld:
     lists nothing and exits 1), each call taking ``took`` seconds too, and may raise as running
     it would. ``named(t)`` gives the answer of the control's lsof by name (by default, nothing,
     exit 1), each call taking ``named_took`` seconds, none by default, so that the listers' times
-    stay what they were without it. A process runs now where ps would list it now. The control's
+    stay what they were without it. ``open`` returns ``open_took`` seconds after it was called: run
+    and waited for, the caller waits that long; started (``start_open``), it does not, and waiting
+    for it later takes what is left. A process runs now where ps would list it now. The control's
     snapshots are counted, and when its unified log was asked for is recorded."""
 
     pgrep: Callable[[float | None], tuple[int, str, str]]
@@ -8828,6 +8898,7 @@ class _ListerWorld:
     named: Callable[[float | None], tuple[int, str, str]] | None = None
     named_took: float = 0.0
     named_calls: int = 0
+    open_took: float = 0.0
     clock: _Clock = dataclasses.field(default_factory=_Clock)
     opened: list[list[str]] = dataclasses.field(default_factory=list)
     opened_at: float | None = None
@@ -8847,12 +8918,21 @@ class _ListerWorld:
         _, out, _ = self.ps(self.since_open())
         return any(line.split()[:1] == [str(pid)] for line in out.splitlines())
 
+    def _open(self, argv: list[str]) -> None:
+        self.opened.append(list(argv))
+        self.opened_at = self.clock.now
+        if "--stderr" in argv:
+            self.err = Path(argv[argv.index("--stderr") + 1])
+
+    def start_open(self, argv: list[str]) -> _Opening:
+        assert argv[0] == "open", argv
+        self._open(argv)
+        return _Opening(self.clock, list(argv), self.clock.now + self.open_took)
+
     def run(self, argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
         if argv[0] == "open":
-            self.opened.append(list(argv))
-            self.opened_at = self.clock.now
-            if "--stderr" in argv:
-                self.err = Path(argv[argv.index("--stderr") + 1])
+            self._open(argv)
+            self.clock.now += self.open_took
             return _done(argv, 0)
         if argv[0] in ("pgrep", "ps"):
             at = self.since_open()
@@ -8891,6 +8971,7 @@ def _in_lister_world(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, world: _Li
     profile = tmp_path / "profile"
     (profile / "state").mkdir(parents=True)
     monkeypatch.setattr("subprocess.run", world.run)
+    monkeypatch.setattr(check_app, "_start_open", world.start_open, raising=False)
     monkeypatch.setattr(check_app.time, "monotonic", world.clock.monotonic)
     monkeypatch.setattr(check_app.time, "sleep", world.clock.sleep)
     monkeypatch.setattr(check_app, "_lister_pool", _NowPool, raising=False)
@@ -11329,7 +11410,68 @@ def test_a_slow_lister_gets_overlapping_calls_staggered_and_bounded(
         assert most[lister] == check_app.OVERLAP, most
         starts = sorted(r.started for r in watch.readings if r.lister == lister)
         steps = [b - a for a, b in zip(starts, starts[1:], strict=False)]
-        assert steps and max(steps) < 0.3, steps
+        # Each next call starts once the newest has run STAGGER, never at once beside it, and
+        # never a whole call's length later.
+        assert steps and min(steps) >= 0.07 and max(steps) < 0.25, steps
+
+
+def test_the_controls_watch_reads_on_while_the_open_is_in_progress(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # `open` takes 2 s to return, as it can on a slow runner. The watch started it and did not
+    # wait: it read on meanwhile, so no stretch went without a reading for longer than half a
+    # second, and the app's first status read could not fall between two readings. (Made inside
+    # the watch and waited for, the open left a stretch of its own length: run 44015279534, on
+    # xcode-27, had none from 0.23 s to 2.41 s.)
+    world = _ListerWorld(pgrep=_host_from(0.4), ps=_ps_host_from(0.4), marker_at=1.5, open_took=2.0)
+    checker, _ = _control_in(world, tmp_path, monkeypatch)
+    said = capsys.readouterr().out
+    assert checker.failures == [], checker.failures
+    line = next(line for line in said.splitlines() if line.startswith("the control's watch"))
+    gap = re.search(r"longest gap between readings (\d+\.\d+) s", line)
+    assert gap and float(gap.group(1)) < 0.5, line
+    assert world.opened and world.opened_at is not None
+
+
+def test_a_sighting_from_before_the_open_holds_no_gate_and_is_kept_apart() -> None:
+    # A reading that started before the open (below zero, from ``since``) saw a host process: no
+    # gate counts it, not as a first sighting, nor as ps having read the table; it is kept in
+    # ``before_open``, which fails the control (_watch_control).
+    runtime = _runtime_of(Path("/Applications") / f"{check_app.APP_NAME}.app")
+    before = check_app._Reading("pgrep", -0.04, -0.02, frozenset({4242}))
+    watch = check_app._Watch(began=-0.05, since=0.0)
+    watch.add(before)
+    watch.ended = 40.0
+    assert watch.first == {} and watch.hosts == set()
+    assert watch.passed_by(runtime) == ("", "")
+    assert watch.before_open == [
+        (pytest.approx(-0.04), "4242, matched by its command line by pgrep")
+    ]
+
+
+def test_a_host_process_running_before_the_open_fails_the_control(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # A host process on the app's profile comes after the check found none (stood in for here)
+    # and before the open, and runs on after it: what the watch sees after the open may be that
+    # one, so it proves nothing of what the app started. The control fails with that reason,
+    # though both listers match a host process after the open.
+    def ps(at: float | None) -> tuple[int, str, str]:
+        code, out, err = _ps_none(at)
+        return code, out + _PS_HOST_ROW + "\n", err
+
+    world = _ListerWorld(pgrep=lambda at: (0, "4242\n", ""), ps=ps, marker_at=1.5)
+    monkeypatch.setattr(check_app, "_no_profile_process", lambda: True)
+    checker, _ = _control_in(world, tmp_path, monkeypatch)
+    said = capsys.readouterr().out
+    assert checker.failures == [_STARTS], checker.failures
+    assert re.search(
+        r"a host process was running before the app was opened, so what the watch saw after the "
+        r"open proves nothing of what the app started: 4242, matched by its command line by "
+        r"(pgrep|ps), at -0\.0\d s",
+        said,
+    ), said
+    assert "the control's gate held" not in said, said
 
 
 def test_the_controls_record_keeps_the_first_of_two_answers_that_say_as_much() -> None:
