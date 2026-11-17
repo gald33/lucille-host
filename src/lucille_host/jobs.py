@@ -41,15 +41,26 @@ from __future__ import annotations
 
 import hashlib
 import json
+import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from types import MappingProxyType
 from typing import Any, Final
 
 from lucille_host import __version__, _exec, _output
 from lucille_host.audit import AuditLog
 from lucille_host.containment import contain
 from lucille_host.controls import Controls
-from lucille_host.ops import CATALOG_VERSION, OPERATIONS, Operation, args_valid
+from lucille_host.ops import (
+    CATALOG_VERSION,
+    OPERATIONS,
+    Call,
+    Operation,
+    Result,
+    Stopped,
+    TimedOut,
+    args_valid,
+)
 from lucille_host.policy import Effective
 
 __all__ = [
@@ -216,6 +227,8 @@ def execute(ready: Ready, ctx: Context) -> Outcome:
     """
     job_id = ready.job.job_id
     stop = ctx.stop if ctx.stop is not None else _never
+    if ready.operation.in_process is not None:
+        return _call_in_process(ready, ctx, stop)
     if ready.argv is None:
         document = json.dumps(describe_document(ctx), ensure_ascii=True, separators=(",", ":"))
         ctx.audit.execution(job_id, op=ready.operation.name, child=False, stdout_size=len(document))
@@ -304,6 +317,134 @@ def execute(ready: Ready, ctx: Context) -> Outcome:
         return Outcome(status="done", **streams)
     code = "timeout" if result.ended == "timeout" else "killed_locally"
     return Outcome(status="failed", code=code, **streams)
+
+
+def _well_formed(returned: object) -> bool:
+    """A Result with an exit code a reply can carry (an in-process call is never a signal's) and
+    two strings."""
+    return (
+        isinstance(returned, Result)
+        and type(returned.exit_code) is int
+        and 0 <= returned.exit_code <= 255
+        and type(returned.stdout) is str
+        and type(returned.stderr) is str
+    )
+
+
+def _call_in_process(ready: Ready, ctx: Context, stop: Callable[[], bool]) -> Outcome:
+    """Run an in-process entry under a child's rules (see :func:`execute`).
+
+    The pause flag, the drain and the room are read just before the call, as before a child's
+    start. The ``start`` line names the function and the entry's definition hash in place of an
+    executable and its argv. A kill or an abandoned room reaches the function through its call's
+    ``stop``; the host cannot stop a function that does not poll it. A function that raises
+    anything else gets a ``done`` reply with exit code 1 and a stderr naming the exception's type
+    only: its message can hold anything the function held, so it goes neither in the reply nor in
+    the audit log.
+    """
+    job_id = ready.job.job_id
+    operation = ready.operation
+    entry = operation.in_process
+    assert entry is not None
+    reason = (
+        "abandoned"
+        if stop()
+        else "draining"
+        if ctx.controls.draining.is_set()
+        else "paused"
+        if ctx.controls.paused()
+        else None
+    )
+    if reason is not None:
+        ctx.audit.execution(job_id, op=operation.name, started=False, stopped=reason)
+        if reason == "abandoned":
+            raise Abandoned
+        return Outcome(status="failed", code="interrupted", duration_ms=0)
+    ctx.audit.start(
+        job_id,
+        op=operation.name,
+        in_process=entry.name,
+        definition_hash=operation.definition_hash,
+    )
+    if ctx.observe is not None:
+        ctx.observe("started")
+
+    def kill_requested() -> bool:
+        return ctx.controls.kill_requested() or stop()
+
+    began = time.monotonic()
+    call = Call(
+        args=MappingProxyType(dict(ready.job.args)),
+        timeout_s=ready.timeout_s,
+        deadline=began + ready.timeout_s,
+        stop=kill_requested,
+    )
+    result = Result()
+    raised: str | None = None
+    try:
+        returned = entry.function(call)
+        if _well_formed(returned):
+            result, ended = returned, "exited"
+        else:
+            ended, raised = "raised", "TypeError"
+    except TimedOut:
+        ended = "timeout"
+    except Stopped:
+        ended = "killed"
+    except Exception as exc:
+        ended, raised = "raised", type(exc).__name__
+    duration_ms = int((time.monotonic() - began) * 1000)
+    if raised is not None:
+        result = Result(exit_code=1, stderr=f"the operation raised {raised}")
+    abandoned = ended == "killed" and stop()
+    if ended == "killed" and not abandoned:
+        ctx.controls.kill_done()
+    stdout_raw = result.stdout.encode("utf-8", "replace")
+    stderr_raw = result.stderr.encode("utf-8", "replace")
+    fields: dict[str, Any] = {
+        "op": operation.name,
+        "child": False,
+        "in_process": entry.name,
+        "ended": ended,
+        "exit_code": result.exit_code if ended in ("exited", "raised") else None,
+        "duration_ms": duration_ms,
+        "stdout_bytes": len(stdout_raw),
+        "stderr_bytes": len(stderr_raw),
+    }
+    if raised is not None:
+        fields["raised"] = raised
+    if abandoned:
+        fields["abandoned"] = True
+    if ctx.policy.log_results:
+        fields["stdout"] = result.stdout
+        fields["stderr"] = result.stderr
+    ctx.audit.execution(job_id, **fields)
+    if abandoned:
+        raise Abandoned
+    if ended == "timeout":
+        return Outcome(status="failed", code="timeout", duration_ms=duration_ms)
+    if ended == "killed":
+        return Outcome(status="failed", code="killed_locally", duration_ms=duration_ms)
+    stdout_cap, stderr_cap = _caps(ready.job, ctx)
+    stdout, stdout_truncated = _output.render(
+        stdout_raw[: _output.RAW_CEILING],
+        stdout_cap,
+        dropped=len(stdout_raw) > _output.RAW_CEILING,
+    )
+    stderr, stderr_truncated = _output.render(
+        stderr_raw[: _output.RAW_CEILING],
+        stderr_cap,
+        dropped=len(stderr_raw) > _output.RAW_CEILING,
+    )
+    return Outcome(
+        status="done",
+        exit_code=result.exit_code,
+        stdout=stdout,
+        stdout_truncated=stdout_truncated,
+        stderr=stderr,
+        stderr_truncated=stderr_truncated,
+        duration_ms=duration_ms,
+    )
 
 
 _FIELD_ORDER: Final = (
