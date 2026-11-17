@@ -327,6 +327,22 @@ IN_PROCESS_GRACE: Final = 2.0
 _IN_PROCESS_POLL: Final = 0.05
 
 
+# The call of each in-process entry that was left running after the host replied without it, by
+# entry name. While one is alive, no other call of that entry starts: at most one stray call per
+# entry, never two calls of one entry at once. Process-wide, as the threads are.
+_DETACHED: dict[str, threading.Thread] = {}
+_DETACHED_LOCK = threading.Lock()
+
+
+def _detached_running(name: str) -> bool:
+    with _DETACHED_LOCK:
+        thread = _DETACHED.get(name)
+        if thread is not None and not thread.is_alive():
+            del _DETACHED[name]
+            thread = None
+        return thread is not None
+
+
 def _well_formed(returned: object) -> bool:
     """A Result with an exit code a reply can carry (an in-process call is never a signal's) and
     two strings."""
@@ -352,7 +368,11 @@ def _call_in_process(ready: Ready, ctx: Context, stop: Callable[[], bool]) -> Ou
     - after that the host replies without it (``failed timeout``, ``failed killed_locally``, or no
       reply for an abandoned room) and its audit line says ``detached``. A thread cannot be
       killed: a detached function runs on, its result is dropped, and whatever it does after the
-      reply happens anyway. The worker, the drain and the other rooms do not wait for it;
+      reply happens anyway. The worker, the drain and the other rooms do not wait for it. While
+      it runs, a new call of the same entry is refused before it starts (``failed interrupted``,
+      ``stopped: detached_call_running`` in the audit log): at most one stray call per entry, and
+      never two calls of one entry at once. Its thread is a daemon: when the process exits, a
+      stray call is cut off wherever it is;
     - a call that returns after its deadline is ``failed timeout``, and one that returns after a
       kill or an abandonment is ``killed``, whatever it returned, as for a child; a kill is then
       consumed, so it does not reach the next request.
@@ -372,6 +392,8 @@ def _call_in_process(ready: Ready, ctx: Context, stop: Callable[[], bool]) -> Ou
         if ctx.controls.draining.is_set()
         else "paused"
         if ctx.controls.paused()
+        else "detached_call_running"
+        if _detached_running(operation.name)
         else None
     )
     if reason is not None:
@@ -434,6 +456,9 @@ def _call_in_process(ready: Ready, ctx: Context, stop: Callable[[], bool]) -> Ou
         told.set()
         finished.wait(IN_PROCESS_GRACE)
     detached = not finished.is_set()
+    if detached:
+        with _DETACHED_LOCK:
+            _DETACHED[operation.name] = thread
     duration_ms = int((time.monotonic() - began) * 1000)
     result = Result()
     raised: str | None = None
