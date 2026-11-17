@@ -14697,6 +14697,12 @@ def test_the_record_gate_fails_with_no_record_and_skips_lines_it_does_not_know()
         line = json.loads(json.dumps(_a_record()).replace("1000.5", started))
         held, said = check_app._record_gate([line], _RUNTIME, [99], 1000.0, 1030.0)
         assert not held and "none from the minute before the open on" in said, (started, said)
+    # An integer too large for a float is no time either, and says so rather than raising.
+    huge = json.loads(json.dumps(_a_record()).replace("1000.5", "1" + "0" * 400))
+    held, said = check_app._record_gate([huge], _RUNTIME, [99], 1000.0, 1030.0)
+    assert not held and "none from the minute before the open on" in said, said
+    # A version of true is not 1, though Python takes it for 1.
+    assert not check_app._record_gate([_a_record(v=True)], _RUNTIME, [99], 1000.0, 1030.0)[0]
     # true is 1 to Python: a gate open from 0 s would take it for a time.
     assert not check_app._record_gate([_a_record(started=True)], _RUNTIME, [99], 0.0, 30.0)[0]
     held, said = check_app._record_gate([_a_record(ppid=True)], _RUNTIME, [1], 1000.0, 1030.0)

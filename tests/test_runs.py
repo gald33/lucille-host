@@ -17,7 +17,7 @@ from pathlib import Path
 import pytest
 
 from lucille_host import cli, paths, runs
-from tests._host import HostEnv
+from tests._host import HostEnv, lock_held
 
 VERBS = tuple(cli.VERBS)
 RUNTIME = "/Applications/Capsule.app" + runs.RUNTIME_IN_APP
@@ -227,8 +227,17 @@ def test_the_record_is_cut_back_by_bytes_once_too_large(
     ],
 )
 def test_a_planted_large_record_costs_one_cut_of_its_tail(
-    host_env: HostEnv, planted: bytes
+    host_env: HostEnv, planted: bytes, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    asked: list[int] = []
+    pread = os.pread
+
+    def counted(descriptor: int, length: int, offset: int) -> bytes:
+        if length > 1:  # not the one byte the append reads to see that the record ends a line
+            asked.append(length)
+        return pread(descriptor, length, offset)
+
+    monkeypatch.setattr("os.pread", counted)
     state = paths.ensure_dir(paths.dirs().state)
     path = state / runs.FILE
     path.write_bytes(planted)
@@ -237,6 +246,8 @@ def test_a_planted_large_record_costs_one_cut_of_its_tail(
     with pytest.raises(SystemExit):
         cli.main(["--version"])
     first = time.monotonic() - started
+    # Only the tail is read: the cut asks for KEEP_BYTES at most, wherever the record ends.
+    assert max(asked) <= runs.KEEP_BYTES and len(asked) >= 1, asked
     assert path.stat().st_size <= runs.KEEP_BYTES
     assert [line["command"] for line in _lines()][-1:] == ["version"]
     started = time.monotonic()
@@ -292,15 +303,16 @@ def test_a_start_time_that_is_not_a_number_writes_no_line(host_env: HostEnv) -> 
 def test_a_lock_held_elsewhere_is_waited_for_briefly_then_the_line_is_skipped(
     host_env: HostEnv, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    monkeypatch.setattr(runs, "LOCK_WAIT", 0.05)
-
-    def held(descriptor: int, command: int, length: int) -> None:
-        raise BlockingIOError(11, "Resource temporarily unavailable")
-
-    monkeypatch.setattr("os.lockf", held)
-    started = time.monotonic()
-    assert cli.main(["pause"]) == 0
-    assert time.monotonic() - started < 1
+    # The wait is 0.2 s, as spec/CLI.md section 16 says, and no longer: a lock held for ever by
+    # another process costs each command that and no more.
+    assert runs.LOCK_WAIT == 0.2
+    state = paths.ensure_dir(paths.dirs().state)
+    (state / runs.FILE).touch(mode=0o600)
+    with lock_held(state / runs.FILE):
+        started = time.monotonic()
+        assert cli.main(["pause"]) == 0
+        waited = time.monotonic() - started
+    assert 0.2 <= waited < 1.5, waited
     assert "paused" in capsys.readouterr().out
     assert _lines() == []
 

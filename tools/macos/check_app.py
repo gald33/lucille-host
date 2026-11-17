@@ -6506,6 +6506,19 @@ def _app_pids_at(app: Path) -> list[int]:
     return sorted(pids)
 
 
+def _record_time(value: object) -> float | None:
+    """A run record's ``started`` as a time, or None where it is no time: not a number, a
+    boolean (json's true is 1 to Python), or no finite one (json reads NaN and Infinity, and NaN
+    fails every comparison; an integer too large for a float is no time either)."""
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        return None
+    try:
+        time_ = float(value)
+    except OverflowError:
+        return None
+    return time_ if math.isfinite(time_) else None
+
+
 def _record_gate(
     records: Sequence[Mapping[str, Any]],
     runtime: str,
@@ -6520,15 +6533,9 @@ def _record_gate(
     why each record near the open does not."""
     near = []
     for entry in records:
-        started = entry.get("started")
-        # A time that is no finite number (json reads NaN and Infinity, and NaN fails every
-        # comparison) or a boolean is no time: such a line is not read.
-        if (
-            entry.get("v") != 1
-            or isinstance(started, bool)
-            or not isinstance(started, int | float)
-            or not math.isfinite(started)
-        ):
+        started = _record_time(entry.get("started"))
+        version = entry.get("v")
+        if isinstance(version, bool) or version != 1 or started is None:
             continue
         at = started - opened
         why = []
