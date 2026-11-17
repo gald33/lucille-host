@@ -11430,13 +11430,14 @@ def test_a_slow_lister_gets_overlapping_calls_staggered_and_bounded(
         assert most[lister] == check_app.OVERLAP, most
         steps = [b - a for a, b in zip(made[lister], made[lister][1:], strict=False)]
         # Each next call is made once the newest has run STAGGER, 0.2 s, never at once beside it
-        # (without the stagger they are made a POLL_PAUSE, 0.05 s, apart), and less than a whole
-        # call's length later: once OVERLAP calls are out, the next waits for the oldest to end,
-        # 0.8 - 2 x 0.2 = 0.4 s after the newest was made, and a loaded runner adds to that
-        # (0.27 s where 0.2 s was due, in run 44034162354, on macos-latest). Without overlapping
-        # calls, a step is at least a call and POLL_PAUSE, 0.85 s, both waits at least as long as
-        # asked.
-        assert len(steps) >= 5 and min(steps) >= 0.15 and max(steps) < call, steps
+        # (without the stagger they are made a POLL_PAUSE, 0.05 s, apart; the floor, 0.1 s, leaves
+        # room on both sides, since a loaded runner made steps as short as 0.18 s), and less than
+        # a whole call's length later: once OVERLAP calls are out, the next waits for the oldest
+        # to end, 0.8 - 2 x 0.2 = 0.4 s after the newest was made, and a loaded runner adds to
+        # that (0.27 s where 0.2 s was due, in run 44034162354, on macos-latest). Without
+        # overlapping calls, a step is at least a call and POLL_PAUSE, 0.85 s, both waits at least
+        # as long as asked.
+        assert len(steps) >= 5 and min(steps) >= 0.1 and max(steps) < call, steps
 
 
 def test_the_controls_watch_reads_on_while_the_open_is_in_progress(
