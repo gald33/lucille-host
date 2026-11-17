@@ -43,6 +43,7 @@ RUNTIME_MODULES = (
     "lucille_host.paths",
     "lucille_host.policy",
     "lucille_host.report",
+    "lucille_host.runs",
     "lucille_host.rooms",
     "lucille_host.spec",
     "lucille_host.state",

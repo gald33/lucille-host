@@ -284,7 +284,8 @@ Section 9 says how each state is decided. The text line shows the alias and the 
 | `last_hub_contact` | string (a time) or null | When `run` last reached the hub. |
 | `clock` | object, below | |
 
-`status` reads only this computer's files and its store, and makes no hub call. It reports what it can:
+`status` makes no hub call. It reads this computer's files and its store, and writes one thing: its line in
+the run record, as every command does (section 16). It reports what it can:
 when the store that keeps the pair cannot be read, `pair` says so (`unreadable`), and every other field is
 still filled in. A file of the host's own that holds something else still stops it (`state_invalid`), and so
 does one that holds a value the host never writes there: a time or a skew that is not a finite number in
@@ -560,7 +561,8 @@ Notes:
   `--allow-home-or-root` is given (`broad_folder`, with `kind`). A shell asks the user before it passes that
   flag. A shell passes `--` before the alias and the path, so that neither is read as an option.
 - **`roots add --suggest-alias <path>`** takes no alias, no folder argument and no other option. A path that
-  starts with `-` is written `--suggest-alias=<path>`. It writes nothing, and takes no lock: another verb may
+  starts with `-` is written `--suggest-alias=<path>`. It writes nothing but its line in the run record
+  (section 16), and takes no lock: another verb may
   take the alias before `roots add` runs, which then refuses with `alias_taken`, and the shell asks again.
 - **`roots check`** exits 0 whatever it found: a folder that cannot be opened is a result, not a failure.
   With no folder in the policy it writes no object and exits 0; empty standard output then means there is
@@ -613,7 +615,8 @@ list of what this project must never claim; a test checks them against it.
 ### 9.1 `roots add --suggest-alias`
 
 It suggests an alias made from the folder's name, which `roots add` will take, and which no folder of the
-local policy has. It reads the policy and nothing else, and writes nothing.
+local policy has. It reads the policy and nothing else, and writes nothing but its line in the run record
+(section 16).
 
 1. The name is the last part of the folder's absolute path (`""` for `/`).
 2. Each character becomes:
@@ -641,7 +644,7 @@ checks any alias.
 ### 9.2 `roots check`
 
 For each folder, it opens it and reads one entry, as an operation working there would need to. It sends
-nothing to Lucille or the hub, and writes nothing.
+nothing to Lucille or the hub, and writes nothing but its line in the run record (section 16).
 
 | State | When |
 |---|---|
@@ -1078,6 +1081,37 @@ Keychain on macOS, the Secret Service on Linux.
   of one, `a.example.com/x`) is not read, and is left as it is (`store_error`).
 - There is no file fallback, as there is for the pair (`pair --store-file`), and `--store-file` is a usage
   error. The verb refuses to run as root.
+
+## 16. The run record
+
+Every command, before its work starts, appends one line to the run record of its profile: `runs.jsonl`
+in the profile's state folder (`~/Library/Application Support/lucille-host/<profile>/state` on macOS,
+`$XDG_STATE_HOME/lucille-host/<profile>` on Linux), mode 0600, in a folder of mode 0700. That includes
+`status`, `roots list`, `roots check`, `roots add --suggest-alias`, `--version` and a command that then
+refuses. It is kept on this computer only: nothing reads it at run time, and nothing sends it anywhere.
+It is there so that the Mac app's checks can prove that the app started its own host
+([macos/README.md](../macos/README.md), placement), from the host's own word, without catching a process
+that may run for a fraction of a second.
+
+Each line is one JSON object:
+
+| Field | What it holds |
+|---|---|
+| `v` | `1`. |
+| `command` | The verb the command line names (`status`, `run`, `credential`, …), or `version` for `--version` or no verb. Never an argument: a line whose first plain word is not a verb, or that asks for help, writes no line, so a value typed on the command line by mistake never lands here. |
+| `pid` | The command's process. |
+| `ppid` | The process that started it. |
+| `executable` | The real path of the interpreter that runs the command where it is an app bundle's runtime (`…/Contents/Resources/runtime/bin/lucille-host-runtime`); `null` otherwise, so that no path outside an app is kept. |
+| `started` | When the command started, in seconds since the epoch. |
+
+- **It never fails the command.** A line that cannot be written (a full disk, a folder where the file
+  goes, a symbolic link in its place, which is not followed) is skipped, and nothing is said. Nothing is
+  written as root, or for a profile name that is not valid. The file is not synced to disk.
+- **It is capped.** Once the file is larger than 64 KiB, the command that finds it so keeps its last 200
+  lines, under the file's own lock. It only tries for that lock: when another command holds it, its line
+  is still appended, and the cut is left to a later command.
+- **What it holds about you:** which commands ran on this computer, when, and from which app, but no
+  argument, folder, credential, request or reply.
 
 ## Changes
 

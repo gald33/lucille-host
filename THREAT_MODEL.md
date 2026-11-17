@@ -69,6 +69,11 @@ release must have. The full design is [decisions/0001-host-design.md](decisions/
 
 ## Known gaps
 
+- Every command, `status` among them, appends one line to a run record in the profile's state folder
+  (spec/CLI.md section 16): the command's name, its process and parent, the app's runtime path where it
+  runs from one, and when. It holds no argument, folder, credential, request or reply, and is kept at
+  mode 0600 in a folder of mode 0700, but it still tells anyone who can read your files which of the
+  host's commands ran, and when. It is there for the Mac app's checks; nothing reads it at run time.
 - Switchboard's signer-socket hazard is shown for one user. That another local user could exploit it on
   Linux with `XDG_RUNTIME_DIR` unset is inferred, not tested.
 - The leak-path analysis above has not been repeated for the offered work rooms.

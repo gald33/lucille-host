@@ -87,6 +87,7 @@ from lucille_host import (
     paths,
     policy,
     report,
+    runs,
     store,
 )
 from lucille_host import state as host_state
@@ -1738,6 +1739,8 @@ def _usage_said(
 def main(argv: Sequence[str] | None = None) -> int:
     """Entry point for the ``lucille-host`` console script and ``python -m lucille_host``."""
     words = list(sys.argv[1:] if argv is None else argv)
+    # Before anything else the command does, and never failing it (spec/CLI.md section 16).
+    runs.record(words, tuple(VERBS))
     wanted = _wants_json(words)
     parser = build_parser()
     if isinstance(parser, _Parser):
