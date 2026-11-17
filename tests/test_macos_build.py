@@ -11386,12 +11386,17 @@ def test_a_watch_keeps_the_earliest_sighting_when_readings_end_out_of_order() ->
 def test_a_slow_lister_gets_overlapping_calls_staggered_and_bounded(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # Each call takes 0.4 s, in real time, on the real threads: while one is out, another starts
-    # once the newest has run STAGGER seconds (shortened here), never more than OVERLAP at once,
-    # so the readings start STAGGER apart, not a call's length apart.
-    monkeypatch.setattr(check_app, "STAGGER", 0.1)
+    # Each call takes 0.8 s, in real time, on the real threads: while one is out, another is
+    # made once the newest has run STAGGER seconds (shortened here to 0.2 s), never more than
+    # OVERLAP at once, so the calls are made STAGGER apart, not a call's length apart. The steps
+    # are measured where the watch makes each call (the pool's submit), not where its thread
+    # starts it, which a loaded runner delays by an amount of its own: two calls' threads started
+    # 0.067 s apart, under load, although the watch made them 0.1 s apart.
+    monkeypatch.setattr(check_app, "STAGGER", 0.2)
+    call = 0.8
     out: dict[str, int] = {}
     most: dict[str, int] = {}
+    made: dict[str, list[float]] = {}
     lock = threading.Lock()
 
     def read(lister: str) -> Any:
@@ -11399,20 +11404,39 @@ def test_a_slow_lister_gets_overlapping_calls_staggered_and_bounded(
         with lock:
             out[lister] = out.get(lister, 0) + 1
             most[lister] = max(most.get(lister, 0), out[lister])
-        threading.Event().wait(0.4)
+        threading.Event().wait(call)
         with lock:
             out[lister] -= 1
         return check_app._Reading(lister, started, time.monotonic(), frozenset())
 
+    real_pool = check_app._lister_pool
+
+    def pool() -> Any:
+        inner = real_pool()
+        submit = inner.submit
+
+        def recorded(fn: Any, /, *args: Any, **kwargs: Any) -> Any:
+            with lock:
+                made.setdefault(args[0], []).append(time.monotonic())
+            return submit(fn, *args, **kwargs)
+
+        inner.submit = recorded  # type: ignore[method-assign]
+        return inner
+
     monkeypatch.setattr(check_app, "_read", read)
-    watch = check_app._watch_profile(1.2)
+    monkeypatch.setattr(check_app, "_lister_pool", pool)
+    check_app._watch_profile(2.4)
     for lister in check_app.LISTERS:
         assert most[lister] == check_app.OVERLAP, most
-        starts = sorted(r.started for r in watch.readings if r.lister == lister)
-        steps = [b - a for a, b in zip(starts, starts[1:], strict=False)]
-        # Each next call starts once the newest has run STAGGER, never at once beside it, and
-        # never a whole call's length later.
-        assert steps and min(steps) >= 0.07 and max(steps) < 0.25, steps
+        steps = [b - a for a, b in zip(made[lister], made[lister][1:], strict=False)]
+        # Each next call is made once the newest has run STAGGER, 0.2 s, never at once beside it
+        # (without the stagger they are made a POLL_PAUSE, 0.05 s, apart), and less than a whole
+        # call's length later: once OVERLAP calls are out, the next waits for the oldest to end,
+        # 0.8 - 2 x 0.2 = 0.4 s after the newest was made, and a loaded runner adds to that
+        # (0.27 s where 0.2 s was due, in run 44034162354, on macos-latest). Without overlapping
+        # calls, a step is at least a call and POLL_PAUSE, 0.85 s, both waits at least as long as
+        # asked.
+        assert len(steps) >= 5 and min(steps) >= 0.15 and max(steps) < call, steps
 
 
 def test_the_controls_watch_reads_on_while_the_open_is_in_progress(
