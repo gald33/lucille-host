@@ -717,7 +717,7 @@ limit, as it runs every verb, and stops it when the limit passes.
 | `no_such_credential` | `credential remove`: no credential is stored under that service and name. |
 | `no_value` | `credential set`: no value was given, or standard input is of the wrong kind to give one: not a terminal without `--value-stdin`, or a terminal with it. Nothing was stored. |
 | `values_differ` | `credential set`: the value typed twice differed. Nothing was stored. |
-| `bad_value` | `credential set`: the value holds a control character. Nothing was stored. |
+| `bad_value` | `credential set`: the value holds a control character, or is not text in standard input's encoding. Nothing was stored. |
 
 ## 11. Golden fixtures
 
@@ -1005,20 +1005,27 @@ one. The verb writes text only in version 1 (section 14).
 | `credential remove <service> <name>` | Deletes that credential and no other. One not stored is refused, exit 1. |
 
 **Names.** A service and a credential name are each 1 to 64 characters of `a`-`z`, `0`-`9`, `.`, `_` and
-`-`, starting with a letter or a digit: `gmail`, `github.com`, `app-password`.
+`-`, starting with a letter or a digit: `gmail`, `github.com`, `app-password`. The whole name is matched:
+a name with a newline at its end is refused.
 
 **Hosts.** Each credential is bound to the hosts given with `--host`, the only hosts it may ever be sent
 to, once something uses credentials (decisions/0003, "Use", rule 1). That use will enforce exactly what is
 stored here:
 - A host is an exact DNS name: two labels or more, separated by `.`, each label 1 to 63 characters of
   `a`-`z`, `0`-`9` and `-`, not starting or ending with `-`, the last starting with a letter; 253
-  characters at most. A name in another script is written in its `xn--` form.
+  characters at most. The whole host is matched: a host with a newline at its end is refused.
+- It is ASCII as given. A character that lowercases to an ASCII letter, such as the Kelvin sign (U+212A),
+  is refused, since ASCII is checked before lowercasing. A name in another script is written in its
+  `xn--` form, and a label that starts with `xn--` must decode as IDNA writes one; one that does not
+  (`xn--abc`) is refused.
 - What is given is lowercased, and one trailing `.` is taken off. A host given twice is kept once. The
   hosts are kept in the order given.
 - Refused: a wildcard (`*.example.com`), a scheme (`https://`), a path, a port (`:443`), an IP address
-  (IPv4 or IPv6), a single label (`localhost`, `gmail`), and a name of this computer or a local network:
-  `localhost`, `local`, `lan`, `internal`, `home.arpa` and `arpa`, and any name ending in `.` and one of
-  them. A host is matched exactly, never as a pattern: `gmail.com` does not cover `imap.gmail.com`.
+  (IPv4 or IPv6), a single label (`localhost`, `gmail`), and a name of this computer, of a local network,
+  or one that resolves nowhere on the internet: `localhost`, `localdomain`, `local`, `lan`, `internal`,
+  `home.arpa`, `arpa`, `test` and `invalid`, and any name ending in `.` and one of them
+  (`localhost.localdomain`, `printer.test`). A host is matched exactly, never as a pattern: `gmail.com`
+  does not cover `imap.gmail.com`.
 - One host at least, and 16 at most.
 - A refusal names a host by its place (`host 2`), and does not repeat it.
 
@@ -1026,16 +1033,20 @@ stored here:
 - It is never an argument. Without `--value-stdin`, standard input must be a terminal: the value is asked
   for twice, at a prompt on standard error that turns the terminal's echo off while it is typed, and two
   values that differ are refused. With `--value-stdin`, standard input must not be a terminal; the verb
-  reads one line, the value, and nothing more, taking off the newline (`
-` or `
-`) that ends it.
+  reads one line, the value, and nothing more, taking off the line break (LF, or CR and LF) that ends it.
 - Refused, with nothing stored: an empty value (an empty line, or standard input that ends at once), a
-  value holding a control character (U+0000 to U+001F, or U+007F), and one longer than 65536 characters.
+  value holding a control character (U+0000 to U+001F, or U+007F), one longer than 65536 characters, and
+  a line that is not text in standard input's encoding (`bad_value`, without the bytes it could not
+  decode).
 - The names and hosts are checked, and a credential already stored without `--replace` is refused, before
   the value is asked for or read.
-- The value is written to the keyring and nowhere else. No output, error message or file of the host's
-  holds it. A usage error of a `credential` command line repeats none of the words given there, since one
-  may be a value typed by mistake, and says that such a value is now in the shell's history.
+- The value is written to the keyring and nowhere else. No output, error message, traceback or file of
+  the host's holds it, nor any other stored credential's value.
+- A usage error of a `credential` command line repeats nothing typed on it, since a word there may be a
+  value typed by mistake. It is argparse's own message only where that names the verb's arguments and
+  options (`the following arguments are required: name`). An unknown action is
+  `unknown credential subcommand: it is set, list or remove`, after the verb's usage. Any other says that
+  a value is never given on the command line, and that one typed there is now in the shell's history.
 
 **Replacing.** A credential already stored under that service and name is refused (exit 1), and nothing
 changes, unless `--replace` is given. `--replace` replaces its value, and replaces its hosts with the hosts
@@ -1044,10 +1055,21 @@ stored is decided again under the store's lock when it is written, so one stored
 command is not replaced without `--replace`.
 
 **The keyring.** A credential is stored only in the keyring backend the host builds for this system: the
-Keychain on macOS, the Secret Service on Linux. A keyring the host refuses, or turned off by keyring's own
-setting, or one that cannot be read or written, is refused with the store's own message, exit 1. There is
-no file fallback, as there is for the pair (`pair --store-file`), and `--store-file` is a usage error.
-The verb refuses to run as root.
+Keychain on macOS, the Secret Service on Linux.
+- A keyring the host refuses, or one turned off by keyring's own setting, is refused with the store's own
+  message (`insecure_keyring`), exit 1. So is one that cannot be read or written for a reason the store
+  has words for, such as a Secret Service that cannot be started (`store_error`): those words are the
+  host's, with the error's class and D-Bus name, never its message.
+- Any other error of a read or a write of the keyring is `store_error` with a fixed sentence: "the keyring
+  refused to read (or write) the credentials item; its error is not shown, since it may hold a
+  credential's value". Nothing of the keyring's error is shown: not its message, its notes, nor the error
+  as a cause or context. The item holds every credential, written whole, so the error could carry any of
+  them.
+- An error of the verb's own that none of its refusals names is `internal`: its traceback shows where the
+  verb was, and an error of the host's own in place of the one raised, whose message, notes, cause and
+  context are not shown.
+- There is no file fallback, as there is for the pair (`pair --store-file`), and `--store-file` is a usage
+  error. The verb refuses to run as root.
 
 ## Changes
 

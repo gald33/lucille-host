@@ -5,6 +5,7 @@ line and never shown; each credential is bound to the hosts given; the verb has 
 from __future__ import annotations
 
 import io
+import json
 import os
 import pty
 import select
@@ -297,15 +298,67 @@ def test_it_does_not_run_as_root(
 
 # --- the value appears nowhere but the keyring -------------------------------------------------
 
-SENTINEL = "s3ntinel-VALUE-7f2c"
+# Values that each escape differently: in JSON, in repr(), in an error's text. Each holds a token
+# of its own, letters and digits that no escaping changes, so that a value is found in what was
+# shown whatever form it was shown in.
+SECRETS: dict[str, str] = {
+    "quote": 'vQ7zx1"q',
+    "backslash": "vQ7zx2\\b",
+    "accents-cjk": "vQ7zx3é中",
+    "emoji": "vQ7zx4😀",
+}
+SENTINEL = SECRETS["quote"]
+# Another credential stored beside the one each path works on, with a tab too: it must not show
+# on any path, error paths for the first among them.
+OTHER = 'oW3kp9"\\\té中😀'
+TOKENS = ("vQ7zx", "oW3kp9")
 SET = ["credential", "set", "gmail", "x", "--host", "imap.gmail.com"]
 
 
+def _shown(text: str) -> list[str]:
+    """The tokens of the values above that ``text`` holds, in any form."""
+    return [token for token in TOKENS if token in text]
+
+
+def _item(entries: dict[str, str]) -> str:
+    """The credentials item holding ``entries``, ``service/name`` to value, as the store writes
+    it."""
+    doc = {"v": 1, "credentials": {}}
+    for key, value in entries.items():
+        service, name = key.split("/")
+        doc["credentials"][key] = {
+            "service": service,
+            "name": name,
+            "value": value,
+            "hosts": [f"{service}.example.com"],
+            "saved_at": 1.0,
+        }
+    return json.dumps(doc, sort_keys=True, separators=(",", ":"))
+
+
 class _SaysTheValue(MemoryKeyring):
-    """A keyring whose write fails with an error that says what it was asked to write."""
+    """A keyring whose write fails with an error that says what it was asked to write: every
+    credential in the item."""
 
     def set_password(self, service: str, username: str, password: str) -> None:
         raise RuntimeError(f"could not store {password!r}")
+
+
+class _SaysTheItemOnRead(MemoryKeyring):
+    """A keyring whose read fails with an error that says what the item holds."""
+
+    def get_password(self, service: str, username: str) -> str | None:
+        raise RuntimeError(f"could not read {self.items.get((service, username))!r}")
+
+
+class _NotesTheValue(MemoryKeyring):
+    """A keyring whose write fails with an error that says nothing, but carries what it was
+    asked to write in a note (``add_note``), which a traceback prints."""
+
+    def set_password(self, service: str, username: str, password: str) -> None:
+        error = RuntimeError("the keychain is busy")
+        error.add_note(password)
+        raise error
 
 
 class _FailsPlainly(MemoryKeyring):
@@ -322,90 +375,133 @@ def _unusable(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(store, "keyring_call", call)
 
 
-# Each: the command line, what stdin holds (SENTINEL stands for the value), whether stdin is a
-# terminal (then the hidden prompt gives SENTINEL, twice), a set-up, and the exit expected (None:
-# the error is raised out of main, as a bug's is).
+def _a_bug(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A bug in the store's write: an error that says the value, with a note, raised from
+    another that says it too."""
+
+    def save(
+        self: object, service: str, name: str, value: str, *rest: object, **kw: object
+    ) -> None:
+        try:
+            raise KeyError(value)
+        except KeyError as inner:
+            error = ValueError(f"cannot save {value!r}")
+            error.add_note(value)
+            raise error from inner
+
+    monkeypatch.setattr(credentials.CredentialStore, "save", save)
+
+
+# Each: the command line, what stdin holds (VALUE stands for the value), whether stdin is a
+# terminal (then the hidden prompt gives the value, twice), a set-up, and the exit expected (None:
+# an error is raised out of main, as a bug's is, which Python prints with its traceback).
+V = "\x00VALUE\x00"
 _PATHS: dict[str, tuple[list[str], str, bool, str, int | None]] = {
-    "set from stdin": ([*SET, "--value-stdin"], SENTINEL + "\n", False, "", 0),
+    "set from stdin": ([*SET, "--value-stdin"], V + "\n", False, "", 0),
     "set at a terminal": (SET, "", True, "", 0),
-    "set over one saved, refused": ([*SET, "--value-stdin"], SENTINEL + "\n", False, "saved", 1),
-    "set with --replace": (
-        [*SET, "--value-stdin", "--replace"],
-        SENTINEL + "\n",
-        False,
-        "saved",
-        0,
-    ),
+    "set over one saved, refused": ([*SET, "--value-stdin"], V + "\n", False, "saved", 1),
+    "set with --replace": ([*SET, "--value-stdin", "--replace"], V + "\n", False, "saved", 0),
     "set, bad name": (
         ["credential", "set", "Gmail", "x", "--host", "imap.gmail.com", "--value-stdin"],
-        SENTINEL + "\n",
+        V + "\n",
         False,
         "",
         1,
     ),
     "set, bad host": (
         ["credential", "set", "gmail", "x", "--host", "localhost", "--value-stdin"],
-        SENTINEL + "\n",
+        V + "\n",
         False,
         "",
         1,
     ),
-    "set, value on the command line": ([*SET, SENTINEL], "", False, "", 2),
-    "set, value as an action": (["credential", SENTINEL], "", False, "", 2),
+    "set, value on the command line": ([*SET, V], "", False, "", 2),
+    "set, value as an action": (["credential", V], "", False, "", 2),
+    "set, value as the service": (
+        ["credential", "set", V, "x", "--host", "a.example.com"],
+        "",
+        False,
+        "",
+        1,
+    ),
     "set, value as --host": (
-        ["credential", "set", "gmail", "x", "--host", SENTINEL, "--value-stdin"],
+        ["credential", "set", "gmail", "x", "--host", V, "--value-stdin"],
         "",
         False,
         "",
         1,
     ),
-    "set with --json": (["--json", *SET, "--value-stdin"], SENTINEL + "\n", False, "", 2),
-    "set with --store-file": (
-        [*SET, "--value-stdin", "--store-file"],
-        SENTINEL + "\n",
-        False,
-        "",
-        2,
-    ),
-    "set, no terminal": (SET, SENTINEL + "\n", False, "", 1),
+    "set, value as --host=": (["credential", "set", "gmail", "x", f"--host={V}"], "", True, "", 1),
+    "set, value as an option": ([*SET, f"--{V}"], "", False, "", 2),
+    "set with --json": (["--json", *SET, "--value-stdin"], V + "\n", False, "", 2),
+    "set with --store-file": ([*SET, "--value-stdin", "--store-file"], V + "\n", False, "", 2),
+    "set, no terminal": (SET, V + "\n", False, "", 1),
     "set, --value-stdin at a terminal": ([*SET, "--value-stdin"], "", True, "", 1),
-    "set, a control character": ([*SET, "--value-stdin"], SENTINEL + "\x1b\n", False, "", 1),
-    "set, no keyring": ([*SET, "--value-stdin"], SENTINEL + "\n", False, "no keyring", 1),
-    "set, keyring off": ([*SET, "--value-stdin"], SENTINEL + "\n", False, "keyring off", 1),
-    "set, keyring unusable": ([*SET, "--value-stdin"], SENTINEL + "\n", False, "unusable", 1),
-    "set, keyring says the value": ([*SET, "--value-stdin"], SENTINEL + "\n", False, "says", 1),
-    "set, keyring fails plainly": ([*SET, "--value-stdin"], SENTINEL + "\n", False, "plain", None),
+    "set, a control character": ([*SET, "--value-stdin"], V + "\x1b\n", False, "", 1),
+    "set, no keyring": ([*SET, "--value-stdin"], V + "\n", False, "no keyring", 1),
+    "set, keyring off": ([*SET, "--value-stdin"], V + "\n", False, "keyring off", 1),
+    "set, keyring unusable": ([*SET, "--value-stdin"], V + "\n", False, "unusable", 1),
+    "set, keyring says the item": ([*SET, "--value-stdin"], V + "\n", False, "says", 1),
+    "set, keyring notes the item": ([*SET, "--value-stdin"], V + "\n", False, "notes", 1),
+    "set, keyring fails plainly": ([*SET, "--value-stdin"], V + "\n", False, "plain", 1),
+    "set, keyring says the item on read": ([*SET, "--value-stdin"], V + "\n", False, "reads", 1),
+    "set, a bug in the store": ([*SET, "--value-stdin"], V + "\n", False, "bug", None),
     "list": (["credential", "list"], "", False, "saved", 0),
+    "list, keyring says the item on read": (["credential", "list"], "", False, "reads", 1),
     "remove": (["credential", "remove", "gmail", "x"], "", False, "saved", 0),
     "remove, none saved": (["credential", "remove", "gmail", "x"], "", False, "", 1),
+    "remove, keyring says the item": (["credential", "remove", "gmail", "x"], "", False, "says", 1),
+    "remove, keyring says the item on read": (
+        ["credential", "remove", "gmail", "x"],
+        "",
+        False,
+        "reads",
+        1,
+    ),
 }
 
 
+@pytest.mark.parametrize("secret", list(SECRETS))
 @pytest.mark.parametrize("path", list(_PATHS))
 def test_the_value_appears_nowhere_but_the_keyring(
     path: str,
+    secret: str,
     host_env: HostEnv,
     home: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    argv, stdin_text, at_terminal, setup, expected = _PATHS[path]
-    keyring = host_env.keyring
-    if setup == "saved":
-        _store(host_env).save("gmail", "x", SENTINEL, ("imap.gmail.com",))
-    elif setup == "no keyring":
+    value = SECRETS[secret]
+    template, stdin_template, at_terminal, setup, expected = _PATHS[path]
+    argv = [word.replace(V, value) for word in template]
+    profile = host_env.dirs.profile
+    item = (credentials.SERVICE, profile)
+    stored = {"other/y": OTHER}
+    if setup in ("saved", "says", "reads"):
+        stored["gmail/x"] = value
+    keyring: MemoryKeyring = host_env.keyring
+    if setup == "says":
+        keyring = _SaysTheValue()
+    elif setup == "reads":
+        keyring = _SaysTheItemOnRead()
+    elif setup == "notes":
+        keyring = _NotesTheValue()
+    elif setup == "plain":
+        keyring = _FailsPlainly()
+    keyring.items[item] = _item(stored)
+    monkeypatch.setattr("keyring.core._keyring_backend", keyring)
+    if setup == "no keyring":
         monkeypatch.setattr("keyring.core._keyring_backend", FailKeyring())
     elif setup == "keyring off":
         turned_off(monkeypatch, home, "variable-null")
     elif setup == "unusable":
         _unusable(monkeypatch)
-    elif setup in ("says", "plain"):
-        keyring = _SaysTheValue() if setup == "says" else _FailsPlainly()
-        monkeypatch.setattr("keyring.core._keyring_backend", keyring)
-    stdin = io.StringIO(stdin_text)
+    elif setup == "bug":
+        _a_bug(monkeypatch)
+    stdin = io.StringIO(stdin_template.replace(V, value))
     monkeypatch.setattr(stdin, "isatty", lambda: at_terminal)
     monkeypatch.setattr("sys.stdin", stdin)
-    monkeypatch.setattr(cli, "_read_hidden", _Typed(SENTINEL, SENTINEL))
+    monkeypatch.setattr(cli, "_read_hidden", _Typed(value, value))
     raised: BaseException | None = None
     code: int | None
     try:
@@ -416,32 +512,147 @@ def test_the_value_appears_nowhere_but_the_keyring(
         raised, code = exc, None
     said = capsys.readouterr()
     assert code == expected, said.err
-    assert SENTINEL not in said.out and SENTINEL not in said.err, said
+    assert _shown(said.out) == [] and _shown(said.err) == [], said
     if raised is not None:
+        # What Python prints for it: the traceback, with every cause, context and note.
         shown = "".join(traceback.format_exception(raised))
-        assert SENTINEL not in shown, shown
-    # Nor in any file the host wrote, logs among them, nor in what may be shown of a credential.
+        assert _shown(shown) == [], shown
+    # Nor in any file the host wrote, logs among them.
     for each in home.rglob("*"):
         if each.is_file():
-            assert SENTINEL.encode() not in each.read_bytes(), each
+            assert _shown(each.read_bytes().decode("utf-8", "replace")) == [], each
     if setup in ("", "saved"):
+        # Nor in what may be shown of a credential, nor in any keyring item but the credentials'.
         creds = _store(host_env)
-        assert SENTINEL not in repr(creds.names()) + repr(creds.saved("gmail", "x"))
-        assert SENTINEL not in repr(creds)
-        for item, text in keyring.items.items():
-            if SENTINEL in text:
-                assert item == (credentials.SERVICE, host_env.dirs.profile)
+        assert _shown(repr(creds.names()) + repr(creds.saved("gmail", "x")) + repr(creds)) == []
+        for each, text in keyring.items.items():
+            if _shown(text):
+                assert each == item
 
 
-def test_a_keyring_error_that_says_the_value_is_not_shown(
+def test_a_keyring_error_that_says_the_item_is_not_shown(
     host_env: HostEnv, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    monkeypatch.setattr("keyring.core._keyring_backend", _SaysTheValue())
-    assert _main([*SET, "--value-stdin"], monkeypatch, SENTINEL + "\n") == 1
+    # The write's error says the whole item, the other credential's value among it; a fixed
+    # refusal takes its place, whatever form the value is in there.
+    keyring = _SaysTheValue()
+    keyring.items[(credentials.SERVICE, host_env.dirs.profile)] = _item({"other/y": OTHER})
+    monkeypatch.setattr("keyring.core._keyring_backend", keyring)
+    assert _main([*SET, "--value-stdin"], monkeypatch, SECRETS["backslash"] + "\n") == 1
     assert capsys.readouterr().err == (
-        "lucille-host: the keyring could not be written (RuntimeError); its message is not "
-        "shown, since it holds the value. Nothing may have been saved\n"
+        "lucille-host: the keyring refused to write the credentials item; its error is not "
+        "shown, since it may hold a credential's value\n"
     )
+
+
+def test_a_keyring_error_with_the_value_in_a_note_shows_nothing_of_it(
+    host_env: HostEnv, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr("keyring.core._keyring_backend", _NotesTheValue())
+    assert _main([*SET, "--value-stdin"], monkeypatch, SECRETS["emoji"] + "\n") == 1
+    said = capsys.readouterr()
+    assert _shown(said.out + said.err) == [], said
+    assert said.err == (
+        "lucille-host: the keyring refused to write the credentials item; its error is not "
+        "shown, since it may hold a credential's value\n"
+    )
+
+
+def test_the_keyrings_refusal_carries_none_of_its_error() -> None:
+    # Neither as a cause nor as the context it was raised in, so no traceback prints it.
+    error = credentials._refused("write")
+    assert error.__cause__ is None and error.__context__ is None
+    assert not getattr(error, "__notes__", None)
+
+
+def test_the_keyrings_refusal_is_raised_with_no_context(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    keyring = _NotesTheValue()
+    monkeypatch.setattr("keyring.core._keyring_backend", keyring)
+    creds = credentials.CredentialStore(tmp_path / "state", "default")
+    with pytest.raises(credentials.KeyringRefused) as info:
+        creds.save("gmail", "x", SECRETS["quote"], ("imap.gmail.com",))
+    raised = info.value
+    assert raised.__cause__ is None and raised.__context__ is None
+    assert _shown("".join(traceback.format_exception(raised))) == []
+
+
+def test_a_bug_on_the_credential_path_is_shown_without_its_error(
+    host_env: HostEnv, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _a_bug(monkeypatch)
+    with pytest.raises(RuntimeError) as info:
+        _main([*SET, "--value-stdin"], monkeypatch, SECRETS["accents-cjk"] + "\n")
+    raised = info.value
+    assert str(raised) == (
+        "an unexpected error (ValueError) in the credential verb; its message is not shown, "
+        "since it may hold a credential's value"
+    )
+    assert raised.__cause__ is None and raised.__context__ is None
+    assert not getattr(raised, "__notes__", None)
+    assert _shown("".join(traceback.format_exception(raised))) == []
+    assert '"code":"internal"' not in capsys.readouterr().out  # text mode: no object
+
+
+def test_an_unknown_action_is_named_as_such_and_not_repeated(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    with pytest.raises(SystemExit) as exited:
+        _main(["credential", SECRETS["backslash"]], monkeypatch)
+    assert exited.value.code == 2
+    err = capsys.readouterr().err
+    assert err.startswith("usage: lucille-host credential "), err
+    assert err.endswith(
+        "lucille-host credential: error: unknown credential subcommand: it is set, list or remove\n"
+    ), err
+    assert _shown(err) == []
+
+
+@pytest.mark.parametrize(
+    ("argv", "said"),
+    [
+        (["credential", "set", "gmail", "--host", "a.example.com"], "required: name"),
+        (["credential", "set", "gmail", "x"], "required: --host"),
+        (["credential", "set", "gmail", "x", "--host"], "argument --host: expected one argument"),
+        (["credential"], "required: ACTION"),
+    ],
+)
+def test_usage_errors_that_repeat_nothing_typed_are_argparses_own(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    argv: list[str],
+    said: str,
+) -> None:
+    with pytest.raises(SystemExit):
+        _main(argv, monkeypatch)
+    assert said in capsys.readouterr().err
+
+
+def test_an_undecodable_value_on_stdin_is_refused_without_its_bytes(
+    host_env: HostEnv, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Standard input in a strict UTF-8 locale, and a value that is not UTF-8: a refusal, not the
+    # decoder's error, which names the bytes it could not decode.
+    stdin = io.TextIOWrapper(io.BytesIO(b"vQ7zx5\xff\xfe\n"), encoding="utf-8", errors="strict")
+    monkeypatch.setattr("sys.stdin", stdin)
+    assert cli.main([*SET, "--value-stdin"]) == 1
+    err = capsys.readouterr().err
+    assert err == (
+        "lucille-host: the value is not text in this terminal's encoding; nothing was saved\n"
+    )
+    assert _store(host_env).names() == []
+
+
+def test_an_undecodable_line_at_the_hidden_prompt_is_refused(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stdin = io.TextIOWrapper(io.BytesIO(b"\xff\n"), encoding="utf-8", errors="strict")
+    monkeypatch.setattr("sys.stdin", stdin)
+    with pytest.raises(cli._Refused) as info:
+        cli._read_value_line()
+    assert info.value.code == "bad_value"
+    assert info.value.__context__ is None
 
 
 def test_the_stores_refusals_surface_as_they_are(

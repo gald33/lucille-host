@@ -48,6 +48,7 @@ __all__ = [
     "SERVICE",
     "CredentialError",
     "CredentialExists",
+    "KeyringRefused",
     "CredentialStore",
     "SavedCredential",
     "hosts_of",
@@ -57,18 +58,31 @@ SERVICE: Final = "lucille-host.credentials"
 VERSION: Final = 1
 LOCK: Final = ".credentials.lock"
 # Lower-case service and credential names, the same rule Lucille checks: ``gmail``, ``github.com``.
-NAME: Final = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
+# Matched whole (``fullmatch``): ``$`` would also match before a newline at the end.
+NAME: Final = re.compile(r"[a-z0-9][a-z0-9._-]{0,63}")
 # A password, a token or a small JSON document; well above any of them.
 MAX_VALUE_CHARS: Final = 64 * 1024
 # A host a credential is bound to: a DNS name of two labels or more, lowercase ASCII (a name in
-# another script is written in its ``xn--`` form), no port, no IP address.
+# another script is written in its ``xn--`` form), no port, no IP address. Matched whole.
 HOST: Final = re.compile(
-    r"^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?$"
+    r"(?=.{1,253}\Z)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?"
 )
 # Names that reach this computer or the user's own network, not a service on the internet. The
 # proxy that will use a credential checks each address it connects to as well (decisions/0003,
 # "Hardening"); this only stops such a name being saved.
-LOCAL_SUFFIXES: Final = ("localhost", "local", "internal", "lan", "home.arpa", "arpa")
+# ``test`` and ``invalid`` are reserved names that resolve nowhere on the internet (RFC 6761);
+# ``localdomain`` is the domain of ``localhost.localdomain``.
+LOCAL_SUFFIXES: Final = (
+    "localhost",
+    "localdomain",
+    "local",
+    "internal",
+    "lan",
+    "home.arpa",
+    "arpa",
+    "test",
+    "invalid",
+)
 MAX_HOSTS: Final = 16
 
 
@@ -85,6 +99,13 @@ class CredentialExists(CredentialError):
     """A credential of that service and name is saved already, and ``replace`` was not asked."""
 
 
+class KeyringRefused(store.StoreError):
+    """A read or write of the item failed with an error the store has no words of its own for
+    (:func:`store.keyring_failure`). Nothing of that error is kept: not its message, its notes,
+    nor the error itself as a cause or context. The item is one JSON document holding every
+    credential, written whole, so a keyring's error could carry any credential's value."""
+
+
 @dataclass(frozen=True)
 class SavedCredential:
     """What may be shown about a credential: never its value."""
@@ -97,7 +118,7 @@ class SavedCredential:
 
 def _key(service: str, name: str) -> str:
     for label, value in (("service", service), ("name", name)):
-        if not isinstance(value, str) or not NAME.match(value):
+        if not isinstance(value, str) or not NAME.fullmatch(value):
             raise CredentialError(
                 f"{label} must be 1-64 characters of a-z, 0-9, '.', '_' or '-', "
                 "starting with a letter or digit"
@@ -116,17 +137,23 @@ def hosts_of(hosts: list[str] | tuple[str, ...]) -> tuple[str, ...]:
         which = f"host {number}" if len(hosts) > 1 else "the host"
         if not isinstance(given, str):
             raise CredentialError("a host must be text")
-        host = given.lower()
-        if host.endswith("."):
-            host = host[:-1]
-        if not host.isascii():
+        # ASCII is checked first: lowercasing turns some other characters into ASCII ones, such
+        # as the Kelvin sign (U+212A) into "k".
+        if not given.isascii():
             raise CredentialError(
                 f"{which} is not plain ASCII: write a name in another script in its xn-- form"
             )
-        if not HOST.match(host):
+        host = given.lower()
+        if host.endswith("."):
+            host = host[:-1]
+        if not HOST.fullmatch(host):
             raise CredentialError(
                 f"{which} is not a host name such as mail.example.com: two labels or "
                 "more, of a-z, 0-9 and '-', with no port, path or IP address"
+            )
+        if not _labels_decode(host):
+            raise CredentialError(
+                f"{which} has an xn-- label that is not a name in another script as IDNA writes one"
             )
         if any(host == end or host.endswith("." + end) for end in LOCAL_SUFFIXES):
             raise CredentialError(
@@ -139,6 +166,25 @@ def hosts_of(hosts: list[str] | tuple[str, ...]) -> tuple[str, ...]:
     if len(kept) > MAX_HOSTS:
         raise CredentialError(f"a credential is bound to at most {MAX_HOSTS} hosts")
     return tuple(kept)
+
+
+def _labels_decode(host: str) -> bool:
+    """Whether each ``xn--`` label of ``host`` is a name in another script, written as IDNA
+    writes one: one that does not decode is not."""
+    for label in host.split("."):
+        if label.startswith("xn--"):
+            try:
+                label.encode("ascii").decode("idna")
+            except UnicodeError:
+                return False
+    return True
+
+
+def _refused(verb: str) -> KeyringRefused:
+    return KeyringRefused(
+        f"the keyring refused to {verb} the credentials item; its error is not shown, since it "
+        "may hold a credential's value"
+    )
 
 
 def _saved(entry: dict[str, Any]) -> SavedCredential:
@@ -252,6 +298,7 @@ class CredentialStore:
 
     def _load(self) -> dict[str, Any]:
         backend = store.check_backend(refusal=REFUSAL)
+        failed: store.StoreError | None = None
         try:
             raw = store.keyring_call(
                 lambda: backend.get_password(self.service, self.username), "read"
@@ -259,10 +306,11 @@ class CredentialStore:
         except store.StoreError:
             raise
         except Exception as exc:
-            failed = store.keyring_failure(exc, "read")
-            if failed is None:
-                raise
-            raise failed from exc
+            failed = store.keyring_failure(exc, "read") or _refused("read")
+        if failed is not None:
+            # Raised here, outside the except clause, so that the keyring's error is not its
+            # context either (:class:`KeyringRefused`).
+            raise failed
         if raw is None:
             return _empty()
         try:
@@ -279,6 +327,7 @@ class CredentialStore:
     def _save(self, doc: dict[str, Any]) -> None:
         backend = store.check_backend(refusal=REFUSAL)
         text = json.dumps(doc, sort_keys=True, separators=(",", ":"))
+        failed: store.StoreError | None = None
         try:
             store.keyring_call(
                 lambda: backend.set_password(self.service, self.username, text), "write"
@@ -286,10 +335,9 @@ class CredentialStore:
         except store.StoreError:
             raise
         except Exception as exc:
-            failed = store.keyring_failure(exc, "write")
-            if failed is None:
-                raise
-            raise failed from exc
+            failed = store.keyring_failure(exc, "write") or _refused("write")
+        if failed is not None:
+            raise failed
 
 
 def _well_formed(doc: object) -> bool:
@@ -312,7 +360,7 @@ def _well_formed(doc: object) -> bool:
             return False
         hosts = entry.get("hosts", [])
         if not isinstance(hosts, list) or not all(
-            isinstance(host, str) and HOST.match(host) for host in hosts
+            isinstance(host, str) and HOST.fullmatch(host) for host in hosts
         ):
             return False
     return True

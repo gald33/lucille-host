@@ -107,7 +107,8 @@ def test_names_never_carry_the_value(creds: credentials.CredentialStore) -> None
     assert SECRET not in repr(creds.names())
 
 
-@pytest.mark.parametrize("name", ["", "Gmail", "a b", "a/b", "-x", "x" * 65])
+# "gmail\n": a name is matched whole, so a newline at its end is refused too.
+@pytest.mark.parametrize("name", ["", "Gmail", "a b", "a/b", "-x", "x" * 65, "gmail\n", "\ngmail"])
 def test_bad_names_refused(creds: credentials.CredentialStore, name: str) -> None:
     with pytest.raises(credentials.CredentialError):
         creds.save(name, "ok", SECRET, HOSTS)
@@ -271,20 +272,22 @@ def test_only_the_credential_verb_imports_it() -> None:
     one names the module, except the command line's ``credential`` verb, in its own function, so
     that no other verb's process (``run`` among them) loads it. When an operation is allowed to
     use one, this test changes with the design record."""
-    assert _importers() == [("cli.py", "_credential")]
+    assert _importers() == [("cli.py", "_credential_verb")]
 
 
 def test_the_credential_verb_never_reads_a_value() -> None:
     """The verb saves, lists and removes; it never reads a value back (nothing uses one yet)."""
     tree = ast.parse((PACKAGE / "cli.py").read_text(encoding="utf-8"))
-    [verb] = [
+    verb = [
         node
         for node in ast.walk(tree)
-        if isinstance(node, ast.FunctionDef) and node.name == "_credential"
+        if isinstance(node, ast.FunctionDef) and node.name in ("_credential", "_credential_verb")
     ]
+    assert len(verb) == 2
     read = [
         node.lineno
-        for node in ast.walk(verb)
+        for function in verb
+        for node in ast.walk(function)
         if isinstance(node, ast.Attribute) and node.attr == "value"
     ]
     assert read == []
@@ -318,6 +321,19 @@ def test_importing_the_command_line_does_not_load_it() -> None:
         ("a..b.com",),
         ("-a.com",),
         ("a.123",),
+        # Matched whole: a newline at the end is refused, also after a local name.
+        ("imap.gmail.com\n",),
+        ("foo.localhost\n",),
+        # ASCII is checked before lowercasing: the Kelvin sign lowercases to "k".
+        ("\u212aelvin.example.com",),
+        # An xn-- label that IDNA does not decode.
+        ("xn--abc.example.com",),
+        ("xn--zzzzzzzz-a.example.com",),
+        ("mail.xn--a1b2",),
+        # More names of this computer, or names that resolve nowhere on the internet.
+        ("localhost.localdomain",),
+        ("printer.test",),
+        ("x.invalid",),
         (),
         tuple(f"h{n}.example.com" for n in range(credentials.MAX_HOSTS + 1)),
     ],
@@ -354,7 +370,9 @@ def test_an_entry_saved_without_hosts_is_read_with_none(
     assert creds.names() == [credentials.SavedCredential("gmail", "x", 5.0, ())]
 
 
-@pytest.mark.parametrize("hosts", ["imap.gmail.com", ["Gmail.com"], [1], ["localhost"]])
+@pytest.mark.parametrize(
+    "hosts", ["imap.gmail.com", ["Gmail.com"], [1], ["localhost"], ["imap.gmail.com\n"]]
+)
 def test_an_item_with_hosts_this_version_would_not_write_is_left_alone(
     creds: credentials.CredentialStore, memory_keyring: MemoryKeyring, hosts: object
 ) -> None:
@@ -364,3 +382,18 @@ def test_an_item_with_hosts_this_version_would_not_write_is_left_alone(
     with pytest.raises(store.StoreError):
         creds.names()
     assert memory_keyring.items[(credentials.SERVICE, "default")] == text
+
+
+def test_a_name_in_another_script_written_as_idna_writes_it_is_kept(
+    creds: credentials.CredentialStore,
+) -> None:
+    saved = creds.save("shop", "x", SECRET, ["xn--bcher-kva.example", "xn--55qx5d.cn"])
+    assert saved.hosts == ("xn--bcher-kva.example", "xn--55qx5d.cn")
+
+
+def test_a_bad_xn_label_has_its_own_message() -> None:
+    with pytest.raises(credentials.CredentialError) as info:
+        credentials.hosts_of(["xn--abc.example.com"])
+    assert str(info.value) == (
+        "the host has an xn-- label that is not a name in another script as IDNA writes one"
+    )

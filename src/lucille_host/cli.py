@@ -1478,6 +1478,19 @@ def _roots_verb(args: argparse.Namespace, dirs: paths.Dirs, out: _Out) -> None:
         _roots(args, dirs, out)
 
 
+def _read_value_line() -> str:
+    """One line of stdin. A line that is not text in stdin's encoding is refused, without the
+    decoder's error, which names the bytes it could not decode: bytes of the value."""
+    try:
+        return sys.stdin.readline()
+    except UnicodeDecodeError:
+        pass
+    # Raised outside the except clause, so that the decoder's error is not its context.
+    raise _Refused(
+        "bad_value", "the value is not text in this terminal's encoding; nothing was saved"
+    )
+
+
 def _read_hidden(prompt: str) -> str:
     """One line typed at the terminal on stdin, with the terminal's echo off while it is typed,
     after a prompt on stderr; what was typed ahead of the prompt is discarded. EOFError at the end
@@ -1489,7 +1502,7 @@ def _read_hidden(prompt: str) -> str:
     print(prompt, end="", file=sys.stderr, flush=True)
     try:
         termios.tcsetattr(descriptor, termios.TCSAFLUSH, hidden)
-        line = sys.stdin.readline()
+        line = _read_value_line()
     finally:
         termios.tcsetattr(descriptor, termios.TCSADRAIN, before)
         print(file=sys.stderr, flush=True)
@@ -1508,7 +1521,7 @@ def _credential_value(args: argparse.Namespace, key: str) -> str:
                 "with --value-stdin, standard input is a terminal, where the value would show as "
                 "it is typed; leave out --value-stdin to type it at a prompt that hides it",
             )
-        line = sys.stdin.readline()
+        line = _read_value_line()
         value = line[:-1] if line.endswith("\n") else line
         if value.endswith("\r"):
             value = value[:-1]
@@ -1531,9 +1544,29 @@ def _credential_value(args: argparse.Namespace, key: str) -> str:
 
 
 def _credential(args: argparse.Namespace, dirs: paths.Dirs, out: _Out) -> None:
-    """``credential set``, ``list`` and ``remove``. This function is the only place in the
-    runtime, but the module itself, that names the credential store
-    (tests/test_credentials.py), so a process that does not run this verb never imports it."""
+    """``credential set``, ``list`` and ``remove``. An error none of the verb's own refusals
+    names is not shown as it is: its message, its notes, its cause and its context could carry
+    a credential's value. :func:`main` shows an error of its own instead, with its traceback,
+    which names the place the verb was in and nothing the error said."""
+    unexpected = ""
+    try:
+        _credential_verb(args, dirs, out)
+    except _FAILURES:
+        raise
+    except Exception as exc:
+        unexpected = type(exc).__name__
+    if unexpected:
+        # Raised outside the except clause, so that the error is not its context.
+        raise RuntimeError(
+            f"an unexpected error ({unexpected}) in the credential verb; its message is not "
+            "shown, since it may hold a credential's value"
+        )
+
+
+def _credential_verb(args: argparse.Namespace, dirs: paths.Dirs, out: _Out) -> None:
+    """The verb's work. This function is the only place in the runtime, but the module itself,
+    that names the credential store (tests/test_credentials.py), so a process that does not run
+    this verb never imports it."""
     from lucille_host import credentials  # noqa: PLC0415 - kept out of every other verb
 
     host_state.startup_checks()
@@ -1565,20 +1598,7 @@ def _credential(args: argparse.Namespace, dirs: paths.Dirs, out: _Out) -> None:
             raise _Refused("interrupted", "nothing was saved") from exc
         if any(ord(char) < 0x20 or ord(char) == 0x7F for char in value):
             raise _Refused("bad_value", "the value holds a control character; nothing was saved")
-        try:
-            saved = creds.save(args.service, args.name, value, hosts, replace=args.replace)
-        except credentials.CredentialError:
-            raise
-        except Exception as exc:
-            # A keyring that says the value in an error it raises: the error is not shown, nor
-            # chained, so that no traceback carries it. The store's own errors never hold it.
-            if not _says(exc, value):
-                raise
-            raise _Refused(
-                "store_error",
-                f"the keyring could not be written ({type(exc).__name__}); its message is not "
-                "shown, since it holds the value. Nothing may have been saved",
-            ) from None
+        saved = creds.save(args.service, args.name, value, hosts, replace=args.replace)
         out.text(
             f"{'replaced' if before else 'saved'} {key}, to be sent only to "
             f"{', '.join(saved.hosts)}. Nothing uses saved credentials yet."
@@ -1591,18 +1611,6 @@ def _credential(args: argparse.Namespace, dirs: paths.Dirs, out: _Out) -> None:
         ) from exc
     except credentials.CredentialError as exc:
         raise _Refused("bad_credential", str(exc)) from exc
-
-
-def _says(exc: BaseException, value: str) -> bool:
-    """Whether ``exc``, or an error it was raised from or during, says ``value``."""
-    seen: set[int] = set()
-    current: BaseException | None = exc
-    while current is not None and id(current) not in seen:
-        seen.add(id(current))
-        if value in str(current) or value in repr(current) or value in repr(current.args):
-            return True
-        current = current.__cause__ or current.__context__
-    return False
 
 
 def _control(verb: str) -> Callable[[argparse.Namespace, paths.Dirs, _Out], None]:
@@ -1667,23 +1675,34 @@ def _failure(exc: BaseException) -> tuple[str, str, str, dict[str, str]]:
     return f"lucille-host: {said}", code, said, extra
 
 
-# The words of a credential command line that are its own, not the user's: the verb, its actions
-# and its options. A usage error repeats none of the others, since one may be a value typed there.
-_CREDENTIAL_WORDS: Final = frozenset(
-    {"credential", "set", "list", "remove", "--host", "--value-stdin", "--replace", "--json"}
+# argparse's usage errors of a credential command line that repeat nothing typed on it: the
+# arguments a form needs, by name, and options that need a word after them.
+_CREDENTIAL_REQUIRED: Final = "the following arguments are required: "
+_CREDENTIAL_ARGUMENTS: Final = frozenset({"service", "name", "--host", "ACTION"})
+_CREDENTIAL_USAGE: Final = frozenset(
+    {
+        "argument --host: expected one argument",
+        "credential has no JSON form in contract version 1",
+    }
 )
 
 
 def _usage_said(words: Sequence[str], message: str) -> str:
-    """argparse's ``message`` for a usage error, unless the command line is ``credential``'s and
-    the message repeats a word the user gave there: then a message that repeats none of them,
-    which says where a value given on the command line has gone."""
+    """argparse's ``message`` for a usage error, unless the command line is ``credential``'s:
+    then only a message that repeats nothing typed on it, since a word there may be a value
+    typed by mistake, in any form argparse writes it (quoted, escaped). That is argparse's
+    message only where it names the verb's own arguments and options; an unknown action is
+    "unknown credential subcommand"; anything else is a message that says where a value given
+    on the command line has gone."""
     given = list(words[: words.index("--")] if "--" in words else words)
     if "credential" not in given:
         return message
-    own = [word for word in words[words.index("credential") :] if word not in _CREDENTIAL_WORDS]
-    if not any(word and word in message for word in own):
-        return message
+    if message.startswith("argument ACTION: invalid choice:"):
+        return "unknown credential subcommand: it is set, list or remove"
+    if message in _CREDENTIAL_USAGE or message.startswith(_CREDENTIAL_REQUIRED):
+        own = message.removeprefix(_CREDENTIAL_REQUIRED)
+        if all(name in _CREDENTIAL_ARGUMENTS for name in own.split(", ")) or own == message:
+            return message
     return (
         "the credential command line could not be parsed, and its words are not repeated here, "
         "since one may be a credential's value. A value is never given on the command line: "
