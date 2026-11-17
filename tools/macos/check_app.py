@@ -265,6 +265,7 @@ import traceback
 import zipfile
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Final
 
@@ -3221,13 +3222,19 @@ STATUS_READ_MARKER: Final = "login item: "
 DIAGNOSIS_LIMIT: Final = 30
 SNAPSHOT_LIMIT: Final = 3 * DIAGNOSIS_LIMIT + 10
 CONTROL_LOG_LIMIT: Final = 90
+# The most of the runtime's processes the unified log's record names, by pid.
+LOG_RUNTIME_SHOWN: Final = 12
 # The most lines of the unified log kept of each style, the first ones: from five seconds before
 # the open on, so that the moments around the app's launch are never the ones cut. (Kept from
 # the end, 300 lines began 7 s after the open in run 44051526894, after the stall they were for.)
 CONTROL_LOG_LINES: Final = 50_000
-# The two styles saved: ndjson, whose lines carry the process's image path, its pid and the time
-# in microseconds, and compact, to read. The ndjson file's name ends in .txt, as the files the CI
-# workflow uploads do.
+# The two styles saved: ndjson, whose lines carry the process's image UUID and path, its pid and
+# the time in microseconds, and compact, to read. The ndjson file's name ends in .txt, as the
+# files the CI workflow uploads do. The image path in the unified log cannot tell byte-identical
+# copies of the app apart: the log keeps a path per image UUID, the one it first saw it run from,
+# and a `ditto` copy has the build's UUIDs (in xcode-27 job 134047369644, the /Applications copy's
+# runtime was logged under the build copy's path, which ran first; lsof, which reads a running
+# process's own file, told them apart). So what is read from it is the image UUID and the pid.
 CONTROL_LOG_STYLES: Final = (("ndjson", "control-log-ndjson.txt"), ("compact", "control-log.txt"))
 CONTROL_LOG_PROCESSES: Final = (
     APP_NAME,
@@ -6479,11 +6486,12 @@ def _watch_control(
     lister that never matched one by its command line, or was blind. While the gate does not hold
     :data:`CONTROL_SNAPSHOT_AT` seconds after the open, it takes
     :func:`_control_snapshot` on a thread of its own, without pausing the listers. Where it did not
-    hold, it watches on to :data:`CONTROL_DIAGNOSIS` seconds, saves the unified log
-    (:func:`_save_control_log`), and its detail ends with the case (:func:`_control_case`). Either
-    way it prints, once, the app's children as ps first showed them (:meth:`_Watch.children_said`),
-    what :data:`NAMED` saw (:meth:`_Watch.named_said`), and each stretch with no reading longer than
-    :data:`RECORDED_GAP` seconds (:meth:`_Watch.recorded`). Returns whether the gate held, and the
+    hold, it watches on to :data:`CONTROL_DIAGNOSIS` seconds, and its detail ends with the case
+    (:func:`_control_case`). Either way, once the watch is over, it saves the unified log
+    (:func:`_save_control_log`), and it prints, once, the app's children as ps first showed them
+    (:meth:`_Watch.children_said`), what :data:`NAMED` saw (:meth:`_Watch.named_said`), each
+    stretch with no reading longer than :data:`RECORDED_GAP` seconds (:meth:`_Watch.recorded`),
+    and where the log is. Returns whether the gate held, and the
     detail for when it did not. ``start``, where given, starts the open of the app once the
     watch's first readings are out, without waiting for it, so that the watch reads on while the
     app starts, and returns when it started it, which the watch's times then count from in place
@@ -6543,6 +6551,9 @@ def _watch_control(
     said = f"the control's watch: {watch.summary()}; {watch.burst()}"
     children = [f"the control: {watch.children_said()}", f"the control: {watch.named_said()}"]
     stretches = [f"the control: {line}" for line in watch.recorded()]
+    # On every run, passed or failed, once the watch is over: so that passing runs show too what
+    # the log holds of the app's launch and of its interpreter's processes.
+    logged = _save_control_log(work / "control-log.txt", opened_wall)
     if watch.before_open:
         # Contamination, not proof: whatever the watch saw after the open may be what was there
         # before it.
@@ -6552,12 +6563,12 @@ def _watch_control(
             said,
             *children,
             *stretches,
+            logged,
         ]
         return False, "\n".join(lines)
     if how:
-        print(
-            "\n".join([said, f"the control's gate held {held}", *children, *stretches]), flush=True
-        )
+        held_lines = [said, f"the control's gate held {held}", *children, *stretches, logged]
+        print("\n".join(held_lines), flush=True)
         for note in _control_notes(watch):
             print(f"note: the control passed, but {note}", flush=True)
         return True, ""
@@ -6566,7 +6577,7 @@ def _watch_control(
         said,
         *children,
         *stretches,
-        _save_control_log(work / "control-log.txt", opened_wall),
+        logged,
         f"the case: {_control_case(watch, runtime)}",
     ]
     return False, "\n".join(lines)
@@ -6750,7 +6761,58 @@ def _save_control_log(path: Path, opened_wall: float) -> str:
         if done.returncode != 0:
             line += f"; log exited {done.returncode}: {done.stderr.strip()[-300:]!r}"
         said.append(line)
+        if style == "ndjson":
+            said.append(_log_runtime_said(kept, opened_wall))
     return "\n".join(said)
+
+
+def _log_runtime_said(lines: Sequence[str], opened_wall: float) -> str:
+    """Recorded, not a gate: the processes of the runtime's executable (by name,
+    :data:`RUNTIME_NAME`) that wrote a line in the unified log's ``lines`` (ndjson), by image UUID
+    and pid, each with its first line's time from the open. Not their path, which cannot tell
+    copies of one build apart (:data:`CONTROL_LOG_STYLES`): so this says that a runtime of this
+    build ran, and when, not which copy's."""
+    first: dict[tuple[str, int], float | None] = {}
+    for line in lines:
+        try:
+            entry = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(entry, dict):
+            continue
+        image = str(entry.get("processImagePath") or "")
+        pid = entry.get("processID")
+        if Path(image).name != RUNTIME_NAME or not isinstance(pid, int):
+            continue
+        key = (str(entry.get("processImageUUID") or "unknown"), pid)
+        if key not in first:
+            first[key] = _log_time(entry.get("timestamp"))
+    if not first:
+        return "recorded, not a gate: no process of the runtime's executable wrote to the log"
+    by_uuid: dict[str, list[str]] = {}
+    for (uuid, pid), at in sorted(first.items(), key=lambda item: (item[1] is None, item[1] or 0)):
+        when = "at an unknown time" if at is None else f"from {at - opened_wall:+.2f} s"
+        by_uuid.setdefault(uuid, []).append(f"{pid} {when}")
+    shown = "; ".join(
+        f"image UUID {uuid}: pid {', pid '.join(pids[:LOG_RUNTIME_SHOWN])}"
+        + (f", and {len(pids) - LOG_RUNTIME_SHOWN} more" if len(pids) > LOG_RUNTIME_SHOWN else "")
+        for uuid, pids in by_uuid.items()
+    )
+    return (
+        f"recorded, not a gate: processes of the runtime's executable that wrote to the log: "
+        f"{shown} (the log's image path cannot tell copies of one build apart)"
+    )
+
+
+def _log_time(stamp: object) -> float | None:
+    """A unified-log ndjson timestamp ("2026-11-17 12:44:41.264117+0000") as a wall-clock time,
+    or None."""
+    if not isinstance(stamp, str):
+        return None
+    try:
+        return datetime.strptime(stamp, "%Y-%m-%d %H:%M:%S.%f%z").timestamp()
+    except ValueError:
+        return None
 
 
 def _lister_libraries() -> str:
