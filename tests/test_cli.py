@@ -77,6 +77,10 @@ class _ParsedAs:
     def parse_args(self, argv: object) -> argparse.Namespace:
         return argparse.Namespace(verb=self.verb, profile="default")
 
+    def parse_known_args(self, argv: object) -> tuple[argparse.Namespace, list[str]]:
+        # What main calls: the command line read as the verb, with no word left over.
+        return self.parse_args(argv), []
+
 
 def test_dispatch_is_explicit(
     home: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]

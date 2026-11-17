@@ -717,7 +717,7 @@ limit, as it runs every verb, and stops it when the limit passes.
 | `no_such_credential` | `credential remove`: no credential is stored under that service and name. |
 | `no_value` | `credential set`: no value was given, or standard input is of the wrong kind to give one: not a terminal without `--value-stdin`, or a terminal with it. Nothing was stored. |
 | `values_differ` | `credential set`: the value typed twice differed. Nothing was stored. |
-| `bad_value` | `credential set`: the value holds a control character, or is not text in standard input's encoding. Nothing was stored. |
+| `bad_value` | `credential set`: the value holds a control character, or is not text in standard input's encoding (a line that does not decode, or one holding a lone surrogate). Nothing was stored. |
 
 ## 11. Golden fixtures
 
@@ -1036,15 +1036,19 @@ stored here:
   reads one line, the value, and nothing more, taking off the line break (LF, or CR and LF) that ends it.
 - Refused, with nothing stored: an empty value (an empty line, or standard input that ends at once), a
   value holding a control character (U+0000 to U+001F, or U+007F), one longer than 65536 characters, and
-  a line that is not text in standard input's encoding (`bad_value`, without the bytes it could not
-  decode).
+  one that is not text in standard input's encoding (`bad_value`, without the bytes it could not decode):
+  a line that does not decode, or one holding a lone surrogate (U+D800 to U+DFFF), which is what
+  standard input decodes undecodable bytes to under the C or POSIX locale or with `PYTHONUTF8=1`. Both
+  are refused at the prompt and with `--value-stdin`.
 - The names and hosts are checked, and a credential already stored without `--replace` is refused, before
   the value is asked for or read.
 - The value is written to the keyring and nowhere else. No output, error message, traceback or file of
   the host's holds it, nor any other stored credential's value.
 - A usage error of a `credential` command line repeats nothing typed on it, since a word there may be a
-  value typed by mistake. It is argparse's own message only where that names the verb's arguments and
-  options (`the following arguments are required: name`). An unknown action is
+  value typed by mistake. That is any usage error the verb's parser, or one of its actions', raises, and
+  any usage error of a line that names the verb anywhere, before `--` or after it
+  (`lucille-host -- credential list <word>`), whichever parser raised it. It is argparse's own message
+  only where that names the verb's arguments and options (`the following arguments are required: name`). An unknown action is
   `unknown credential subcommand: it is set, list or remove`, after the verb's usage. Any other says that
   a value is never given on the command line, and that one typed there is now in the shell's history.
 
@@ -1068,6 +1072,10 @@ Keychain on macOS, the Secret Service on Linux.
 - An error of the verb's own that none of its refusals names is `internal`: its traceback shows where the
   verb was, and an error of the host's own in place of the one raised, whose message, notes, cause and
   context are not shown.
+- A Ctrl-C on the verb's path, where no prompt catches it (`interrupted`), is raised again as a bare
+  `KeyboardInterrupt`, which carries nothing of an error it interrupted the handling of.
+- An item whose service, credential names or hosts this version would not write (a newline at the end
+  of one, `a.example.com/x`) is not read, and is left as it is (`store_error`).
 - There is no file fallback, as there is for the pair (`pair --store-file`), and `--store-file` is a usage
   error. The verb refuses to run as root.
 

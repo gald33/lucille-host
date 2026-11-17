@@ -191,6 +191,9 @@ class _Parser(argparse.ArgumentParser):
     json_wanted = False
     # The parsers of the verbs whose forms are checked once the line is parsed, by name.
     forms: dict[str, argparse.ArgumentParser] = {}
+    # The ``credential`` verb's parser and its actions': a usage error any of them raises
+    # repeats nothing typed (:func:`_usage_said`).
+    credential_parsers: frozenset[argparse.ArgumentParser] = frozenset()
 
     def error(self, message: str) -> NoReturn:
         raise _Usage(self, message)
@@ -688,13 +691,16 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="replace a credential saved already: its value, and its hosts with the ones given now",
     )
-    credential_verbs.add_parser(
+    credential_list = credential_verbs.add_parser(
         "list", help="show each credential's name, its hosts and when it was saved, never its value"
     )
     credential_remove = credential_verbs.add_parser("remove", help="delete one credential")
     credential_remove.add_argument("service", help="the service")
     credential_remove.add_argument("name", help="the credential's name")
     parser.forms = {"run": run, "pair": pair, "roots add": add, "credential": credential}
+    parser.credential_parsers = frozenset(
+        {credential, credential_set, credential_list, credential_remove}
+    )
     return parser
 
 
@@ -1549,14 +1555,20 @@ def _credential(args: argparse.Namespace, dirs: paths.Dirs, out: _Out) -> None:
     a credential's value. :func:`main` shows an error of its own instead, with its traceback,
     which names the place the verb was in and nothing the error said."""
     unexpected = ""
+    interrupted = False
     try:
         _credential_verb(args, dirs, out)
     except _FAILURES:
         raise
+    except KeyboardInterrupt:
+        interrupted = True
     except Exception as exc:
         unexpected = type(exc).__name__
+    # Each raised again outside the except clause, so that the error caught is not its context:
+    # a Ctrl-C while the store handled a keyring's error would otherwise carry that error.
+    if interrupted:
+        raise KeyboardInterrupt
     if unexpected:
-        # Raised outside the except clause, so that the error is not its context.
         raise RuntimeError(
             f"an unexpected error ({unexpected}) in the credential verb; its message is not "
             "shown, since it may hold a credential's value"
@@ -1596,6 +1608,12 @@ def _credential_verb(args: argparse.Namespace, dirs: paths.Dirs, out: _Out) -> N
             value = _credential_value(args, key)
         except (EOFError, KeyboardInterrupt) as exc:
             raise _Refused("interrupted", "nothing was saved") from exc
+        if any(0xD800 <= ord(char) <= 0xDFFF for char in value):
+            # What stdin decodes undecodable bytes to under the C or POSIX locale, or with
+            # PYTHONUTF8=1 (surrogateescape): not text, and not to be stored.
+            raise _Refused(
+                "bad_value", "the value is not text in this terminal's encoding; nothing was saved"
+            )
         if any(ord(char) < 0x20 or ord(char) == 0x7F for char in value):
             raise _Refused("bad_value", "the value holds a control character; nothing was saved")
         saved = creds.save(args.service, args.name, value, hosts, replace=args.replace)
@@ -1687,15 +1705,21 @@ _CREDENTIAL_USAGE: Final = frozenset(
 )
 
 
-def _usage_said(words: Sequence[str], message: str) -> str:
-    """argparse's ``message`` for a usage error, unless the command line is ``credential``'s:
+def _usage_said(
+    parser: argparse.ArgumentParser,
+    raised_by: argparse.ArgumentParser,
+    words: Sequence[str],
+    message: str,
+) -> str:
+    """argparse's ``message`` for a usage error, unless the credential verb's parser or one of
+    its actions' raised it (``raised_by``), or the line names the verb anywhere, ``--`` or not:
     then only a message that repeats nothing typed on it, since a word there may be a value
     typed by mistake, in any form argparse writes it (quoted, escaped). That is argparse's
     message only where it names the verb's own arguments and options; an unknown action is
     "unknown credential subcommand"; anything else is a message that says where a value given
     on the command line has gone."""
-    given = list(words[: words.index("--")] if "--" in words else words)
-    if "credential" not in given:
+    ours = raised_by in getattr(parser, "credential_parsers", frozenset())
+    if not ours and "credential" not in words:
         return message
     if message.startswith("argument ACTION: invalid choice:"):
         return "unknown credential subcommand: it is set, list or remove"
@@ -1719,11 +1743,19 @@ def main(argv: Sequence[str] | None = None) -> int:
     if isinstance(parser, _Parser):
         parser.json_wanted = wanted
     try:
-        args = parser.parse_args(words)
+        args, extras = parser.parse_known_args(words)
+        if extras:
+            # What parse_args says of them, said by the parser of the verb that took them, so
+            # that a credential line's are refused as its own (_usage_said).
+            forms = getattr(parser, "forms", {})
+            credential = getattr(args, "verb", None) == "credential"
+            owner = forms["credential"] if credential else parser
+            owner.error(f"unrecognized arguments: {' '.join(extras)}")
         _check_usage(parser, args)
     except _Usage as exc:
         _Out(wanted).error("usage", USAGE_MESSAGE)
-        argparse.ArgumentParser.error(exc.parser, _usage_said(words, exc.message))
+        said = _usage_said(parser, exc.parser, words, exc.message)
+        argparse.ArgumentParser.error(exc.parser, said)
     out = _Out(bool(getattr(args, "json", False)))
     if args.verb is None:
         out.version()

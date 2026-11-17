@@ -9,6 +9,7 @@ import json
 import os
 import pty
 import select
+import subprocess
 import sys
 import termios
 import threading
@@ -772,3 +773,190 @@ def test_a_usage_error_of_another_verb_still_says_what_argparse_says(
     with pytest.raises(SystemExit):
         _main(["roots", "remove", "a", "unexpected-word"], monkeypatch)
     assert "unrecognized arguments: unexpected-word" in capsys.readouterr().err
+
+
+# --- the second review ----------------------------------------------------------------------
+
+W = SECRETS["backslash"]
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["--", "credential", W],
+        ["--", "credential", "list", W],
+        ["--", "credential", "remove", "gmail", "x", W],
+        ["--", "credential", "set", "gmail", "x", "--host", "a.example.com", W],
+        ["--json", "--", "credential", W],
+        ["--json", "--", "credential", "list", W],
+        ["credential", "--", W],
+        ["credential", "list", "--", W],
+        ["credential", "list", W],
+        ["credential", "remove", "gmail", "x", W],
+        [f"--{W}", "credential", "list"],
+        ["--profile", "default", "--", "credential", W],
+    ],
+)
+def test_a_usage_error_of_a_credential_line_repeats_nothing_typed_with_or_without_dashes(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], argv: list[str]
+) -> None:
+    # Whichever parser raises it, and wherever `--` puts the verb: argparse's own message would
+    # repeat the word, quoted (an invalid choice) or as it is (unrecognized arguments).
+    with pytest.raises(SystemExit) as exited:
+        _main(argv, monkeypatch)
+    assert exited.value.code == 2
+    said = capsys.readouterr()
+    assert _shown(said.out + said.err) == [], said
+
+
+def test_another_verbs_unrecognized_words_are_said_as_argparse_says_them(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    with pytest.raises(SystemExit):
+        _main(["roots", "remove", "a", "unexpected-word"], monkeypatch)
+    assert capsys.readouterr().err.endswith(
+        "lucille-host: error: unrecognized arguments: unexpected-word\n"
+    )
+
+
+def test_a_lone_surrogate_from_stdin_is_refused(
+    host_env: HostEnv, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # stdin as Python opens it under the C or POSIX locale, or with PYTHONUTF8=1: undecodable
+    # bytes come out as lone surrogates, not an error.
+    stdin = io.TextIOWrapper(
+        io.BytesIO(b"vQ7zx6\xff\xfe\n"), encoding="utf-8", errors="surrogateescape"
+    )
+    monkeypatch.setattr("sys.stdin", stdin)
+    assert cli.main([*SET, "--value-stdin"]) == 1
+    err = capsys.readouterr().err
+    assert err == (
+        "lucille-host: the value is not text in this terminal's encoding; nothing was saved\n"
+    )
+    assert _store(host_env).names() == []
+
+
+def test_a_lone_surrogate_typed_at_the_prompt_is_refused(
+    host_env: HostEnv, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _at_a_terminal(monkeypatch, _Typed("vQ7zx7\udcff", "vQ7zx7\udcff"))
+    assert cli.main(SET) == 1
+    err = capsys.readouterr().err
+    assert "the value is not text in this terminal's encoding; nothing was saved" in err
+    assert _shown(err) == []
+    assert _store(host_env).names() == []
+
+
+# The command line in a fresh interpreter, with stdin as the environment makes it, a keyring in
+# memory and a user id that is not root; it prints whether anything was stored, and the exit.
+_IN_A_LOCALE = """
+import sys
+import keyring.core
+from lucille_host import cli, credentials, store
+from tests._keyring import MemoryKeyring
+backend = MemoryKeyring()
+keyring.core._keyring_backend = backend
+store._system_backend = lambda: backend
+store._known = lambda each: each is backend
+import os
+os.geteuid = lambda: 1000
+print("stdin errors:", sys.stdin.errors, file=sys.stderr)
+code = cli.main(["credential", "set", "gmail", "x", "--host", "imap.gmail.com", "--value-stdin"])
+print("stored:", bool(backend.items), "exit:", code)
+"""
+
+
+@pytest.mark.parametrize("environment", [{"LC_ALL": "C"}, {"PYTHONUTF8": "1"}])
+def test_invalid_utf8_on_stdin_under_a_c_locale_or_utf8_mode_is_refused(
+    tmp_path: Path, environment: dict[str, str]
+) -> None:
+    env = {
+        key: value
+        for key, value in os.environ.items()
+        if not key.startswith(("LC_", "LANG", "PYTHON", "SWITCHBOARD_"))
+    }
+    env.update(environment, HOME=str(tmp_path), PYTHONPATH=str(Path(__file__).resolve().parents[1]))
+    env.pop("XDG_CONFIG_HOME", None)
+    env.pop("XDG_STATE_HOME", None)
+    done = subprocess.run(
+        [sys.executable, "-c", _IN_A_LOCALE],
+        input=b"vQ7zx8\xff\xfe\n",
+        capture_output=True,
+        env=env,
+        check=False,
+        timeout=60,
+    )
+    out, err = done.stdout.decode(), done.stderr.decode("utf-8", "replace")
+    assert "stdin errors: surrogateescape" in err, err
+    assert out.strip() == "stored: False exit: 1", (out, err)
+    assert "the value is not text in this terminal's encoding; nothing was saved" in err, err
+    assert "vQ7zx8" not in out + err
+
+
+class _StopsWhileHandlingAnError(MemoryKeyring):
+    """A keyring whose read fails with an error that says the item; the store, while it handles
+    that error, is interrupted (Ctrl-C)."""
+
+    def get_password(self, service: str, username: str) -> str | None:
+        raise RuntimeError(f"could not read {self.items.get((service, username))!r}")
+
+
+def test_ctrl_c_while_the_store_handles_a_keyrings_error_does_not_carry_it(
+    host_env: HostEnv, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    keyring = _StopsWhileHandlingAnError()
+    keyring.items[(credentials.SERVICE, host_env.dirs.profile)] = _item({"other/y": OTHER})
+    monkeypatch.setattr("keyring.core._keyring_backend", keyring)
+
+    def interrupted(exc: BaseException, verb: str) -> None:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(store, "keyring_failure", interrupted)
+    with pytest.raises(KeyboardInterrupt) as info:
+        _main(["credential", "list"], monkeypatch)
+    raised = info.value
+    assert raised.__cause__ is None and raised.__context__ is None
+    assert _shown("".join(traceback.format_exception(raised))) == []
+    said = capsys.readouterr()
+    assert _shown(said.out + said.err) == []
+
+
+def test_the_keyrings_refusal_on_a_read_carries_none_of_its_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    keyring = _SaysTheItemOnRead()
+    keyring.items[(credentials.SERVICE, "default")] = _item({"other/y": OTHER})
+    monkeypatch.setattr("keyring.core._keyring_backend", keyring)
+    creds = credentials.CredentialStore(tmp_path / "state", "default")
+    with pytest.raises(credentials.KeyringRefused) as info:
+        creds.names()
+    raised = info.value
+    assert raised.__cause__ is None and raised.__context__ is None
+    assert not getattr(raised, "__notes__", None)
+    assert str(raised) == (
+        "the keyring refused to read the credentials item; its error is not shown, since it "
+        "may hold a credential's value"
+    )
+    assert _shown("".join(traceback.format_exception(raised))) == []
+
+
+def test_a_usage_error_raised_by_the_credential_verbs_parsers_is_gated_by_its_parser() -> None:
+    # Each of the two gates holds alone: here the parser that raised it, with no "credential" in
+    # the words looked at.
+    parser = cli.build_parser()
+    for raised_by in parser.credential_parsers:
+        said = cli._usage_said(parser, raised_by, [], f"unrecognized arguments: {W}")
+        assert _shown(said) == [], said
+    said = cli._usage_said(
+        parser, parser.forms["credential"], [], f"argument ACTION: invalid choice: {W!r}"
+    )
+    assert said == "unknown credential subcommand: it is set, list or remove"
+
+
+def test_a_usage_error_of_a_line_that_names_the_verb_is_gated_by_its_words() -> None:
+    # The other gate alone: the top parser raised it, on a line that names the verb anywhere.
+    parser = cli.build_parser()
+    said = cli._usage_said(parser, parser, ["--", "credential", W], f"unrecognized arguments: {W}")
+    assert _shown(said) == [], said
+    other = cli._usage_said(parser, parser, ["roots", W], f"unrecognized arguments: {W}")
+    assert other == f"unrecognized arguments: {W}"

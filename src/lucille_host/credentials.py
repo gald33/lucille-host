@@ -353,6 +353,8 @@ def _well_formed(doc: object) -> bool:
         if (
             not isinstance(service, str)
             or not isinstance(name, str)
+            or not NAME.fullmatch(service)
+            or not NAME.fullmatch(name)
             or key != f"{service}/{name}"
             or not isinstance(entry.get("value"), str)
             or not isinstance(entry.get("saved_at"), int | float)

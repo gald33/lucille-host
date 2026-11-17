@@ -371,7 +371,15 @@ def test_an_entry_saved_without_hosts_is_read_with_none(
 
 
 @pytest.mark.parametrize(
-    "hosts", ["imap.gmail.com", ["Gmail.com"], [1], ["localhost"], ["imap.gmail.com\n"]]
+    "hosts",
+    [
+        "imap.gmail.com",
+        ["Gmail.com"],
+        [1],
+        ["localhost"],
+        ["imap.gmail.com\n"],
+        ["a.example.com/x"],
+    ],
 )
 def test_an_item_with_hosts_this_version_would_not_write_is_left_alone(
     creds: credentials.CredentialStore, memory_keyring: MemoryKeyring, hosts: object
@@ -397,3 +405,15 @@ def test_a_bad_xn_label_has_its_own_message() -> None:
     assert str(info.value) == (
         "the host has an xn-- label that is not a name in another script as IDNA writes one"
     )
+
+
+@pytest.mark.parametrize(("service", "name"), [("gmail\n", "x"), ("gmail", "x\n"), ("Gmail", "x")])
+def test_an_item_with_names_this_version_would_not_write_is_left_alone(
+    creds: credentials.CredentialStore, memory_keyring: MemoryKeyring, service: str, name: str
+) -> None:
+    entry = {"service": service, "name": name, "value": SECRET, "saved_at": 5.0}
+    text = json.dumps({"v": 1, "credentials": {f"{service}/{name}": entry}})
+    memory_keyring.items[(credentials.SERVICE, "default")] = text
+    with pytest.raises(store.StoreError):
+        creds.names()
+    assert memory_keyring.items[(credentials.SERVICE, "default")] == text
