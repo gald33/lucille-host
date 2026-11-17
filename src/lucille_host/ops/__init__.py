@@ -34,6 +34,10 @@ changes any of those files turns an enabled entry off, as a changed argv does. W
 NOT cover is any code the entry does not name: a module it imports and leaves out of ``files``, an
 installed library and its version, ``lucille_host`` itself, the interpreter. Naming every file on
 the path is the review's job; the host checks only that the function's own module is among them.
+That gap is accepted only while no entry uses this kind: the first entry that does must close it
+for its own code, by folding the versions of the libraries it calls into the hash (which needs
+``importlib.metadata`` on the runtime's import allowlist, a reviewed change) or by a test that
+every project-local import of its module is in its ``files``.
 
 The function gets a :class:`Call` (read-only arguments, its time limit and deadline, and a ``stop``
 it should poll) and returns a :class:`Result`; it raises :class:`TimedOut` when it ran past its
@@ -41,7 +45,8 @@ deadline and :class:`Stopped` when ``stop`` said so. The host runs it on a threa
 bounds it whether or not it polls (``jobs._call_in_process``): past its deadline, or once killed or
 abandoned, it gets a short grace to return, and then the host replies without it. A thread cannot
 be killed, so a function that ignores ``stop`` runs on after that reply, and what it does then
-still happens. No in-process entry takes a folder alias.
+still happens; while it does, no other call of that entry starts. No in-process entry takes a
+folder alias.
 
 Each entry also carries what a shell shows of it (:class:`About`, ``spec/CLI.md`` section 8): a few
 plain words for what it does, what Lucille gets when it runs, whether a reply can carry the

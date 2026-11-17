@@ -13,6 +13,7 @@ import json
 import shutil
 import threading
 import time
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
@@ -337,6 +338,21 @@ def test_a_request_for_one_goes_through_every_check(
 # --- a function that does not cooperate -----------------------------------------------------------
 
 
+def _settle() -> None:
+    """Let every stray call of these tests end, so none holds its entry for the next test."""
+    _in_process.release.set()
+    for thread in threading.enumerate():
+        if thread.name.startswith("lucille-host test."):
+            thread.join(10)
+            assert not thread.is_alive(), thread.name
+
+
+@pytest.fixture(autouse=True)
+def _strays_ended() -> Iterator[None]:
+    yield
+    _settle()
+
+
 @pytest.fixture
 def short_grace(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("lucille_host.jobs.IN_PROCESS_GRACE", 0.2)
@@ -387,7 +403,7 @@ def test_a_kill_the_call_ignores_is_killed_locally_and_consumed(
     assert (outcome.status, outcome.code) == ("failed", "killed_locally")
     assert not killed.is_set()
     assert _lines(ctx)[-1]["detached"] is True
-    _in_process.release.set()
+    _settle()
     # A function that returns a result after a kill is still killed.
     killed.set()
     outcome = execute(_ready(_op(_in_process.ignores_stop)), ctx)
@@ -422,3 +438,32 @@ def test_a_base_exception_is_reported_by_type(make_context: MakeContext) -> None
     assert (outcome.status, outcome.exit_code) == ("done", 1)
     assert outcome.stderr == "the operation raised SystemExit"
     assert _lines(ctx)[-1]["raised"] == "SystemExit"
+
+
+def test_an_entry_with_a_detached_call_starts_no_other(
+    make_context: MakeContext, short_grace: None
+) -> None:
+    """At most one stray call per entry: while one is still running, a new call of that entry is
+    refused before it starts (failed interrupted, recorded), so calls never overlap and repeated
+    timeouts cannot pile threads up. Another entry is not held back, and once the stray ends the
+    entry runs again."""
+    _in_process.release.clear()
+    _in_process.calls.clear()
+    ctx = make_context()
+    op = dataclasses.replace(_op(_in_process.blocks, name="test.blocks"), timeout_s=1)
+    assert execute(_ready(op), ctx).code == "timeout"
+    for _ in range(3):
+        outcome = execute(_ready(op), ctx)
+        assert (outcome.status, outcome.code, outcome.duration_ms) == ("failed", "interrupted", 0)
+        execution = _lines(ctx)[-1]
+        assert (execution["started"], execution["stopped"]) == (False, "detached_call_running")
+    strays = [t for t in threading.enumerate() if t.name == "lucille-host test.blocks"]
+    assert len(strays) == 1
+    # Another entry runs meanwhile.
+    assert execute(_ready(_op(_in_process.record)), ctx).status == "done"
+    _in_process.release.set()
+    strays[0].join(5)
+    assert not strays[0].is_alive()
+    _in_process.release.clear()
+    assert execute(_ready(op), ctx).code == "timeout"  # it starts again: not refused
+    _in_process.release.set()
