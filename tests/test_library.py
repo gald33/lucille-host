@@ -146,3 +146,20 @@ def test_stop_before_ready_drains_without_serving(
     stopping.join(30)
     assert running.outcome == "drained" and not running.ready.is_set()
     assert running.controls.drain_cause == library.STOP_CAUSE
+
+
+@pytest.mark.parametrize("cause", ["root", "switchboard_variable"])
+def test_a_refused_start_writes_nothing(
+    host_env: HostEnv, monkeypatch: pytest.MonkeyPatch, cause: str
+) -> None:
+    """The startup checks come first, as `run`'s do: refused as root or with a SWITCHBOARD_*
+    variable set, start raises before the run lock or anything else is written."""
+    if cause == "root":
+        monkeypatch.setattr("os.geteuid", lambda: 0)
+    else:
+        monkeypatch.setenv("SWITCHBOARD_URL", "http://127.0.0.1:1")
+    assert not host_env.dirs.state.exists()
+    with pytest.raises(state.Refused):
+        _start(host_env.dirs, "keyring")
+    assert not host_env.dirs.state.exists()
+    assert not host_env.dirs.config.exists()

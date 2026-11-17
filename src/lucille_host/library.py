@@ -145,14 +145,19 @@ def start(
 
     ``store`` is where the profile keeps its pair, ``keyring`` or ``file`` (``state.STORE_KINDS``);
     it must be the one the profile's ``config/host.json`` names, which pairing writes, and a
-    profile with none names ``keyring``. A store that is not one of those raises ``ValueError``,
-    and one other than the profile's raises ``state.Refused``, both before anything starts.
+    profile with none names ``keyring``. A store that is not one of those raises ``ValueError``.
+    The startup checks (``state.startup_checks``: not as root, no ``SWITCHBOARD_*`` variable) run
+    next, before anything is read or written, and a refusal raises ``state.Refused``; so does a
+    store other than the profile's. All of these are raised here, before anything starts.
     Everything after that, the start checks included, happens on the host's thread: their
     failures end it, and :meth:`Host.wait` or :meth:`Host.stop` raises them, as ``run`` reports
     them in its ``stopped`` object.
     """
     if store not in host_state.STORE_KINDS:
         raise ValueError(f"a store is one of {', '.join(host_state.STORE_KINDS)}")
+    # Before anything is read or written, as `run`'s come before its lock: the run lock creates
+    # the profile's state folder.
+    host_state.startup_checks()
     config = host_state.load_host_config(dirs)
     if config.store != store:
         raise host_state.Refused(
