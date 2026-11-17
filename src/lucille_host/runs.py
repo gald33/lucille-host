@@ -161,8 +161,13 @@ def _line(fields: Mapping[str, object]) -> bytes:
 
 
 def _in_app(executable: str) -> str | None:
-    """The real path of ``executable`` where it is an app bundle's runtime, else None."""
-    real = os.path.realpath(executable)
+    """The real path of ``executable`` where it is an app bundle's runtime, else None, and None
+    where the path cannot be resolved (one too long for the system, say): the line is written
+    all the same."""
+    try:
+        real = os.path.realpath(executable)
+    except (OSError, ValueError):
+        return None
     return real if real.endswith(RUNTIME_IN_APP) and ".app/" in real else None
 
 

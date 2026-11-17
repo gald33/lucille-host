@@ -246,17 +246,41 @@ def test_a_planted_large_record_costs_one_cut_of_its_tail(
     assert [line["command"] for line in _lines()][-2:] == ["version", "version"]
 
 
-def test_a_line_is_never_longer_than_its_cap(host_env: HostEnv, tmp_path: Path) -> None:
-    # Only an app at a very long path makes a line this long: it is kept without the path.
-    deep = tmp_path.joinpath(*(letter * 250 for letter in "defgh"), "Capsule.app")
-    runtime = Path(str(deep) + runs.RUNTIME_IN_APP)
-    runtime.parent.mkdir(parents=True)
-    runtime.write_text("", encoding="utf-8")
-    runs.record(["status"], VERBS, executable=str(runtime))
-    [line] = _lines()
-    assert line["executable"] is None and line["command"] == "status"
-    text = (paths.dirs().state / runs.FILE).read_bytes()
-    assert len(text) <= runs.MAX_LINE
+def _app_path(length: int) -> str:
+    """A path of ``length`` characters to an app's runtime, in folders that are not there, each
+    name short enough for any system: the path itself, not a folder, is what is long."""
+    prefix, suffix = "/no-such-folder/", ".app" + runs.RUNTIME_IN_APP
+    filler = length - len(prefix) - len(suffix)
+    names = ["a" * 99] * (filler // 100) + ["a" * (filler % 100)]
+    path = prefix + "/".join(names).strip("/") + suffix
+    assert len(path) == length
+    return path
+
+
+def test_a_line_is_never_longer_than_its_cap(host_env: HostEnv) -> None:
+    # Only an app at a very long path makes a line this long: it is kept without the path. The
+    # line's other fields are this process's, so its length for a given path is known here.
+    fields = {"v": 1, "command": "status", "pid": os.getpid(), "ppid": os.getppid()}
+    base = len(runs._line({**fields, "executable": "", "started": 1.5}))
+    longest = runs.MAX_LINE - base
+    runs.record(["status"], VERBS, clock=lambda: 1.5, executable=_app_path(longest))
+    runs.record(["status"], VERBS, clock=lambda: 1.5, executable=_app_path(longest + 1))
+    runs.record(["status"], VERBS, clock=lambda: 1.5, executable=_app_path(5000))
+    lines = (paths.dirs().state / runs.FILE).read_bytes().splitlines(keepends=True)
+    assert [len(line) for line in lines][:1] == [runs.MAX_LINE]
+    assert [json.loads(line)["executable"] for line in lines] == [_app_path(longest), None, None]
+    assert all(json.loads(line)["command"] == "status" for line in lines)
+
+
+def test_a_path_that_cannot_be_resolved_is_left_out_and_the_line_kept(
+    host_env: HostEnv, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def too_long(path: str) -> str:
+        raise OSError(63, "File name too long")
+
+    monkeypatch.setattr("os.path.realpath", too_long)
+    runs.record(["status"], VERBS, executable=RUNTIME)
+    assert [(line["command"], line["executable"]) for line in _lines()] == [("status", None)]
 
 
 def test_a_start_time_that_is_not_a_number_writes_no_line(host_env: HostEnv) -> None:
