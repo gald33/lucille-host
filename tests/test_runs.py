@@ -7,6 +7,7 @@ import io
 import json
 import os
 import signal
+import stat
 import subprocess
 import sys
 import threading
@@ -193,6 +194,24 @@ def test_a_file_linked_elsewhere_is_not_written(host_env: HostEnv, tmp_path: Pat
     os.link(elsewhere, state / runs.FILE)
     runs.record(["status"], VERBS)
     assert elsewhere.read_text(encoding="utf-8") == "untouched\n"
+
+
+def test_anything_but_a_regular_file_is_not_written(
+    host_env: HostEnv, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A device at the record's place (made here by reporting the file opened as one, since a test
+    # cannot make a device) is left alone, whatever writing to it would do.
+    state = paths.ensure_dir(paths.dirs().state)
+    real = os.fstat
+
+    def as_a_device(descriptor: int) -> os.stat_result:
+        found = real(descriptor)
+        return os.stat_result((stat.S_IFCHR | 0o600, *tuple(found)[1:]))
+
+    monkeypatch.setattr("os.fstat", as_a_device)
+    runs.record(["status"], VERBS)
+    monkeypatch.undo()
+    assert (state / runs.FILE).read_bytes() == b""
 
 
 def test_the_record_is_cut_back_by_bytes_once_too_large(
