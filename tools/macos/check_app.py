@@ -3222,7 +3222,8 @@ STATUS_READ_MARKER: Final = "login item: "
 DIAGNOSIS_LIMIT: Final = 30
 SNAPSHOT_LIMIT: Final = 3 * DIAGNOSIS_LIMIT + 10
 CONTROL_LOG_LIMIT: Final = 90
-# The most of the runtime's processes the unified log's record names, by pid.
+# The most of the runtime's processes the unified log's record names, by pid, for each image
+# UUID: past that, it says how many more.
 LOG_RUNTIME_SHOWN: Final = 12
 # The most lines of the unified log kept of each style, the first ones: from five seconds before
 # the open on, so that the moments around the app's launch are never the ones cut. (Kept from
@@ -3232,9 +3233,10 @@ CONTROL_LOG_LINES: Final = 50_000
 # the time in microseconds, and compact, to read. The ndjson file's name ends in .txt, as the
 # files the CI workflow uploads do. The image path in the unified log cannot tell byte-identical
 # copies of the app apart: the log keeps a path per image UUID, the one it first saw it run from,
-# and a `ditto` copy has the build's UUIDs (in xcode-27 job 134047369644, the /Applications copy's
-# runtime was logged under the build copy's path, which ran first; lsof, which reads a running
-# process's own file, told them apart). So what is read from it is the image UUID and the pid.
+# and a `ditto` copy has the build's UUIDs. In xcode-27 job 134047369644, the /Applications
+# copy's runtime was logged under the build copy's path, whose runtime ran first; in run
+# 44034162354, lsof, which reads a running process's own file, saw the app's children map the
+# /Applications copy's runtime. So what is read from the log is the image UUID and the pid.
 CONTROL_LOG_STYLES: Final = (("ndjson", "control-log-ndjson.txt"), ("compact", "control-log.txt"))
 CONTROL_LOG_PROCESSES: Final = (
     APP_NAME,
@@ -6762,8 +6764,19 @@ def _save_control_log(path: Path, opened_wall: float) -> str:
             line += f"; log exited {done.returncode}: {done.stderr.strip()[-300:]!r}"
         said.append(line)
         if style == "ndjson":
-            said.append(_log_runtime_said(kept, opened_wall))
+            said.append(_log_runtime_record(kept, opened_wall))
     return "\n".join(said)
+
+
+def _log_runtime_record(lines: Sequence[str], opened_wall: float) -> str:
+    """:func:`_log_runtime_said`, which never raises: a record that cannot be made says so, and
+    leaves the control's verdict, and the log saved, as they are."""
+    try:
+        return _log_runtime_said(lines, opened_wall)
+    except Exception as exc:  # recorded, not a gate: nothing it does may change the verdict
+        return (
+            f"recorded, not a gate: the runtime's processes in the log could not be read: {exc!r}"
+        )
 
 
 def _log_runtime_said(lines: Sequence[str], opened_wall: float) -> str:
