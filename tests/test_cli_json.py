@@ -43,6 +43,7 @@ from lucille_host import (
     paths,
     policy,
     rooms,
+    runs,
     spec,
     state,
     store,
@@ -888,9 +889,17 @@ def test_suggest_alias_valid_and_unused(
 
 
 def _tree(root: Path) -> dict[str, tuple[int, int, int, bytes]]:
+    """Every path under ``root``, with its mode, size, time and bytes, but the run record, which
+    every command appends to (spec/CLI.md section 16), and the times of folders, which a new
+    line in it changes; a folder made or removed still shows, as a path."""
     seen = {}
     for path in sorted(root.rglob("*")):
+        if path.name == runs.FILE:
+            continue
         info = path.lstat()
+        if path.is_dir():
+            seen[str(path)] = (info.st_mode, 0, 0, b"")
+            continue
         content = path.read_bytes() if path.is_file() else b""
         seen[str(path)] = (info.st_mode, info.st_size, info.st_mtime_ns, content)
     return seen
@@ -905,6 +914,8 @@ def test_suggest_alias_writes_nothing(
 ) -> None:
     w = World(tmp_path, stack, capsys, monkeypatch)
     folder = w.folder("Documents")
+    # The run record, and the folder it is kept in, made once before the snapshots.
+    w.ok("roots", "list")
     for with_policy in (False, True):
         if with_policy:
             w.ok("roots", "add", "documents", folder)
@@ -2474,6 +2485,8 @@ def test_roots_list_and_check_take_no_lock_and_write_nothing(
 ) -> None:
     w = World(tmp_path, stack, capsys, monkeypatch)
     w.folder("Documents")
+    # The run record, and the folder it is kept in, made once before the snapshots.
+    w.ok("roots", "list")
     for with_policy in (False, True):
         if with_policy:
             w.ok("roots", "add", "docs", w.path("/home/me/Documents"))

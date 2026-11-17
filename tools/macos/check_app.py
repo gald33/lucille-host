@@ -248,6 +248,7 @@ import csv
 import fnmatch
 import hashlib
 import json
+import math
 import os
 import plistlib
 import re
@@ -3216,6 +3217,14 @@ CONTROL_AFTER: Final = 5
 # How long the check waits, once the control's watch has ended, for the `open` it started to
 # return.
 OPEN_LIMIT: Final = 30
+# The host's run record in its profile's state folder (src/lucille_host/runs.py, FILE), and what
+# the control's gate asks of it (_record_gate).
+RUNS_FILE: Final = "runs.jsonl"
+RECORDS_SHOWN: Final = 10
+CONTROL_STARTS: Final = (
+    f"the control: it starts its own host: a run record names the copy's runtime, with the app as "
+    f"its parent, from after the open and inside the {CONTROL_GATE} s gate"
+)
 STATUS_READ_MARKER: Final = "login item: "
 # The time limit of each of the control's diagnostics, of its snapshot as a whole, and of the
 # unified log; how much of the log is kept, and of which processes.
@@ -6377,6 +6386,7 @@ def _placement_control(checker: Checker, work: Path, require_driven: bool) -> bo
     for log in (out_log, err_log):
         log.write_text("", encoding="utf-8")
     launched: list[subprocess.Popen[str]] = []
+    opened_wall: list[float] = []
 
     def open_app() -> float:
         # Started, not waited for: `open` can take seconds to return on a slow runner, and the
@@ -6384,6 +6394,7 @@ def _placement_control(checker: Checker, work: Path, require_driven: bool) -> bo
         # the watch and waited for left it without a reading from 0.23 s to 2.41 s, though no
         # lister call took more than 0.41 s).
         opened = time.monotonic()
+        opened_wall.append(_wall())
         launched.append(
             _start_open(
                 ["open", "--stdout", str(out_log), "--stderr", str(err_log), str(installed)]
@@ -6413,12 +6424,19 @@ def _placement_control(checker: Checker, work: Path, require_driven: bool) -> bo
         f"the control: open starts the copy at {installed}",
         _shown(done),
     )
-    checker.expect(
-        gated,
-        "the control: it starts the host (by its arguments) or a child that runs its runtime (by "
-        "its executable), and the check sees it",
-        detail,
+    # The gate: the host's own run record (_record_gate). What the listers saw is recorded, not a
+    # gate: a host that runs for a fraction of a second can start and end between two readings.
+    apps = _app_pids_at(installed)
+    runtime = os.path.realpath(python_in(installed))
+    start = opened_wall[0] if opened_wall else _wall()
+    held, said = _record_gate(
+        _run_records(_profile_folder()), runtime, apps, start, start + CONTROL_GATE
     )
+    if not gated:
+        print(f"recorded, not a gate: the listers' way did not hold:\n{detail}", flush=True)
+    if held:
+        print(said, flush=True)
+    checker.expect(held, CONTROL_STARTS, said)
     time.sleep(3)
     driven = _can_drive()
     if driven:
@@ -6439,6 +6457,114 @@ def _placement_control(checker: Checker, work: Path, require_driven: bool) -> bo
     for log in (out_log, err_log):
         print(f"the control's {log.stem.removeprefix('control-app-')}: {_text_of(log)[-5000:]!r}")
     return driven
+
+
+def _wall() -> float:
+    """The wall clock the run record's times are on (time.time), apart so that tests can set it."""
+    return time.time()
+
+
+def _run_records(folder: Path) -> list[dict[str, Any]]:
+    """The run record of the app's profile (``folder``'s ``state/``:data:`RUNS_FILE`), one object
+    per line it could read; none where there is no file. Never raises."""
+    try:
+        text = (folder / "state" / RUNS_FILE).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return []
+    records = []
+    for line in text.splitlines():
+        try:
+            entry = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(entry, dict):
+            records.append(entry)
+    return records
+
+
+def _app_pids_at(app: Path) -> list[int]:
+    """The pids of the running processes whose command is ``app``'s own executable, by ``ps``.
+    Never raises; none where ps cannot say."""
+    main = f"{app}/Contents/MacOS/{APP_NAME}"
+    try:
+        done = subprocess.run(
+            ["ps", "-axww", "-o", "pid=,command="],
+            capture_output=True,
+            text=True,
+            errors="replace",
+            timeout=DIAGNOSIS_LIMIT,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return []
+    pids = []
+    for line in done.stdout.splitlines():
+        parts = line.strip().split(None, 1)
+        if len(parts) == 2 and parts[0].isdigit():
+            if parts[1] == main or parts[1].startswith(main + " "):
+                pids.append(int(parts[0]))
+    return sorted(pids)
+
+
+def _record_time(value: object) -> float | None:
+    """A run record's ``started`` as a time, or None where it is no time: not a number, a
+    boolean (json's true is 1 to Python), or no finite one (json reads NaN and Infinity, and NaN
+    fails every comparison; an integer too large for a float is no time either)."""
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        return None
+    try:
+        time_ = float(value)
+    except OverflowError:
+        return None
+    return time_ if math.isfinite(time_) else None
+
+
+def _record_gate(
+    records: Sequence[Mapping[str, Any]],
+    runtime: str,
+    apps: Sequence[int],
+    opened: float,
+    deadline: float,
+) -> tuple[bool, str]:
+    """Whether a run record proves that the app started its own host: one that names ``runtime``
+    (the copy's runtime, its real path) as the executable, one of ``apps`` (the copy's pids, as ps
+    showed them) as its parent, and a start time from ``opened`` (the open, on the wall clock) to
+    ``deadline``. Returns that, and what it found: the record that holds it, or, where none does,
+    why each record near the open does not."""
+    near = []
+    for entry in records:
+        started = _record_time(entry.get("started"))
+        version = entry.get("v")
+        if isinstance(version, bool) or version != 1 or started is None:
+            continue
+        at = started - opened
+        why = []
+        if entry.get("executable") != runtime:
+            why.append(f"its executable is {entry.get('executable')!r}, not the copy's runtime")
+        ppid = entry.get("ppid")
+        if isinstance(ppid, bool) or not isinstance(ppid, int) or ppid not in apps:
+            why.append(f"its parent {entry.get('ppid')} is not the app ({list(apps)})")
+        if started < opened:
+            why.append("it is from before the open")
+        elif started > deadline:
+            why.append(f"it is from after the {deadline - opened:g} s gate")
+        said = f"pid {entry.get('pid')} ({entry.get('command')}) from {at:+.2f} s"
+        if not why:
+            return True, f"the control's gate held by the run record: {said}, a child of the app"
+        if at >= -60:
+            near.append(f"{said}: {'; '.join(why)}")
+    if not records:
+        return False, f"no run record in the app's profile ({RUNS_FILE})"
+    shown = near[-RECORDS_SHOWN:]
+    return False, (
+        f"no run record holds the gate, of {len(records)}; the copy's runtime: {runtime}; the "
+        f"app: {list(apps)}"
+        + (
+            "".join(f"\n  {line}" for line in shown)
+            if shown
+            else "; none from the minute before the open on"
+        )
+    )
 
 
 def _start_open(argv: list[str]) -> subprocess.Popen[str]:
@@ -6569,7 +6695,13 @@ def _watch_control(
         ]
         return False, "\n".join(lines)
     if how:
-        held_lines = [said, f"the control's gate held {held}", *children, *stretches, logged]
+        held_lines = [
+            said,
+            f"recorded, not a gate: the listers' way held {held}",
+            *children,
+            *stretches,
+            logged,
+        ]
         print("\n".join(held_lines), flush=True)
         for note in _control_notes(watch):
             print(f"note: the control passed, but {note}", flush=True)

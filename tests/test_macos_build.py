@@ -8187,6 +8187,29 @@ def _placement_world(
     monkeypatch.setattr(check_app, "_screenshot", lambda path: None)
     monkeypatch.setattr(check_app, "_can_drive", lambda: False)
     monkeypatch.setattr(check_app.time, "sleep", lambda seconds: None)
+    # The run record: where the copy starts the host, one for it, a child of the app (pid 99),
+    # running the installed copy's runtime, just after the open, on a wall clock fixed at 1000.
+    monkeypatch.setattr(check_app, "_wall", lambda: 1000.0, raising=False)
+    monkeypatch.setattr(
+        check_app, "_app_pids_at", lambda app: [99] if opened else [], raising=False
+    )
+
+    def records(folder: Path) -> list[dict[str, Any]]:
+        if not (opened and starts):
+            return []
+        runtime = check_app.python_in(check_app.installed_app_path())
+        return [
+            {
+                "v": 1,
+                "command": "status",
+                "pid": 4242,
+                "ppid": 99,
+                "executable": os.path.realpath(runtime),
+                "started": 1000.1,
+            }
+        ]
+
+    monkeypatch.setattr(check_app, "_run_records", records, raising=False)
     return profile, opened
 
 
@@ -8225,7 +8248,7 @@ def test_the_placement_control_fails_unless_the_installed_copy_starts_the_host(
     assert opened == [str(installed)]
     assert bool(checker.failures) != starts, checker.failures
     if not starts:
-        assert any("the control: it starts the host" in what for what in checker.failures)
+        assert any("the control: it starts its own host" in what for what in checker.failures)
 
 
 # --- check_app.py placement: two listers, a watch that knows when it was blind, and the control's
@@ -8907,6 +8930,33 @@ class _ListerWorld:
     marked: bool = False
     snapshots: list[Path] = dataclasses.field(default_factory=list)
     logs: list[float | None] = dataclasses.field(default_factory=list)
+    # The host's run record, as the control reads it once its watch is over: given, or, by
+    # default, one for the host (pid 4242, a child of the app, pid 99, 0.4 s after the open,
+    # running the installed copy's runtime) where the listers' way held, and none where it did
+    # not, so that the tests of the listers' reasoning keep their verdicts; the record's own gate
+    # is tested with records given (test_the_controls_gate_is_the_run_record and those after it).
+    records: Callable[[_ListerWorld], list[dict[str, Any]]] | None = None
+    installed: Path | None = None
+    listers_held: bool = False
+
+    def run_records(self) -> list[dict[str, Any]]:
+        if self.records is not None:
+            return self.records(self)
+        return [self.record(0.4)] if self.listers_held else []
+
+    def record(self, at: float, **changes: Any) -> dict[str, Any]:
+        """A run record of the host, ``at`` seconds after the open, with ``changes``."""
+        assert self.opened_at is not None and self.installed is not None
+        entry = {
+            "v": 1,
+            "command": "status",
+            "pid": 4242,
+            "ppid": 99,
+            "executable": os.path.realpath(check_app.python_in(self.installed)),
+            "started": self.opened_at + at,
+        }
+        entry.update(changes)
+        return entry
 
     def since_open(self) -> float | None:
         return None if self.opened_at is None else self.clock.now - self.opened_at
@@ -9001,6 +9051,22 @@ def _in_lister_world(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, world: _Li
     monkeypatch.setattr(check_app, "_save_control_log", save_log, raising=False)
     monkeypatch.setattr(
         check_app, "_lister_libraries", lambda: "the listers: stand-in", raising=False
+    )
+    world.installed = installed
+    watch_control = check_app._watch_control
+
+    def watched(*args: Any, **kwargs: Any) -> tuple[bool, str]:
+        gated, detail = watch_control(*args, **kwargs)
+        world.listers_held = gated
+        return gated, detail
+
+    monkeypatch.setattr(check_app, "_watch_control", watched)
+    monkeypatch.setattr(check_app, "_wall", world.clock.monotonic, raising=False)
+    monkeypatch.setattr(
+        check_app, "_app_pids_at", lambda app: [99] if world.opened else [], raising=False
+    )
+    monkeypatch.setattr(
+        check_app, "_run_records", lambda folder: world.run_records(), raising=False
     )
     return installed
 
@@ -9360,10 +9426,7 @@ def _case(said: str) -> str:
 # The control's expectation, as it is printed whichever way its gate held: by its arguments, the
 # host; by its executable, a child that runs the copy's runtime, which does not prove that the
 # child is the host (that is inferred from the app's code).
-_STARTS = (
-    "the control: it starts the host (by its arguments) or a child that runs its runtime (by its "
-    "executable), and the check sees it"
-)
+_STARTS = check_app.CONTROL_STARTS
 
 
 @pytest.mark.parametrize("marker_at", [1.0, None])
@@ -9381,7 +9444,7 @@ def test_a_failed_control_says_whether_the_app_had_read_its_status(
     world = _ListerWorld(pgrep=_none, ps=_ps_none, marker_at=marker_at)
     checker, installed = _control_in(world, tmp_path, monkeypatch)
     said = capsys.readouterr().out
-    assert any("the control: it starts the host" in what for what in checker.failures)
+    assert any("the control: it starts its own host" in what for what in checker.failures)
     assert "no host process of the app's profile was seen in 30 s" in said
     case = _case(said)
     if marker_at is None:
@@ -9416,7 +9479,7 @@ def test_a_failed_control_says_when_the_host_came_after_the_gate(
     world = _ListerWorld(pgrep=_host_from(30.5), ps=_ps_host_from(30.5), marker_at=32.0)
     checker, _ = _control_in(world, tmp_path, monkeypatch)
     said = capsys.readouterr().out
-    assert any("the control: it starts the host" in what for what in checker.failures)
+    assert any("the control: it starts its own host" in what for what in checker.failures)
     case = _case(said)
     assert re.search(r"the first host process appeared at 30\.\d s, after the 30 s gate", case)
     assert "missed" not in case, case
@@ -9451,7 +9514,7 @@ def test_a_failed_control_says_the_status_read_came_before_the_first_sighting(
     world = _ListerWorld(pgrep=_host_from(40.0), ps=_ps_host_from(40.0), marker_at=1.0)
     checker, _ = _control_in(world, tmp_path, monkeypatch)
     said = capsys.readouterr().out
-    assert any("the control: it starts the host" in what for what in checker.failures)
+    assert any("the control: it starts its own host" in what for what in checker.failures)
     case = _case(said)
     assert re.search(
         r"status read had ended by 1\.\d s, inside the 30 s gate .*no reading saw a host "
@@ -9473,7 +9536,7 @@ def test_the_control_fails_on_a_child_of_the_app_that_is_not_the_host_on_its_pro
     )
     checker, _ = _control_in(world, tmp_path, monkeypatch)
     said = capsys.readouterr().out
-    assert any("the control: it starts the host" in what for what in checker.failures)
+    assert any("the control: it starts its own host" in what for what in checker.failures)
     case = _case(said)
     assert re.search(r"a child of the app from 0\.\d s \('5555 S .*--profile default", case), case
     assert re.search(r"no host process the gate matches by 60\.\d s", case), case
@@ -9490,7 +9553,7 @@ def test_a_failed_control_names_a_child_seen_before_the_host_appears(
     world = _ListerWorld(pgrep=_host_from(30.5), ps=ps, marker_at=32.0)
     checker, _ = _control_in(world, tmp_path, monkeypatch)
     said = capsys.readouterr().out
-    assert any("the control: it starts the host" in what for what in checker.failures)
+    assert any("the control: it starts its own host" in what for what in checker.failures)
     assert len(world.snapshots) == 1 and len(world.logs) == 1
     case = _case(said)
     assert re.search(
@@ -10051,9 +10114,14 @@ def test_the_control_passes_on_a_child_that_runs_its_runtime_where_ps_cannot_rea
     checker, _ = _control_in(world, tmp_path, monkeypatch)
     said = capsys.readouterr().out
     assert checker.failures == [], checker.failures
-    gate = next(line for line in said.splitlines() if line.startswith("the control's gate held"))
+    gate = next(
+        line
+        for line in said.splitlines()
+        if line.startswith("recorded, not a gate: the listers' way held")
+    )
     assert re.fullmatch(
-        r"the control's gate held by its executable, its arguments unreadable: pid 5555, a child "
+        r"recorded, not a gate: the listers' way held by its executable, its arguments unreadable: "
+        r"pid 5555, a child "
         rf"of the app, has the runtime's name and maps {re.escape(runtime)} \(by ps's lsof lookup, "
         r"asked at "
         rf"0\.4\d s\), and ps showed it as 'R {re.escape(_SHORT)}' at 0\.4\d s; "
@@ -10138,7 +10206,7 @@ def test_the_control_still_fails_unless_a_child_runs_that_copys_runtime(
     checker, _ = _control_in(world, tmp_path, monkeypatch)
     said = capsys.readouterr().out
     assert checker.failures == [_STARTS], checker.failures
-    assert "the control's gate held" not in said, said
+    assert "the listers' way held" not in said, said
     assert len(world.snapshots) == 1 and len(world.logs) == 1
     case = _case(said)
     expected = {
@@ -10172,7 +10240,7 @@ def test_the_controls_gate_needs_every_child_ps_read_to_match_the_pattern(
     )
     checker, _ = _control_in(world, tmp_path, monkeypatch)
     said = capsys.readouterr().out
-    assert any("the control: it starts the host" in what for what in checker.failures)
+    assert any("the control: it starts its own host" in what for what in checker.failures)
     case = _case(said)
     # From the first reading that started after 0.4 s, which the watch's phase puts at 0.4x s.
     assert re.search(
@@ -10199,7 +10267,7 @@ def test_the_control_fails_on_a_child_that_runs_its_runtime_only_after_the_gate(
     checker, _ = _control_in(world, tmp_path, monkeypatch)
     said = capsys.readouterr().out
     assert checker.failures == [_STARTS], checker.failures
-    assert "the control's gate held" not in said, said
+    assert "the listers' way held" not in said, said
     line = next(line for line in said.splitlines() if "the control's watch" in line)
     assert re.search(r"ps, by executable \(its arguments unreadable\) at 30\.\d\d s", line), line
 
@@ -10346,9 +10414,14 @@ def test_a_control_that_sees_both_says_it_held_by_the_arguments(
     checker, _ = _control_in(world, tmp_path, monkeypatch)
     said = capsys.readouterr().out
     assert checker.failures == [], checker.failures
-    gate = [line for line in said.splitlines() if line.startswith("the control's gate held")]
+    gate = [
+        line
+        for line in said.splitlines()
+        if line.startswith("recorded, not a gate: the listers' way held")
+    ]
     assert len(gate) == 1 and re.fullmatch(
-        r"the control's gate held by its arguments: (pgrep|ps) matched a host process by its "
+        r"recorded, not a gate: the listers' way held by its arguments: (pgrep|ps) matched a host "
+        r"process by its "
         r"command line at 0\.5\d s",
         gate[0],
     ), gate
@@ -10382,7 +10455,8 @@ def test_a_passing_control_by_the_arguments_still_prints_its_lines_as_before(
     said = capsys.readouterr().out
     assert checker.failures == [] and asked == [], (checker.failures, asked)
     assert re.search(
-        r"^the control's gate held by its arguments: (pgrep|ps) matched a host process by its "
+        r"^recorded, not a gate: the listers' way held by its arguments: (pgrep|ps) matched a host "
+        r"process by its "
         r"command line at 0\.4\d s$",
         said,
         re.MULTILINE,
@@ -10888,9 +10962,14 @@ def test_the_control_passes_where_its_reader_by_name_sees_a_child_ps_was_too_slo
     checker, _ = _control_in(world, tmp_path, monkeypatch)
     said = capsys.readouterr().out
     assert checker.failures == [], checker.failures
-    gate = next(line for line in said.splitlines() if line.startswith("the control's gate held"))
+    gate = next(
+        line
+        for line in said.splitlines()
+        if line.startswith("recorded, not a gate: the listers' way held")
+    )
     assert re.fullmatch(
-        r"the control's gate held by its executable, its arguments unreadable: pid 5555, a child "
+        r"recorded, not a gate: the listers' way held by its executable, its arguments unreadable: "
+        r"pid 5555, a child "
         r"of the app, has a name that begins as the runtime's \(its first 15 characters, as lsof "
         rf"-c matches\) and maps {re.escape(runtime)} \(by the reader by name, "
         r"asked at 1\.\d\d s\), and ps showed it as 'R \(lucille-host-run\)' at 1\.\d\d s; "
@@ -10947,7 +11026,11 @@ def test_a_passing_controls_record_says_what_ps_s_own_lookup_said_where_lsof_by_
         r"text file for it \(exit 1\); it had ended by the time lsof answered\)",
         children,
     ), children
-    gate = next(line for line in said.splitlines() if line.startswith("the control's gate held"))
+    gate = next(
+        line
+        for line in said.splitlines()
+        if line.startswith("recorded, not a gate: the listers' way held")
+    )
     assert "ps's lsof lookup" not in gate and "(by the reader by name, asked at 1." in gate, gate
 
 
@@ -11004,9 +11087,14 @@ def test_the_control_passes_on_a_child_its_reader_by_name_alone_saw(
     checker, _ = _control_in(world, tmp_path, monkeypatch)
     said = capsys.readouterr().out
     assert checker.failures == [], checker.failures
-    gate = next(line for line in said.splitlines() if line.startswith("the control's gate held"))
+    gate = next(
+        line
+        for line in said.splitlines()
+        if line.startswith("recorded, not a gate: the listers' way held")
+    )
     assert gate.startswith(
-        "the control's gate held by its executable, ps never read its arguments: pid 5555, a child "
+        "recorded, not a gate: the listers' way held by its executable, ps never read its "
+        "arguments: pid 5555, a child "
         "of the app, has a name that begins as the runtime's (its first 15 characters, as lsof -c "
         f"matches) and maps {runtime} (by the reader by name, asked at 0.4"
     ), gate
@@ -11053,7 +11141,7 @@ def test_the_control_fails_where_ps_never_read_the_table_though_its_reader_by_na
     checker, _ = _control_in(world, tmp_path, monkeypatch)
     said = capsys.readouterr().out
     assert checker.failures == [_STARTS], checker.failures
-    assert "the control's gate held" not in said, said
+    assert "the listers' way held" not in said, said
     case = _case(said)
     assert case.startswith(
         "the case: a child of the app from 0.4 s (5555, seen by the reader by name alone), but no "
@@ -11186,7 +11274,11 @@ def test_the_reader_by_name_takes_a_child_that_ps_saw_where_lsof_did_not_list_th
     checker, _ = _control_in(world, tmp_path, monkeypatch)
     said = capsys.readouterr().out
     assert checker.failures == [], checker.failures
-    gate = next(line for line in said.splitlines() if line.startswith("the control's gate held"))
+    gate = next(
+        line
+        for line in said.splitlines()
+        if line.startswith("recorded, not a gate: the listers' way held")
+    )
     # When the reader asked depends on where the slow ps call fell in the watch's phase.
     assert re.search(
         r"pid 5555, a child of the app, .*\(by the reader by name, asked at 1\.\d\d s\)", gate
@@ -11231,7 +11323,7 @@ def test_the_controls_gate_needs_the_runtimes_name_as_well_as_what_a_child_maps(
     )
     checker, _ = _control_in(world, tmp_path, monkeypatch)
     said = capsys.readouterr().out
-    assert any("the control: it starts the host" in what for what in checker.failures)
+    assert any("the control: it starts its own host" in what for what in checker.failures)
     # From the first reading that started after 0.4 s, which the watch's phase puts at 0.4x s.
     assert re.search(
         r"5555 maps that copy's runtime \(by ps's lsof lookup\), from 0\.[45] s, but its name is "
@@ -11258,7 +11350,7 @@ def test_a_child_whose_arguments_ps_reads_later_takes_the_executables_pass_away(
     checker, _ = _control_in(world, tmp_path, monkeypatch)
     said = capsys.readouterr().out
     assert checker.failures == [_STARTS], checker.failures
-    assert "the control's gate held" not in said, said
+    assert "the listers' way held" not in said, said
     # The child that held the gate is not listed as one whose arguments ps did not read: ps read
     # them, inside the gate, and that is the cause the case names.
     case = _case(said)
@@ -11295,7 +11387,7 @@ def test_a_child_whose_arguments_ps_reads_after_the_gate_takes_the_executables_p
     checker, _ = _control_in(world, tmp_path, monkeypatch)
     said = capsys.readouterr().out
     assert checker.failures == [_STARTS], checker.failures
-    assert "the control's gate held" not in said, said
+    assert "the listers' way held" not in said, said
     # The child that held the gate, whose arguments ps never read, is listed as such; the other
     # was read after the gate, inside the 5 s after it held, so the case says the gate was decided
     # over the watch up to then, not inside the gate.
@@ -11330,7 +11422,7 @@ def test_the_case_names_the_child_that_held_the_gate_where_ps_read_its_arguments
     checker, _ = _control_in(world, tmp_path, monkeypatch)
     said = capsys.readouterr().out
     assert checker.failures == [_STARTS], checker.failures
-    assert "the control's gate held" not in said, said
+    assert "the listers' way held" not in said, said
     case = _case(said)
     assert "whose arguments ps did not read" not in case, case
     assert re.search(
@@ -11517,7 +11609,7 @@ def test_a_host_process_running_before_the_open_fails_the_control(
         r"(pgrep|ps), at -0\.0\d s",
         said,
     ), said
-    assert "the control's gate held" not in said, said
+    assert "the listers' way held" not in said, said
     # The unified log is saved on this path too, once, and the output says where.
     assert len(world.logs) == 1, world.logs
     assert "control-log.txt: a stand-in" in said.splitlines(), said
@@ -14538,3 +14630,168 @@ def test_the_documents_step_makes_its_own_folder_or_does_nothing(
     _documents_step_on(mac, monkeypatch, tmp_path)
     assert mac.chosen == 0
     assert "could not make" in capsys.readouterr().out
+
+
+# --- the control's gate: the host's run record (src/lucille_host/runs.py) -------------------
+
+
+_RUNTIME_IN_APP = "/Contents/Resources/runtime/bin/lucille-host-runtime"
+
+
+def _a_record(**changes: Any) -> dict[str, Any]:
+    entry = {
+        "v": 1,
+        "command": "status",
+        "pid": 4242,
+        "ppid": 99,
+        "executable": f"/Applications/Capsule.app{_RUNTIME_IN_APP}",
+        "started": 1000.5,
+    }
+    entry.update(changes)
+    return entry
+
+
+_RUNTIME = _a_record()["executable"]
+
+
+@pytest.mark.parametrize(
+    ("changes", "why"),
+    [
+        ({}, ""),
+        (
+            {"executable": f"/Users/x/build/Capsule.app{_RUNTIME_IN_APP}"},
+            "its executable is",
+        ),
+        ({"executable": None}, "its executable is None"),
+        ({"ppid": 7}, "its parent 7 is not the app ([99])"),
+        ({"ppid": None}, "its parent None is not the app ([99])"),
+        ({"ppid": 99.0}, "its parent 99.0 is not the app ([99])"),
+        ({"started": 999.9}, "it is from before the open"),
+        ({"started": 1031.0}, "it is from after the 30 s gate"),
+    ],
+)
+def test_the_record_gate_holds_only_for_the_copys_runtime_a_child_of_the_app_inside_the_gate(
+    changes: dict[str, Any], why: str
+) -> None:
+    held, said = check_app._record_gate([_a_record(**changes)], _RUNTIME, [99], 1000.0, 1030.0)
+    assert held == (why == ""), said
+    if why:
+        assert why in said, said
+        assert "pid 4242 (status) from" in said, said
+    else:
+        assert said == (
+            "the control's gate held by the run record: pid 4242 (status) from +0.50 s, a child "
+            "of the app"
+        )
+
+
+def test_the_record_gate_fails_with_no_record_and_skips_lines_it_does_not_know() -> None:
+    held, said = check_app._record_gate([], _RUNTIME, [99], 1000.0, 1030.0)
+    assert not held and said == "no run record in the app's profile (runs.jsonl)"
+    unknown = [{"v": 2, "started": 1000.5}, {"v": 1, "started": "soon"}, {"v": 1}]
+    held, said = check_app._record_gate(unknown, _RUNTIME, [99], 1000.0, 1030.0)
+    assert not held and "none from the minute before the open on" in said, said
+    # A time that is no finite number is no time, as json reads it from the file: NaN fails
+    # every comparison, and would otherwise pass both bounds.
+    for started in ("NaN", "Infinity", "-Infinity", "true"):
+        line = json.loads(json.dumps(_a_record()).replace("1000.5", started))
+        held, said = check_app._record_gate([line], _RUNTIME, [99], 1000.0, 1030.0)
+        assert not held and "none from the minute before the open on" in said, (started, said)
+    # An integer too large for a float is no time either, and says so rather than raising.
+    huge = json.loads(json.dumps(_a_record()).replace("1000.5", "1" + "0" * 400))
+    held, said = check_app._record_gate([huge], _RUNTIME, [99], 1000.0, 1030.0)
+    assert not held and "none from the minute before the open on" in said, said
+    # A version of true is not 1, though Python takes it for 1.
+    assert not check_app._record_gate([_a_record(v=True)], _RUNTIME, [99], 1000.0, 1030.0)[0]
+    # true is 1 to Python: a gate open from 0 s would take it for a time.
+    assert not check_app._record_gate([_a_record(started=True)], _RUNTIME, [99], 0.0, 30.0)[0]
+    held, said = check_app._record_gate([_a_record(ppid=True)], _RUNTIME, [1], 1000.0, 1030.0)
+    assert not held and "its parent True is not the app ([1])" in said, said
+    # One that holds among many that do not is enough.
+    mixed = [_a_record(ppid=7), _a_record(started=999.0), _a_record(pid=5000)]
+    assert check_app._record_gate(mixed, _RUNTIME, [99], 1000.0, 1030.0)[0]
+
+
+def test_the_run_record_is_read_line_by_line_skipping_what_is_not_an_object(tmp_path: Path) -> None:
+    assert check_app._run_records(tmp_path) == []
+    (tmp_path / "state").mkdir()
+    lines = [json.dumps(_a_record()), "{not json", "[1, 2]", json.dumps(_a_record(pid=5))]
+    (tmp_path / "state" / check_app.RUNS_FILE).write_text("\n".join(lines), encoding="utf-8")
+    assert [entry["pid"] for entry in check_app._run_records(tmp_path)] == [4242, 5]
+
+
+def test_the_apps_pids_are_its_own_executables_by_ps(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    app = Path("/Applications") / f"{check_app.APP_NAME}.app"
+    main = f"{app}/Contents/MacOS/{check_app.APP_NAME}"
+    rows = [
+        f"   99 {main}",
+        f"  100 {main} -psn_0_1",
+        f"  101 /Users/x/build/{check_app.APP_NAME}.app/Contents/MacOS/{check_app.APP_NAME}",
+        f"  102 {main}-helper",
+        "  103 /bin/sleep 5",
+    ]
+    monkeypatch.setattr("subprocess.run", lambda argv, **k: _done(argv, 0, "\n".join(rows)))
+    assert check_app._app_pids_at(app) == [99, 100]
+
+
+def test_the_controls_gate_is_the_run_record(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # The listers see the host by its arguments, but no run record says the app started it: the
+    # control fails, and says so; what the listers saw is recorded, not a gate.
+    world = _ListerWorld(
+        pgrep=_host_from(0.4), ps=_ps_host_from(0.4), marker_at=1.5, records=lambda w: []
+    )
+    checker, _ = _control_in(world, tmp_path / "none", monkeypatch)
+    said = capsys.readouterr().out
+    assert checker.failures == [_STARTS], checker.failures
+    assert "recorded, not a gate: the listers' way held by its arguments" in said, said
+    assert "the control's gate held" not in said, said
+    # No lister ever sees it, but the host's record says the app started its own runtime 0.4 s
+    # after the open: the control passes, and the listers' miss is recorded.
+    world = _ListerWorld(pgrep=_none, ps=_ps_none, marker_at=1.5, records=lambda w: [w.record(0.4)])
+    checker, _ = _control_in(world, tmp_path / "missed", monkeypatch)
+    said = capsys.readouterr().out
+    assert checker.failures == [], checker.failures
+    assert "recorded, not a gate: the listers' way did not hold:" in said, said
+    assert (
+        "the control's gate held by the run record: pid 4242 (status) from +0.40 s, a child of "
+        "the app" in said.splitlines()
+    ), said
+
+
+@pytest.mark.parametrize(
+    ("name", "make"),
+    [
+        ("no record", lambda w: []),
+        (
+            "another copy's runtime",
+            lambda w: [
+                w.record(
+                    0.4,
+                    executable=os.path.realpath(
+                        check_app.python_in(w.installed.parent.parent / "build" / "Capsule.app")
+                    ),
+                )
+            ],
+        ),
+        ("not a child of the app", lambda w: [w.record(0.4, ppid=12345)]),
+        ("from before the open", lambda w: [w.record(-0.6)]),
+        ("from after the gate", lambda w: [w.record(check_app.CONTROL_GATE + 1)]),
+    ],
+)
+def test_the_control_fails_on_a_run_record_that_does_not_prove_the_app_started_its_host(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    name: str,
+    make: Callable[[_ListerWorld], list[dict[str, Any]]],
+) -> None:
+    # Whatever the listers saw (here, the host by its arguments): each of these fails the control.
+    world = _ListerWorld(pgrep=_host_from(0.4), ps=_ps_host_from(0.4), marker_at=1.5, records=make)
+    checker, _ = _control_in(world, tmp_path, monkeypatch)
+    said = capsys.readouterr().out
+    assert checker.failures == [_STARTS], (name, checker.failures)
+    assert "the control's gate held" not in said, said
