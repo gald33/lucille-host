@@ -11518,6 +11518,9 @@ def test_a_host_process_running_before_the_open_fails_the_control(
         said,
     ), said
     assert "the control's gate held" not in said, said
+    # The unified log is saved on this path too, once, and the output says where.
+    assert len(world.logs) == 1, world.logs
+    assert "control-log.txt: a stand-in" in said.splitlines(), said
 
 
 def test_a_reading_that_straddles_the_open_holds_no_gate_and_is_not_kept_apart() -> None:
@@ -11924,6 +11927,33 @@ def test_the_runtimes_log_record_names_at_most_a_dozen_pids() -> None:
     said = check_app._log_runtime_said(lines, 0.0)
     assert said.count("pid ") == check_app.LOG_RUNTIME_SHOWN, said
     assert ", and 3 more (the log's image path" in said, said
+
+
+def test_a_record_of_the_runtimes_log_lines_that_raises_leaves_the_verdict(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # The real _save_control_log, on a passing control, with the record raising: the control
+    # still passes, both files are saved, and the output says the record could not be made.
+    real = check_app._save_control_log
+    world = _ListerWorld(pgrep=_host_from(0.4), ps=_ps_host_from(0.4), marker_at=1.5)
+    _in_lister_world(tmp_path, monkeypatch, world)
+    monkeypatch.setattr(check_app, "_save_control_log", real)
+
+    def broken(lines: Any, opened: float) -> str:
+        raise RuntimeError("a record that breaks")
+
+    monkeypatch.setattr(check_app, "_log_runtime_said", broken)
+    checker = check_app.Checker()
+    check_app._placement_control(checker, tmp_path, False)
+    said = capsys.readouterr().out
+    assert checker.failures == [], checker.failures
+    assert "the control's gate held" in said, said
+    assert (
+        "recorded, not a gate: the runtime's processes in the log could not be read: "
+        "RuntimeError('a record that breaks')"
+    ) in said.splitlines(), said
+    for _, name in check_app.CONTROL_LOG_STYLES:
+        assert (tmp_path / name).exists(), name
 
 
 def test_the_control_log_says_which_style_it_could_not_save(
