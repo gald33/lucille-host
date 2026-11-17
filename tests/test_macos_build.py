@@ -9844,16 +9844,35 @@ def test_the_real_lsof_finds_a_process_by_the_runtimes_name_with_its_parent(
     # app, so it is no child of one. Seen here with Linux's lsof; on a Mac, Apple's.
     if shutil.which("lsof") is None:
         pytest.skip("no lsof here")
+    if not os.path.exists("/bin/bash"):
+        pytest.skip("no /bin/bash here")
     runtime = Path(_runtime_of(tmp_path / f"{check_app.APP_NAME}.app"))
     runtime.parent.mkdir(parents=True)
     # copyfile and chmod, not copy2: copy2 also copies /bin/sleep's file flags, which macOS refuses
     # to set on a copy of a system binary (seen in CI, job 129545633292: PermissionError, errno 1).
     shutil.copyfile("/bin/sleep", runtime)
     runtime.chmod(0o755)
+    # The copy runs with argv[0] "sleep": where /bin/sleep is one program of a multi-call
+    # coreutils, which runs as the program its argv[0] names, a copy called by the runtime's name
+    # exits at once ("coreutils: unknown program", Ubuntu 26.04's). The process's name, which lsof
+    # matches, is the executed file's own, the runtime's, whatever argv[0] says. bash, not sh,
+    # since dash has no `exec -a`; the subshell's exec keeps bash as the parent.
     shell = subprocess.Popen(
-        ["/bin/sh", "-c", '"$0" 30 & wait', str(runtime)], start_new_session=True
+        ["/bin/bash", "-c", '(exec -a sleep "$0" 30) & echo "$!"; wait', str(runtime)],
+        start_new_session=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
     )
     try:
+        assert shell.stdout is not None and shell.stderr is not None
+        stand_in = int(shell.stdout.readline())
+        # The stand-in runs before lsof is asked, so one that exits at once fails here, saying
+        # why, and never as a process lsof did not find.
+        time.sleep(0.2)
+        if shell.poll() is not None:
+            pytest.fail(f"the stand-in exited at once: {shell.stderr.read().strip()!r}")
+        os.kill(stand_in, 0)
         found: list[Any] = []
         error = ""
         deadline = time.monotonic() + 10
@@ -9868,7 +9887,7 @@ def test_the_real_lsof_finds_a_process_by_the_runtimes_name_with_its_parent(
         assert each.executable is not None and _names(each.executable, runtime), each
     finally:
         os.killpg(shell.pid, signal.SIGKILL)
-        shell.wait()
+        shell.communicate()
 
 
 def _child_world(
