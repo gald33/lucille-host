@@ -1,10 +1,12 @@
 {
-  "description": "gmail.search with a line break in its query: valid, and harmless, since each criterion goes to Gmail as an IMAP literal, never as part of a command line.",
-  "valid": true,
+  "description": "gmail.search with a line break in its query: the schema takes it, and the host's own check refuses it, as any control character in any argument.",
+  "valid": false,
   "schema_valid": true,
+  "prose_rule": "gmail-args",
   "expect": {
     "reply": {
-      "status": "done"
+      "status": "refused",
+      "code": "bad_args"
     }
   },
   "body": {

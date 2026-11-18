@@ -1,0 +1,23 @@
+{
+  "description": "gmail.read by an id above 2^64 - 1: the schema takes 20 digits, and the host's own check refuses it.",
+  "valid": false,
+  "schema_valid": true,
+  "prose_rule": "gmail-args",
+  "expect": {
+    "reply": {
+      "status": "refused",
+      "code": "bad_args"
+    }
+  },
+  "body": {
+    "v": "lucille.exec/1",
+    "dir": "request",
+    "job_id": "00000000-0000-4000-8000-000000001464",
+    "op": "gmail.read",
+    "args": {
+      "credential": "default",
+      "id": "18446744073709551616"
+    },
+    "not_after": 1767229200
+  }
+}

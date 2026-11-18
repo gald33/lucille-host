@@ -1,0 +1,23 @@
+{
+  "description": "gmail.search since a date that does not exist: the schema takes its form, and the host's own check refuses it.",
+  "valid": false,
+  "schema_valid": true,
+  "prose_rule": "gmail-args",
+  "expect": {
+    "reply": {
+      "status": "refused",
+      "code": "bad_args"
+    }
+  },
+  "body": {
+    "v": "lucille.exec/1",
+    "dir": "request",
+    "job_id": "00000000-0000-4000-8000-000000001463",
+    "op": "gmail.search",
+    "args": {
+      "credential": "default",
+      "since": "2026-02-31"
+    },
+    "not_after": 1767229200
+  }
+}

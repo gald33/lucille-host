@@ -514,11 +514,17 @@ change ([§21](#21-versioning)).
   the host's environment, whose child could not see them. `host.describe` then leaves it out of
   `enabled_ops`.
 - **The Gmail operations** read only. The host signs in with the stored app password in IMAP's `LOGIN` and
-  nowhere else, opens a mailbox only read-only (`EXAMINE`), fetches only with `BODY.PEEK` (so no message is
-  marked read), and sends no command that changes anything. Each text criterion goes to Gmail as an IMAP
-  literal, never as part of a command line. They connect only to `imap.gmail.com`, port 993, over TLS. The
-  host refuses them `not_enabled`, as `github.read`, while it cannot run them. How it uses the credential, and
-  what it refuses, is in [decisions/0003](../decisions/0003-local-credentials.md) ("Second use").
+  nowhere else, opens a mailbox only read-only (`EXAMINE`), fetches only the closed list of items in
+  decisions/0003 ("IMAP, exactly"), none of which marks a message read (`BODY.PEEK`, never `RFC822` or
+  `RFC822.TEXT`), and sends no command that changes anything. Mailbox names go in IMAP's modified UTF-7;
+  each text criterion goes in a `UID SEARCH CHARSET UTF-8` as a synchronizing literal whose length counts
+  octets, one literal per command. They connect only to `imap.gmail.com`, port 993, over TLS from the first
+  byte. The host refuses them `not_enabled`, as `github.read`, while it cannot run them. How it uses the
+  credential, and what it refuses, is in [decisions/0003](../decisions/0003-local-credentials.md) ("Second
+  use").
+- **Rule gmail-args.** Beyond the schema, the host refuses a Gmail operation `bad_args` when any of its
+  arguments holds a control character (U+0000 to U+001F, or U+007F), when `since` or `before` is a date
+  that does not exist (`2026-02-31`), or when `id` is above 2^64 − 1 (18446744073709551615).
 - A **folder alias** (`root`) is a name the host's local policy maps to a folder: 1 to 32 characters matching
   `^[a-z][a-z0-9_-]{0,31}$`. A request never carries a folder's path.
 - An argument that breaks its operation's schema (an extra key, a missing key, a wrong type, a value out of
@@ -611,8 +617,11 @@ host's module at all, before any credential was read, and then `stderr` is Pytho
 end: 2 and 4 write none, 5 writes the part of an uncompressed body it read, and 6 writes none unless the
 failure came during that last write. None of these is a refusal: the reply is `done`.
 
-**The Gmail operations.** Each child's output is capped as any child's is. `stdout` is one JSON object, written
-once, at the end; `stderr` is empty, or one fixed line on failure. The app password is never in either.
+**The Gmail operations.** Each child's output is capped as any child's is. On success, `stdout` is one JSON
+object, written once, at the end, and `stderr` is empty. On failure, `stdout` is empty and `stderr` is one
+fixed line of the host's own: never text Gmail wrote, such as a `NO`'s or `BAD`'s text or an `[ALERT]`.
+The one exception is exit 1, below, whose `stderr` is Python's traceback. The app password is never in
+either stream.
 
 - `gmail.check`: `{"ok": true}`.
 - `gmail.mailboxes`: `{"mailboxes": [{"name", "special_use"}], "truncated"}`. `name` is the mailbox's name,
@@ -628,12 +637,23 @@ once, at the end; `stderr` is empty, or one fixed line on failure. The app passw
   text (`text_from` says which, or is null with neither), cut at 32 KiB of UTF-8 (`text_truncated`).
   `message_truncated` is true when the message passed the 4 MiB the host fetches. Header values are cut at
   1 KiB, `to` and `cc` at 4 KiB.
-- The exit code says how it went: 0 done; 2 the credential is missing, not bound to `imap.gmail.com`, or not
-  an address and an app password; 3 Gmail answered `NO` or `BAD` (no such mailbox or message); 4 the address
-  check, the connection or the TLS handshake failed, or the connection broke; 5 a cap was reached (8 MiB
-  read from Gmail, or the counts above); 6 anything unexpected in the host's own code; 7 Gmail refused the
-  sign-in (a wrong or revoked app password); 1 as for `github.read`. None of these is a refusal: the reply
-  is `done`.
+- The counts above (500 mailboxes, 50 messages, the first 4 MiB of a message, 32 KiB of text) are limits on
+  what is returned, not failures: each sets its flag, and the exit is 0.
+- The exit code says how it went:
+  - 0: done.
+  - 2: the credential is missing, not bound to `imap.gmail.com`, or not in the form decisions/0003 gives.
+  - 3: Gmail answered `NO` to a command other than `LOGIN` (no such mailbox, no such message, a search it
+    refused), or `gmail.read` found the `\All` mailbox hidden from IMAP.
+  - 4: the address check, the connection or the TLS handshake failed, or the connection broke.
+  - 5: more than 8 MiB was read from Gmail in the request, or the credential was used for more than 60
+    sign-ins in 10 minutes; nothing was returned.
+  - 6: anything unexpected in the host's own code, a `BAD` from Gmail to any command included (it means the
+    host sent something Gmail could not parse).
+  - 7: Gmail answered `NO` to `LOGIN` (a wrong or revoked app password, or IMAP closed to the account), or
+    did within the last 15 minutes, in which case the host did not try again.
+  - 1: as for `github.read`, the interpreter could not start the host's module.
+
+  None of these is a refusal: the reply is `done`.
 
 **`host.describe`.** It replies `done` with `exit_code` 0, an empty `stderr`, and both truncation flags
 false. Its document goes, JSON-encoded, in `stdout`. The reply has no structured result field, and the

@@ -20,6 +20,7 @@
 
 from __future__ import annotations
 
+import datetime
 import json
 import re
 from collections.abc import Iterator, Mapping
@@ -66,7 +67,37 @@ EVENTS = {
     "killed_locally": "killed_locally",
     "restarted_after_decision": "interrupted",
 }
-PROSE_RULES = ("strings", "integers", "request-size", "stream-size", "not-after-range")
+PROSE_RULES = (
+    "strings",
+    "integers",
+    "request-size",
+    "stream-size",
+    "not-after-range",
+    "gmail-args",
+)
+GMAIL_ID_MAX = 2**64 - 1
+_CONTROL = re.compile(r"[\x00-\x1f\x7f]")
+_DATE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")
+
+
+def gmail_args_broken(op: Any, args: Any) -> bool:
+    """Rule gmail-args (spec/PROTOCOL.md section 10): a Gmail operation's argument holding a
+    control character, a date that does not exist, or an id above 2^64 - 1."""
+    if not isinstance(op, str) or not op.startswith("gmail.") or not isinstance(args, dict):
+        return False
+    for key, value in args.items():
+        if not isinstance(value, str):
+            continue
+        if _CONTROL.search(value):
+            return True
+        if key in ("since", "before") and _DATE.fullmatch(value):
+            try:
+                datetime.date.fromisoformat(value)
+            except ValueError:
+                return True
+        if key == "id" and value.isascii() and value.isdigit() and int(value) > GMAIL_ID_MAX:
+            return True
+    return False
 
 
 def ecma_regex(pattern: str) -> re.Pattern[str]:
@@ -171,6 +202,12 @@ def prose_violations(
         not_after = body.get("not_after")
         if is_integer(not_after) and not_after > host_state["received_at"] + NOT_AFTER_RANGE:
             broken.append("not-after-range")
+    if (
+        kind == "request"
+        and isinstance(body, dict)
+        and gmail_args_broken(body.get("op"), body.get("args"))
+    ):
+        broken.append("gmail-args")
     return broken
 
 
@@ -248,6 +285,8 @@ def _bad_args(op: str, args: Any) -> bool:
     schema.pop("oneOf")
     schema["$ref"] = f"#/$defs/args.{op}"
     if not validator_for(schema).is_valid(args):
+        return True
+    if gmail_args_broken(op, args):
         return True
     return any(isinstance(v, float) for v in walk(args))
 

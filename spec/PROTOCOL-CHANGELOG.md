@@ -79,7 +79,8 @@ The first version.
 - **Added in the draft, 2026-11-18: `gmail.check`, `gmail.mailboxes`, `gmail.search` and `gmail.read`,**
   four read-only operations, not yet in the host's catalog, that read Gmail over IMAP with an app password
   stored on the computer (§10). Their replies are a child's output: one JSON object on `stdout`, and an exit
-  code that says how it went (§11). No field, status or code was added. The host's side is in
+  code that says how it went (§11). No field, status or code was added; one prose rule was, `gmail-args`
+  (§10), which the host checks after the schema, before anything runs. The host's side is in
   [decisions/0003](../decisions/0003-local-credentials.md) ("Second use"). Lucille sends them only with
   `min_host_version` set to the first release whose catalog has them.
 - **Files.** JSON Schemas (draft 2020-12) for the request, the reply and the `host.describe` document, closed
