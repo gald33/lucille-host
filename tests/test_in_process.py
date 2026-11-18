@@ -505,3 +505,21 @@ def test_the_audit_line_holds_what_a_child_s_would_for_the_same_output(
     assert "ghp_" not in text and "sk-bbbb" not in text
     assert len(text) < 300_000
     assert line["stdout_bytes"] == len(_in_process.BIG_STDOUT)
+
+
+@pytest.mark.parametrize("log_results", [False, True])
+def test_an_exception_s_own_name_and_message_reach_neither_audit_nor_reply(
+    make_context: MakeContext, log_results: bool
+) -> None:
+    """A class the function made has a name of its choosing: only the built-in class it derives
+    from is named, so the audit line is small and token-free with log_results on or off."""
+    ctx = make_context(log_results=log_results)
+    op = _op(_in_process.raises_named_for_a_token, name="test.named")
+    outcome = execute(_ready(op), ctx)
+    assert (outcome.status, outcome.exit_code) == ("done", 1)
+    assert outcome.stderr == "the operation raised ValueError"
+    text = ctx.audit.path.read_text()
+    assert "ghp_" not in text and "sk-bbbb" not in text and "nnnn" not in text
+    assert len(text) < 5_000
+    execution = _lines(ctx)[-1]
+    assert (execution["ended"], execution["raised"]) == ("raised", "ValueError")

@@ -105,3 +105,12 @@ BIG_CHILD_SOURCE = (
 def big(call: Call) -> Result:
     """Output of 20 MiB on each stream, with a token in clear at the front of each."""
     return Result(stdout=BIG_STDOUT, stderr=BIG_STDERR)
+
+
+HUGE = 1024 * 1024
+
+
+def raises_named_for_a_token(call: Call) -> Result:
+    """Raises a class whose own name is a token ahead of a huge run, with a message to match."""
+    name = "ghp_" + "a" * 36 + "_" + "n" * HUGE
+    raise type(name, (ValueError,), {})("sk-" + "b" * 30 + "m" * HUGE)
