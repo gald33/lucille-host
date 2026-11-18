@@ -343,6 +343,50 @@ def _detached_running(name: str) -> bool:
         return thread is not None
 
 
+# Python's own exception classes an in-process call's exception is named for, each before any class
+# it derives from.
+_NAMED_EXCEPTIONS: Final = (
+    RecursionError,
+    NotImplementedError,
+    KeyError,
+    IndexError,
+    LookupError,
+    FileNotFoundError,
+    PermissionError,
+    TimeoutError,
+    OSError,
+    UnicodeError,
+    ValueError,
+    TypeError,
+    ZeroDivisionError,
+    OverflowError,
+    ArithmeticError,
+    AttributeError,
+    ImportError,
+    AssertionError,
+    RuntimeError,
+    MemoryError,
+    KeyboardInterrupt,
+    SystemExit,
+    GeneratorExit,
+    Exception,
+)
+
+
+def _exception_name(exc: BaseException) -> str:
+    """The name of the first of :data:`_NAMED_EXCEPTIONS` the exception is an instance of, else
+    ``BaseException``.
+
+    The name of a class the function made is the function's to choose, and so is as unbounded and
+    as unredacted as its output: it goes nowhere. Every name returned is one of Python's own, so
+    it is short and holds no secret, and it is written to the audit line with ``log_results`` off.
+    """
+    for cls in _NAMED_EXCEPTIONS:
+        if isinstance(exc, cls):
+            return cls.__name__
+    return "BaseException"
+
+
 def _well_formed(returned: object) -> bool:
     """A Result with an exit code a reply can carry (an in-process call is never a signal's) and
     two strings."""
@@ -378,8 +422,9 @@ def _call_in_process(ready: Ready, ctx: Context, stop: Callable[[], bool]) -> Ou
       consumed, so it does not reach the next request.
 
     A function that raises anything else, ``BaseException`` included, gets a ``done`` reply with
-    exit code 1 and a stderr naming the exception's type only: its message can hold anything the
-    function held, so it goes neither in the reply nor in the audit log.
+    exit code 1 and a stderr naming the exception's nearest built-in class only (see
+    :func:`_exception_name`): its message and any name the function gave its own class can hold
+    anything the function held, so neither goes in the reply or in the audit log.
     """
     job_id = ready.job.job_id
     operation = ready.operation
@@ -437,7 +482,7 @@ def _call_in_process(ready: Ready, ctx: Context, stop: Callable[[], bool]) -> Ou
         except Stopped:
             box["said"] = "stopped"
         except BaseException as exc:  # noqa: BLE001 - reported by type, as any other raise
-            box["raised"] = type(exc).__name__
+            box["raised"] = _exception_name(exc)
         finally:
             box["at"] = time.monotonic()
             finished.set()
