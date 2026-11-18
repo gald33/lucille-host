@@ -37,15 +37,15 @@ backstop ([VERIFYING.md](VERIFYING.md) says what each guard cannot see).
 ## Paragraph 1: what the host can do
 
 **C1.** "lucille-host does only what you switch on, on your computer."
-- Code: `src/lucille_host/ops/__init__.py` (the closed operation set: three entries in an immutable
+- Code: `src/lucille_host/ops/__init__.py` (the closed operation set: four entries in an immutable
   mapping); `src/lucille_host/_exec.py` (the only place the program may start a process);
   `src/lucille_host/policy.py` (the local policy file; with no file, only `host.describe` is enabled,
   and a new pair starts from that fresh policy, the earlier one set aside unused).
 - Tests: `tests/guards/test_ast_lint.py` (no process-spawning call in the runtime package outside
   `_exec.py`, in the forms the lint lists, and no import there of a module outside the lint's
   allowlist, as the lint resolves imports and the re-exports it follows; with the limit stated under
-  C2); `tests/test_catalog.py` (`test_catalog_entries`: the operation set is exactly three entries and
-  read-only); `tests/test_policy.py` (`test_fresh_policy`: only `host.describe` is on after install);
+  C2); `tests/test_catalog.py` (`test_catalog_entries`: the operation set is exactly four entries and
+  read-only; `github.read` makes one `GET`, `tests/test_proxy.py`); `tests/test_policy.py` (`test_fresh_policy`: only `host.describe` is on after install);
   `tests/test_pair.py` (`test_new_pair_starts_from_fresh_policy`,
   `test_previous_policy_archived_not_applied`: only `host.describe` is on after a new pair, and the
   policy set aside is listed by `lucille-host policy previous` but not applied); invariant "Nothing
@@ -171,7 +171,9 @@ backstop ([VERIFYING.md](VERIFYING.md) says what each guard cannot see).
   folder); invariant "An upgrade never runs a changed op under old consent" (pending, conformance).
 
 **C4.** "It never runs code, a shell or a command line sent by Lucille, and the programs it starts get none
-of its keys and none of your environment variables."
+of its keys and none of your environment variables, except `github.read`'s: it reads a credential you
+saved for it, and gets `HOME` (macOS) or `DBUS_SESSION_BUS_ADDRESS` and `XDG_RUNTIME_DIR` (Linux), which
+the keyring needs."
 - Code: `src/lucille_host/_exec.py` (argv only, `shell=False`, the environment `CHILD_ENV` and nothing
   else, stdin `/dev/null`, each child in its own session); the catalog's argv templates in
   `src/lucille_host/ops/__init__.py` (an absolute executable; each string from a request after `--`, as
@@ -190,6 +192,20 @@ of its keys and none of your environment variables."
   (`test_steps_1_to_4_hold_to_the_request_fixtures`: requests carrying `exe`, `argv`, `env`, `cwd` or
   `timeout` are refused `bad_request` by the host's own check); invariant "Nothing Lucille sends can
   widen what the host permits" (pending, conformance: the same through the installed host).
+- `github.read`. Code: the catalog entry's `env_copy` and `Operation.child_env` in
+  `src/lucille_host/ops/__init__.py`, which `execute` in `src/lucille_host/jobs.py` passes as the
+  child's whole environment; `src/lucille_host/proxy.py`, the child, which reads the one credential
+  the request names (decisions/0003, "First use"). The `run` process never imports
+  `lucille_host.credentials`. Tests: `tests/test_jobs.py`
+  (`test_github_read_runs_the_hosts_interpreter_with_the_values_the_host_fills`: the child's
+  environment is `PATH`, `LANG` and `LC_ALL` and that OS's allow-list, and a proxy setting,
+  `SSL_CERT_FILE`, `PYTHONPATH` and `LD_PRELOAD` set in the host's are absent;
+  `test_other_children_get_the_fixed_environment_only`); `tests/test_credentials.py`
+  (`test_importing_the_command_line_does_not_load_it`: importing `cli`, `loop`, `jobs` and `library`
+  loads neither `lucille_host.credentials` nor `lucille_host.proxy`;
+  `test_only_the_credential_verb_and_the_proxy_import_it`); `tests/test_catalog.py`
+  (`test_definition_hash_covers_operands_schema_limits_and_environment`: a change to the allow-list, or
+  to which elements the host fills, turns an enabled `github.read` off).
 - Note: "get none of its keys" means the host passes them no key. An enabled operation that reads a
   folder holding the host's own state could still read what is stored there. That is inferred from the
   design, not tested. [PRIVACY.md](PRIVACY.md) says that keys leave if they are inside a file an enabled
@@ -247,6 +263,19 @@ changes, and, to within a day, when lucille-host was last running and when your 
   "Output is bounded, decodable and path-free" (pending, conformance: no reply contains a root's realpath
   or `$HOME`); `tests/test_rooms.py` (`test_resolves_at_least_daily`: with nothing else asking, the
   session resolves the pair again a day after the last resolve).
+
+**C8a.** "`github.read` returns GitHub's reply to the read it names, and Lucille learns the names of the
+credentials it asks it to use, never their values."
+- Code: `src/lucille_host/proxy.py` (standard output is the response body, standard error `HTTP
+  <status>` and GitHub's `Link` header, each with the token replaced, raw and in base64, before anything
+  is written); the request schema's `args.github.read` (`credential` is a name; nothing carries a value).
+- Tests: `tests/test_proxy.py` (`test_one_get_with_the_fixed_headers_and_the_token_only_in_authorization`;
+  `test_the_scrub_covers_the_token_and_its_base64_at_each_alignment`;
+  `test_the_scrub_covers_url_and_json_escaped_echoes`; `test_a_chunked_body_is_joined_before_the_scrub`;
+  `test_at_the_cut_a_beginning_of_the_token_is_dropped`; `test_a_keyrings_error_is_not_shown`).
+- Note: the scrub is defence in depth, with the limits decisions/0003 states (JSON's optional `\uXXXX`
+  escapes, base64 wrapped across lines, a change of case, a part of the token). What the token can read
+  on GitHub is what Lucille can ask for while `github.read` is on (THREAT_MODEL.md).
 
 ## Paragraph 4: transport
 
@@ -316,6 +345,19 @@ more than 23 h 45 min) expires and the job fails."
   as `test_a_profile_runs_one_run_at_a_time`'s, through the command, which takes the lock before its
   other start checks: from `ready` until it exits, another process cannot take it). An operation that
   started in time can still finish after `not_after`: the check is made once, before the start.
+
+**C13a.** "With `github.read` on, your computer also connects to `api.github.com`, for each read Lucille
+asks for, with the token you saved for it."
+- Code: `src/lucille_host/proxy.py`: the name `api.github.com` and port 443 are fixed; every address the
+  name resolves to must be on the proxy's fixed list (`address_allowed`), and the connection goes to a
+  vetted address with TLS checked for `api.github.com` against certifi's bundle; no redirect is
+  followed, and no proxy setting is read. `tools/guards/ast_lint.py`: among the host's modules, only
+  `proxy.py` may import `socket`, `ssl`, `http.client`, `ipaddress` or `certifi`.
+- Tests: `tests/test_proxy.py` (`test_refused_addresses`, `test_allowed_addresses`,
+  `test_one_refused_address_refuses_the_whole_request`, `test_a_redirect_is_reported_never_followed`,
+  `test_it_connects_to_vetted_addresses_only_in_order`); `tests/test_jobs.py`
+  (`test_github_read_is_not_enabled_where_the_host_knows_no_interpreter`: a program that embeds the
+  host runs no `github.read`).
 
 ## Paragraph 5: what Lucille keeps
 
@@ -547,6 +589,7 @@ These existing tests back the design rather than one sentence of the claim.
 | `tests/guards/test_macos_lint.py` | The Mac app's part of decisions/0002 §20 and of its invariants M1, M2, M9 and M20, in the forms the lint lists: its Swift names no network, listener, XPC, shell or other way to start a process (a Swift file under `Tests` may start a multi-line string with `#!/bin/sh`, the stand-in the self-test runs through `HostCLI.swift`), starts `Process` only in `macos/App/HostCLI.swift`, which writes the bundled runtime's path and arguments, names `NSWorkspace` and makes a URL from a string only in `macos/App/SystemPlaces.swift`, the app's one opener, in one call of the two System Settings pages and the Applications folder written there, each place its own, in that file's designed code; names the opener elsewhere only in a call, extends none of its types, gives none another name and holds no backtick in its code; names a System Settings address nowhere else and Full Disk Access's page (`Privacy_AllFiles`) nowhere; uses none of the other ways it lists to open a URL or another application (the login item's `openSystemSettingsLoginItems()` is not its to see), reads no pasteboard and holds no `http(s)` URL; the app's strings, the `Info.plist` template and the pins it reads use no phrase [PRIVACY.md](PRIVACY.md) says this project must never claim; and nothing declares a URL scheme, a daemon or an installer package. It reads the source, not the built app. |
 | `tests/guards/test_workflow_lint.py` | Invariant "Every release comes from a hosted runner and environment `pypi`" (the hosted-runner half; that a release publishes from environment `pypi` is checked by the provenance step in [VERIFYING.md](VERIFYING.md), not by this test). |
 | `tests/test_import_graph.py` | The runtime imports no hub server. (That the base install has none is `pyproject.toml`'s dependency list: the server comes only with the `[conformance]` extra.) The README's "opens no listening port" also needs `tests/test_read_loop.py` (`test_no_listening_socket`). |
+| `tests/test_proxy.py` | `github.read`'s child (decisions/0003, "First use"): it reads its arguments by position and writes one fixed line, never an exception's text, for a malformed list or anything unexpected (exit 6), also as a real process; it refuses a credential that is missing, not bound to `api.github.com` or not in a GitHub token's form, and a keyring's error, before anything is sent (exit 2); every address must be allowed by its fixed list, the shared address space for carrier-grade NAT built from its integer, with each network's edges and the addresses just outside them, and one refused address refuses the whole request (exit 4); it sends one `GET` with the fixed headers, the token in `Authorization` alone; a 3xx is reported, never followed; headers past 64 KiB or 100, a body past 1 MiB (cut there, a beginning of the token dropped at the cut) and a compressed body are exit 5; a connection that breaks before the response has been read is exit 4; the scrub replaces the token and its base64 at each alignment, after chunks are joined; each stream is written once, and the process ends with the exit code its reply carries. |
 | `tests/test_cli.py` | `lucille-host` and `lucille-host --version` print the version, and the version has one source; every verb the parser takes has a handler of its own, and a verb without one is refused. |
 | `tests/test_cli_json.py` | The command line's `--json` contract, [spec/CLI.md](spec/CLI.md). Every golden fixture's command line, run in a home set up for it, writes on stdout exactly the fixture's objects, each one its schema accepts, in ASCII, written compactly with its fields in the fixture's order, and the exit code the fixture gives; run without `--json` from the same set-up, it exits the same and writes the same stderr. `--json` works before the verb, after it and after its action, for every verb and action, and before `--` only; `--version` writes one `version` object with it in either order; a usage error exits 2 with one `usage` object that quotes nothing of the command line, and `run --json` without `--json-events`, `pair --json` without `--code-stdin`, and `run`'s options with another verb are usage errors; `run`'s fixtures end with the `stopped` its exit code goes with, and `policy reset`'s set an invalid file aside or refuse `not_invalid`. Every literal failure code in `cli.py`, `link.py` and `loop.py` is in the contract's list, every other failure `main` catches has the code spec/CLI.md section 10 gives it, in that table's order, with its own line on stderr, and a bug writes `internal` and then its traceback, and never a value that is not JSON. Each failure reachable without a hub, and several through the in-process hub, ends stdout with an `error` object whose code spec/CLI.md lists for that verb, with the same exit and stderr as without `--json`: among them a hub error and a refused answer, a loopback code with no `--hub`, a pair the library refuses, a pair held in the other store, and a profile that holds two pairs. A refusal of the library's that ends nothing says why in the host's words, after the host's words and the library's state, in the `error` object and on stderr alike, and repeats no text of the library's: an answer refused for want of `cryptography`, which leaves no pair and no gate record; the same refusal at a resolve, which keeps the pair; a record of the file store that is not JSON, in `status`, `forget`, `pair status` and `run`, which forget nothing and name neither the file nor any folder of the host's; a healing strategy Lucille wrote in the pair room, which `pair status` and `run` never repeat, whether it is shaped as a strategy's name or holds a code, a token and a SAS; and sentences and states holding a code, a pair's export, a room's join code, a token, a SAS, a path or words the other side wrote, at an answer, at a resolve and reading the pair's record, which no verb repeats in its `error`, its `status` or on stderr, saying instead that the host does not repeat the library's reason. With stdout a pipe, each object and each line is written while the next folder still stalls. `ops list` tells an enabled operation this computer cannot run from a disabled one, and its words and its flags come from the catalog; `roots add --suggest-alias` gives the Mac app's aliases for every Latin name in its test vectors, folds every letter from U+00C0 to U+017F and every full-width form as section 9.1 says, and drops every combining mark, so a letter from U+00C0 to U+017F gives the same decomposed as composed, while a decomposed Latin letter past U+017F keeps its plain letter where its composed form is `-`, gives `folder` for a name in another script, writes nothing and takes no lock; `roots add -- <alias> <path>` works, and a broad folder's refusal says which kind it is, while one added with `--allow-home-or-root` is `broad` in `roots add` and `roots list`; `roots check` reports each folder's state by its error number, a folder that opens and cannot be listed included, opens no session and writes nothing; a file name that is not UTF-8 is written as U+FFFD; and `status` reports a store it cannot read (a keyring that refuses the read included), or a pair the library refuses, in its `pair`, and the rest as it is, and stops as `state_invalid` on a run record, a room record or a gate record holding a value the host never writes there (NaN, an infinity, a pid or a time out of range, or a value of another type). A file nested too deep to parse is invalid as any other is, never `internal`: the policy gives `policy_invalid`, and `pair` sets it aside and pairs; a state file gives `state_invalid`; the keyring item or the file store's record of the pair gives `status` a `pair` `unreadable`, and `pair status` `store_error`. |
 | `tests/spec/test_cli_schemas.py`, `tests/spec/test_packaged.py` (`test_cli_spec_packaged`) | The command line's contract, [spec/CLI.md](spec/CLI.md): every object in its schemas is closed and lists every field it allows as required, every value the host bounds is bounded, every pattern reads the same in ECMA-262 and Python, a definition two schemas share is the same in both and the same as the protocol's, `status` has no field that could hold the SAS, every type has a schema and a fixture, and every fixture validates; the wheel ships the schemas and fixtures, and an installed copy loads them. |

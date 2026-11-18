@@ -14,23 +14,27 @@ sentence to the code and test behind it, or marks it as Lucille policy that this
 > this release (listed in `src/lucille_host/ops/` and by `lucille-host ops list`), and only on folders
 > you add. Nothing Lucille sends can add an operation, add a folder, or loosen a limit. It never runs code,
 > a shell or a command line sent by Lucille, and the programs it starts get none of its keys and none of
-> your environment variables.
+> your environment variables, except `github.read`'s: it reads a credential you saved for it, and gets
+> `HOME` (macOS) or `DBUS_SESSION_BUS_ADDRESS` and `XDG_RUNTIME_DIR` (Linux), which the keyring needs.
 >
 > Any file no enabled operation reads stays on your computer. So do your passwords, keys and browser
 > sessions, unless they are inside a file an enabled operation reads.
 >
 > What leaves it: each request Lucille makes (which operation, and its inputs, such as a file name or a
 > search pattern), and what an enabled operation returns, up to 64 KiB of output and 64 KiB of errors.
-> `files.search` returns lines of the files it searches. Lucille also learns the host's version, OS
-> family, enabled operation names and folder aliases (never folder paths), each run's exit code and
-> duration, a fingerprint that changes when your local policy changes, and, to within a day, when
-> lucille-host was last running and when your computer last answered.
+> `files.search` returns lines of the files it searches. `github.read` returns GitHub's reply to the read
+> it names, and Lucille learns the names of the credentials it asks it to use, never their values.
+> Lucille also learns the host's version, OS family, enabled operation names and folder aliases (never
+> folder paths), each run's exit code and duration, a fingerprint that changes when your local policy
+> changes, and, to within a day, when lucille-host was last running and when your computer last
+> answered.
 >
 > Requests and replies travel through Lucille's Switchboard hub, encrypted between your computer and
 > Lucille's backend. The hub, and the network in front of it, can see your computer's network address,
 > when it connects, and roughly how large each message is; they cannot read the messages. Lucille's
 > backend can. A request your computer has not answered within its wait (an hour unless chosen otherwise,
-> never more than 23 h 45 min) expires and the job fails.
+> never more than 23 h 45 min) expires and the job fails. With `github.read` on, your computer also
+> connects to `api.github.com`, for each read Lucille asks for, with the token you saved for it.
 >
 > Lucille stores what is returned with the job. Lucille's operators, Lucille's assistant and the AI
 > provider it uses can read it. Lucille blanks it 24 hours after the job ends. That is Lucille's policy,

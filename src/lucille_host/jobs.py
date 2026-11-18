@@ -49,7 +49,15 @@ from lucille_host import __version__, _exec, _output
 from lucille_host.audit import AuditLog
 from lucille_host.containment import contain
 from lucille_host.controls import Controls
-from lucille_host.ops import CATALOG_VERSION, OPERATIONS, Operation, args_valid
+from lucille_host.ops import (
+    CATALOG_VERSION,
+    HOST_PROFILE,
+    HOST_PYTHON,
+    HOST_STATE,
+    OPERATIONS,
+    Operation,
+    args_valid,
+)
 from lucille_host.policy import Effective
 
 __all__ = [
@@ -102,6 +110,29 @@ class Context:
     # Told each step of the request, right after its audit line: ("received"), ("decided",
     # decision, code), ("started") and ("finished", outcome, reply size).
     observe: Callable[..., None] | None = None
+    # What the host fills in a template itself (ops.HOST_FILLED). ``interpreter`` is the one it
+    # runs on, or None where it does not know it (a program that embeds the host): an entry whose
+    # program is the host's interpreter is then unavailable, and refused ``not_enabled``.
+    interpreter: str | None = None
+    state_dir: str | None = None
+    profile: str | None = None
+    # The host's own environment, which an entry's ``env_copy`` names are read from.
+    environ: Mapping[str, str] | None = None
+
+
+def runs_here(operation: Operation, ctx: Context) -> bool:
+    """Whether this host can run ``operation`` now: for one whose program is the host's own
+    interpreter, only when the context names one (decisions/0003, "First use")."""
+    if operation.runs_host_python:
+        if ctx.interpreter is None or ctx.state_dir is None or ctx.profile is None:
+            return False
+        return operation.available(ctx.os_family, ctx.interpreter)
+    return operation.available(ctx.os_family)
+
+
+def _host_filled(ctx: Context) -> dict[str, str]:
+    filled = {HOST_PYTHON: ctx.interpreter, HOST_STATE: ctx.state_dir, HOST_PROFILE: ctx.profile}
+    return {marker: value for marker, value in filled.items() if value}
 
 
 @dataclass(frozen=True)
@@ -153,7 +184,7 @@ def check(job: Job, ctx: Context) -> str | Ready:
     operation = OPERATIONS.get(job.op)
     if operation is None:
         return "unknown_op"
-    if job.op not in ctx.policy.enabled_ops or not operation.available(ctx.os_family):
+    if job.op not in ctx.policy.enabled_ops or not runs_here(operation, ctx):
         return "not_enabled"
     if not args_valid(operation, job.args):
         return "bad_args"
@@ -165,7 +196,11 @@ def check(job: Job, ctx: Context) -> str | Ready:
         cwd = contain(root.path, job.args["path"], own=ctx.own_dirs)
         if cwd is None:
             return "path_outside_root"
-    argv = operation.build_argv(ctx.os_family, job.args) if operation.runs_child else None
+    argv = (
+        operation.build_argv(ctx.os_family, job.args, _host_filled(ctx))
+        if operation.runs_child
+        else None
+    )
     if argv is not None and cwd is None:
         # An operation with no root runs in the filesystem root, never in the user's folders.
         cwd = "/"
@@ -186,7 +221,7 @@ def describe_document(ctx: Context) -> dict[str, Any]:
         "os_family": ctx.os_family,
         "catalog_version": CATALOG_VERSION,
         "enabled_ops": [
-            name for name in ctx.policy.enabled_ops if OPERATIONS[name].available(ctx.os_family)
+            name for name in ctx.policy.enabled_ops if runs_here(OPERATIONS[name], ctx)
         ],
         "root_aliases": sorted(ctx.policy.roots),
         "policy_digest": ctx.policy_digest,
@@ -236,6 +271,7 @@ def execute(ready: Ready, ctx: Context) -> Outcome:
         timeout_s=ready.timeout_s,
         stdout_cap=stdout_cap,
         stderr_cap=stderr_cap,
+        env=ready.operation.child_env(ctx.os_family, ctx.environ or {}),
     )
 
     def started(executable_sha256: str) -> None:
@@ -286,6 +322,9 @@ def execute(ready: Ready, ctx: Context) -> Outcome:
     }
     if abandoned:
         fields["abandoned"] = True
+    http_status = _http_status(ready, result.stderr)
+    if http_status is not None:
+        fields["http_status"] = http_status
     if ctx.policy.log_results:
         fields["stdout"] = result.stdout
         fields["stderr"] = result.stderr
@@ -304,6 +343,24 @@ def execute(ready: Ready, ctx: Context) -> Outcome:
         return Outcome(status="done", **streams)
     code = "timeout" if result.ended == "timeout" else "killed_locally"
     return Outcome(status="failed", code=code, **streams)
+
+
+def _http_status(ready: Ready, stderr: str) -> int | None:
+    """The HTTP status a proxy child reported (decisions/0003, "First use": its standard error
+    begins ``HTTP <status>``), or None for any other child or when it reported none."""
+    if not ready.operation.runs_host_python:
+        return None
+    first = stderr.split("\n", 1)[0]
+    if (
+        len(first) == 8
+        and first.startswith("HTTP ")
+        and first[5:].isascii()
+        and first[5:].isdigit()
+    ):
+        status = int(first[5:])
+        if 100 <= status <= 599:
+            return status
+    return None
 
 
 _FIELD_ORDER: Final = (

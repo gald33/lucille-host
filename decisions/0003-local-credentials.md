@@ -1,12 +1,14 @@
 # 0003: Local credentials (draft)
 
-**Status: storage, and entry from the command line, built; entry at Lucille's request and use chosen,
-not built; the first use, `github.read`, decided 2026-11-18 (below), not built.** `src/lucille_host/credentials.py` can save, list, read (`value()`) and remove a credential for
-an online service, kept only on this computer. `lucille-host credential set`, `list` and `remove` write
-to it from the command line, each credential bound to the hosts it may be sent to (spec/CLI.md §15).
-Nothing uses a stored credential yet: nothing calls `value()`, and nothing Lucille sends can reach it.
-This record says what was built, and what is still to be decided before a credential kept here can be
-used.
+**Status: storage, entry from the command line, and the first use, `github.read`, built; entry at
+Lucille's request chosen, not built.** `src/lucille_host/credentials.py` can save, list, read and
+remove a credential for an online service, kept only on this computer. `lucille-host credential set`,
+`list` and `remove` write to it from the command line, each credential bound to the hosts it may be
+sent to (spec/CLI.md §15). One operation uses a stored credential: `github.read`, off by default, whose
+child process reads the one credential a request names and sends it to `api.github.com` alone ("First
+use", below). Nothing Lucille sends can list or change a credential, nor read one any other way. This
+record says what was built, and what is still to be decided before a credential kept here can be used
+for anything else.
 
 ## Why
 
@@ -44,12 +46,14 @@ This repository builds only the first. The other two belong to Lucille's backend
   value is returned only by `value()`.
 - **An item this version did not write is left as it is.** It may hold the only copy of the user's
   credentials.
-- **Unreachable from Lucille.** No runtime module but `credentials.py` and the command line's
-  `credential` verb, in its own function, imports it, so no other verb's process, `run` among them,
-  loads it, and the verb never reads a value back (`tests/test_credentials.py`,
-  `test_only_the_credential_verb_imports_it`, `test_importing_the_command_line_does_not_load_it`,
-  `test_the_credential_verb_never_reads_a_value`). No request, operation or reply can write, read or
-  list it.
+- **Unreachable from Lucille, but through `github.read`.** No runtime module but `credentials.py`
+  imports it, except the command line's `credential` verb, in its own function, and `github.read`'s
+  child, `proxy.py`, in the one function that reads the credential. So no other verb's process, `run`
+  among them, loads it; the verb never reads a value back; and only the child reads a value, on a
+  request for an enabled `github.read` (`tests/test_credentials.py`,
+  `test_only_the_credential_verb_and_the_proxy_import_it`,
+  `test_importing_the_command_line_does_not_load_it`, `test_the_credential_verb_never_reads_a_value`).
+  No request or reply can write or list it, and only `github.read` can have one read.
 
 ## What was open, and how it was decided
 
@@ -61,7 +65,7 @@ This repository builds only the first. The other two belong to Lucille's backend
 3. **How a credential is used.** Decided 2026-11-11: see "Use: the host as a
    credential proxy" below.
 
-## Use: the host as a credential proxy (chosen 2026-11-11, not built)
+## Use: the host as a credential proxy (chosen 2026-11-11; its first use, `github.read`, built)
 
 This was chosen over two alternatives. A local program that asks the host for a credential
 would let more than this program read the item. Handing the value to Lucille for each use would end
@@ -101,7 +105,7 @@ and stays true. The proxy design keeps Lucille's own logic off the computer; onl
 public code runs here. A future feature that ships Lucille logic to run here (for example to keep data
 off Lucille's servers) would expose that logic to the user; obfuscation slows a reader and stops none.
 
-## First use: `github.read` (decided 2026-11-18, not built)
+## First use: `github.read` (decided 2026-11-18, built)
 
 The repository owner ruled on 2026-11-18: the first use is a read-only proxy, and its first service is
 GitHub's REST API. It comes in two pull requests: this text and the protocol's (spec/PROTOCOL.md §10 and
@@ -122,13 +126,22 @@ ops enable github.read`. Its arguments are `{credential, path}`:
   `.` or `..` does not match, so no path can climb out of `/repos/{owner}`.
 
 **Where it runs: a child process, never `run`.** The catalog entry runs the host's own interpreter:
-`<the host's interpreter> -I -B -W ignore -X utf8 -m lucille_host.proxy --profile <the host's profile>
--- {credential} {path}`. `-W ignore` keeps Python's warnings off standard error, which is reply output. Two elements are filled by the host, never from a request:
+`<the host's interpreter> -I -B -W ignore -X utf8 -m lucille_host.proxy --state <the profile's state
+folder> --profile <the host's profile> -- {credential} {path}`. `-W ignore` keeps Python's warnings off
+standard error, which is reply output. Three elements are filled by the host, never from a request:
 
 - the interpreter, as `sys.executable` gives it: an absolute path, not resolved through links. In a
   virtual environment (a `pipx` install among them), resolving the link would land on the base
   interpreter, which does not load the environment, and `-m lucille_host.proxy` would not import;
+- the profile's state folder, which holds the credential store's lock file. The child's environment
+  holds no `XDG_STATE_HOME` (Linux), so the child could not find the folder itself; the host passes the
+  one it uses (added in the implementation, beside what was reviewed);
 - the host's own profile name.
+
+Where the host does not know its interpreter, `github.read` is unavailable, and refused `not_enabled`:
+a program that embeds the host (`lucille_host.library`, spec/CLI.md §13.7) runs under its own
+`sys.executable`, which may not be a Python that can run `-I -m lucille_host.proxy`, so it passes none.
+Only `lucille-host run` passes its own.
 
 Every string from the request comes after `--`, as in every entry. So:
 
@@ -154,13 +167,21 @@ Every string from the request comes after `--`, as in every entry. So:
   the child.
 - The executable's sha256 in the audit log is the interpreter's; it does not cover `lucille_host.proxy`,
   which is part of the installed release.
+- **Keyring's off switch, in the child.** The child reads keyring's off switch as the host does
+  (`store.check_backend`), but from its own environment: `PYTHON_KEYRING_BACKEND` is not copied, and on
+  Linux the `keyringrc.cfg` is looked for under `~/.config` only, since `XDG_CONFIG_HOME` is not copied
+  either. So a host started with keyring turned off by that variable, or by a `keyringrc.cfg` under a
+  custom `XDG_CONFIG_HOME`, does not turn it off for the child, which then reads the system keyring. The
+  credential store refuses every backend but the system's own in either process, so this changes which
+  keyring is asked, never whether a file backend is.
 
 **What the child does, in order.** Each refusal writes one fixed line on standard error, holds no value,
 and sends nothing.
 
 0. **Its own arguments, and anything unexpected.** It reads its arguments by position, exactly
-   `--profile <profile> -- <credential> <path>`, not with `argparse`, which would exit 2 on a usage error
-   and collide with exit 2 below. A top-level handler, the first thing `main` sets up, catches every
+   `--state <state folder> --profile <profile> -- <credential> <path>`, not with `argparse`, which
+   would exit 2 on a usage error and collide with exit 2 below. It also checks the credential's name
+   and the path against the catalog's schema again. A top-level handler, the first thing `main` sets up, catches every
    exception the child does not raise on purpose: it writes one fixed line (`lucille-host proxy: internal
    error`), never the exception's text, which could hold a header's value, and exits 6. A malformed
    argument list exits 6 the same way. The child writes standard output once, at the end, from the
@@ -240,8 +261,8 @@ the child's output and exit code. Lucille sends `github.read` only with `min_hos
 first release that has it (spec/PROTOCOL-CHANGELOG.md), and needs its own change, outside this
 repository, to send it.
 
-**The claim documents, with the implementation.** Each of these sentences changes in the pull request
-that builds `github.read`, and not before, since until then it stays true:
+**The claim documents, with the implementation.** Each of these sentences changed in the pull request
+that built `github.read`, and not before, since until then it stayed true:
 
 - PRIVACY.md, "the programs it starts get none of its keys and none of your environment variables":
   `github.read`'s child reads a credential you saved for it, and gets `HOME` (macOS) or

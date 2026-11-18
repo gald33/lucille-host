@@ -93,7 +93,7 @@ from lucille_host import (
 from lucille_host import state as host_state
 from lucille_host.containment import inside_own, on_proc
 from lucille_host.controls import Controls
-from lucille_host.ops import OPERATIONS
+from lucille_host.ops import OPERATIONS, host_interpreter
 
 # The words ``pair`` takes in place of a code.
 PAIR_ACTIONS: Final = ("status", "confirm", "reject")
@@ -658,8 +658,10 @@ def build_parser() -> argparse.ArgumentParser:
         description=(
             "Keeps credentials for online services (a password, an app token) in the system "
             "keyring of this computer, each bound to the hosts it may be sent to. The value is "
-            "typed here, never given on the command line, and is never shown. Nothing uses a "
-            "saved credential yet, and nothing Lucille sends can read, list or change them."
+            "typed here, never given on the command line, and is never shown. Only github.read "
+            "uses one: a credential of the service github, bound to api.github.com, read by a "
+            "separate process when that operation is on. Nothing Lucille sends can list or "
+            "change them."
         ),
     )
     credential_verbs = credential.add_subparsers(
@@ -1297,6 +1299,7 @@ def _serve(
                 say=say,
                 tell=None if events is None else events.tell,
                 lifeline=lifeline,
+                interpreter=host_interpreter(),
             )
             made.append(runner)
             said = runner.serve()
@@ -1622,7 +1625,8 @@ def _credential_verb(args: argparse.Namespace, dirs: paths.Dirs, out: _Out) -> N
         saved = creds.save(args.service, args.name, value, hosts, replace=args.replace)
         out.text(
             f"{'replaced' if before else 'saved'} {key}, to be sent only to "
-            f"{', '.join(saved.hosts)}. Nothing uses saved credentials yet."
+            f"{', '.join(saved.hosts)}. Only github.read uses saved credentials: those of the "
+            "service github, bound to api.github.com."
         )
     except credentials.CredentialExists as exc:
         raise _Refused(

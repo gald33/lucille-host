@@ -20,6 +20,14 @@ argument may come before it: it is rendered with ``str()`` from an integer the s
 by 1, so it cannot begin with ``-``. (``host.sleep`` needs that: macOS's ``/bin/sleep`` takes no
 ``--``.)
 
+Three elements of a template are filled by the host, never from a request (decisions/0003,
+"First use"): :data:`HOST_PYTHON`, the interpreter the host runs on; :data:`HOST_STATE`, the
+profile's state folder; and :data:`HOST_PROFILE`, the profile's name. An entry whose program is
+:data:`HOST_PYTHON` runs only where the host knows its interpreter: ``run`` does, and a program
+that embeds the host (``library.py``) does not, so there it is unavailable. An entry may also
+name, per OS, variables of the host's own environment that its child gets beside
+:data:`CHILD_ENV` (:attr:`Operation.env_copy`).
+
 Each entry's :attr:`Operation.definition_hash` covers everything that decides what the entry does
 when it is enabled. The local policy stores it beside each enabled entry, and an upgrade that
 changes an enabled entry disables it until the user enables it again.
@@ -39,6 +47,7 @@ import hashlib
 import json
 import os
 import re
+import sys
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
@@ -48,6 +57,10 @@ from lucille_host._exec import CHILD_ENV
 
 __all__ = [
     "CATALOG_VERSION",
+    "HOST_FILLED",
+    "HOST_PROFILE",
+    "HOST_PYTHON",
+    "HOST_STATE",
     "About",
     "DEFAULT_TIMEOUT_S",
     "MAX_TIMEOUT_S",
@@ -56,6 +69,7 @@ __all__ = [
     "Operation",
     "args_valid",
     "catalog_version",
+    "host_interpreter",
 ]
 
 # The operating systems this release runs on, by the names host.describe reports.
@@ -70,6 +84,24 @@ _OBJECT_KEYWORDS = frozenset({"type", "additionalProperties", "required", "prope
 _VALUE_KEYWORDS = frozenset({"type", "minimum", "maximum", "minLength", "maxLength", "pattern"})
 
 _PLACEHOLDER = re.compile(r"\{([a-z_][a-z0-9_]*)\}", re.ASCII)
+
+# Template elements the host fills itself, never from a request: the interpreter it runs on, the
+# profile's state folder and the profile's name. The template holds these markers, which are what
+# the definition hash covers, not the values, which differ from one computer to another.
+HOST_PYTHON: Final = "{@python}"
+HOST_STATE: Final = "{@state}"
+HOST_PROFILE: Final = "{@profile}"
+HOST_FILLED: Final = frozenset({HOST_PYTHON, HOST_STATE, HOST_PROFILE})
+
+
+def host_interpreter() -> str | None:
+    """The interpreter this process runs on, as ``sys.executable`` gives it (never resolved
+    through links: a virtual environment's interpreter keeps the environment), or None when it is
+    not an absolute path to a file."""
+    executable = sys.executable
+    if not executable or not os.path.isabs(executable) or not os.path.isfile(executable):
+        return None
+    return executable
 
 
 @dataclass(frozen=True)
@@ -106,6 +138,9 @@ class Operation:
     # Arguments that name a file to the program. "-" is rendered "./-": most programs read
     # standard input for an operand "-", even after "--".
     file_operands: tuple[str, ...] = ()
+    # Per OS family, names of variables copied from the host's own environment into the child's,
+    # beside CHILD_ENV, each only when it is set there. None for none.
+    env_copy: Mapping[str, tuple[str, ...]] | None = None
 
     def params(self) -> dict[str, Any]:
         """The parameter schema, as a fresh dict."""
@@ -121,26 +156,64 @@ class Operation:
         """Whether the operation works inside a folder alias: it takes ``root`` and ``path``."""
         return "root" in self.params()["properties"]
 
-    def executable(self, os_family: str) -> str | None:
-        """The absolute executable this operation runs on that OS, or None if it runs none."""
+    @property
+    def runs_host_python(self) -> bool:
+        """Whether its program is the host's own interpreter (:data:`HOST_PYTHON`)."""
+        return self.argv is not None and any(
+            template[0] == HOST_PYTHON for template in self.argv.values()
+        )
+
+    def executable(self, os_family: str, interpreter: str | None = None) -> str | None:
+        """The absolute executable this operation runs on that OS, or None if it runs none. For
+        one whose program is the host's interpreter, that is ``interpreter``, by default this
+        process's own (:func:`host_interpreter`)."""
         if self.argv is None:
             return None
-        return self.argv[os_family][0]
+        first = self.argv[os_family][0]
+        if first == HOST_PYTHON:
+            return interpreter if interpreter is not None else host_interpreter()
+        return first
 
-    def available(self, os_family: str) -> bool:
+    def available(self, os_family: str, interpreter: str | None = None) -> bool:
         """Whether this computer can run it: True for an operation with no process, else whether
-        its executable is an executable regular file."""
-        exe = self.executable(os_family)
-        if exe is None:
+        its executable is an executable regular file (for one whose program is the host's
+        interpreter, ``interpreter``, by default this process's own)."""
+        if self.argv is None:
             return True
+        exe = self.executable(os_family, interpreter)
+        if exe is None:
+            return False
         return os.path.isfile(exe) and os.access(exe, os.X_OK)
 
-    def build_argv(self, os_family: str, args: Mapping[str, Any]) -> tuple[str, ...]:
-        """The argv for valid ``args`` (see :func:`args_valid`), from this OS's template."""
+    def child_env(self, os_family: str, environ: Mapping[str, str]) -> dict[str, str]:
+        """The child's whole environment: :data:`CHILD_ENV`, and each name of this entry's
+        :attr:`env_copy` for that OS that ``environ`` (the host's own) sets."""
+        env = dict(CHILD_ENV)
+        for name in (self.env_copy or {}).get(os_family, ()):
+            value = environ.get(name)
+            if value:
+                env[name] = value
+        return env
+
+    def build_argv(
+        self,
+        os_family: str,
+        args: Mapping[str, Any],
+        host: Mapping[str, str] | None = None,
+    ) -> tuple[str, ...]:
+        """The argv for valid ``args`` (see :func:`args_valid`), from this OS's template. Each
+        element in :data:`HOST_FILLED` is taken from ``host``, which the host builds itself, never
+        from a request; one it lacks raises ``ValueError``."""
         if self.argv is None:
             raise ValueError(f"{self.name} runs no process")
         built = []
         for element in self.argv[os_family]:
+            if element in HOST_FILLED:
+                filled = (host or {}).get(element)
+                if not filled:
+                    raise ValueError(f"{self.name}: the host gives no value for {element}")
+                built.append(filled)
+                continue
             match = _PLACEHOLDER.fullmatch(element)
             if match is None:
                 built.append(element)
@@ -177,6 +250,13 @@ class Operation:
             "max_timeout_s": MAX_TIMEOUT_S,
             "cwd": None if self.argv is None else ("root" if self.uses_root else "/"),
             "child_env": None if self.argv is None else dict(CHILD_ENV),
+            # Written only when there are any, so that the hashes of entries that copy nothing are
+            # the ones they had before the field existed.
+            **(
+                {"env_copy": {k: list(v) for k, v in sorted(self.env_copy.items())}}
+                if self.env_copy
+                else {}
+            ),
             # Written only when true, so that the hashes of entries that send no file contents
             # are the ones they had before the field existed.
             **({"sends_file_content": True} if self.about.sends_file_content else {}),
@@ -194,6 +274,16 @@ def _sha256_json(value: Any) -> str:
 # The argument schemas, from spec/PROTOCOL.md section 10 (request.schema.json, $defs args.*).
 _ROOT = {"type": "string", "minLength": 1, "maxLength": 32, "pattern": "^[a-z][a-z0-9_-]{0,31}$"}
 _RELATIVE_PATH = {"type": "string", "minLength": 1, "maxLength": 1024, "pattern": "^[^\\u0000]*$"}
+# github.read's path: GitHub's read endpoints and query keys (spec/PROTOCOL.md section 10).
+_GITHUB_PATH = (
+    "^/(user|user/repos|search/issues|repos/[A-Za-z0-9][A-Za-z0-9-]{0,38}/([A-Za-z0-9_-][A-Za-z"
+    "0-9._-]{0,99}|\\.[A-Za-z0-9_-][A-Za-z0-9._-]{0,98}|\\.\\.[A-Za-z0-9._-]{1,98})(/issues(/[1-9]"
+    "[0-9]{0,9}(/comments)?)?|/pulls(/[1-9][0-9]{0,9})?|/commits|/readme)?)(\\?(per_page=([1-9]|"
+    "[1-9][0-9]|100)|page=[1-9][0-9]{0,4}|state=(open|closed|all)|sort=(created|updated|comment"
+    "s|pushed|full_name)|direction=(asc|desc)|q=[A-Za-z0-9%+:._-]{1,256})(&(per_page=([1-9]|[1-"
+    "9][0-9]|100)|page=[1-9][0-9]{0,4}|state=(open|closed|all)|sort=(created|updated|comments|p"
+    "ushed|full_name)|direction=(asc|desc)|q=[A-Za-z0-9%+:._-]{1,256}))*)?$"
+)
 
 
 def _object(required: list[str], properties: dict[str, Any]) -> str:
@@ -216,6 +306,7 @@ def _entry(
     timeout_plus_arg: str | None = None,
     default_enabled: bool = False,
     file_operands: tuple[str, ...] = (),
+    env_copy: dict[str, tuple[str, ...]] | None = None,
 ) -> Operation:
     return Operation(
         name=name,
@@ -226,6 +317,7 @@ def _entry(
         default_enabled=default_enabled,
         about=about,
         file_operands=file_operands,
+        env_copy=None if env_copy is None else MappingProxyType(env_copy),
     )
 
 
@@ -274,6 +366,60 @@ _ENTRIES = (
             ),
         ),
         file_operands=("path",),
+    ),
+    # Reads one GitHub REST API endpoint with a credential stored on this computer
+    # (decisions/0003, "First use"). Its program is the host's own interpreter running
+    # lucille_host.proxy, which reads the credential, checks the address, makes the call and
+    # removes the token from what it writes. The path schema holds GitHub's read endpoints only.
+    _entry(
+        "github.read",
+        _object(
+            ["credential", "path"],
+            {
+                "credential": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 64,
+                    "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$",
+                },
+                "path": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 1024,
+                    "pattern": _GITHUB_PATH,
+                },
+            },
+        ),
+        {
+            family: (
+                HOST_PYTHON,
+                "-I",
+                "-B",
+                "-W",
+                "ignore",
+                "-X",
+                "utf8",
+                "-m",
+                "lucille_host.proxy",
+                "--state",
+                HOST_STATE,
+                "--profile",
+                HOST_PROFILE,
+                "--",
+                "{credential}",
+                "{path}",
+            )
+            for family in OS_FAMILIES
+        },
+        About(
+            summary="Read from GitHub with a token kept here",
+            sends=(
+                "Lucille gets GitHub's reply to one read it names: your repositories, issues, "
+                "pull requests, commits or a README. The token goes only to api.github.com; "
+                "Lucille learns only its name."
+            ),
+        ),
+        env_copy={"macos": ("HOME",), "linux": ("DBUS_SESSION_BUS_ADDRESS", "XDG_RUNTIME_DIR")},
     ),
 )
 

@@ -44,6 +44,17 @@
     {
       "v": 1,
       "type": "op",
+      "name": "github.read",
+      "state": "disabled",
+      "enabled": false,
+      "summary": "Read from GitHub with a token kept here",
+      "sends": "Lucille gets GitHub's reply to one read it names: your repositories, issues, pull requests, commits or a README. The token goes only to api.github.com; Lucille learns only its name.",
+      "sends_file_content": false,
+      "diagnostic": false
+    },
+    {
+      "v": 1,
+      "type": "op",
       "name": "host.nothing",
       "state": "not_in_catalog",
       "enabled": false

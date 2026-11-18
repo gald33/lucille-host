@@ -724,6 +724,7 @@ name = "lucille-host"
 source = { editable = "." }
 dependencies = [
     { name = "agent-switchboard" },
+    { name = "certifi" },
     { name = "keyring" },
 ]
 
@@ -748,6 +749,7 @@ dev = [
 requires-dist = [
     { name = "agent-switchboard", specifier = "==2.6.*" },
     { name = "agent-switchboard", extras = ["server"], marker = "extra == 'conformance'", specifier = "==2.6.*" },
+    { name = "certifi", specifier = ">=2024.2.2" },
     { name = "keyring", specifier = ">=25" },
     { name = "pypi-attestations", marker = "extra == 'verify'" },
     { name = "starlette", marker = "extra == 'conformance'", specifier = ">=1.9" },

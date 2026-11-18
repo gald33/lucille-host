@@ -10,9 +10,11 @@
   not delete the user's credentials. ``forget`` is not the way to delete them:
   :meth:`CredentialStore.remove` is.
 - The value is entered on this computer, by the user, with ``lucille-host credential set``. Nothing
-  Lucille sends can write, read or list this item: no request handler, operation or reply refers to
-  this module, and the command line names it only in the ``credential`` verb's own function (the
-  design record, decisions/0003, says what would have to change for an operation to use one).
+  Lucille sends can write or list this item, and only one operation reads it: no request handler
+  or reply refers to this module, the command line names it only in the ``credential`` verb's own
+  function, and ``run`` never imports it. ``github.read`` runs a separate, short-lived process,
+  ``proxy.py``, which reads the one credential a request names, for ``api.github.com`` only, when
+  the user has turned that operation on (decisions/0003, "First use").
 - What may be shown, here or anywhere, is the names (service and credential name), the hosts
   each is bound to, and when each was saved. The value is returned only by
   :meth:`CredentialStore.value`, and no error message holds anything read from the item.
@@ -269,12 +271,20 @@ class CredentialStore:
         )
 
     def value(self, service: str, name: str) -> str:
-        """One credential's value. No operation calls this yet (module docstring)."""
+        """One credential's value."""
         key = _key(service, name)
         entry = self._read()["credentials"].get(key)
         if entry is None:
             raise CredentialError(f"no credential {key}")
         return str(entry["value"])
+
+    def for_use(self, service: str, name: str) -> tuple[SavedCredential, str] | None:
+        """What may be shown of one credential and its value, from one read of the item, or None
+        when there is none. Only ``github.read``'s child (``proxy.py``) calls it."""
+        entry = self._read()["credentials"].get(_key(service, name))
+        if entry is None:
+            return None
+        return _saved(entry), str(entry["value"])
 
     def remove(self, service: str, name: str) -> bool:
         """Delete one credential. True when there was one."""

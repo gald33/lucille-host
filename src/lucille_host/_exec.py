@@ -15,7 +15,8 @@ The rules :func:`run` follows:
   script it does not cover the interpreter);
 - the caller puts every string that came from a request after ``--`` (the catalog's templates);
 - stdin is ``/dev/null``, and the child's environment is :data:`CHILD_ENV`, never copied from the
-  host's own;
+  host's own, except for the names a catalog entry lists for its OS, which the caller copies
+  (``Operation.child_env``) and passes as :attr:`Command.env`;
 - the child runs in its own session and process group, and that whole group is killed on timeout
   or when the user kills it; once the child has ended, whatever is left in its group is killed
   too;
@@ -42,7 +43,7 @@ import signal
 import subprocess
 import threading
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from types import MappingProxyType
 from typing import IO, Final
@@ -74,6 +75,8 @@ class Command:
     timeout_s: float
     stdout_cap: int = _output.STREAM_CAP
     stderr_cap: int = _output.STREAM_CAP
+    # The child's whole environment, or None for :data:`CHILD_ENV` alone.
+    env: Mapping[str, str] | None = None
 
 
 @dataclass(frozen=True)
@@ -235,7 +238,7 @@ def run(
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             cwd=command.cwd,
-            env=dict(CHILD_ENV),
+            env=dict(CHILD_ENV) if command.env is None else dict(command.env),
             start_new_session=True,
             close_fds=True,
             shell=False,

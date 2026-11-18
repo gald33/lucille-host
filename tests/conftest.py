@@ -15,6 +15,7 @@ host's own ``store._system_backend``, in a process with none of this.
 from __future__ import annotations
 
 import os
+import sys
 from collections.abc import Iterable
 from pathlib import Path
 from types import MappingProxyType
@@ -85,6 +86,8 @@ def make_context(tmp_path: Path, state_dir: Path) -> MakeContext:
         *,
         log_results: bool = False,
         audit: AuditLog | None = None,
+        interpreter: str | None = sys.executable,
+        environ: dict[str, str] | None = None,
     ) -> Context:
         if isinstance(roots, dict):
             root_map = {alias: policy.Root(path=str(path)) for alias, path in roots.items()}
@@ -108,6 +111,10 @@ def make_context(tmp_path: Path, state_dir: Path) -> MakeContext:
             controls=Controls(state_dir),
             audit=audit if audit is not None else AuditLog(state_dir),
             own_dirs=(str(state_dir),),
+            interpreter=interpreter,
+            state_dir=str(state_dir),
+            profile="default",
+            environ=environ if environ is not None else {},
         )
 
     return make
