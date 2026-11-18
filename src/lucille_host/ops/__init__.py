@@ -24,6 +24,30 @@ Each entry's :attr:`Operation.definition_hash` covers everything that decides wh
 when it is enabled. The local policy stores it beside each enabled entry, and an upgrade that
 changes an enabled entry disables it until the user enables it again.
 
+An entry is one of three kinds: an argv template (it runs a child), :class:`InProcess` (it calls a
+reviewed module-level function in the host's own process), or neither (``host.describe``, whose
+reply the host builds itself). An in-process entry is for an operation whose inputs cannot go in an
+argv, such as a token held by the process that embeds the host. Its definition hash covers the
+function's module and qualified name, and the name and SHA-256 of each source file the entry names
+as on its path, its own module's among them, read when the entry is defined. A release that
+changes any of those files turns an enabled entry off, as a changed argv does. What the hash does
+NOT cover is any code the entry does not name: a module it imports and leaves out of ``files``, an
+installed library and its version, ``lucille_host`` itself, the interpreter. Naming every file on
+the path is the review's job; the host checks only that the function's own module is among them.
+That gap is accepted only while no entry uses this kind: the first entry that does must close it
+for its own code, by folding the versions of the libraries it calls into the hash (which needs
+``importlib.metadata`` on the runtime's import allowlist, a reviewed change) or by a test that
+every project-local import of its module is in its ``files``.
+
+The function gets a :class:`Call` (read-only arguments, its time limit and deadline, and a ``stop``
+it should poll) and returns a :class:`Result`; it raises :class:`TimedOut` when it ran past its
+deadline and :class:`Stopped` when ``stop`` said so. The host runs it on a thread of its own and
+bounds it whether or not it polls (``jobs._call_in_process``): past its deadline, or once killed or
+abandoned, it gets a short grace to return, and then the host replies without it. A thread cannot
+be killed, so a function that ignores ``stop`` runs on after that reply, and what it does then
+still happens; while it does, no other call of that entry starts. No in-process entry takes a
+folder alias.
+
 Each entry also carries what a shell shows of it (:class:`About`, ``spec/CLI.md`` section 8): a few
 plain words for what it does, what Lucille gets when it runs, whether a reply can carry the
 contents of a file, and whether it is meant for testing. The words, and whether it is meant for
@@ -35,12 +59,14 @@ it is true.
 
 from __future__ import annotations
 
+import functools
 import hashlib
 import json
 import os
 import re
-from collections.abc import Iterable, Mapping
-from dataclasses import dataclass
+from collections.abc import Callable, Iterable, Mapping
+from dataclasses import dataclass, field
+from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Final
 
@@ -49,11 +75,16 @@ from lucille_host._exec import CHILD_ENV
 __all__ = [
     "CATALOG_VERSION",
     "About",
+    "Call",
     "DEFAULT_TIMEOUT_S",
+    "InProcess",
     "MAX_TIMEOUT_S",
     "OPERATIONS",
     "OS_FAMILIES",
     "Operation",
+    "Result",
+    "Stopped",
+    "TimedOut",
     "args_valid",
     "catalog_version",
 ]
@@ -88,6 +119,83 @@ class About:
 
 
 @dataclass(frozen=True)
+class Call:
+    """What an in-process operation's function is given."""
+
+    # The request's arguments, already checked against the entry's schema. Read-only.
+    args: Mapping[str, Any]
+    # The time limit in seconds, and when it runs out, by time.monotonic().
+    timeout_s: int
+    deadline: float
+    # True once the user kills the operation or its room is abandoned: the function stops and
+    # raises Stopped.
+    stop: Callable[[], bool]
+
+
+@dataclass(frozen=True)
+class Result:
+    """What an in-process operation returns: as a child's exit code and streams."""
+
+    exit_code: int = 0
+    stdout: str = ""
+    stderr: str = ""
+
+
+class TimedOut(Exception):  # noqa: N818 - the name is the outcome it reports
+    """Raised by an in-process function that ran past its deadline: the reply is failed timeout."""
+
+
+class Stopped(Exception):  # noqa: N818 - the name is the outcome it reports
+    """Raised by an in-process function that stopped because its call's ``stop`` said so."""
+
+
+@dataclass(frozen=True)
+class InProcess:
+    """A reviewed function the host calls in its own process, and the source files of its code path.
+
+    ``function`` is a module-level function, so its module and qualified name pin it. ``files`` are
+    the source files its code runs through, its own module's among them (a module gives its own as
+    ``Path(__file__)``). Each is read and hashed here, when the entry is defined, so the hash
+    describes the code the process loaded; the hash holds each file's name and digest, never where
+    it is, so it is the same on every computer. Which files are on the path is the review's to
+    check. The host checks that one file's path ends with the function's dotted module path
+    (``a/b/c.py`` or ``a/b/c/__init__.py`` for ``a.b.c``); it cannot see the module's file itself
+    without the reflection the runtime does not use."""
+
+    function: Callable[[Call], Result]
+    files: tuple[Path, ...]
+    # The function's "module:qualname", and each file's name with the SHA-256 of its bytes.
+    name: str = field(init=False)
+    sources: tuple[tuple[str, str], ...] = field(init=False)
+
+    def __post_init__(self) -> None:
+        module = getattr(self.function, "__module__", None)
+        qualname = getattr(self.function, "__qualname__", None)
+        if not isinstance(module, str) or not isinstance(qualname, str):
+            raise ValueError("an in-process operation is a named module-level function")
+        if not qualname.isidentifier():
+            raise ValueError("an in-process operation is a named module-level function")
+        parts = module.split(".")
+        endings = ((*parts[:-1], parts[-1] + ".py"), (*parts, "__init__.py"))
+        if not any(
+            path.parts[-len(ending) :] == ending for path in self.files for ending in endings
+        ):
+            raise ValueError(
+                f"the files of {module}:{qualname} do not include its module, "
+                f"{'/'.join(endings[0])}"
+            )
+        sources = []
+        for path in self.files:
+            try:
+                digest = hashlib.sha256(path.read_bytes()).hexdigest()
+            except OSError as exc:
+                raise ValueError(f"{path.name} cannot be read to hash ({exc.strerror})") from None
+            sources.append((path.name, digest))
+        object.__setattr__(self, "name", f"{module}:{qualname}")
+        object.__setattr__(self, "sources", tuple(sorted(sources)))
+
+
+@dataclass(frozen=True)
 class Operation:
     """One catalog entry."""
 
@@ -106,6 +214,16 @@ class Operation:
     # Arguments that name a file to the program. "-" is rendered "./-": most programs read
     # standard input for an operand "-", even after "--".
     file_operands: tuple[str, ...] = ()
+    # The function it calls in the host's own process, for an entry with no argv.
+    in_process: InProcess | None = None
+
+    def __post_init__(self) -> None:
+        if self.in_process is None:
+            return
+        if self.argv is not None:
+            raise ValueError(f"{self.name}: an entry runs a child or calls a function, not both")
+        if self.file_operands or "root" in self.params()["properties"]:
+            raise ValueError(f"{self.name}: an in-process operation takes no folder")
 
     def params(self) -> dict[str, Any]:
         """The parameter schema, as a fresh dict."""
@@ -161,7 +279,8 @@ class Operation:
     def definition_hash(self) -> str:
         """SHA-256 over what decides what this entry does when enabled: its name, parameter
         schema, argv templates and file operands, its time limit and the cap on it, where its
-        child runs (the folder's real path, or ``/``), and the child's environment; and, when a
+        child runs (the folder's real path, or ``/``), and the child's environment; for an
+        in-process entry, its function and each source file on its code path; and, when a
         reply can carry the contents of a file, that it can. The words a shell shows are not in
         it."""
         return _sha256_json(self._definition())
@@ -180,6 +299,17 @@ class Operation:
             # Written only when true, so that the hashes of entries that send no file contents
             # are the ones they had before the field existed.
             **({"sends_file_content": True} if self.about.sends_file_content else {}),
+            # Written only for an in-process entry, for the same reason.
+            **(
+                {}
+                if self.in_process is None
+                else {
+                    "in_process": {
+                        "function": self.in_process.name,
+                        "sources": [list(pair) for pair in self.in_process.sources],
+                    }
+                }
+            ),
         }
 
 
@@ -316,15 +446,21 @@ def _compile(pattern: str) -> re.Pattern[str]:
     return re.compile(pattern[:-1] + r"\Z")
 
 
-_COMPILED: dict[str, dict[str, re.Pattern[str]]] = {}
+@functools.lru_cache(maxsize=64)
+def _patterns(name: str, params_json: str) -> Mapping[str, re.Pattern[str]]:
+    schema = json.loads(params_json)
+    _check_schema(name, schema)
+    return MappingProxyType(
+        {
+            key: _compile(sub["pattern"])
+            for key, sub in schema["properties"].items()
+            if "pattern" in sub
+        }
+    )
+
+
 for _op in _ENTRIES:
-    _schema = _op.params()
-    _check_schema(_op.name, _schema)
-    _COMPILED[_op.name] = {
-        key: _compile(sub["pattern"])
-        for key, sub in _schema["properties"].items()
-        if "pattern" in sub
-    }
+    _patterns(_op.name, _op.params_json)
 
 
 def args_valid(op: Operation, args: Any) -> bool:
@@ -340,7 +476,7 @@ def args_valid(op: Operation, args: Any) -> bool:
     properties: dict[str, Any] = schema["properties"]
     if set(args) - set(properties) or set(schema["required"]) - set(args):
         return False
-    patterns = _COMPILED[op.name]
+    patterns = _patterns(op.name, op.params_json)
     for key, value in args.items():
         sub = properties[key]
         kind = sub["type"]

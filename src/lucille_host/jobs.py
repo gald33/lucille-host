@@ -41,15 +41,27 @@ from __future__ import annotations
 
 import hashlib
 import json
+import threading
+import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from types import MappingProxyType
 from typing import Any, Final
 
 from lucille_host import __version__, _exec, _output
 from lucille_host.audit import AuditLog
 from lucille_host.containment import contain
 from lucille_host.controls import Controls
-from lucille_host.ops import CATALOG_VERSION, OPERATIONS, Operation, args_valid
+from lucille_host.ops import (
+    CATALOG_VERSION,
+    OPERATIONS,
+    Call,
+    Operation,
+    Result,
+    Stopped,
+    TimedOut,
+    args_valid,
+)
 from lucille_host.policy import Effective
 
 __all__ = [
@@ -216,6 +228,8 @@ def execute(ready: Ready, ctx: Context) -> Outcome:
     """
     job_id = ready.job.job_id
     stop = ctx.stop if ctx.stop is not None else _never
+    if ready.operation.in_process is not None:
+        return _call_in_process(ready, ctx, stop)
     if ready.argv is None:
         document = json.dumps(describe_document(ctx), ensure_ascii=True, separators=(",", ":"))
         ctx.audit.execution(job_id, op=ready.operation.name, child=False, stdout_size=len(document))
@@ -304,6 +318,272 @@ def execute(ready: Ready, ctx: Context) -> Outcome:
         return Outcome(status="done", **streams)
     code = "timeout" if result.ended == "timeout" else "killed_locally"
     return Outcome(status="failed", code=code, **streams)
+
+
+# How long an in-process function told to stop (its deadline passed, the user killed it, or its
+# room was abandoned) has to return before the host replies without it; and how often the worker
+# looks while it runs.
+IN_PROCESS_GRACE: Final = 2.0
+_IN_PROCESS_POLL: Final = 0.05
+
+
+# The call of each in-process entry that was left running after the host replied without it, by
+# entry name. While one is alive, no other call of that entry starts: at most one stray call per
+# entry, never two calls of one entry at once. Process-wide, as the threads are.
+_DETACHED: dict[str, threading.Thread] = {}
+_DETACHED_LOCK = threading.Lock()
+
+
+def _detached_running(name: str) -> bool:
+    with _DETACHED_LOCK:
+        thread = _DETACHED.get(name)
+        if thread is not None and not thread.is_alive():
+            del _DETACHED[name]
+            thread = None
+        return thread is not None
+
+
+# Python's own exception classes an in-process call's exception is named for, each before any class
+# it derives from.
+_NAMED_EXCEPTIONS: Final = (
+    RecursionError,
+    NotImplementedError,
+    KeyError,
+    IndexError,
+    LookupError,
+    FileNotFoundError,
+    PermissionError,
+    TimeoutError,
+    OSError,
+    UnicodeError,
+    ValueError,
+    TypeError,
+    ZeroDivisionError,
+    OverflowError,
+    ArithmeticError,
+    AttributeError,
+    ImportError,
+    AssertionError,
+    RuntimeError,
+    MemoryError,
+    KeyboardInterrupt,
+    SystemExit,
+    GeneratorExit,
+    Exception,
+)
+
+
+def _exception_name(exc: BaseException) -> str:
+    """The name of the first of :data:`_NAMED_EXCEPTIONS` the exception's type derives from, else
+    ``BaseException``.
+
+    The name of a class the function made is the function's to choose, and so is as unbounded and
+    as unredacted as its output: it goes nowhere. Every name returned is one of Python's own, so
+    it is short and holds no secret, and it is written to the audit line with ``log_results`` off.
+
+    The exception object is the function's too, and Python asks it for its ``__class__`` when
+    ``isinstance`` is given an instance, which can run the function's code and raise anything,
+    with a message that holds a secret. So this asks the type, which asks the object nothing, and
+    any exception it raises anyway is dropped: the call is then named ``BaseException``.
+    """
+    try:
+        kind = type(exc)
+        for cls in _NAMED_EXCEPTIONS:
+            if issubclass(kind, cls):
+                return cls.__name__
+    except Exception:  # noqa: BLE001 - nothing it holds may reach the thread's excepthook
+        pass
+    return "BaseException"
+
+
+def _well_formed(returned: object) -> bool:
+    """A Result with an exit code a reply can carry (an in-process call is never a signal's) and
+    two strings."""
+    return (
+        isinstance(returned, Result)
+        and type(returned.exit_code) is int
+        and 0 <= returned.exit_code <= 255
+        and type(returned.stdout) is str
+        and type(returned.stderr) is str
+    )
+
+
+def _call_in_process(ready: Ready, ctx: Context, stop: Callable[[], bool]) -> Outcome:
+    """Run an in-process entry (see :func:`execute`), bounded by the host whether or not the
+    function cooperates.
+
+    The pause flag, the drain and the room are read just before the call, as before a child's
+    start. The ``start`` line names the function and the entry's definition hash in place of an
+    executable and its argv. The function runs on a thread of its own while the worker watches it:
+
+    - at its deadline, or when the user kills it or its room is abandoned, the call's ``stop``
+      turns true and the function has :data:`IN_PROCESS_GRACE` seconds to return;
+    - after that the host replies without it (``failed timeout``, ``failed killed_locally``, or no
+      reply for an abandoned room) and its audit line says ``detached``. A thread cannot be
+      killed: a detached function runs on, its result is dropped, and whatever it does after the
+      reply happens anyway. The worker, the drain and the other rooms do not wait for it. While
+      it runs, a new call of the same entry is refused before it starts (``failed interrupted``,
+      ``stopped: detached_call_running`` in the audit log): at most one stray call per entry, and
+      never two calls of one entry at once. Its thread is a daemon: when the process exits, a
+      stray call is cut off wherever it is;
+    - a call that returns after its deadline is ``failed timeout``, and one that returns after a
+      kill or an abandonment is ``killed``, whatever it returned, as for a child; a kill is then
+      consumed, so it does not reach the next request.
+
+    A function that raises anything else, ``BaseException`` included, gets a ``done`` reply with
+    exit code 1 and a stderr naming the exception's nearest built-in class only (see
+    :func:`_exception_name`): its message and any name the function gave its own class can hold
+    anything the function held, so neither goes in the reply or in the audit log.
+    """
+    job_id = ready.job.job_id
+    operation = ready.operation
+    entry = operation.in_process
+    assert entry is not None
+    reason = (
+        "abandoned"
+        if stop()
+        else "draining"
+        if ctx.controls.draining.is_set()
+        else "paused"
+        if ctx.controls.paused()
+        else "detached_call_running"
+        if _detached_running(operation.name)
+        else None
+    )
+    if reason is not None:
+        ctx.audit.execution(job_id, op=operation.name, started=False, stopped=reason)
+        if reason == "abandoned":
+            raise Abandoned
+        return Outcome(status="failed", code="interrupted", duration_ms=0)
+    ctx.audit.start(
+        job_id,
+        op=operation.name,
+        in_process=entry.name,
+        definition_hash=operation.definition_hash,
+    )
+    if ctx.observe is not None:
+        ctx.observe("started")
+
+    def kill_requested() -> bool:
+        return ctx.controls.kill_requested() or stop()
+
+    began = time.monotonic()
+    deadline = began + ready.timeout_s
+    told = threading.Event()
+
+    def call_stop() -> bool:
+        return told.is_set() or kill_requested() or time.monotonic() >= deadline
+
+    call = Call(
+        args=MappingProxyType(dict(ready.job.args)),
+        timeout_s=ready.timeout_s,
+        deadline=deadline,
+        stop=call_stop,
+    )
+    box: dict[str, Any] = {}
+    finished = threading.Event()
+
+    def body() -> None:
+        try:
+            box["returned"] = entry.function(call)
+        except TimedOut:
+            box["said"] = "timeout"
+        except Stopped:
+            box["said"] = "stopped"
+        except BaseException as exc:  # noqa: BLE001 - reported by type, as any other raise
+            box["raised"] = _exception_name(exc)
+        finally:
+            box["at"] = time.monotonic()
+            finished.set()
+
+    thread = threading.Thread(target=body, name=f"lucille-host {operation.name}", daemon=True)
+    thread.start()
+    watched: str | None = None
+    while not finished.wait(_IN_PROCESS_POLL):
+        if kill_requested():
+            watched = "killed"
+            break
+        if time.monotonic() >= deadline:
+            watched = "timeout"
+            break
+    if watched is not None:
+        told.set()
+        finished.wait(IN_PROCESS_GRACE)
+    detached = not finished.is_set()
+    if detached:
+        with _DETACHED_LOCK:
+            _DETACHED[operation.name] = thread
+    duration_ms = int((time.monotonic() - began) * 1000)
+    result = Result()
+    raised: str | None = None
+    if watched == "killed" or kill_requested():
+        ended = "killed"
+    elif watched == "timeout" or box.get("said") == "timeout" or box["at"] > deadline:
+        ended = "timeout"
+    elif "raised" in box:
+        ended, raised = "raised", box["raised"]
+    elif box.get("said") == "stopped":
+        # Stopped with nothing telling it to stop: a fault of the function's own.
+        ended, raised = "raised", "Stopped"
+    elif _well_formed(box.get("returned")):
+        ended, result = "exited", box["returned"]
+    else:
+        ended, raised = "raised", "TypeError"
+    if raised is not None:
+        result = Result(exit_code=1, stderr=f"the operation raised {raised}")
+    abandoned = ended == "killed" and stop()
+    if ended == "killed" and not abandoned:
+        ctx.controls.kill_done()
+    stdout_raw = result.stdout.encode("utf-8", "replace")
+    stderr_raw = result.stderr.encode("utf-8", "replace")
+    # Rendered as a child's output is (decoded, redacted, capped), before anything is written or
+    # sent: the audit line, the reply and the logs only ever see the rendered strings.
+    stdout_cap, stderr_cap = _caps(ready.job, ctx)
+    stdout, stdout_truncated = _output.render(
+        stdout_raw[: _output.RAW_CEILING],
+        stdout_cap,
+        dropped=len(stdout_raw) > _output.RAW_CEILING,
+    )
+    stderr, stderr_truncated = _output.render(
+        stderr_raw[: _output.RAW_CEILING],
+        stderr_cap,
+        dropped=len(stderr_raw) > _output.RAW_CEILING,
+    )
+    fields: dict[str, Any] = {
+        "op": operation.name,
+        "child": False,
+        "in_process": entry.name,
+        "ended": ended,
+        "exit_code": result.exit_code if ended in ("exited", "raised") else None,
+        "duration_ms": duration_ms,
+        "stdout_bytes": len(stdout_raw),
+        "stderr_bytes": len(stderr_raw),
+    }
+    if raised is not None:
+        fields["raised"] = raised
+    if abandoned:
+        fields["abandoned"] = True
+    if detached:
+        fields["detached"] = True
+    if ctx.policy.log_results:
+        fields["stdout"] = stdout
+        fields["stderr"] = stderr
+    ctx.audit.execution(job_id, **fields)
+    if abandoned:
+        raise Abandoned
+    if ended == "timeout":
+        return Outcome(status="failed", code="timeout", duration_ms=duration_ms)
+    if ended == "killed":
+        return Outcome(status="failed", code="killed_locally", duration_ms=duration_ms)
+    return Outcome(
+        status="done",
+        exit_code=result.exit_code,
+        stdout=stdout,
+        stdout_truncated=stdout_truncated,
+        stderr=stderr,
+        stderr_truncated=stderr_truncated,
+        duration_ms=duration_ms,
+    )
 
 
 _FIELD_ORDER: Final = (
