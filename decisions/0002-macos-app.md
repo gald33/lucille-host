@@ -339,7 +339,10 @@ Until the project's Apple Developer membership exists, the repository owner trie
 their own Mac only (§18). macOS refuses to open such a build normally; the owner opens it once per build
 through System Settings › Privacy & Security › **Open Anyway**, or by removing its quarantine attribute.
 Each new ad-hoc build is a new code identity to macOS, so its Keychain and folder prompts come again with
-every build. Nobody else is given one, and nobody is told to work around the warning.
+every build. That is the expectation, not yet borne out for the Keychain: on the owner's Mac on 2026-11-17
+and 2026-11-18, a new build used the existing connection, and saved and read a credential, and macOS asked
+nothing ([macos/README.md](../macos/README.md), What CI does not check, the Keychain). Nobody else is given
+one, and nobody is told to work around the warning.
 
 The first signed builds go only to the repository owner, as draft releases that are never published (§18).
 They pair by pasting the code: on Lucille's page **Add computer**, **Copy**, then the user pastes it into the
