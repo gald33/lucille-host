@@ -590,9 +590,10 @@ code says how the call went: 0 for a 2xx status; 3 for any other status, a 3xx i
 and never followed; 2 when the credential is missing, is not bound to `api.github.com`, or is not in the form
 of a GitHub token; 4 when the address check, the connection or the TLS handshake failed, so that nothing
 was sent, or when the connection broke before the response was read; 5 when the
-response's headers passed 64 KiB or its body 1 MiB. Each of 2, 4 and 5 writes one fixed line on `stderr`;
-2 and 4 write no `stdout`, and 5 writes the part of the body it read. None of these is a refusal: the reply
-is `done`.
+response's headers passed 64 KiB or its body 1 MiB, or it came compressed (any `Content-Encoding` but
+`identity`); 6 for anything unexpected in the host's own code. Each of 2, 4, 5 and 6 writes one fixed line on
+`stderr`, never an error's text; 2, 4 and 6 write no `stdout`, and 5 writes the part of an uncompressed body
+it read. None of these is a refusal: the reply is `done`.
 
 **`host.describe`.** It replies `done` with `exit_code` 0, an empty `stderr`, and both truncation flags
 false. Its document goes, JSON-encoded, in `stdout`. The reply has no structured result field, and the

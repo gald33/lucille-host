@@ -123,16 +123,31 @@ ops enable github.read`. Its arguments are `{credential, path}`:
 
 **Where it runs: a child process, never `run`.** The catalog entry runs the host's own interpreter:
 `<the host's interpreter> -I -B -X utf8 -m lucille_host.proxy --profile <the host's profile> --
-{credential} {path}`. Two elements are filled by the host, never from a request: the real path of the
-interpreter the host runs on, and the host's own profile name. Every string from the request comes after
-`--`, as in every entry. So:
+{credential} {path}`. Two elements are filled by the host, never from a request:
 
-- `run` never imports `credentials`, `ssl`, `socket`, `http.client`, `ipaddress` or `certifi`, and never
-  holds a value: only the short-lived child reads one. A test holds the imports.
+- the interpreter, as `sys.executable` gives it: an absolute path, not resolved through links. In a
+  virtual environment (a `pipx` install among them), resolving the link would land on the base
+  interpreter, which does not load the environment, and `-m lucille_host.proxy` would not import;
+- the host's own profile name.
+
+Every string from the request comes after `--`, as in every entry. So:
+
+- **The `run` process never imports `lucille_host.credentials`**, and never holds a value: only the
+  short-lived child reads one. A test of `sys.modules` holds it. The network modules are another matter:
+  `run`'s dependencies (the Switchboard client, keyring) already load `ssl`, `socket`, `http.client` and
+  `ipaddress`, so no test could hold that `run` never imports them. What holds instead is that, among the
+  host's own modules, only `proxy.py` may import `socket`, `ssl`, `http.client`, `ipaddress` or `certifi`:
+  the AST lint's zone, below.
 - The child's environment is `CHILD_ENV` plus a fixed allow-list of names, each copied from the host's own
   environment when it is set: `HOME` on macOS; `DBUS_SESSION_BUS_ADDRESS` and `XDG_RUNTIME_DIR` on Linux.
-  The keyring needs them. The names are in the entry's definition hash, so a release that changes them
-  turns an enabled `github.read` off until the user enables it again.
+  The keyring needs them. Nothing else is copied: no proxy setting (`HTTPS_PROXY` and the rest), no
+  `SSL_CERT_*`, `LD_*`, `DYLD_*` or `PYTHON*` variable (`-I` also makes the interpreter ignore
+  `PYTHON*`).
+- **The definition hash grows.** Today `_definition()` covers the argv template and `CHILD_ENV`. It is
+  extended to cover each OS's allow-list of copied names, and which argv elements the host fills (as
+  markers in the template, not their values, which differ from one computer to another). So a release
+  that changes either turns an enabled `github.read` off until the user enables it again. The
+  interpreter's sha256 is recorded in the audit log, as every executable's is.
 - **Field check, not a claim:** whether macOS opens the credential's Keychain item to this child without a
   prompt is not known. It is checked on the repository owner's Mac with the implementation's first build,
   and the result is recorded in macos/README.md. So is whether a Linux desktop's Secret Service answers
@@ -143,37 +158,63 @@ interpreter the host runs on, and the host's own profile name. Every string from
 **What the child does, in order.** Each refusal writes one fixed line on standard error, holds no value,
 and sends nothing.
 
+0. **Its own arguments, and anything unexpected.** It reads its arguments by position, exactly
+   `--profile <profile> -- <credential> <path>`, not with `argparse`, which would exit 2 on a usage error
+   and collide with exit 2 below. A top-level handler catches every exception the child does not raise
+   on purpose: it writes one fixed line (`lucille-host proxy: internal error`), never the exception's
+   text, which could hold a header's value, and exits 6. A malformed argument list exits 6 the same way.
+
 1. **The credential.** It reads `github/<credential>`, and refuses (exit 2) when there is none, when its
    bound hosts do not include `api.github.com`, or when its value is not in the form of a GitHub token
    (`github_pat_` followed by 22 to 255 of `[A-Za-z0-9_]`, or `ghp_` followed by 36 to 251 of
    `[A-Za-z0-9]`). That last check also keeps a password saved by mistake from being sent.
 2. **The address.** Only `api.github.com`, port 443, over HTTPS. It resolves the name and refuses (exit 4)
-   unless every address it gets is a global unicast address: no loopback, private, link-local,
-   multicast, reserved or unspecified address, IPv4 or IPv6. One mixed answer refuses the whole request.
+   unless every address it gets is allowed, by its own fixed list, not by `ipaddress.is_global`, whose
+   meaning changed between Python 3.11 and 3.13. One refused address refuses the whole request.
+   - IPv4 refused: `0.0.0.0/8`, `10.0.0.0/8`, RFC 6598's shared address space (carrier-grade NAT), `127.0.0.0/8`,
+     `169.254.0.0/16`, `172.16.0.0/12`, `192.0.0.0/24`, `192.0.2.0/24`, `192.88.99.0/24`,
+     `192.168.0.0/16`, `198.18.0.0/15`, `198.51.100.0/24`, `203.0.113.0/24`, `224.0.0.0/4` and
+     `240.0.0.0/4`, which holds `255.255.255.255`. Any other IPv4 address is allowed.
+   - IPv6 allowed: only `2000::/3`, less these: `2001::/23` (Teredo and the other protocol assignments),
+     `2001:db8::/32`, and `2002::/16` (6to4, which can carry a private IPv4 address). So `::`, `::1`,
+     `::ffff:0:0/96` (IPv4-mapped), `64:ff9b::/96` and `64:ff9b:1::/48` (NAT64, which can reach a
+     private IPv4 address through a translator), `100::/64`, `fc00::/7`, `fe80::/10` and `ff00::/8` are
+     all refused. On a network that reaches GitHub only through NAT64, `github.read` therefore fails
+     (exit 4); that is the price of not reasoning about what the translator reaches.
 3. **One connection per request.** It connects to a vetted address, never to the name again, so nothing
-   can re-point the name between the check and the connection. TLS checks the certificate for
-   `api.github.com` against certifi's bundle, the trust the hub client already uses. It sends
+   can re-point the name between the check and the connection. TLS sends `api.github.com` as the server
+   name (SNI) and checks the certificate for that name against certifi's bundle, the trust the hub
+   client already uses. It sends
    `Connection: close` and makes no second request on the connection, so there is no keep-alive to
    re-check. It reads no proxy setting from the environment.
 4. **The request.** `GET` only, with no body, and fixed headers: `Host`, `Authorization: Bearer
-   <token>`, `Accept: application/vnd.github+json`, `X-GitHub-Api-Version: 2022-11-28` and
-   `User-Agent: lucille-host/<version>`. The token goes nowhere else: not in the path, the query or any
+   <token>`, `Accept: application/vnd.github+json`, `Accept-Encoding: identity`, `X-GitHub-Api-Version:
+   2022-11-28` and `User-Agent: lucille-host/<version>`. The token goes nowhere else: not in the path, the query or any
    other header. Lucille writes none of the headers.
 5. **No redirects.** A 3xx is reported, never followed.
-6. **Caps.** The response's headers are read up to 64 KiB in all (and at most 100 headers, `http.client`'s
-   own limit), and its body up to 1 MiB; past either, it stops reading and exits 5, having written what it
-   read of the body. The reply carries at most what §13 of the protocol allows any child's output (64 KiB
+6. **Caps, and no compressed body.** The response's headers are read up to 64 KiB in all (and at most 100
+   headers, `http.client`'s own limit), and its body up to 1 MiB; past either, it stops reading and exits
+   5, having written what it read of the body. A response with a `Content-Encoding` other than `identity`
+   is not read at all (exit 5, no body), since the scrub cannot see into a compressed body. The reply carries at most what §13 of the protocol allows any child's output (64 KiB
    of each stream), with the stream's truncation flag set.
 7. **The scrub.** Before anything is written, every occurrence of the token is replaced, in the body and
    in what goes on standard error. Because the token's characters are `[A-Za-z0-9_]`, URL-encoding leaves
-   them unchanged and JSON escapes none of them, so the raw form also covers an echo in URL-encoded or
-   JSON-escaped text. The proxy also replaces the token's base64 encoding at each of the three byte
-   alignments (the four-character groups that depend only on the token): GitHub has no reason to echo a
-   bearer token in base64, and the check is cheap.
+   them unchanged and a standard JSON encoder escapes none of them, so the raw form also covers an echo
+   in URL-encoded or JSON-escaped text. The proxy also replaces the token's base64 encoding at each of
+   the three byte alignments (the four-character groups that depend only on the token).
+   - **Where it runs.** Once, on the whole body buffer, after `http.client` has undone any chunked
+     transfer encoding: never per read, so never across a chunk boundary. At the 1 MiB cut (exit 5), any
+     tail of the cut buffer that is a beginning of the token is dropped before writing, so no part of the
+     token is written at the cut.
+   - **Its scope.** It is defence in depth. Lucille cannot make GitHub reflect the `Authorization` header,
+     and nothing else sends the token. It does not cover JSON's optional `\uXXXX` escaping of ordinary
+     characters, base64 broken across lines (the readme endpoint wraps its base64), a change of case, or a
+     part of the token.
 8. **What it writes.** Standard output: the response body. Standard error: `HTTP <status>`, then, when
    GitHub sent one, its `Link` header (for paging), both scrubbed. Exit code: 0 for a 2xx; 3 for any other
-   status (a 3xx included); 2, 4 and 5 as above, and 4 also when the connection breaks before the
-   response has been read.
+   status (a 3xx included); 2, 4, 5 and 6 as above, and 4 also when the connection breaks before the
+   response has been read. These are the child's exit codes, which the reply carries as data under
+   `done`: none of them is a refusal code of the protocol.
 
 The catalog's default time limit, 30 s, applies.
 
