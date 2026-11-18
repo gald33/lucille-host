@@ -1622,30 +1622,32 @@ extension SelfTest {
                           "\(name) gives the host's version", "\(objects)")
         }
         let listed = VerbOutcome.done(fixtures["ops-list"]?.objects ?? []).abilities
-        report.expect(listed.map(\.name) == ["host.describe", "host.sleep", "files.sha256"]
-                          && listed.map(\.state) == [.enabled, .disabled, .disabled]
-                          && listed.map(\.isOn) == [true, false, false]
-                          && listed.map(\.diagnostic) == [false, true, false]
+        report.expect(listed.map(\.name) == ["host.describe", "host.sleep", "files.sha256", "github.read"]
+                          && listed.map(\.state) == [.enabled, .disabled, .disabled, .disabled]
+                          && listed.map(\.isOn) == [true, false, false, false]
+                          && listed.map(\.diagnostic) == [false, true, false, false]
                           && listed.allSatisfy({ !$0.sendsFileContent }),
                       "ops list reads each operation in catalog order, its switch from enabled", "\(listed)")
         let shown = listed.filter(\.isShown)
-        report.expect(shown.map(\.title) == ["Check a file's fingerprint"]
-                          && shown.map(\.detail) == ["Lucille gets a code that identifies the file's exact contents, not the contents."],
-                      "the menu lists files.sha256 alone, in the core's words", "\(shown)")
+        report.expect(shown.map(\.title) == ["Check a file's fingerprint", "Read from GitHub with a token kept here"]
+                          && shown.map(\.detail) == ["Lucille gets a code that identifies the file's exact contents, not the contents.",
+                                                     "Lucille gets GitHub's reply to one read it names: your repositories, issues, pull requests, commits or a README. The token goes only to api.github.com; Lucille learns only its name."],
+                      "the menu lists files.sha256 and github.read, in the core's words", "\(shown)")
         let every = VerbOutcome.done(fixtures["ops-list-every-state"]?.objects ?? []).abilities
-        report.expect(every.map(\.state) == [.disabled, .unavailable(missingExecutable: "/bin/sleep"), .disabledByUpgrade, .notInCatalog]
-                          && every.map(\.isOn) == [false, true, false, false]
-                          && every.map(\.canChange) == [true, true, true, false]
-                          && every.map(\.isShown) == [false, false, true, false],
+        report.expect(every.map(\.state) == [.disabled, .unavailable(missingExecutable: "/bin/sleep"), .disabledByUpgrade, .disabled, .notInCatalog]
+                          && every.map(\.isOn) == [false, true, false, false, false]
+                          && every.map(\.canChange) == [true, true, true, true, false]
+                          && every.map(\.isShown) == [false, false, true, true, false],
                       "every state reads: one this Mac can't run is on as the policy says, and can be turned off", "\(every)")
         let content = VerbOutcome.done(fixtures["ops-list-sends-file-content"]?.objects ?? []).abilities
         let questionOn: [Bool] = content.map { $0.asksFirst(turningOn: true) }
         let questionOff: [Bool] = content.map { $0.asksFirst(turningOn: false) }
-        report.expect(questionOn == [false, false, true] && questionOff == [false, false, false],
+        report.expect(questionOn == [false, false, true, false] && questionOff == [false, false, false, false],
                       "only the operation that sends file contents asks first, and only before it is turned on",
                       "\(questionOn) \(questionOff)")
-        report.expect(content.map(\.sendsFileContent) == [false, false, true]
-                          && content.last.map({ HostText.turnOnQuestion($0).text }) == content.last?.detail,
+        let sendsContent = content.first(where: { $0.sendsFileContent })
+        report.expect(content.map(\.sendsFileContent) == [false, false, true, false]
+                          && sendsContent.map({ HostText.turnOnQuestion($0).text }) == sendsContent?.detail,
                       "an operation that sends file contents says so in a field, which the question before it is turned on reads",
                       "\(content)")
         let enabled = VerbOutcome.done(fixtures["ops-enable"]?.objects ?? []).ability
@@ -1726,10 +1728,11 @@ extension SelfTest {
         if !fixtures.isEmpty {
             let listed = VerbOutcome.done(fixtures["ops-list"]?.objects ?? []).summaries
             report.expect(listed == ["host.describe": "Describe this computer's host", "host.sleep": "Wait up to 4 minutes, for testing",
-                                     "files.sha256": "Check a file's fingerprint"],
+                                     "files.sha256": "Check a file's fingerprint",
+                                     "github.read": "Read from GitHub with a token kept here"],
                           "ops list --json gives each operation's summary, in the core's words", "\(listed)")
             let every = VerbOutcome.done(fixtures["ops-list-every-state"]?.objects ?? []).summaries
-            report.expect(every.count == 3 && every["host.nothing"] == nil,
+            report.expect(every.count == 4 && every["host.nothing"] == nil,
                           "a policy entry this release does not have has no summary", "\(every)")
             report.expect(VerbOutcome.done(fixtures["log"]?.objects ?? []).logLines
                               == [#"{"kind":"test","n":1}"#, #"{"kind":"test","n":2}"#],
@@ -2494,8 +2497,8 @@ extension SelfTest {
         let lacking = Ability(name: "old.op", state: .notInCatalog, enabled: true, summary: nil, sends: nil,
                               sendsFileContent: false, diagnostic: false)
         let lackingOnPage = lacking.isOnSetUpPage
-        report.expect(onPage == ["host.describe", "files.sha256"] && !lackingOnPage,
-                      "What Lucille may do switches host.describe and files.sha256, not host.sleep, which is for testing, nor a name this release lacks",
+        report.expect(onPage == ["host.describe", "files.sha256", "github.read"] && !lackingOnPage,
+                      "What Lucille may do switches host.describe, files.sha256 and github.read, not host.sleep, which is for testing, nor a name this release lacks",
                       "\(onPage)")
 
         // The way the app feeds it: this session's pairing started at `at`, in the pairing flow's
