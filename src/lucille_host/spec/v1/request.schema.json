@@ -18,6 +18,18 @@
     },
     {
       "$ref": "#/$defs/request.github.read"
+    },
+    {
+      "$ref": "#/$defs/request.gmail.check"
+    },
+    {
+      "$ref": "#/$defs/request.gmail.mailboxes"
+    },
+    {
+      "$ref": "#/$defs/request.gmail.search"
+    },
+    {
+      "$ref": "#/$defs/request.gmail.read"
     }
   ],
   "$defs": {
@@ -188,6 +200,141 @@
           "minLength": 1,
           "maxLength": 1024,
           "pattern": "^/(user|user/repos|search/issues|repos/[A-Za-z0-9][A-Za-z0-9-]{0,38}/([A-Za-z0-9_-][A-Za-z0-9._-]{0,99}|\\.[A-Za-z0-9_-][A-Za-z0-9._-]{0,98}|\\.\\.[A-Za-z0-9._-]{1,98})(/issues(/[1-9][0-9]{0,9}(/comments)?)?|/pulls(/[1-9][0-9]{0,9})?|/commits|/readme)?)(\\?(per_page=([1-9]|[1-9][0-9]|100)|page=[1-9][0-9]{0,4}|state=(open|closed|all)|sort=(created|updated|comments|pushed|full_name)|direction=(asc|desc)|q=[A-Za-z0-9%+:._-]{1,256})(&(per_page=([1-9]|[1-9][0-9]|100)|page=[1-9][0-9]{0,4}|state=(open|closed|all)|sort=(created|updated|comments|pushed|full_name)|direction=(asc|desc)|q=[A-Za-z0-9%+:._-]{1,256}))*)?$"
+        }
+      }
+    },
+    "args.gmail.check": {
+      "description": "gmail.check: sign in to Gmail over IMAP with an app password stored on the computer, and out again; no message is read (spec/PROTOCOL.md section 10; decisions/0003).",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "credential"
+      ],
+      "properties": {
+        "credential": {
+          "description": "The credential's name; the host uses the one it stores as gmail/<credential>.",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+        }
+      }
+    },
+    "args.gmail.mailboxes": {
+      "description": "gmail.mailboxes: the Gmail account's mailboxes, at most 500 (spec/PROTOCOL.md section 10; decisions/0003).",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "credential"
+      ],
+      "properties": {
+        "credential": {
+          "description": "The credential's name; the host uses the one it stores as gmail/<credential>.",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+        }
+      }
+    },
+    "args.gmail.search": {
+      "description": "gmail.search: the newest messages of one mailbox that match every criterion given, read-only (spec/PROTOCOL.md section 10; decisions/0003).",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "credential"
+      ],
+      "properties": {
+        "credential": {
+          "description": "The credential's name; the host uses the one it stores as gmail/<credential>.",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+        },
+        "mailbox": {
+          "description": "The mailbox to search, by its name as gmail.mailboxes gives it; INBOX when not given.",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[^\\u0000]*$"
+        },
+        "query": {
+          "description": "Gmail's own search syntax, sent as X-GM-RAW.",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "pattern": "^[^\\u0000]*$"
+        },
+        "from": {
+          "description": "Matches the From header.",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[^\\u0000]*$"
+        },
+        "to": {
+          "description": "Matches the To header.",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[^\\u0000]*$"
+        },
+        "subject": {
+          "description": "Matches the Subject header.",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[^\\u0000]*$"
+        },
+        "since": {
+          "description": "Messages on or after this date (YYYY-MM-DD).",
+          "type": "string",
+          "minLength": 10,
+          "maxLength": 10,
+          "pattern": "^[0-9]{4}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])$"
+        },
+        "before": {
+          "description": "Messages before this date (YYYY-MM-DD).",
+          "type": "string",
+          "minLength": 10,
+          "maxLength": 10,
+          "pattern": "^[0-9]{4}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])$"
+        },
+        "unseen": {
+          "description": "Only messages not yet read.",
+          "type": "boolean"
+        },
+        "limit": {
+          "description": "The most messages returned, newest first; 20 when not given.",
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 50
+        }
+      }
+    },
+    "args.gmail.read": {
+      "description": "gmail.read: one message, by Gmail's message id, as text, with its attachments' names, types and sizes only (spec/PROTOCOL.md section 10; decisions/0003).",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "credential",
+        "id"
+      ],
+      "properties": {
+        "credential": {
+          "description": "The credential's name; the host uses the one it stores as gmail/<credential>.",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+        },
+        "id": {
+          "description": "Gmail's message id (X-GM-MSGID), a decimal integer, as gmail.search gives it.",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 20,
+          "pattern": "^[1-9][0-9]{0,19}$"
         }
       }
     },
@@ -384,6 +531,170 @@
         },
         "args": {
           "$ref": "#/$defs/args.github.read"
+        },
+        "not_after": {
+          "$ref": "#/$defs/not_after"
+        },
+        "caps": {
+          "$ref": "#/$defs/caps"
+        },
+        "min_host_version": {
+          "$ref": "#/$defs/min_host_version"
+        }
+      }
+    },
+    "request.gmail.check": {
+      "description": "A request for gmail.check.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "v",
+        "dir",
+        "job_id",
+        "op",
+        "args",
+        "not_after"
+      ],
+      "properties": {
+        "v": {
+          "$ref": "#/$defs/v"
+        },
+        "dir": {
+          "$ref": "#/$defs/dir",
+          "const": "request"
+        },
+        "job_id": {
+          "$ref": "#/$defs/job_id"
+        },
+        "op": {
+          "$ref": "#/$defs/op_name",
+          "const": "gmail.check"
+        },
+        "args": {
+          "$ref": "#/$defs/args.gmail.check"
+        },
+        "not_after": {
+          "$ref": "#/$defs/not_after"
+        },
+        "caps": {
+          "$ref": "#/$defs/caps"
+        },
+        "min_host_version": {
+          "$ref": "#/$defs/min_host_version"
+        }
+      }
+    },
+    "request.gmail.mailboxes": {
+      "description": "A request for gmail.mailboxes.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "v",
+        "dir",
+        "job_id",
+        "op",
+        "args",
+        "not_after"
+      ],
+      "properties": {
+        "v": {
+          "$ref": "#/$defs/v"
+        },
+        "dir": {
+          "$ref": "#/$defs/dir",
+          "const": "request"
+        },
+        "job_id": {
+          "$ref": "#/$defs/job_id"
+        },
+        "op": {
+          "$ref": "#/$defs/op_name",
+          "const": "gmail.mailboxes"
+        },
+        "args": {
+          "$ref": "#/$defs/args.gmail.mailboxes"
+        },
+        "not_after": {
+          "$ref": "#/$defs/not_after"
+        },
+        "caps": {
+          "$ref": "#/$defs/caps"
+        },
+        "min_host_version": {
+          "$ref": "#/$defs/min_host_version"
+        }
+      }
+    },
+    "request.gmail.search": {
+      "description": "A request for gmail.search.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "v",
+        "dir",
+        "job_id",
+        "op",
+        "args",
+        "not_after"
+      ],
+      "properties": {
+        "v": {
+          "$ref": "#/$defs/v"
+        },
+        "dir": {
+          "$ref": "#/$defs/dir",
+          "const": "request"
+        },
+        "job_id": {
+          "$ref": "#/$defs/job_id"
+        },
+        "op": {
+          "$ref": "#/$defs/op_name",
+          "const": "gmail.search"
+        },
+        "args": {
+          "$ref": "#/$defs/args.gmail.search"
+        },
+        "not_after": {
+          "$ref": "#/$defs/not_after"
+        },
+        "caps": {
+          "$ref": "#/$defs/caps"
+        },
+        "min_host_version": {
+          "$ref": "#/$defs/min_host_version"
+        }
+      }
+    },
+    "request.gmail.read": {
+      "description": "A request for gmail.read.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "v",
+        "dir",
+        "job_id",
+        "op",
+        "args",
+        "not_after"
+      ],
+      "properties": {
+        "v": {
+          "$ref": "#/$defs/v"
+        },
+        "dir": {
+          "$ref": "#/$defs/dir",
+          "const": "request"
+        },
+        "job_id": {
+          "$ref": "#/$defs/job_id"
+        },
+        "op": {
+          "$ref": "#/$defs/op_name",
+          "const": "gmail.read"
+        },
+        "args": {
+          "$ref": "#/$defs/args.gmail.read"
         },
         "not_after": {
           "$ref": "#/$defs/not_after"

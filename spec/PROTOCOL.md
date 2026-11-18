@@ -494,6 +494,10 @@ change ([§21](#21-versioning)).
 | `files.sha256` | `{root, path}` | The SHA-256 digest of one file. `root` is a folder alias; `path` is a string of 1 to 1024 characters with no U+0000. |
 | `files.search` | `{root, pattern, fixed_strings, max_count}` | Searches the files under `root`. `pattern` is a string of 1 to 256 characters with no U+0000; `fixed_strings` is a boolean; `max_count` is an integer from 1 to 200, the most matches per file. All four are required. Its reply carries lines of the files it searched. |
 | `github.read` | `{credential, path}` | Reads one GitHub REST API endpoint with a credential stored on the computer, which the host sends to `api.github.com` alone and never to Lucille. `credential` is a credential's name, 1 to 64 characters matching `^[a-z0-9][a-z0-9._-]{0,63}$`; the host uses the one it stores as `github/<credential>`. `path` is a string of 1 to 1024 characters matching the schema's pattern: one of the listed read endpoints, with only the listed query keys (below). Both are required. Its reply carries GitHub's response. |
+| `gmail.check` | `{credential}` | Signs in to Gmail over IMAP with an app password stored on the computer, and out again; reads no mailbox and no message. `credential` is a credential's name, as `github.read`'s; the host uses the one it stores as `gmail/<credential>`, and sends its app password to `imap.gmail.com` alone, never to Lucille. |
+| `gmail.mailboxes` | `{credential}` | The account's mailboxes (Gmail's labels), at most 500. `credential` as `gmail.check`'s. |
+| `gmail.search` | `{credential, mailbox, query, from, to, subject, since, before, unseen, limit}` | The newest messages of one mailbox that match every criterion given; only `credential` is required. `mailbox` (`INBOX` when not given), `from`, `to` and `subject` are 1 to 128 characters, `query` (Gmail's own search syntax) 1 to 256, each of any character but U+0000; `since` and `before` are dates, `YYYY-MM-DD`; `unseen` is a boolean; `limit` is an integer from 1 to 50 (20 when not given). Its reply carries each message's headers and Gmail's message id, never its body. |
+| `gmail.read` | `{credential, id}` | One message, by `id`, Gmail's message id (`X-GM-MSGID`): 1 to 20 digits, no leading zero, as `gmail.search` gives it. Both are required. Its reply carries the message's headers, at most 32 KiB of its text, and its attachments' names, types and sizes, never their contents. |
 
 - **`github.read`'s paths.** `path` is `/user`, `/user/repos`, `/search/issues`, or, under
   `/repos/{owner}/{repo}`, the repository itself, `/issues`, `/issues/{number}`, `/issues/{number}/comments`,
@@ -509,6 +513,12 @@ change ([§21](#21-versioning)).
   interpreter (a program that embeds the host), and while keyring's own settings turn the keyring off in
   the host's environment, whose child could not see them. `host.describe` then leaves it out of
   `enabled_ops`.
+- **The Gmail operations** read only. The host signs in with the stored app password in IMAP's `LOGIN` and
+  nowhere else, opens a mailbox only read-only (`EXAMINE`), fetches only with `BODY.PEEK` (so no message is
+  marked read), and sends no command that changes anything. Each text criterion goes to Gmail as an IMAP
+  literal, never as part of a command line. They connect only to `imap.gmail.com`, port 993, over TLS. The
+  host refuses them `not_enabled`, as `github.read`, while it cannot run them. How it uses the credential, and
+  what it refuses, is in [decisions/0003](../decisions/0003-local-credentials.md) ("Second use").
 - A **folder alias** (`root`) is a name the host's local policy maps to a folder: 1 to 32 characters matching
   `^[a-z][a-z0-9_-]{0,31}$`. A request never carries a folder's path.
 - An argument that breaks its operation's schema (an extra key, a missing key, a wrong type, a value out of
@@ -600,6 +610,30 @@ host's module at all, before any credential was read, and then `stderr` is Pytho
 4, 5 and 6 writes one fixed line on `stderr`, never an error's text. Standard output is written once, at the
 end: 2 and 4 write none, 5 writes the part of an uncompressed body it read, and 6 writes none unless the
 failure came during that last write. None of these is a refusal: the reply is `done`.
+
+**The Gmail operations.** Each child's output is capped as any child's is. `stdout` is one JSON object, written
+once, at the end; `stderr` is empty, or one fixed line on failure. The app password is never in either.
+
+- `gmail.check`: `{"ok": true}`.
+- `gmail.mailboxes`: `{"mailboxes": [{"name", "special_use"}], "truncated"}`. `name` is the mailbox's name,
+  decoded from IMAP's modified UTF-7; `special_use` is Gmail's mark (`\All`, `\Sent`, `\Trash`, ...) or
+  null; `truncated` is true when there were more than 500.
+- `gmail.search`: `{"mailbox", "total", "messages": [{"id", "thread", "date", "from", "to", "subject",
+  "size", "unseen"}], "truncated"}`, newest first. `id` and `thread` are Gmail's message and thread ids, as
+  decimal strings; `date` is the message's `INTERNALDATE` in RFC 3339; `total` counts every match;
+  `truncated` is true when `total` passed `limit`. Each header value is cut at 1 KiB.
+- `gmail.read`: `{"id", "thread", "date", "from", "to", "cc", "subject", "message_id", "in_reply_to",
+  "text", "text_from", "text_truncated", "attachments": [{"filename", "content_type", "size"}],
+  "message_truncated"}`. `text` is the `text/plain` part, or, with none, the `text/html` part turned into
+  text (`text_from` says which, or is null with neither), cut at 32 KiB of UTF-8 (`text_truncated`).
+  `message_truncated` is true when the message passed the 4 MiB the host fetches. Header values are cut at
+  1 KiB, `to` and `cc` at 4 KiB.
+- The exit code says how it went: 0 done; 2 the credential is missing, not bound to `imap.gmail.com`, or not
+  an address and an app password; 3 Gmail answered `NO` or `BAD` (no such mailbox or message); 4 the address
+  check, the connection or the TLS handshake failed, or the connection broke; 5 a cap was reached (8 MiB
+  read from Gmail, or the counts above); 6 anything unexpected in the host's own code; 7 Gmail refused the
+  sign-in (a wrong or revoked app password); 1 as for `github.read`. None of these is a refusal: the reply
+  is `done`.
 
 **`host.describe`.** It replies `done` with `exit_code` 0, an empty `stderr`, and both truncation flags
 false. Its document goes, JSON-encoded, in `stdout`. The reply has no structured result field, and the

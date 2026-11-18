@@ -1,0 +1,22 @@
+{
+  "description": "gmail.search with Gmail's own syntax, in Hebrew, of a label.",
+  "valid": true,
+  "schema_valid": true,
+  "expect": {
+    "reply": {
+      "status": "done"
+    }
+  },
+  "body": {
+    "v": "lucille.exec/1",
+    "dir": "request",
+    "job_id": "00000000-0000-4000-8000-000000001454",
+    "op": "gmail.search",
+    "args": {
+      "credential": "default",
+      "mailbox": "עבודה",
+      "query": "חשבונית newer_than:7d"
+    },
+    "not_after": 1767229200
+  }
+}

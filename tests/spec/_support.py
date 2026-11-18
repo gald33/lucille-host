@@ -37,7 +37,17 @@ NOT_AFTER_MAX = 4294967295
 OP_MAX = 64  # characters in an op name
 CAP_MIN = 2  # the empty stream, "", measures 2 bytes
 CAP_MAX = 2147483647
-CATALOG = ("host.describe", "host.sleep", "files.sha256", "files.search", "github.read")
+CATALOG = (
+    "host.describe",
+    "host.sleep",
+    "files.sha256",
+    "files.search",
+    "github.read",
+    "gmail.check",
+    "gmail.mailboxes",
+    "gmail.search",
+    "gmail.read",
+)
 REFUSED_CODES = (
     "unknown_op",
     "not_enabled",

@@ -1,0 +1,22 @@
+{
+  "description": "gmail.search with a key off the list: no raw IMAP criteria.",
+  "valid": false,
+  "schema_valid": false,
+  "expect": {
+    "reply": {
+      "status": "refused",
+      "code": "bad_args"
+    }
+  },
+  "body": {
+    "v": "lucille.exec/1",
+    "dir": "request",
+    "job_id": "00000000-0000-4000-8000-000000001460",
+    "op": "gmail.search",
+    "args": {
+      "credential": "default",
+      "imap": "ALL"
+    },
+    "not_after": 1767229200
+  }
+}
