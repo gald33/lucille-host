@@ -423,6 +423,30 @@ that builds these operations: PRIVACY.md (the child's credential; what leaves; t
 decisions/0001 (the transport section), spec/CLI.md (§8's words; §15's `credential test`), macos/README.md
 (the Gmail section), and this record's "Unreachable from Lucille".
 
+**Open questions, to be confirmed by the repository owner before this design is merged.** Gmail would be the
+host's first protocol other than HTTPS and its first access to mail. Each question below has the answer
+this record proposes; none is settled until the owner confirms it.
+
+1. **Which IMAP commands, and which mailboxes.** Proposed: read-only, with only `CAPABILITY`, `LOGIN`,
+   `LIST`, `EXAMINE`, `UID SEARCH`, `UID FETCH` of `BODY.PEEK` and the items in §11, and `LOGOUT`. Any
+   mailbox the account has, opened only with `EXAMINE`. Open: whether some mailboxes (`\Trash`, `\Junk`,
+   `\Drafts`) should be out of reach, or only an allowed list of labels in reach, set by the user.
+2. **The transport.** Proposed: implicit TLS on port 993 only, from the first byte; no `STARTTLS`, so there
+   is nothing to downgrade, and no port 143. The certificate is checked for `imap.gmail.com` against
+   certifi's bundle, and the address against `github.read`'s fixed list.
+3. **Bodies: how they are capped and scrubbed.** Proposed: at most 4 MiB of a message fetched; text cut at
+   32 KiB, header values at 1 KiB, recipient lists at 4 KiB; the app password replaced, raw, spaced and in
+   base64 at three alignments, in all output. The host's own redaction of child output (§13) also runs.
+   Open: whether bodies should be cut further, or `gmail.read` return only a part of the text unless asked.
+4. **Attachments.** Proposed: names, content types and sizes only; never contents, and no operation that
+   reads one. Open: whether even names should be left out, since a name can say much.
+5. **How the app password is scoped and revoked.** An app password opens the whole account over IMAP
+   (Google offers no narrower one), so its scope is these operations' read-only rules, not the password's.
+   It is revoked by Google when the account password changes, by the user at Google's app-password page,
+   and removed here by Capsule's Remove or `credential remove`; a revoked one makes each operation exit 7.
+   Open: whether Capsule should say, when it saves one, that it opens the whole mailbox, and how to make an
+   account just for this.
+
 **Field check, not a claim.** That a real app password signs in from a Mac, through Capsule's bundled
 runtime, and that the Keychain gives the child the value without a prompt, is checked with a dedicated
 test account on the repository owner's Mac, with the implementation's first build.
