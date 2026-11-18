@@ -55,7 +55,11 @@ build is, and what is planned after it.
 - `Contents/Resources/bin/lucille-host`, a three-line `sh` wrapper for Terminal users. It runs the bundled
   host as the app does, with the app's flags and on the app's profile, `mac-app` (a `--profile` you give it
   replaces that one), and finds the bundle from its own real path, so a link to it from a folder on `PATH`
-  works too.
+  works too. It keeps the shell's environment, so a `SWITCHBOARD_*` variable set in that shell stops it,
+  as it stops any host command (`startup_refused`, exit 24), whereas the app's own children never have
+  one (their environment is fixed: [How the app talks to the host](#how-the-app-talks-to-the-host)).
+  Seen on the maintainer's Mac on 2026-11-18, with a variable that the shell had set up for other work:
+  removing it for those commands alone, in a subshell, was enough.
 - `Contents/Resources/licenses/`, the licence texts of the Python runtime and of every installed
   distribution, one folder each.
 - `Contents/Resources/AppIcon.icns`, the app icon, which `Info.plist` names (`CFBundleIconFile`), and
@@ -932,7 +936,17 @@ need a Mac and a person. Where the maintainer reported one done, in whole or in 
 - **The Keychain.** CI's harness keeps the connection in a file (`--store-file`). The app passes no
   `--store-file`, so the pairing of 2026-11-09 kept its connection in the Keychain; that is inferred from
   the code, not seen. What macOS asked about it then, if anything, was not recorded. What macOS asks
-  about it on each new ad hoc build is untested.
+  about it on each new ad hoc build is untested in CI. The maintainer reported two runs on their Mac,
+  none of which is in a CI log:
+  - on 2026-11-17, the disk image of run 43998253083 (`main` at 9b44656), put in place of the copy
+    there, found the connection of 2026-11-09 and went on with it, and macOS asked nothing;
+  - on 2026-11-18, with the disk image of run 44246935572 (`main` at 2869f11), `credential set`,
+    `credential list` and `credential remove`, run through the Terminal wrapper on the app's profile,
+    saved, listed and removed a test credential, and macOS asked nothing either.
+
+  Why it asked nothing is not known: that the connection is in the Keychain at all is inferred, and
+  macOS ties a Keychain item to the program that made it, here likely the bundled interpreter, which
+  may be byte for byte the same in both builds (not checked).
 - **Paste on macOS 26 and 27,** and whether macOS shows a paste alert there. The `macos-app` job pastes
   on macOS 15; the smoke jobs reach the code window on macOS 26 and 27 only where System Events can drive
   the app there. Paste through the Control-click menu is not driven in CI either. The maintainer reported a
