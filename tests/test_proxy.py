@@ -544,3 +544,237 @@ def test_the_child_writes_each_stream_once_and_ends_with_its_code() -> None:
     )
     done = _child(code=code)
     assert (done.returncode, done.stdout, done.stderr) == (3, b"body", b"HTTP 404\n")
+
+
+# --- review of the first build: what each rule's removal must break -------------------------
+
+
+@pytest.mark.parametrize(
+    "encoding",
+    ["gzip, chunked", "gzip", "deflate", "chunked, chunked", "Chunked, gzip", "identity"],
+)
+def test_a_transfer_coding_but_plain_chunked_is_not_read(encoding: str) -> None:
+    raw = TOKEN.encode()
+    payload = b"%x\r\n%s\r\n0\r\n\r\n" % (len(raw), raw)
+    reply, _, _ = _main(_http("200 OK", [f"Transfer-Encoding: {encoding}"], payload))
+    assert reply == proxy.Reply(
+        5,
+        b"",
+        b"HTTP 200\nlucille-host proxy: the response's transfer encoding is not chunked alone;"
+        b" not read\n",
+    )
+
+
+def test_two_chunked_transfer_encoding_headers_are_not_read() -> None:
+    payload = b"2\r\n{}\r\n0\r\n\r\n"
+    headers = ["Transfer-Encoding: chunked", "Transfer-Encoding: chunked"]
+    reply, _, _ = _main(_http("200 OK", headers, payload))
+    assert reply.code == 5 and reply.stdout == b""
+
+
+def test_it_connects_to_the_vetted_address_never_the_name(monkeypatch: pytest.MonkeyPatch) -> None:
+    connected: list[tuple[Any, ...]] = []
+
+    def create_connection(address: tuple[str, int], timeout: float) -> Any:
+        connected.append(address)
+        raise OSError("no network in tests")
+
+    monkeypatch.setattr(proxy.socket, "create_connection", create_connection)
+    reply = proxy.main(ARGV, read_credential=_creds(), resolve=lambda *_: [GITHUB_V4, GITHUB_V6])
+    assert reply.code == 4
+    assert connected == [(GITHUB_V4, 443), (GITHUB_V6, 443)]
+
+
+def _self_signed(tmp_path: Any) -> tuple[str, str]:
+    """A certificate for api.github.com that no bundle trusts, and its key, as PEM files."""
+    import datetime
+
+    from cryptography import x509
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import ec
+    from cryptography.x509.oid import NameOID
+
+    key = ec.generate_private_key(ec.SECP256R1())
+    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "api.github.com")])
+    now = datetime.datetime.now(datetime.UTC)
+    cert = (
+        x509.CertificateBuilder()
+        .subject_name(name)
+        .issuer_name(name)
+        .public_key(key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now - datetime.timedelta(days=1))
+        .not_valid_after(now + datetime.timedelta(days=1))
+        .add_extension(x509.SubjectAlternativeName([x509.DNSName("api.github.com")]), False)
+        .sign(key, hashes.SHA256())
+    )
+    cert_path, key_path = tmp_path / "cert.pem", tmp_path / "key.pem"
+    cert_path.write_bytes(cert.public_bytes(serialization.Encoding.PEM))
+    key_path.write_bytes(
+        key.private_bytes(
+            serialization.Encoding.PEM,
+            serialization.PrivateFormat.PKCS8,
+            serialization.NoEncryption(),
+        )
+    )
+    return str(cert_path), str(key_path)
+
+
+def test_tls_checks_the_certificate_for_api_github_com_against_certifi(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A real handshake with a server whose certificate names api.github.com but chains to no
+    root in certifi's bundle: the proxy refuses it, having sent api.github.com as the server name,
+    so turning verification off, or sending another name, fails this test."""
+    import socket
+    import ssl
+    import threading
+
+    cert, key = _self_signed(tmp_path)
+    server_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    server_context.load_cert_chain(cert, key)
+    names: list[str | None] = []
+    server_context.sni_callback = lambda sock, name, ctx: names.append(name)
+    listener = socket.create_server(("127.0.0.1", 0))
+    port = listener.getsockname()[1]
+
+    def serve() -> None:
+        conn, _ = listener.accept()
+        try:
+            with server_context.wrap_socket(conn, server_side=True):
+                pass
+        except (OSError, ssl.SSLError):
+            pass
+
+    thread = threading.Thread(target=serve, daemon=True)
+    thread.start()
+    contexts: list[ssl.SSLContext] = []
+    real_context = proxy.ssl.create_default_context
+
+    def create_default_context(*args: Any, **kwargs: Any) -> ssl.SSLContext:
+        made = real_context(*args, **kwargs)
+        contexts.append(made)
+        return made
+
+    asked: list[tuple[str, int]] = []
+    real_connection = proxy.socket.create_connection
+
+    def create_connection(address: tuple[str, int], timeout: float) -> Any:
+        asked.append(address)
+        return real_connection(("127.0.0.1", port), timeout=timeout)
+
+    monkeypatch.setattr(proxy.ssl, "create_default_context", create_default_context)
+    monkeypatch.setattr(proxy.socket, "create_connection", create_connection)
+    try:
+        with pytest.raises(ssl.SSLCertVerificationError):
+            proxy._connect(GITHUB_V4)
+    finally:
+        thread.join(10)
+        listener.close()
+    assert asked == [(GITHUB_V4, 443)]
+    assert names == ["api.github.com"]
+    [context] = contexts
+    assert context.verify_mode == ssl.CERT_REQUIRED and context.check_hostname
+    assert context.minimum_version >= ssl.TLSVersion.TLSv1_2
+    # The trust is certifi's bundle and nothing else.
+    import certifi
+
+    bundle = open(certifi.where(), encoding="ascii").read().count("BEGIN CERTIFICATE")
+    assert len(context.get_ca_certs()) == bundle
+
+
+class _Endless(io.RawIOBase):
+    """A response's bytes, made as they are read, counting how many were."""
+
+    def __init__(self, head: bytes, size: int) -> None:
+        self.head = head
+        self.size = size
+        self.given = 0
+
+    def readable(self) -> bool:
+        return True
+
+    def readinto(self, buffer: Any) -> int:
+        total = len(self.head) + self.size
+        count = min(len(buffer), total - self.given)
+        for index in range(count):
+            at = self.given + index
+            buffer[index] = self.head[at] if at < len(self.head) else 0x78
+        self.given += count
+        return count
+
+
+class _EndlessSocket(FakeSocket):
+    def __init__(self, stream: _Endless) -> None:
+        super().__init__(b"")
+        self.stream = stream
+
+    def makefile(self, mode: str) -> io.BufferedReader:
+        return io.BufferedReader(self.stream)
+
+
+@pytest.mark.parametrize("length", [True, False])
+def test_the_body_is_read_no_further_than_the_cap(length: bool) -> None:
+    size = 6 * proxy.BODY_CAP
+    head = b"HTTP/1.1 200 OK\r\n" + (b"Content-Length: %d\r\n" % size if length else b"") + b"\r\n"
+    stream = _Endless(head, size)
+    reply = proxy.main(
+        ARGV,
+        read_credential=_creds(),
+        resolve=lambda *_: [GITHUB_V4],
+        connect=lambda address: _EndlessSocket(stream),
+    )
+    assert reply.code == 5 and len(reply.stdout) == proxy.BODY_CAP
+    # One read past the cap at most, and what the reader buffered.
+    assert stream.given <= len(head) + proxy.BODY_CAP + 2 * proxy._READ_CHUNK + 8192
+
+
+def test_the_interpreter_is_never_resolved_through_links(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from lucille_host import ops
+
+    link = tmp_path / "venv-python"
+    link.symlink_to(sys.executable)
+    monkeypatch.setattr("sys.executable", str(link))
+    assert ops.host_interpreter() == str(link)
+    assert ops.OPERATIONS["github.read"].executable("linux") == str(link)
+
+
+def test_the_child_ends_with_os_exit_so_nothing_runs_after_its_writes() -> None:
+    # An atexit handler, a finalizer and a buffered write would each run or flush at an ordinary
+    # exit; with os._exit none does.
+    code = (
+        "import atexit, os, sys\n"
+        "from lucille_host import proxy\n"
+        "atexit.register(lambda: os.write(proxy_err[0], b'atexit ran'))\n"
+        "proxy_err = []\n"
+        "real = proxy._set_aside_streams\n"
+        "def keep():\n"
+        "    out, err = real()\n"
+        "    proxy_err.append(err)\n"
+        "    return out, err\n"
+        "proxy._set_aside_streams = keep\n"
+        "proxy.main = lambda argv: proxy.Reply(0, b'body', b'HTTP 200\\n')\n"
+        "proxy.run()\n"
+    )
+    done = _child(code=code)
+    assert (done.returncode, done.stdout, done.stderr) == (0, b"body", b"HTTP 200\n")
+
+
+def test_nothing_a_library_writes_reaches_the_childs_streams() -> None:
+    code = (
+        "import os, sys\n"
+        "from lucille_host import proxy\n"
+        "def main(argv):\n"
+        f"    print({TOKEN!r})\n"
+        f"    print({TOKEN!r}, file=sys.stderr)\n"
+        f"    sys.stderr.write({TOKEN!r} + '\\n')\n"
+        f"    os.write(1, {TOKEN!r}.encode())\n"
+        f"    os.write(2, {TOKEN!r}.encode())\n"
+        "    return proxy.Reply(0, b'body', b'HTTP 200\\n')\n"
+        "proxy.main = main\n"
+        "proxy.run()\n"
+    )
+    done = _child(code=code)
+    assert (done.returncode, done.stdout, done.stderr) == (0, b"body", b"HTTP 200\n")

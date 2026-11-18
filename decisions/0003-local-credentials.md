@@ -167,13 +167,14 @@ Every string from the request comes after `--`, as in every entry. So:
   the child.
 - The executable's sha256 in the audit log is the interpreter's; it does not cover `lucille_host.proxy`,
   which is part of the installed release.
-- **Keyring's off switch, in the child.** The child reads keyring's off switch as the host does
-  (`store.check_backend`), but from its own environment: `PYTHON_KEYRING_BACKEND` is not copied, and on
-  Linux the `keyringrc.cfg` is looked for under `~/.config` only, since `XDG_CONFIG_HOME` is not copied
-  either. So a host started with keyring turned off by that variable, or by a `keyringrc.cfg` under a
-  custom `XDG_CONFIG_HOME`, does not turn it off for the child, which then reads the system keyring. The
-  credential store refuses every backend but the system's own in either process, so this changes which
-  keyring is asked, never whether a file backend is.
+- **Keyring's off switch is the host's to honour.** The child's environment carries neither
+  `PYTHON_KEYRING_BACKEND` nor `XDG_CONFIG_HOME`, so the child cannot see an off switch set through
+  either. So `run` decides: while keyring's own settings turn the keyring off in the host's environment
+  (`store.keyring_turned_off`: `PYTHON_KEYRING_BACKEND` naming keyring's `null` or `fail` backend, or a
+  `keyringrc.cfg` under `XDG_CONFIG_HOME` or `~/.config` that does), `github.read` is unavailable, refused
+  `not_enabled` before its child starts, and left out of `host.describe`'s `enabled_ops`
+  (`tests/test_jobs.py`, `test_github_read_is_refused_before_its_child_starts_while_keyring_is_off`).
+  The child still reads its own default `keyringrc.cfg`, and refuses every backend but the system's own.
 
 **What the child does, in order.** Each refusal writes one fixed line on standard error, holds no value,
 and sends nothing.

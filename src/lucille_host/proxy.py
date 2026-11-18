@@ -20,13 +20,14 @@ order, each refusal writing one fixed line on standard error, holding no value a
    close``. It reads no proxy setting from the environment.
 4. It follows no redirect, reads at most :data:`HEADER_CAP` bytes of headers and
    :data:`BODY_CAP` of body (exit 5 past either, with what it read of the body), and reads no
-   compressed body (exit 5, no body).
+   compressed body and no transfer coding but a plain ``chunked`` (exit 5, no body).
 5. It replaces the token, raw and in base64 at each of the three byte alignments, in the whole
    body and in what goes on standard error (:func:`scrub`), and at a cut drops any tail that
    begins the token.
 6. It writes standard output once, at the end, then standard error (``HTTP <status>``, and
    GitHub's ``Link`` header when there is one), and ends with ``os._exit``, so no finalizer's text
-   or failed final flush follows.
+   or failed final flush follows. From its start, descriptors 1 and 2 point at the null device and
+   it writes the reply through copies of them, so nothing a library writes reaches the reply.
 
 Exit codes: 0 for a 2xx, 3 for any other status, 2 the credential, 4 the address or the
 connection (also when it breaks before the response has been read), 5 a cap or a compressed body,
@@ -346,6 +347,17 @@ def _exchange(sock: Any, path: str, token: str) -> tuple[int, bytes, str]:
         encodings = response.headers.get_all("Content-Encoding") or []
         if any(value.strip().lower() not in ("", "identity") for value in encodings):
             raise _Stop(CAP, _LINE + "the response is compressed; not read", head=head)
+        # http.client undoes a plain "chunked" alone: any other transfer coding ("gzip, chunked"
+        # among them) would reach the scrub as bytes it cannot see into, so it is not read.
+        transfer = response.headers.get_all("Transfer-Encoding") or []
+        # Decided on what http.client will do, not on the header's text alone: it must be one
+        # header, and http.client must be reading it as chunked.
+        if transfer and (len(transfer) != 1 or response.chunked is not True):
+            raise _Stop(
+                CAP,
+                _LINE + "the response's transfer encoding is not chunked alone; not read",
+                head=head,
+            )
         body = bytearray()
         while len(body) <= BODY_CAP:
             chunk = response.read(_READ_CHUNK)
@@ -446,14 +458,35 @@ def _write(descriptor: int, data: bytes) -> None:
         view = view[written:]
 
 
+def _set_aside_streams() -> tuple[int, int]:
+    """Copies of standard output and standard error for the reply alone, with descriptors 1 and 2
+    pointed at the null device from here on. So nothing a library writes there, through
+    ``sys.stdout``, ``sys.stderr`` (line-buffered under ``-I``) or from C, reaches the reply
+    unscrubbed: the child writes only what :func:`main` returns."""
+    out = os.dup(1)
+    err = os.dup(2)
+    null = os.open(os.devnull, os.O_WRONLY)
+    try:
+        os.dup2(null, 1)
+        os.dup2(null, 2)
+    finally:
+        os.close(null)
+    return out, err
+
+
 def run() -> NoReturn:
-    """The child's entry point: the top-level handler, one write of each stream, ``os._exit``."""
+    """The child's entry point: the streams set aside, the top-level handler, one write of each
+    stream, ``os._exit``."""
+    try:
+        out, err = _set_aside_streams()
+    except OSError:
+        os._exit(INTERNAL)
     try:
         reply = main(sys.argv[1:])
     except BaseException:  # noqa: BLE001 - its text could hold a header's value: never written
         reply = Reply(INTERNAL, b"", (INTERNAL_LINE + "\n").encode("ascii"))
-    _write(1, reply.stdout)
-    _write(2, reply.stderr)
+    _write(out, reply.stdout)
+    _write(err, reply.stderr)
     os._exit(reply.code)
 
 

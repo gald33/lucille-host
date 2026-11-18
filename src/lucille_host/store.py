@@ -179,6 +179,7 @@ __all__ = [
     "file_lock",
     "keyring_call",
     "keyring_failure",
+    "keyring_turned_off",
     "pair_write_tried",
     "stamps_only",
 ]
@@ -503,6 +504,14 @@ def _turned_off() -> bool:
         os.environ.get("PYTHON_KEYRING_BACKEND") in OFF_SWITCH
         or _configured_backend() in OFF_SWITCH
     )
+
+
+def keyring_turned_off() -> bool:
+    """Whether keyring's own settings, in this process's environment, turn the keyring off
+    (:func:`_turned_off`). ``run`` refuses ``github.read`` while they do, before its child starts:
+    the child's environment holds neither ``PYTHON_KEYRING_BACKEND`` nor ``XDG_CONFIG_HOME``, so it
+    could not see the setting itself (decisions/0003, "First use")."""
+    return _turned_off()
 
 
 @functools.cache

@@ -48,7 +48,7 @@ from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Any, Final
 
-from lucille_host import __version__, _exec, _output
+from lucille_host import __version__, _exec, _output, store
 from lucille_host.audit import AuditLog
 from lucille_host.containment import contain
 from lucille_host.controls import Controls
@@ -128,10 +128,14 @@ class Context:
 
 
 def runs_here(operation: Operation, ctx: Context) -> bool:
-    """Whether this host can run ``operation`` now: for one whose program is the host's own
-    interpreter, only when the context names one (decisions/0003, "First use")."""
+    """Whether this host can run ``operation`` now. One whose program is the host's own
+    interpreter (``github.read``, which reads a stored credential) runs only when the context names
+    the interpreter, and never while keyring's own settings turn the keyring off in the host's
+    environment, which its child's environment does not carry (decisions/0003, "First use")."""
     if operation.runs_host_python:
         if ctx.interpreter is None or ctx.state_dir is None or ctx.profile is None:
+            return False
+        if store.keyring_turned_off():
             return False
         return operation.available(ctx.os_family, ctx.interpreter)
     return operation.available(ctx.os_family)
