@@ -482,6 +482,19 @@ def _call_in_process(ready: Ready, ctx: Context, stop: Callable[[], bool]) -> Ou
         ctx.controls.kill_done()
     stdout_raw = result.stdout.encode("utf-8", "replace")
     stderr_raw = result.stderr.encode("utf-8", "replace")
+    # Rendered as a child's output is (decoded, redacted, capped), before anything is written or
+    # sent: the audit line, the reply and the logs only ever see the rendered strings.
+    stdout_cap, stderr_cap = _caps(ready.job, ctx)
+    stdout, stdout_truncated = _output.render(
+        stdout_raw[: _output.RAW_CEILING],
+        stdout_cap,
+        dropped=len(stdout_raw) > _output.RAW_CEILING,
+    )
+    stderr, stderr_truncated = _output.render(
+        stderr_raw[: _output.RAW_CEILING],
+        stderr_cap,
+        dropped=len(stderr_raw) > _output.RAW_CEILING,
+    )
     fields: dict[str, Any] = {
         "op": operation.name,
         "child": False,
@@ -499,8 +512,8 @@ def _call_in_process(ready: Ready, ctx: Context, stop: Callable[[], bool]) -> Ou
     if detached:
         fields["detached"] = True
     if ctx.policy.log_results:
-        fields["stdout"] = result.stdout
-        fields["stderr"] = result.stderr
+        fields["stdout"] = stdout
+        fields["stderr"] = stderr
     ctx.audit.execution(job_id, **fields)
     if abandoned:
         raise Abandoned
@@ -508,17 +521,6 @@ def _call_in_process(ready: Ready, ctx: Context, stop: Callable[[], bool]) -> Ou
         return Outcome(status="failed", code="timeout", duration_ms=duration_ms)
     if ended == "killed":
         return Outcome(status="failed", code="killed_locally", duration_ms=duration_ms)
-    stdout_cap, stderr_cap = _caps(ready.job, ctx)
-    stdout, stdout_truncated = _output.render(
-        stdout_raw[: _output.RAW_CEILING],
-        stdout_cap,
-        dropped=len(stdout_raw) > _output.RAW_CEILING,
-    )
-    stderr, stderr_truncated = _output.render(
-        stderr_raw[: _output.RAW_CEILING],
-        stderr_cap,
-        dropped=len(stderr_raw) > _output.RAW_CEILING,
-    )
     return Outcome(
         status="done",
         exit_code=result.exit_code,

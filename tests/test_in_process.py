@@ -11,6 +11,7 @@ import dataclasses
 import hashlib
 import json
 import shutil
+import sys
 import threading
 import time
 from collections.abc import Iterator
@@ -467,3 +468,40 @@ def test_an_entry_with_a_detached_call_starts_no_other(
     _in_process.release.clear()
     assert execute(_ready(op), ctx).code == "timeout"  # it starts again: not refused
     _in_process.release.set()
+
+
+def test_the_audit_line_holds_what_a_child_s_would_for_the_same_output(
+    make_context: MakeContext, tmp_path: Path
+) -> None:
+    """With log_results on, the audit line holds the rendered output (redacted, capped), never the
+    function's raw output: it is what a child process that wrote the same bytes gets."""
+    child_op = dataclasses.replace(
+        _op(_in_process.big, name="test.big"),
+        argv={family: ("python",) for family in ("linux", "macos", "windows")},
+        in_process=None,
+    )
+    child_ready = Ready(
+        job=Job(job_id=JOB_ID, op="test.big", args={}),
+        operation=child_op,
+        argv=(sys.executable, "-c", _in_process.BIG_CHILD_SOURCE),
+        cwd=tmp_path,
+        timeout_s=120,
+    )
+    child_ctx = make_context(log_results=True)
+    child_outcome = execute(child_ready, child_ctx)
+    ctx = make_context(log_results=True)
+    outcome = execute(_ready(_op(_in_process.big, name="test.big")), ctx)
+
+    child_line, line = _lines(child_ctx)[-1], _lines(ctx)[-1]
+    # The premise: the child's line is itself redacted and capped.
+    assert "ghp_" not in child_line["stdout"] and "sk-bbbb" not in child_line["stderr"]
+    assert len(child_line["stdout"]) < 70_000 and len(child_line["stderr"]) < 70_000
+    # The in-process line is the same, and so is the reply.
+    assert (line["stdout"], line["stderr"]) == (child_line["stdout"], child_line["stderr"])
+    assert (outcome.stdout, outcome.stderr) == (child_outcome.stdout, child_outcome.stderr)
+    assert (outcome.stdout_truncated, outcome.stderr_truncated) == (True, True)
+    # Nothing of the raw output reaches the log, and the line stays small.
+    text = json.dumps(line)
+    assert "ghp_" not in text and "sk-bbbb" not in text
+    assert len(text) < 300_000
+    assert line["stdout_bytes"] == len(_in_process.BIG_STDOUT)
