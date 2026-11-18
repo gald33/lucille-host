@@ -374,16 +374,25 @@ _NAMED_EXCEPTIONS: Final = (
 
 
 def _exception_name(exc: BaseException) -> str:
-    """The name of the first of :data:`_NAMED_EXCEPTIONS` the exception is an instance of, else
+    """The name of the first of :data:`_NAMED_EXCEPTIONS` the exception's type derives from, else
     ``BaseException``.
 
     The name of a class the function made is the function's to choose, and so is as unbounded and
     as unredacted as its output: it goes nowhere. Every name returned is one of Python's own, so
     it is short and holds no secret, and it is written to the audit line with ``log_results`` off.
+
+    The exception object is the function's too, and Python asks it for its ``__class__`` when
+    ``isinstance`` is given an instance, which can run the function's code and raise anything,
+    with a message that holds a secret. So this asks the type, which asks the object nothing, and
+    any exception it raises anyway is dropped: the call is then named ``BaseException``.
     """
-    for cls in _NAMED_EXCEPTIONS:
-        if isinstance(exc, cls):
-            return cls.__name__
+    try:
+        kind = type(exc)
+        for cls in _NAMED_EXCEPTIONS:
+            if issubclass(kind, cls):
+                return cls.__name__
+    except Exception:  # noqa: BLE001 - nothing it holds may reach the thread's excepthook
+        pass
     return "BaseException"
 
 

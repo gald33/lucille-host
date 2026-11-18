@@ -523,3 +523,29 @@ def test_an_exception_s_own_name_and_message_reach_neither_audit_nor_reply(
     assert len(text) < 5_000
     execution = _lines(ctx)[-1]
     assert (execution["ended"], execution["raised"]) == ("raised", "ValueError")
+
+
+@pytest.mark.parametrize(
+    "function",
+    [_in_process.raises_with_a_hostile_class, _in_process.raises_with_a_hostile_getattribute],
+)
+@pytest.mark.parametrize("log_results", [False, True])
+def test_an_exception_that_raises_when_asked_about_itself_leaks_nothing(
+    make_context: MakeContext,
+    capfd: pytest.CaptureFixture[str],
+    function: Any,
+    log_results: bool,
+) -> None:
+    """The exception's own code runs if the host asks the object (its ``__class__``) and can raise
+    a token: nothing reaches the host process's stderr (by the thread's excepthook), the audit line
+    or the reply, and the call is named for the base class."""
+    ctx = make_context(log_results=log_results)
+    capfd.readouterr()
+    outcome = execute(_ready(_op(function, name="test.hostile")), ctx)
+    _settle()
+    captured = capfd.readouterr()
+    assert _in_process.SECRET not in captured.out + captured.err
+    assert (outcome.status, outcome.exit_code) == ("done", 1)
+    assert outcome.stderr == "the operation raised ValueError"
+    assert _in_process.SECRET not in ctx.audit.path.read_text()
+    assert _lines(ctx)[-1]["raised"] == "ValueError"

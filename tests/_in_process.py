@@ -114,3 +114,29 @@ def raises_named_for_a_token(call: Call) -> Result:
     """Raises a class whose own name is a token ahead of a huge run, with a message to match."""
     name = "ghp_" + "a" * 36 + "_" + "n" * HUGE
     raise type(name, (ValueError,), {})("sk-" + "b" * 30 + "m" * HUGE)
+
+
+SECRET = "ghp_" + "c" * 36
+
+
+class _ClassRaises(ValueError):
+    """An exception whose ``__class__`` raises, with a token, when something asks the object."""
+
+    @property  # type: ignore[misc]
+    def __class__(self) -> type:  # type: ignore[override]
+        raise RuntimeError(SECRET)
+
+
+class _GetattributeRaises(ValueError):
+    """An exception whose every attribute lookup raises, with a token."""
+
+    def __getattribute__(self, name: str) -> object:
+        raise RuntimeError(SECRET)
+
+
+def raises_with_a_hostile_class(call: Call) -> Result:
+    raise _ClassRaises("message")
+
+
+def raises_with_a_hostile_getattribute(call: Call) -> Result:
+    raise _GetattributeRaises("message")
