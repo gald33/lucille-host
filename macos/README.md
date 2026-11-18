@@ -55,8 +55,10 @@ build is, and what is planned after it.
 - `Contents/Resources/bin/lucille-host`, a three-line `sh` wrapper for Terminal users. It runs the bundled
   host as the app does, with the app's flags and on the app's profile, `mac-app` (a `--profile` you give it
   replaces that one), and finds the bundle from its own real path, so a link to it from a folder on `PATH`
-  works too. It keeps the shell's environment, so a `SWITCHBOARD_*` variable set in that shell stops it,
-  as it stops any host command (`startup_refused`, exit 24), whereas the app's own children never have
+  works too. It keeps the shell's environment, so a `SWITCHBOARD_*` variable set in that shell stops the
+  commands that check for one: `pair` in each of its forms, `run`, `status`, `forget` and `credential`
+  refuse with `startup_refused` (exit 24 for `run`, exit 1 for the others), while `ops`, `roots`, `log`,
+  `policy`, `pause`, `resume`, `kill` and `--version` do not check. The app's own children never have
   one (their environment is fixed: [How the app talks to the host](#how-the-app-talks-to-the-host)).
   Seen on the maintainer's Mac on 2026-11-18, with a variable that the shell had set up for other work:
   removing it for those commands alone, in a subshell, was enough.
