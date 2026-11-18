@@ -88,3 +88,20 @@ def sleeps_then_returns(call: Call) -> Result:
 
 def exits_the_interpreter(call: Call) -> Result:
     raise SystemExit(3)
+
+
+# What `big` writes, and the source of a child that writes the same: a token the redaction pass
+# knows ahead of far more output than any cap, on both streams.
+BIG_SIZE = 20 * 1024 * 1024
+BIG_STDOUT = "ghp_" + "a" * 36 + " " + "x" * BIG_SIZE
+BIG_STDERR = "sk-" + "b" * 30 + "\n" + "y" * BIG_SIZE
+BIG_CHILD_SOURCE = (
+    "import sys\n"
+    f"sys.stdout.write('ghp_' + 'a' * 36 + ' ' + 'x' * {BIG_SIZE})\n"
+    f"sys.stderr.write('sk-' + 'b' * 30 + chr(10) + 'y' * {BIG_SIZE})\n"
+)
+
+
+def big(call: Call) -> Result:
+    """Output of 20 MiB on each stream, with a token in clear at the front of each."""
+    return Result(stdout=BIG_STDOUT, stderr=BIG_STDERR)
