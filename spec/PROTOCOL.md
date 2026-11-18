@@ -643,7 +643,9 @@ either stream.
   - 0: done.
   - 2: the credential is missing, not bound to `imap.gmail.com`, or not in the form decisions/0003 gives.
   - 3: Gmail answered `NO` to a command other than `LOGIN` (no such mailbox, no such message, a search it
-    refused), or `gmail.read` found the `\All` mailbox hidden from IMAP.
+    refused); `gmail.read` found the `\All` mailbox hidden from IMAP, or not the message there (one in Spam
+    or Trash only, which Gmail keeps out of `\All`); or Gmail did not offer `X-GM-EXT-1`, which
+    `gmail.search` and `gmail.read` need.
   - 4: the address check, the connection or the TLS handshake failed, or the connection broke.
   - 5: more than 8 MiB was read from Gmail in the request, or the credential was used for more than 60
     sign-ins in 10 minutes; nothing was returned.
