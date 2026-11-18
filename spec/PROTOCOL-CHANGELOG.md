@@ -66,6 +66,13 @@ The first version.
   - `path_outside_root` also covers a path into the host's own configuration or state folders, through
     Linux's `/proc`, or naming a FIFO, socket or device (§10).
   The reply schema's descriptions changed to match; no field, status or code was added or removed.
+- **Added in the draft, 2026-11-18: `github.read`,** a fifth operation, not yet in the host's catalog. Its
+  `args` are `{credential, path}`: a stored credential's name, and one of a fixed list of GitHub read
+  endpoints, with a fixed set of query keys, which its schema's pattern holds (§10). Its reply is a child's
+  output, as any operation's: GitHub's body on `stdout`, the HTTP status and any `Link` header on `stderr`,
+  and an exit code that says how the call went (§11). No field, status or code was added. The host's side
+  is in [decisions/0003](../decisions/0003-local-credentials.md) ("First use"). Lucille sends it only with
+  `min_host_version` set to the first release whose catalog has it.
 - **Files.** JSON Schemas (draft 2020-12) for the request, the reply and the `host.describe` document, closed
   at every level; golden fixtures for requests, replies, `host.describe` documents and decoding. Both ship
   in the wheel under `lucille_host/spec/v1/`.

@@ -275,6 +275,8 @@ def test_args_valid_refuses_what_json_schema_lets_through() -> None:
 
 
 SPEC_STEPS_HERE = {"paused", "unknown_op", "not_enabled", "bad_args", "path_outside_root"}
+# Operations the spec has and this release's catalog does not yet.
+SPEC_ONLY = frozenset({"files.search", "github.read"})
 
 
 def _fixture_context(
@@ -304,7 +306,7 @@ def _decided_here(fixture: dict[str, Any]) -> bool:
     9, or it runs, and its operation is not one the spec has but this catalog does not yet."""
     expect = fixture["expect"]["reply"]
     body = fixture["body"]
-    if expect is None or not isinstance(body, dict) or body.get("op") == "files.search":
+    if expect is None or not isinstance(body, dict) or body.get("op") in SPEC_ONLY:
         return False
     return expect["status"] in ("done", "failed") or expect.get("code") in SPEC_STEPS_HERE
 
@@ -322,7 +324,7 @@ def test_steps_5_to_9_hold_to_the_request_fixtures(
     path: Path, tmp_path: Path, make_context: MakeContext
 ) -> None:
     """The fixtures this release decides alone. The others are the read loop's (steps 1 to 4,
-    dedupe and the messages the host does not answer) or files.search's."""
+    dedupe and the messages the host does not answer) or those of an operation in SPEC_ONLY."""
     fixture = spec.load_fixture(path)
     expect = fixture["expect"]["reply"]
     body = fixture["body"]
