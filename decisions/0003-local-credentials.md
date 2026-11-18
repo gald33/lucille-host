@@ -223,7 +223,9 @@ and sends nothing.
 6. **Caps, and no compressed body.** The response's headers are read up to 64 KiB in all (and at most 100
    headers, `http.client`'s own limit), and its body up to 1 MiB; past either, it stops reading and exits
    5, having written what it read of the body. A response with a `Content-Encoding` other than `identity`
-   is not read at all (exit 5, no body), since the scrub cannot see into a compressed body. The reply carries at most what §13 of the protocol allows any child's output (64 KiB
+   is not read at all (exit 5, no body), since the scrub cannot see into a compressed body; nor is one with
+   a transfer coding other than a plain `chunked` (`gzip, chunked` among them), which `http.client` would
+   pass through as raw bytes. The reply carries at most what §13 of the protocol allows any child's output (64 KiB
    of each stream), with the stream's truncation flag set.
 7. **The scrub.** Before anything is written, every occurrence of the token is replaced, in the body and
    in what goes on standard error. Because the token's characters are `[A-Za-z0-9_]`, URL-encoding leaves

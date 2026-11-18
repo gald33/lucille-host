@@ -504,7 +504,11 @@ change ([§21](#21-versioning)).
   is a positive integer of at most 10 digits. Any other path is refused `bad_args`, before the host reads a
   credential or opens a connection. The host sends only `GET`, only to `https://api.github.com`, and never
   follows a redirect. How it uses the credential, and what it refuses, is in
-  [decisions/0003](../decisions/0003-local-credentials.md) ("First use").
+  [decisions/0003](../decisions/0003-local-credentials.md) ("First use"). The host also refuses it
+  `not_enabled`, though its policy enables it, while it cannot run it: where it does not know its own
+  interpreter (a program that embeds the host), and while keyring's own settings turn the keyring off in
+  the host's environment, whose child could not see them. `host.describe` then leaves it out of
+  `enabled_ops`.
 - A **folder alias** (`root`) is a name the host's local policy maps to a folder: 1 to 32 characters matching
   `^[a-z][a-z0-9_-]{0,31}$`. A request never carries a folder's path.
 - An argument that breaks its operation's schema (an extra key, a missing key, a wrong type, a value out of
@@ -591,7 +595,7 @@ and never followed; 2 when the credential is missing, is not bound to `api.githu
 of a GitHub token; 4 when the address check, the connection or the TLS handshake failed, so that nothing
 was sent, or when the connection broke before the response was read; 5 when the
 response's headers passed 64 KiB or its body 1 MiB, or it came compressed (any `Content-Encoding` but
-`identity`); 6 for anything unexpected in the host's own code; 1 when the interpreter could not start the
+`identity`, or any transfer coding but a plain `chunked`); 6 for anything unexpected in the host's own code; 1 when the interpreter could not start the
 host's module at all, before any credential was read, and then `stderr` is Python's own traceback. Each of 2,
 4, 5 and 6 writes one fixed line on `stderr`, never an error's text. Standard output is written once, at the
 end: 2 and 4 write none, 5 writes the part of an uncompressed body it read, and 6 writes none unless the
