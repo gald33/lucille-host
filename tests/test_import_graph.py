@@ -36,6 +36,7 @@ RUNTIME_MODULES = (
     "lucille_host.gate",
     "lucille_host.jobs",
     "lucille_host.journal",
+    "lucille_host.library",
     "lucille_host.link",
     "lucille_host.loop",
     "lucille_host.mounts",

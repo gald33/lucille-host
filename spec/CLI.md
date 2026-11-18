@@ -980,6 +980,38 @@ lucille-host --profile <name> run --json-events --exit-on-stdin-eof
 - The record is per profile: a profile's `run` never refuses because another profile ran a newer release.
 - The record is a file the user's account can change. It stops an older release by mistake, not on purpose.
 
+### 13.7 A program that embeds the host
+
+`lucille_host.library` serves a profile from inside another program, on a thread of its own, with no
+command line: `start(dirs, store, ...)` returns a `Host` that is running, and `Host.stop()` drains it
+as the first SIGTERM does (cause `stop`) and waits. It is not a verb and adds no field to the contract.
+It keeps `run`'s files, its start checks (not as root, no `SWITCHBOARD_*` variable: refused before
+anything is written) and its one-run lock, but it installs no signal handler, and it writes no line to
+the run record (section 16), which has one line per command of the CLI. Its environment check comes
+before the host-config read, the reverse of `run` (both only read).
+
+- **`stop(raise_error=False)`** returns None for however the host ended, an `Exception` or not, and
+  leaves it in `error`. `TimeoutError` (the host still runs after `timeout`) and an interruption of the
+  caller's own wait still raise.
+- **`stop()` from the host's own thread** (from `say`, `warn` or `on_event`) drains and then raises
+  `RuntimeError`.
+- **The program exits without `stop()`.** The host's thread is a daemon thread, so it is cut off
+  where it is, and an operation running at that moment is left without what watched it. Observed with
+  a `host.sleep` operation, for an exit by `os._exit` and for the program returning with the host
+  running:
+  - the operation's process is not killed (it has a session of its own), so it runs on, with no time
+    limit and no kill request, until it ends by itself;
+  - the audit log ends at the operation's `start` line, with no `execution` line, and Lucille gets no
+    reply;
+  - the journal holds the job as decided to run with no reply, and the room stays held;
+  - the run lock is released, as its process ended, and its file stays;
+  - the next `run` or `start` of the profile replies `failed interrupted` to that job and never runs
+    it again, as after a `SIGKILL` of `run` (section 13.3's drain bound says the same of a group left
+    running).
+
+  A program that wants the operation finished, with its audit line and its reply, calls `stop()` and
+  waits (at most the operation's time limit, then 30 s for its reply).
+
 ## 14. Not in version 1
 
 - `diagnostics` and removing the host's data ([decisions/0002-macos-app.md](../decisions/0002-macos-app.md)
