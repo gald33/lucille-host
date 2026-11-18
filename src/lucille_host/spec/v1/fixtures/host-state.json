@@ -5,7 +5,8 @@
     "host.describe",
     "host.sleep",
     "files.sha256",
-    "files.search"
+    "files.search",
+    "github.read"
   ],
   "roots": [
     "docs"

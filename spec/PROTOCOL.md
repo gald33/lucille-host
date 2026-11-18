@@ -493,7 +493,18 @@ change ([§21](#21-versioning)).
 | `host.sleep` | `{n}`: an integer from 1 to 240 | Sleeps `n` seconds. Diagnostic. Its catalog timeout is `n` + 30 s. |
 | `files.sha256` | `{root, path}` | The SHA-256 digest of one file. `root` is a folder alias; `path` is a string of 1 to 1024 characters with no U+0000. |
 | `files.search` | `{root, pattern, fixed_strings, max_count}` | Searches the files under `root`. `pattern` is a string of 1 to 256 characters with no U+0000; `fixed_strings` is a boolean; `max_count` is an integer from 1 to 200, the most matches per file. All four are required. Its reply carries lines of the files it searched. |
+| `github.read` | `{credential, path}` | Reads one GitHub REST API endpoint with a credential stored on the computer, which never leaves it. `credential` is a credential's name, 1 to 64 characters matching `^[a-z0-9][a-z0-9._-]{0,63}$`; the host uses the one it stores as `github/<credential>`. `path` is a string of 1 to 1024 characters matching the schema's pattern: one of the listed read endpoints, with only the listed query keys (below). Both are required. Its reply carries GitHub's response. |
 
+- **`github.read`'s paths.** `path` is `/user`, `/user/repos`, `/search/issues`, or, under
+  `/repos/{owner}/{repo}`, the repository itself, `/issues`, `/issues/{number}`, `/issues/{number}/comments`,
+  `/pulls`, `/pulls/{number}`, `/commits` or `/readme`; then, optionally, a query of the keys `per_page` (1 to
+  100), `page` (1 to 99999), `state` (`open`, `closed`, `all`), `sort` (`created`, `updated`, `comments`,
+  `pushed`, `full_name`), `direction` (`asc`, `desc`) and `q` (1 to 256 of `[A-Za-z0-9%+:._-]`), joined by `&`.
+  `{owner}` is a GitHub login; `{repo}` is 1 to 100 of `[A-Za-z0-9._-]` and is never `.` or `..`; `{number}`
+  is a positive integer of at most 10 digits. Any other path is refused `bad_args`, before the host reads a
+  credential or opens a connection. The host sends only `GET`, only to `https://api.github.com`, and never
+  follows a redirect. How it uses the credential, and what it refuses, is in
+  [decisions/0003](../decisions/0003-local-credentials.md) ("First use").
 - A **folder alias** (`root`) is a name the host's local policy maps to a folder: 1 to 32 characters matching
   `^[a-z][a-z0-9_-]{0,31}$`. A request never carries a folder's path.
 - An argument that breaks its operation's schema (an extra key, a missing key, a wrong type, a value out of
@@ -571,6 +582,17 @@ These lists are closed. A receiver refuses a reply with any other status or code
 **Error text never crosses the wire.** A refused reply carries a code and nothing else. The host's own
 exception or error text never appears in any reply, under any status. (A child's own `stderr` is output, not
 the host's error text.)
+
+**`github.read`.** Its child's output, capped as any child's is ([§13](#13-strings-numbers-sizes-and-output)):
+`stdout` is GitHub's response body; `stderr` is the line `HTTP <status>`, then, when GitHub sent one, its
+`Link` header line. The credential's value is never in either: the host removes it before writing. The exit
+code says how the call went: 0 for a 2xx status; 3 for any other status, a 3xx included, which is reported
+and never followed; 2 when the credential is missing, is not bound to `api.github.com`, or is not in the form
+of a GitHub token; 4 when the address check, the connection or the TLS handshake failed, so that nothing
+was sent, or when the connection broke before the response was read; 5 when the
+response's headers passed 64 KiB or its body 1 MiB. Each of 2, 4 and 5 writes one fixed line on `stderr`;
+2 and 4 write no `stdout`, and 5 writes the part of the body it read. None of these is a refusal: the reply
+is `done`.
 
 **`host.describe`.** It replies `done` with `exit_code` 0, an empty `stderr`, and both truncation flags
 false. Its document goes, JSON-encoded, in `stdout`. The reply has no structured result field, and the

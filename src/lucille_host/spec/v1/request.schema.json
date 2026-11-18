@@ -15,6 +15,9 @@
     },
     {
       "$ref": "#/$defs/request.files.search"
+    },
+    {
+      "$ref": "#/$defs/request.github.read"
     }
   ],
   "$defs": {
@@ -160,6 +163,31 @@
           "type": "integer",
           "minimum": 1,
           "maximum": 200
+        }
+      }
+    },
+    "args.github.read": {
+      "description": "github.read: read one GitHub REST API endpoint with a credential stored on the computer (spec/PROTOCOL.md section 10; decisions/0003).",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "credential",
+        "path"
+      ],
+      "properties": {
+        "credential": {
+          "description": "The credential's name; the host uses the one it stores as github/<credential>.",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+        },
+        "path": {
+          "description": "One of the listed GitHub read endpoints, with only the listed query keys.",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1024,
+          "pattern": "^/(user|user/repos|search/issues|repos/[A-Za-z0-9][A-Za-z0-9-]{0,38}/([A-Za-z0-9_-][A-Za-z0-9._-]{0,99}|\\.[A-Za-z0-9_-][A-Za-z0-9._-]{0,98}|\\.\\.[A-Za-z0-9._-]{1,98})(/issues(/[1-9][0-9]{0,9}(/comments)?)?|/pulls(/[1-9][0-9]{0,9})?|/commits|/readme)?)(\\?(per_page=([1-9]|[1-9][0-9]|100)|page=[1-9][0-9]{0,4}|state=(open|closed|all)|sort=(created|updated|comments|pushed|full_name)|direction=(asc|desc)|q=[A-Za-z0-9%+:._-]{1,256})(&(per_page=([1-9]|[1-9][0-9]|100)|page=[1-9][0-9]{0,4}|state=(open|closed|all)|sort=(created|updated|comments|pushed|full_name)|direction=(asc|desc)|q=[A-Za-z0-9%+:._-]{1,256}))*)?$"
         }
       }
     },
@@ -315,6 +343,47 @@
         },
         "args": {
           "$ref": "#/$defs/args.files.search"
+        },
+        "not_after": {
+          "$ref": "#/$defs/not_after"
+        },
+        "caps": {
+          "$ref": "#/$defs/caps"
+        },
+        "min_host_version": {
+          "$ref": "#/$defs/min_host_version"
+        }
+      }
+    },
+    "request.github.read": {
+      "description": "A request for github.read.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "v",
+        "dir",
+        "job_id",
+        "op",
+        "args",
+        "not_after"
+      ],
+      "properties": {
+        "v": {
+          "$ref": "#/$defs/v"
+        },
+        "dir": {
+          "$ref": "#/$defs/dir",
+          "const": "request"
+        },
+        "job_id": {
+          "$ref": "#/$defs/job_id"
+        },
+        "op": {
+          "$ref": "#/$defs/op_name",
+          "const": "github.read"
+        },
+        "args": {
+          "$ref": "#/$defs/args.github.read"
         },
         "not_after": {
           "$ref": "#/$defs/not_after"

@@ -1,7 +1,7 @@
 # 0003: Local credentials (draft)
 
 **Status: storage, and entry from the command line, built; entry at Lucille's request and use chosen,
-not built.** `src/lucille_host/credentials.py` can save, list, read (`value()`) and remove a credential for
+not built; the first use, `github.read`, decided 2026-11-18 (below), not built.** `src/lucille_host/credentials.py` can save, list, read (`value()`) and remove a credential for
 an online service, kept only on this computer. `lucille-host credential set`, `list` and `remove` write
 to it from the command line, each credential bound to the hosts it may be sent to (spec/CLI.md §15).
 Nothing uses a stored credential yet: nothing calls `value()`, and nothing Lucille sends can reach it.
@@ -100,6 +100,116 @@ section of 0001 and the AST and Switchboard lints change with it, in the same PR
 and stays true. The proxy design keeps Lucille's own logic off the computer; only this repository's
 public code runs here. A future feature that ships Lucille logic to run here (for example to keep data
 off Lucille's servers) would expose that logic to the user; obfuscation slows a reader and stops none.
+
+## First use: `github.read` (decided 2026-11-18, not built)
+
+The repository owner ruled on 2026-11-18: the first use is a read-only proxy, and its first service is
+GitHub's REST API. It comes in two pull requests: this text and the protocol's (spec/PROTOCOL.md §10 and
+§11) first, then the code, with the final text of the claim documents listed at the end of this section.
+
+**The operation.** A catalog entry, `github.read`, off by default; the user turns it on with `lucille-host
+ops enable github.read`. Its arguments are `{credential, path}`:
+
+- `credential`: a credential's name, by Lucille's rule (`^[a-z0-9][a-z0-9._-]{0,63}$`). The service is
+  fixed: the proxy uses the credential stored as `github/<credential>`. The user saves one with
+  `lucille-host credential set github <name> --host api.github.com`.
+- `path`: one of a fixed list of GitHub read endpoints, with a fixed set of query keys, matched by the
+  pattern in the args schema (spec/PROTOCOL.md §10). A path off the list is refused `bad_args`, before
+  anything is read or sent. The list: `/user`, `/user/repos`, `/search/issues`, and, under
+  `/repos/{owner}/{repo}`, the repository itself, `/issues`, `/issues/{number}`,
+  `/issues/{number}/comments`, `/pulls`, `/pulls/{number}`, `/commits` and `/readme`. The query keys:
+  `per_page`, `page`, `state`, `sort`, `direction` and `q`, each with a bounded value. A repository named
+  `.` or `..` does not match, so no path can climb out of `/repos/{owner}`.
+
+**Where it runs: a child process, never `run`.** The catalog entry runs the host's own interpreter:
+`<the host's interpreter> -I -B -X utf8 -m lucille_host.proxy --profile <the host's profile> --
+{credential} {path}`. Two elements are filled by the host, never from a request: the real path of the
+interpreter the host runs on, and the host's own profile name. Every string from the request comes after
+`--`, as in every entry. So:
+
+- `run` never imports `credentials`, `ssl`, `socket`, `http.client`, `ipaddress` or `certifi`, and never
+  holds a value: only the short-lived child reads one. A test holds the imports.
+- The child's environment is `CHILD_ENV` plus a fixed allow-list of names, each copied from the host's own
+  environment when it is set: `HOME` on macOS; `DBUS_SESSION_BUS_ADDRESS` and `XDG_RUNTIME_DIR` on Linux.
+  The keyring needs them. The names are in the entry's definition hash, so a release that changes them
+  turns an enabled `github.read` off until the user enables it again.
+- **Field check, not a claim:** whether macOS opens the credential's Keychain item to this child without a
+  prompt is not known. It is checked on the repository owner's Mac with the implementation's first build,
+  and the result is recorded in macos/README.md. So is whether a Linux desktop's Secret Service answers
+  the child.
+- The executable's sha256 in the audit log is the interpreter's; it does not cover `lucille_host.proxy`,
+  which is part of the installed release.
+
+**What the child does, in order.** Each refusal writes one fixed line on standard error, holds no value,
+and sends nothing.
+
+1. **The credential.** It reads `github/<credential>`, and refuses (exit 2) when there is none, when its
+   bound hosts do not include `api.github.com`, or when its value is not in the form of a GitHub token
+   (`github_pat_` followed by 22 to 255 of `[A-Za-z0-9_]`, or `ghp_` followed by 36 to 251 of
+   `[A-Za-z0-9]`). That last check also keeps a password saved by mistake from being sent.
+2. **The address.** Only `api.github.com`, port 443, over HTTPS. It resolves the name and refuses (exit 4)
+   unless every address it gets is a global unicast address: no loopback, private, link-local,
+   multicast, reserved or unspecified address, IPv4 or IPv6. One mixed answer refuses the whole request.
+3. **One connection per request.** It connects to a vetted address, never to the name again, so nothing
+   can re-point the name between the check and the connection. TLS checks the certificate for
+   `api.github.com` against certifi's bundle, the trust the hub client already uses. It sends
+   `Connection: close` and makes no second request on the connection, so there is no keep-alive to
+   re-check. It reads no proxy setting from the environment.
+4. **The request.** `GET` only, with no body, and fixed headers: `Host`, `Authorization: Bearer
+   <token>`, `Accept: application/vnd.github+json`, `X-GitHub-Api-Version: 2022-11-28` and
+   `User-Agent: lucille-host/<version>`. The token goes nowhere else: not in the path, the query or any
+   other header. Lucille writes none of the headers.
+5. **No redirects.** A 3xx is reported, never followed.
+6. **Caps.** The response's headers are read up to 64 KiB in all (and at most 100 headers, `http.client`'s
+   own limit), and its body up to 1 MiB; past either, it stops reading and exits 5, having written what it
+   read of the body. The reply carries at most what §13 of the protocol allows any child's output (64 KiB
+   of each stream), with the stream's truncation flag set.
+7. **The scrub.** Before anything is written, every occurrence of the token is replaced, in the body and
+   in what goes on standard error. Because the token's characters are `[A-Za-z0-9_]`, URL-encoding leaves
+   them unchanged and JSON escapes none of them, so the raw form also covers an echo in URL-encoded or
+   JSON-escaped text. The proxy also replaces the token's base64 encoding at each of the three byte
+   alignments (the four-character groups that depend only on the token): GitHub has no reason to echo a
+   bearer token in base64, and the check is cheap.
+8. **What it writes.** Standard output: the response body. Standard error: `HTTP <status>`, then, when
+   GitHub sent one, its `Link` header (for paging), both scrubbed. Exit code: 0 for a 2xx; 3 for any other
+   status (a 3xx included); 2, 4 and 5 as above, and 4 also when the connection breaks before the
+   response has been read.
+
+The catalog's default time limit, 30 s, applies.
+
+**The usage log.** The audit log already records, for every request, its operation and arguments
+(`received`) and how it ended (`execution`): so which credential, which path, and when. The
+implementation adds the HTTP status to `execution`. It never holds the value.
+
+**Imports.** A proxy-only zone in `tools/guards/ast_lint.py`, like the one `_exec.py` has:
+`src/lucille_host/proxy.py` alone may also import `socket`, `ssl`, `http.client`, `ipaddress` and
+`certifi`. `RUNTIME_IMPORTS` is not widened, and the re-export table is written again
+(`tools/guards/reexport_probe.py`). The Switchboard-surface lint does not change: the proxy does not touch
+`switchboard`.
+
+**What it does not change.** No new refusal code and no new reply field: everything the proxy decides is
+the child's output and exit code. Lucille sends `github.read` only with `min_host_version` set to the
+first release that has it (spec/PROTOCOL-CHANGELOG.md), and needs its own change, outside this
+repository, to send it.
+
+**The claim documents, with the implementation.** Each of these sentences changes in the pull request
+that builds `github.read`, and not before, since until then it stays true:
+
+- PRIVACY.md, "the programs it starts get none of its keys and none of your environment variables":
+  `github.read`'s child reads a credential you saved for it, and gets `HOME` (macOS) or
+  `DBUS_SESSION_BUS_ADDRESS` and `XDG_RUNTIME_DIR` (Linux), which the keyring needs.
+- PRIVACY.md, "What leaves it": also what `github.read` returns (GitHub's reply), and the names of the
+  credentials it is asked to use, never their values.
+- PRIVACY.md, the paragraph on how requests travel: with `github.read` on, your computer also connects
+  to `api.github.com`.
+- CLAIMS.md, C1: four catalog entries, not three, and rows for the proxy's tests.
+- THREAT_MODEL.md: a row for a compromised Lucille using a stored credential. What bounds it: the
+  operation is off by default, `GET` on the listed paths only, the token's own scope, and `pause` and
+  `kill`. What is left: whatever that token can read on GitHub, while the host runs.
+- decisions/0001-host-design.md, "Outbound HTTPS to one hub only": the hub, and `api.github.com` from
+  `github.read`'s child, when it is on.
+- This record's "Unreachable from Lucille": the credential verb and the proxy's child import
+  `credentials`, and only the child reads a value, on a request for an enabled `github.read`.
 
 ## Entry: Lucille asks, the user types it here (chosen 2026-11-11, not built)
 
