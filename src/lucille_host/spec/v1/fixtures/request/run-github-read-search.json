@@ -1,0 +1,21 @@
+{
+  "description": "github.read of an issue search, its query URL-encoded.",
+  "valid": true,
+  "schema_valid": true,
+  "expect": {
+    "reply": {
+      "status": "done"
+    }
+  },
+  "body": {
+    "v": "lucille.exec/1",
+    "dir": "request",
+    "job_id": "00000000-0000-4000-8000-000000001442",
+    "op": "github.read",
+    "args": {
+      "credential": "work.read-only",
+      "path": "/search/issues?q=repo%3Aocto-org%2Fhello-world+is%3Aopen&per_page=10"
+    },
+    "not_after": 1767229200
+  }
+}

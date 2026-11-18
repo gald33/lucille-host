@@ -1,0 +1,22 @@
+{
+  "description": "github.read of a path off the list: a file's contents.",
+  "valid": false,
+  "schema_valid": false,
+  "expect": {
+    "reply": {
+      "status": "refused",
+      "code": "bad_args"
+    }
+  },
+  "body": {
+    "v": "lucille.exec/1",
+    "dir": "request",
+    "job_id": "00000000-0000-4000-8000-000000001443",
+    "op": "github.read",
+    "args": {
+      "credential": "personal",
+      "path": "/repos/octo-org/hello-world/contents/README.md"
+    },
+    "not_after": 1767229200
+  }
+}
