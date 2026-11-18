@@ -874,8 +874,8 @@ runs each check in [`check_app.py`](../tools/macos/check_app.py). Its jobs `maco
 on `xcode-27` (macOS 27), take the disk image and the compiled Swift self-test that `macos-app` built,
 refuse them unless their sha256 is the one `macos-app` gave, and run the checks marked "both" on them; they
 build nothing. The workflow's token can only read the repository, and the Mac jobs use no secret. A check
-that finds a problem fails its job. On `xcode-27` alone, a failed job does not fail the workflow run
-(`continue-on-error`, the maintainer's decision of 2026-11-02, decisions/0002 §18).
+that finds a problem fails its job, and every job, on `xcode-27` too, fails the workflow run when it fails
+(decisions/0002 §18: the `xcode-27` leg did not from 2026-11-02 to 2026-11-18).
 
 | Check | Where | What it shows |
 |---|---|---|
@@ -1068,7 +1068,7 @@ need a Mac and a person. Where the maintainer reported one done, in whole or in 
   reads what it shows. The `bundle` check has AppKit load the glyphs from the bundle, but the running
   app's own lookup is not checked. `bundle` also has `iconutil` read `AppIcon.icns`, and fails unless it
   writes exactly the ten files the entries' slots name, each a PNG of its name's size: a gate in
-  `macos-app` and on `macos-26`; on `xcode-27` it runs too, but that job does not fail the workflow run.
+  `macos-app`, on `macos-26` and on `xcode-27`.
   Run 42636263428 (PR 30) held `iconutil`'s files to that rule on all three jobs, with PNG `icp4` and
   `icp5`, and run 42652174302 (PR 31) with the build's `is32` and `s8mk`, and `il32` and `l8mk`.
   Not seen is whether `iconutil` keeps an entry's own size or scales it to its slot; if it scales, a

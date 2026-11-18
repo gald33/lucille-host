@@ -1510,10 +1510,11 @@ to `main`, with no path filter; a new push to a pull request cancels that pull r
   `macos-app` compiled, through the checks that need no build (§19). It builds nothing. It does not run the
   pairing check: it has no copy of the runtime with the test harness, and making one would mean installing
   the suite's dependencies there too. The probe of the host's verbs, printed only, runs in both jobs.
-  **The `xcode-27` leg does not gate** (the maintainer's decision, 2026-11-02): the job is
-  `continue-on-error` on that leg alone, so it still runs and shows its result, but its failure does not fail
-  the workflow run (GitHub's documentation of `jobs.<job_id>.continue-on-error`; not tested here).
-  `macos-26` and every other job still gate.
+  **Both legs gate.** From 2026-11-02 the `xcode-27` leg did not (the maintainer's decision): the job was
+  `continue-on-error` on that leg alone, so it ran and showed its result, but its failure did not fail the
+  workflow run. It gates since 2026-11-18, after six push runs on main passed it, each with the line that
+  says the control's gate was held by the run record: 44165228392 (attempt 2), 44176144359, 44290082086
+  (attempt 2), 44332530002, 44355868493 and 44357737718. Every job gates now.
 - Neither job holds a secret, has an `environment`, signs with anything but `-` (ad hoc), or notarizes. The
   only secret `ci.yml` names is the private-string list, in its `guards` job.
 
