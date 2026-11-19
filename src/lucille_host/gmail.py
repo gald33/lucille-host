@@ -28,8 +28,9 @@ on standard error, holding no value and nothing Gmail wrote:
 6. ``LOGIN`` answered ``NO`` is exit 7; any other ``NO`` is exit 3; a ``BAD`` to anything is exit 6.
 7. It writes one JSON document on standard output on success. Every string in it has the app
    password replaced (in any case, with or without spaces or hyphens between its letters, and in
-   base64 at each alignment) before anything is cut; then each field is cut to its limit, and the
-   document is made to fit :data:`DOCUMENT_CAP` as rule ``stream-size`` measures it
+   base64 at each alignment), and the host's own redaction applied to it alone, so that no
+   private-key block runs past its string, before anything is cut; then each field is cut to its
+   limit, and the document is made to fit :data:`DOCUMENT_CAP` as rule ``stream-size`` measures it
    (:func:`_fit`). Descriptors 1 and 2 point at the null device from its start, and it ends with
    ``os._exit``.
 """
@@ -54,7 +55,7 @@ from pathlib import Path
 from typing import Any, Final, NoReturn
 
 from lucille_host import proxy
-from lucille_host._output import TOKEN_MARK
+from lucille_host._output import TOKEN_MARK, redact
 
 __all__ = [
     "HOST",
@@ -829,6 +830,10 @@ class _Scrub:
         self.forms = [form.decode("ascii") for form in _secrets(password)]
 
     def text(self, value: str) -> str:
+        # The host's own redaction, string by string: a private-key block that does not end in
+        # this string is taken to its end, never past it, so the document stays JSON and the host's
+        # pass over the whole stream finds no block left to run to its end.
+        value = redact(value)
         value = self.pattern.sub(TOKEN_MARK, value)
         for form in self.forms:
             value = value.replace(form, TOKEN_MARK)

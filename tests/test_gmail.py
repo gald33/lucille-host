@@ -19,7 +19,7 @@ from typing import Any
 
 import pytest
 
-from lucille_host import envelope, gmail
+from lucille_host import _output, envelope, gmail
 from tests._fake_gmail import ADDRESS, PASSWORD, FakeGmail, Message
 
 MSGID = 1785634910293847562
@@ -724,6 +724,29 @@ def test_a_password_where_the_fit_cuts_the_text_leaves_none_of_it(tmp_path: Path
         kept.add(len(text) - at)
     # Some cuts fell inside the password: what was left of it is the mark's beginning.
     assert any(0 < n < len(gmail.TOKEN_MARK) for n in kept)
+
+
+def test_an_unterminated_key_block_in_a_message_is_redacted_within_its_string(
+    tmp_path: Path,
+) -> None:
+    # Anyone who can mail the user can put a private-key header in a subject or a text. The child
+    # takes the block to the end of that string only: the document stays JSON, every other field
+    # is whole, and the host's own pass over the stream finds nothing to run to its end.
+    begin = "-----BEGIN PRIVATE KEY-----"
+    raw = _message(subject=f"keys {begin}", text=f"Hello.\n{begin}\nMIIE\nand the rest")
+    reply = _run(tmp_path, "gmail.read", {"id": str(MSGID)}, _server(raw))[0]
+    doc = _doc(reply)
+    assert doc["subject"] == "keys [redacted private key]"
+    assert doc["text"] == "Hello.\n[redacted private key]"
+    assert doc["from"] == "Billing <billing@example.com>" and doc["text_truncated"] is False
+    rendered, truncated = _output.render(reply.stdout, _output.STREAM_CAP)
+    assert truncated is False and json.loads(rendered) == doc
+    # A search's subjects too.
+    box = [Message(1, MSGID, MSGID, _message(subject=f"x {begin} y"))]
+    reply = _run(tmp_path, "gmail.search", {}, FakeGmail(messages={"INBOX": box}))[0]
+    rendered, truncated = _output.render(reply.stdout, _output.STREAM_CAP)
+    assert truncated is False
+    assert json.loads(rendered)["messages"][0]["subject"] == "x [redacted private key]"
 
 
 def test_the_scrub_covers_any_case_and_spaces_or_hyphens_between_letters() -> None:

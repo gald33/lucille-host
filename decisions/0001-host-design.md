@@ -531,7 +531,8 @@ policy changed. A plain hash would let anyone holding it confirm a guessed folde
   - stdout and stderr are read incrementally, decoded as the protocol says, and capped at 64 KiB each on
     the JSON-encoded string, with truncation flags.
   - A best-effort redaction pass (PEM blocks, common key prefixes) runs before anything is sent. It
-    treats an unterminated `BEGIN … PRIVATE KEY` block as running to the end of the buffer.
+    treats an unterminated `BEGIN … PRIVATE KEY` block as running to the end of the buffer, and then
+    sets that stream's truncation flag, since the rest of the output is not in the reply.
   - Redaction is a convenience, not a guarantee.
 
 ## Local policy and upgrades

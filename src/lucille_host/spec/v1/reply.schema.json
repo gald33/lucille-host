@@ -85,7 +85,7 @@
       "pattern": "^[^\\u0000]*$"
     },
     "truncated": {
-      "description": "True only when capping dropped the end of that stream, or output the host did not keep counts as dropped by capping (rule raw-ceiling) (PROTOCOL.md section 13); removing U+0000 and redaction do not set it. Always false for host.describe, whose document is never capped.",
+      "description": "True only when the end of that stream is not in the reply: capping dropped it, the host did not keep it (rule raw-ceiling), or redaction of an unterminated private-key block took it (PROTOCOL.md section 13); removing U+0000, and redaction that ends before the stream does, do not set it. Always false for host.describe, whose document is never capped.",
       "type": "boolean"
     },
     "exit_code": {

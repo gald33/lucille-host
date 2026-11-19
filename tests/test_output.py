@@ -97,6 +97,23 @@ def test_render_order_removes_nul_and_redacts_before_capping() -> None:
     assert (text, truncated) == (f"{_output.PRIVATE_KEY_MARK}\ntail", False)
 
 
+def test_an_unterminated_key_block_sets_the_truncation_flag() -> None:
+    # The block takes the rest of the stream, so the end of the output is gone from the reply:
+    # the flag says so, as capping's would. A block that ends leaves the flag alone.
+    open_block = "head\n" + _fake_key_block("PRIVATE KEY", terminated=False) + "tail\n"
+    assert _output.render(open_block.encode(), 1000) == (
+        "head\n" + _output.PRIVATE_KEY_MARK,
+        True,
+    )
+    assert _output.redact_to_end(open_block) == ("head\n" + _output.PRIVATE_KEY_MARK, True)
+    closed = "head\n" + _fake_key_block("PRIVATE KEY", terminated=True) + "tail\n"
+    assert _output.render(closed.encode(), 1000) == (
+        f"head\n{_output.PRIVATE_KEY_MARK}\ntail\n",
+        False,
+    )
+    assert _output.render(b"no key here", 1000) == ("no key here", False)
+
+
 def test_render_flags_a_stream_the_host_stopped_keeping() -> None:
     assert _output.render(b"short", 100, dropped=True) == ("short", True)
 

@@ -449,6 +449,25 @@ def test_github_read_runs_the_hosts_interpreter_with_the_values_the_host_fills(
     assert execution["executable"] == interpreter
 
 
+def test_a_github_read_reply_with_an_unterminated_key_block_is_flagged_truncated(
+    tmp_path: Path, make_context: MakeContext
+) -> None:
+    # GitHub's body is passed on as it came: a private-key block that never ends takes the rest of
+    # the stream, which the flag says, as it does for a body cut at the cap.
+    script = tmp_path / "python-stand-in"
+    script.write_text(
+        "#!/bin/sh\n"
+        'printf \'%s\' \'{"content":"-----BEGIN PRIVATE KEY-----\\nMIIE","name":"k"}\'\n'
+        "echo 'HTTP 200' >&2\n"
+    )
+    script.chmod(0o755)
+    ctx = make_context(enabled=["github.read"], interpreter=str(script))
+    reply = json.loads(process(Job(job_id=JOB_ID, op="github.read", args=GITHUB_ARGS), ctx))
+    assert reply["status"] == "done"
+    assert reply["stdout"] == '{"content":"[redacted private key]'
+    assert reply["stdout_truncated"] is True and reply["stderr_truncated"] is False
+
+
 @pytest.mark.parametrize(
     "stderr_line",
     [

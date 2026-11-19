@@ -595,9 +595,11 @@ These lists are closed. A receiver refuses a reply with any other status or code
   records show, or 0.
 - `stdout`, `stderr`: the child's output, decoded and capped as in [§13](#13-strings-numbers-sizes-and-output),
   or, for `host.describe`, its document (below), which is neither.
-- `stdout_truncated`, `stderr_truncated`: true when capping dropped the end of that stream's output
-  ([§13](#13-strings-numbers-sizes-and-output)), and false otherwise. Removing U+0000 and redaction do not set
-  it. Output the host did not keep (rule `raw-ceiling`) counts as dropped by capping, and sets it.
+- `stdout_truncated`, `stderr_truncated`: true when the end of that stream's output is not in the reply
+  ([§13](#13-strings-numbers-sizes-and-output)), and false otherwise: when capping dropped it, when the host
+  did not keep it (rule `raw-ceiling`, which counts as dropped by capping), or when redaction took it, an
+  unterminated private-key block running to the end of the stream. Removing U+0000 does not set it, nor
+  does redaction that ends before the stream does.
 
 **Error text never crosses the wire.** A refused reply carries a code and nothing else. The host's own
 exception or error text never appears in any reply, under any status. (A child's own `stderr` is output, not
@@ -641,7 +643,7 @@ either stream.
   fetches. Header values and `content_type` are cut at 1 KiB, `to` and `cc` at 4 KiB, `filename` at 255
   bytes; `attachments_truncated` is true when attachments were left out to fit, below.
 - Every document fits: its stdout's `stream-size` ([§13](#13-strings-numbers-sizes-and-output)) is at
-  most 60 KiB. Past that, the host leaves out, in order: a read's last attachments while they take more
+  most 60 KiB. Past that, the child leaves out, in order: a read's last attachments while they take more
   than 8 KiB of it; the end of its text; its other attachments; a search's oldest results; the last
   mailboxes. Each sets its flag. The app password is replaced before any of these cuts, so none leaves a
   part of it.
@@ -754,13 +756,16 @@ not proven by this repository)*. The decode fixtures cover output that is not UT
 
 **Redaction.** Before anything is sent, a best-effort redaction pass runs over each stream of a child's
 output: PEM blocks
-(an unterminated `BEGIN ... PRIVATE KEY` block counts as running to the end of the stream) and common key
-prefixes. It is a convenience, not a guarantee, and nothing may claim that secrets are removed from output.
+(an unterminated `BEGIN ... PRIVATE KEY` block counts as running to the end of the stream, and then sets that
+stream's truncation flag, since the rest of the output is not in the reply) and common key prefixes. It is a
+convenience, not a guarantee, and nothing may claim that secrets are removed from output. A child that
+writes structured output can redact it itself, item by item, so that a block does not run past the item it
+is in: the Gmail operations do, so their documents stay JSON.
 
 **Order of the steps.** For each stream of a child's output: decode, remove U+0000, redact, then cap last.
 Capping drops whole characters from
 the end of the stream until its JSON-encoded string fits the cap, and then sets that stream's truncation
-flag. Only capping sets it ([§11](#11-replies)).
+flag. Capping sets it, and so does redaction that ran to the end of the stream ([§11](#11-replies)).
 
 **raw-ceiling.** The host keeps at most the first 4 MiB (4194304 bytes) of each stream's raw output. It reads
 and drops the rest, so that a child never blocks on a full pipe and the host's memory stays bounded. It may
