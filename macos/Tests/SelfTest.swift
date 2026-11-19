@@ -1301,7 +1301,7 @@ extension SelfTest {
         } else {
             report.expect(fixtures.isEmpty, "credential test's refusal is read")
         }
-        for code in ["sign_in_refused", "bad_credential", "unreachable", "limit_reached", "paused", "no_such_credential", "insecure_keyring", "store_error"] {
+        for code in ["sign_in_refused", "bad_credential", "unreachable", "limit_reached", "paused", "no_such_credential", "insecure_keyring", "store_error", "internal"] {
             let words = GmailText.refusal(HostError(code: code, message: "the host's words", kind: nil))
             report.expect(words != ConnectionText.appBug && !words.contains("the host's words"),
                           "\(code) has the window's own words, never the host's", words)

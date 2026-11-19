@@ -12940,6 +12940,33 @@ _OPEN_CLOSURES: dict[str, str] = {
 _SYSTEM_PLACE_CASES = ("dateAndTime", "filesAndFolders", "appPasswords", "applicationsFolder")
 
 
+def test_the_gmail_window_keeps_the_app_password_out_of_reach_once_used() -> None:
+    # Save sends the value on standard input only, then overwrites the bytes it sent once the verb
+    # has returned; the field is emptied, its own editor and its undo included, before the verb
+    # starts. The strings are dropped, not zeroed (Swift does not allow it), and the docs say so.
+    model = _swift("HostModel.swift")
+    save = _swift_function(model, "    private func saveGmail(address: String, password: String) {")
+    assert save.index("gmailPanel.clearPassword()") < save.index("VerbQueue.run(")
+    assert "input: input" in save and "GmailRules.saveArguments" in save
+    assert save.index("VerbQueue.run(") < save.index("input.resetBytes(in: 0..<input.count)")
+    assert "dropped, not zeroed" in model
+    panel = _swift("GmailPanel.swift")
+    clear = _swift_function(panel, "    func clearPassword() {")
+    assert "password.currentEditor()" in clear and 'editor.string = ""' in clear
+    assert 'password.stringValue = ""' in clear and "removeAllActions()" in clear
+    assert _swift_function(panel, "    func hide() {").count("clearPassword()") == 1
+    # The buttons wait for every verb the window started: one that ends while another runs (the
+    # window opened again during a Save) does not enable them; and that read leaves the words.
+    busy = _swift_function(panel, "    func setBusy(_ busy: Bool, saying text: String? = nil) {")
+    assert "busyCount = max(0, busyCount + (busy ? 1 : -1))" in busy
+    assert "button.isEnabled = busyCount == 0" in busy
+    chosen = _swift_function(model, "    func gmailChosen() {")
+    assert chosen.index("let quietly = gmailPanel.isBusy") < chosen.index("gmailPanel.show()")
+    assert "await readGmail(quietly: quietly)" in chosen
+    readme = (build_app.MACOS_DIR / "README.md").read_text(encoding="utf-8")
+    assert "dropped, not zeroed" in " ".join(readme.split())
+
+
 def test_the_opener_opens_only_its_places() -> None:
     # One file, SystemPlaces.swift, names the class that opens things, once, in one call; the
     # URL it opens is made there, from a closed list of three places: the two System Settings

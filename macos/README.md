@@ -431,16 +431,21 @@ no Google Cloud project. The window shows:
   with `--json`, the address, one space and the 16 letters on standard input, never in the arguments.
   The window takes Google's four groups of four, in any case, and sends the 16 letters lowercase. It
   sends nothing that is not an address and 16 letters, so an account's own password is never saved.
-  The field is emptied, with its undo, before the verb starts, and whenever the window closes. Saving
-  gives no warning;
+  The field is emptied, with the editor that edits it and their undo, before the verb starts, and
+  whenever the window closes. Once the verb has returned, the bytes sent on standard input are
+  overwritten, where no other copy holds them. The strings typed, and the value made from them, are
+  dropped, not zeroed: Swift gives no way to overwrite a string, and copies AppKit and the pipe made
+  are out of the app's reach. Saving gives no warning;
 - **Test**, which runs `credential test gmail default --json`: Capsule signs in to Gmail and out
   again, reading nothing, whether or not an ability is on. It says whether Gmail took the app
   password, and if not, why, by the refusal's code: Gmail refused it (make a new one; Capsule then
   waits 15 minutes before it signs in with it again), Gmail could not be reached, too many sign-ins
-  in 10 minutes, Capsule is paused, or the Keychain could not be used;
+  in 10 minutes, Capsule is paused, the Keychain could not be used, or the test did not finish
+  (Gmail answered in a way Capsule does not expect, or its helper failed);
 - **Remove**, which runs `credential remove gmail default --json`.
 
-The window's verbs run one at a time with the store's other verbs, since each opens a Keychain item,
+The buttons wait while any of the window's verbs runs, also when the window is opened again during
+one. The window's verbs run one at a time with the store's other verbs, since each opens a Keychain item,
 with 2 minutes each, and 2 minutes 30 seconds for Test. The Gmail abilities themselves are in the
 Abilities menu, off until you turn them on. Lucille names the credential `default`.
 

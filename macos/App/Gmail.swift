@@ -122,6 +122,8 @@ enum GmailText {
             return "\(appName) is paused, so it signs in to nothing. Resume it, then try again."
         case "no_such_credential":
             return noneToTest
+        case "internal":
+            return "\(appName) couldn't finish the test: Gmail answered in a way \(appName) doesn't expect, or its helper program failed. Try again later."
         case "insecure_keyring", "store_error":
             return "\(appName) couldn't use this Mac's Keychain. Try again; if it keeps happening, restart your Mac."
         default:
