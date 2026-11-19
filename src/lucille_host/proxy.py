@@ -21,9 +21,13 @@ order, each refusal writing one fixed line on standard error, holding no value a
 4. It follows no redirect, reads at most :data:`HEADER_CAP` bytes of headers and
    :data:`BODY_CAP` of body (exit 5 past either, with what it read of the body), and reads no
    compressed body and no transfer coding but a plain ``chunked`` (exit 5, no body).
-5. It replaces the token, raw and in base64 at each of the three byte alignments, in the whole
-   body and in what goes on standard error (:func:`scrub`), and at a cut drops any tail that
-   begins the token.
+5. When a private-key block begins in a string of a body that is JSON, it applies the host's
+   redaction to the strings in order, a block one string leaves open going on into the string
+   values after it up to its end, and writes again only the strings that change, so the body stays
+   JSON (:func:`redacted_json`); any other body goes as it came. It
+   replaces the token, raw and in base64 at each of the three byte alignments, in the whole body
+   and in what goes on standard error (:func:`scrub`), and at a cut drops any tail that begins
+   the token.
 6. It writes standard output once, at the end, then standard error (``HTTP <status>``, and
    GitHub's ``Link`` header when there is one), and ends with ``os._exit``, so no finalizer's text
    or failed final flush follows. From its start, descriptors 1 and 2 point at the null device and
@@ -40,6 +44,7 @@ from __future__ import annotations
 import binascii
 import http.client
 import ipaddress
+import json
 import os
 import re
 import socket
@@ -53,7 +58,7 @@ from typing import Any, Final, NoReturn
 import certifi
 
 from lucille_host import __version__
-from lucille_host._output import TOKEN_MARK
+from lucille_host._output import PRIVATE_KEY_MARK, TOKEN_MARK, key_block_end, redact_to_end
 
 __all__ = [
     "resolve",
@@ -436,6 +441,92 @@ def scrub(data: bytes, token: str, *, cut: bool = False) -> bytes:
 # --- the whole ------------------------------------------------------------------------------
 
 
+# A JSON string token, in a body json.loads has taken whole: there a quote outside a string only
+# ever opens one.
+_JSON_STRING: Final = re.compile(r'"(?:[^"\\]|\\.)*"', re.DOTALL)
+
+
+# What follows a string that is an object's key.
+_KEY_COLON: Final = re.compile(r"[ \t\r\n]*:")
+
+
+class _Unfaithful(ValueError):
+    """Two keys of one object that redaction made the same."""
+
+
+def _unique(key: str, marked: set[str]) -> str:
+    """``key``, as redaction made it, numbered from its second on so that it is not a key it
+    made before: ``[redacted private key]``, ``[redacted private key] 2``, ..."""
+    found, number = key, 1
+    while found in marked:
+        number += 1
+        found = f"{key} {number}"
+    marked.add(found)
+    return found
+
+
+def _no_marked_twice(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    seen: set[str] = set()
+    for key, _ in pairs:
+        if key in seen and PRIVATE_KEY_MARK in key:
+            raise _Unfaithful
+        seen.add(key)
+    return dict(pairs)
+
+
+def redacted_json(body: bytes) -> bytes:
+    """GitHub's body as it came, unless it is JSON and a private-key block begins in one of its
+    strings (an escaped one too, since each string is read decoded): then each string, keys
+    included, in the order the body holds them, with the host's own redaction applied. A block
+    that a string opens and does not end takes the rest of that string and goes on into the
+    strings after it, keys and values alike, each taken whole, up to the first end of a block, as
+    the host's pass over the raw text would; so a key whose lines are strings of an array, sibling
+    fields or an object's keys is not returned. Each key redaction changes is numbered when it
+    would be one made before (``[redacted private key] 2``), so no two keys of an object become
+    the same; were they the same all the same, the body is left as it came, to the host's pass
+    over the raw text, which takes the block from its header to its end across the strings, and
+    is then not JSON. Only the strings that change are written again; everything else, numbers,
+    white space and repeated keys among it, stays as it came, and the body stays JSON
+    (spec/PROTOCOL.md section 11). A body that is not JSON, one cut at the cap among them, is left
+    to the host's pass, which sets the truncation flag when a block takes its end."""
+    try:
+        text = body.decode("utf-8")
+        json.loads(text)
+    except (UnicodeDecodeError, ValueError, RecursionError):
+        return body
+    out: list[str] = []
+    pos = 0
+    open_block = False
+    # The keys redaction made, so that no two become the same.
+    marked: set[str] = set()
+    for token in _JSON_STRING.finditer(text):
+        raw = token.group()
+        value = raw[1:-1] if "\\" not in raw else json.loads(raw)
+        if open_block:
+            end = key_block_end(value)
+            if end is None:
+                new = PRIVATE_KEY_MARK
+            else:
+                rest, open_block = redact_to_end(value[end:])
+                new = PRIVATE_KEY_MARK + rest
+        else:
+            new, open_block = redact_to_end(value)
+        if new != value and _KEY_COLON.match(text, token.end()):
+            new = _unique(new, marked)
+        if new != value:
+            out += [text[pos : token.start()], json.dumps(new)]
+            pos = token.end()
+    if not out:
+        return body
+    out.append(text[pos:])
+    result = "".join(out)
+    try:
+        json.loads(result, object_pairs_hook=_no_marked_twice)
+    except ValueError:
+        return body
+    return result.encode("utf-8")
+
+
 def main(
     argv: Sequence[str],
     *,
@@ -457,7 +548,9 @@ def main(
                 sock.close()
             except OSError:
                 pass
-        return Reply(code, scrub(body, token), scrub(head.encode("utf-8") + b"\n", token))
+        return Reply(
+            code, scrub(redacted_json(body), token), scrub(head.encode("utf-8") + b"\n", token)
+        )
     except _Stop as stop:
         err = (stop.head + "\n" if stop.head else "") + stop.line + "\n"
         if token is None:

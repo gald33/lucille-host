@@ -164,6 +164,13 @@ The first version.
     and the description in `reply.schema.json`). No field or value was added; the flag is true in more
     cases.
   - The Gmail operations' child redacts each string of its document itself before the host's pass, so a
-    block in one message's text or subject ends with that string and the document stays JSON. Editorial: §11
+    block in one message's text or subject ends with that string and the document stays JSON; so does
+    `github.read`'s, for a body that is JSON and in one of whose strings a block begins: a block a
+    string does not end goes on into the strings after it, keys and values alike, up to its end, each
+    key it changes numbered so that no two are alike, and only the strings that change are written
+    again (any other body goes as it came). In `gmail.read`'s document, a block that takes the end
+    of the text sets `text_truncated`, and one that begins in another field and does not end there
+    takes the text up to the first end of a block, or the whole text, so a key split between a
+    subject and the text is not returned. Editorial: §11
     says that it is the child, not the host, that leaves out what does not fit its documents.
 - First accepted by: no host release yet. Lucille: not yet.

@@ -606,7 +606,18 @@ exception or error text never appears in any reply, under any status. (A child's
 the host's error text.)
 
 **`github.read`.** Its child's output, capped as any child's is ([§13](#13-strings-numbers-sizes-and-output)):
-`stdout` is GitHub's response body; `stderr` is the line `HTTP <status>`, then, when GitHub sent one, its
+`stdout` is GitHub's response body, as it came, unless it is JSON and a private-key block begins in one
+of its strings, read decoded: then the child applies §13's redaction to its strings, keys included, in
+the order the body holds them. A block a string opens and does not end takes the rest of it, and the
+strings after it, keys and values alike, each whole, up to the first end of a block, as the redaction would
+over the raw text, so a key whose lines are separate strings, or an object's keys, is not returned. With no
+end, it takes every string after the header, and the reply is not flagged: the body is whole. Each key it
+changes is numbered when it would be one it made before (`[redacted private key] 2`), so an object keeps
+no two keys alike; were two alike all the same, the child leaves the body as it came, to §13's pass over
+the raw text. Only the strings that change are written again, so the body stays JSON. A string the
+redaction changes for a common key format alone (a token, §13) is written again too. The marks can make a
+body longer than it came; past the 64 KiB cap (§13) the host cuts it, sets the truncation flag, and the
+body is then not JSON; `stderr` is the line `HTTP <status>`, then, when GitHub sent one, its
 `Link` header line. The credential's value is never in either: the host removes it before writing. The exit
 code says how the call went: 0 for a 2xx status; 3 for any other status, a 3xx included, which is reported
 and never followed; 2 when the credential is missing, is not bound to `api.github.com`, or is not in the form
@@ -640,7 +651,15 @@ either stream.
   "attachments_truncated", "message_truncated"}`. `text` is the `text/plain` part, or, with none, the
   `text/html` part turned into text (`text_from` says which, or is null with neither), cut at 32 KiB of
   UTF-8 (`text_truncated`). `message_truncated` is true when the message passed the 4 MiB the host
-  fetches. Header values and `content_type` are cut at 1 KiB, `to` and `cc` at 4 KiB, `filename` at 255
+  fetches. A private-key block (§13) that does not end in the text takes the rest of it, and sets
+  `text_truncated`; one that begins in another field, a subject say, and does not end there takes the
+  text up to the first end of a block, or the whole text, with `text_truncated`, when it has none, so a
+  key whose header is in one field and whose body is in the text is not returned. Not caught: a block
+  whose header the redaction does not read as one (§13), one split across messages, and one that runs from
+one header into another (from `from` into `to`, say), which each header's own redaction takes only to its
+end. A header the redaction reads, with no key after it, in a subject or a file name, takes the whole
+text all the same. Header values
+  and `content_type` are cut at 1 KiB, `to` and `cc` at 4 KiB, `filename` at 255
   bytes; `attachments_truncated` is true when attachments were left out to fit, below.
 - Every document fits: its stdout's `stream-size` ([§13](#13-strings-numbers-sizes-and-output)) is at
   most 60 KiB. Past that, the child leaves out, in order: a read's last attachments while they take more
@@ -760,7 +779,8 @@ output: PEM blocks
 stream's truncation flag, since the rest of the output is not in the reply) and common key prefixes. It is a
 convenience, not a guarantee, and nothing may claim that secrets are removed from output. A child that
 writes structured output can redact it itself, item by item, so that a block does not run past the item it
-is in: the Gmail operations do, so their documents stay JSON.
+is in: `github.read` does for a JSON body, and the Gmail operations for their documents, so both stay
+JSON.
 
 **Order of the steps.** For each stream of a child's output: decode, remove U+0000, redact, then cap last.
 Capping drops whole characters from

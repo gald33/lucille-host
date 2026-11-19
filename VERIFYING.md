@@ -35,6 +35,10 @@ pull request, and when started by hand. It has no path filter.
   runs the checks that need no build on it. They build nothing, and do not run the pairing check, which
   needs the suite's copy of the runtime. Both fail the workflow run when they fail, like every other job.
   The `xcode-27` job did not from 2026-11-02 to 2026-11-18 (decisions/0002 §18).
+- **The workflow `python-next`** (`.github/workflows/python-next.yml`) runs the same `test` job with
+  Python 3.14, on the same events. It gates nothing: it is a workflow of its own, so that every job of
+  `ci` still fails the run when it fails. It joins `ci`'s matrix once it has passed on a few pushes to
+  `main`, as the `xcode-27` leg did. Until then, read a failure there as a note.
 - The Mac app ships a `checked-hash` `.pyc` beside each `.py` of its runtime. `check_app.py bytecode`, in
   `macos-app` and both smoke jobs, checks that each is byte for byte what the bundled interpreter compiles
   from that `.py`. It is meant to be run on a copy you downloaded too

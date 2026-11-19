@@ -586,6 +586,23 @@ def test_every_job_gates_the_run_the_xcode_27_leg_included() -> None:
         assert "continue-on-error" not in job, job_id
 
 
+def test_the_next_python_runs_the_test_job_as_ci_does_and_gates_nothing_of_ci() -> None:
+    # python-next.yml runs ci.yml's test job, step for step, on Python 3.14 alone. It is a workflow
+    # of its own, so that ci.yml's jobs all still gate the run (decisions/0002 §18); it joins ci's
+    # matrix once it has passed on a few pushes to main.
+    nxt = yaml.safe_load((CI.parent / "python-next.yml").read_text(encoding="utf-8"))
+    ci = _ci()
+    (job,) = nxt["jobs"].values()
+    assert job["steps"] == ci["jobs"]["test"]["steps"]
+    assert job["strategy"] == {
+        "fail-fast": False,
+        "matrix": {"os": ["ubuntu-latest", "macos-latest"], "python": ["3.14"]},
+    }
+    assert "3.14" not in ci["jobs"]["test"]["strategy"]["matrix"]["python"]
+    assert nxt["permissions"] == {"contents": "read"}
+    assert "continue-on-error" not in job
+
+
 def test_the_pairing_check_runs_with_the_suites_copy_of_the_runtime() -> None:
     doc = _ci()
     steps = _steps(doc, "macos-app")

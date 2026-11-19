@@ -11,6 +11,7 @@ from __future__ import annotations
 import base64
 import io
 import ipaddress
+import json
 import subprocess
 import sys
 from collections.abc import Callable
@@ -18,7 +19,7 @@ from typing import Any
 
 import pytest
 
-from lucille_host import proxy
+from lucille_host import _output, proxy
 from lucille_host._output import TOKEN_MARK
 
 TOKEN = "ghp" + "_" + "Ab1" * 12
@@ -350,6 +351,159 @@ def test_no_connection_is_exit_4() -> None:
 def test_any_2xx_is_exit_0(status: str, code: int) -> None:
     reply, _, _ = _main(_http(status, []))
     assert reply.code == code and reply.stderr == f"HTTP {status[:3]}\n".encode()
+
+
+BEGIN = "-----BEGIN PRIVATE KEY-----"
+
+
+END = "-----END PRIVATE KEY-----"
+KEY_MARK = "[redacted private key]"
+
+
+def _rendered(reply: proxy.Reply) -> Any:
+    # The host's own pass finds nothing more to take: the stream is whole and parses.
+    rendered, truncated = _output.render(reply.stdout, _output.STREAM_CAP)
+    assert truncated is False
+    return json.loads(rendered)
+
+
+def test_a_json_body_with_a_key_block_stays_json() -> None:
+    # A file's contents, a commit message or an issue can hold a private-key header that never
+    # ends. The child takes the block to the end of its string: the body stays JSON, every other
+    # field is whole, and the host's pass finds nothing to take to the stream's end.
+    document = {
+        "name": "deploy.pem",
+        "title": "Ünïcödé stays",
+        "items": [{"body": f"See below.\n{BEGIN}\nMIIEvQIB", "number": 7}],
+    }
+    raw = json.dumps(document, indent=2).encode()
+    reply, _, _ = _main(_http("200 OK", ["Content-Type: application/json"], raw))
+    assert reply.code == 0
+    found = _rendered(reply)
+    # The block never ends: the key after it is taken too, as the host's pass would take it.
+    assert found["items"][0] == {"body": f"See below.\n{KEY_MARK}", KEY_MARK: 7}
+    assert found["name"] == "deploy.pem" and found["title"] == "Ünïcödé stays"
+
+
+@pytest.mark.parametrize(
+    ("document", "expected"),
+    [
+        # A key's lines as the strings of an array.
+        (
+            {"lines": [BEGIN, "MIIEvQIBADANBgkq", "hkiG9w0BAQEFAASC", END, "after"], "n": 1},
+            {"lines": [KEY_MARK, KEY_MARK, KEY_MARK, KEY_MARK, "after"], "n": 1},
+        ),
+        # Its header, body and end in sibling fields: the keys between are taken too, each
+        # numbered so that no two are the same.
+        (
+            {"a": f"x {BEGIN}", "b": "MIIEvQIBADANBgkq", "c": f"hkiG9w0B\n{END} ok", "d": "keep"},
+            {
+                "a": f"x {KEY_MARK}",
+                KEY_MARK: KEY_MARK,
+                f"{KEY_MARK} 2": f"{KEY_MARK} ok",
+                "d": "keep",
+            },
+        ),
+        # No end anywhere: every string after it is taken.
+        (
+            {"a": BEGIN, "b": ["MIIE", 5, True, None], "c": "MIIE"},
+            {"a": KEY_MARK, KEY_MARK: [KEY_MARK, 5, True, None], f"{KEY_MARK} 2": KEY_MARK},
+        ),
+        # Its lines as an object's keys (a gist's files are keyed by their names).
+        (
+            {"a": BEGIN, "MIIEvQIBADANBgkq": 1, "hkiG9w0BAQEFAASC": 2, "z": END, "k": "keep"},
+            {
+                "a": KEY_MARK,
+                KEY_MARK: 1,
+                f"{KEY_MARK} 2": 2,
+                f"{KEY_MARK} 3": KEY_MARK,
+                "k": "keep",
+            },
+        ),
+        # Opened in a key; ended in a key, which closes the block.
+        (
+            {BEGIN: "MIIE", "x": "QUFB", "y": f"{END} fine", "z": "keep"},
+            {
+                KEY_MARK: KEY_MARK,
+                f"{KEY_MARK} 2": KEY_MARK,
+                f"{KEY_MARK} 3": f"{KEY_MARK} fine",
+                "z": "keep",
+            },
+        ),
+        (
+            {"a": BEGIN, "b": "MIIE", END: "after", "c": "keep"},
+            {"a": KEY_MARK, KEY_MARK: KEY_MARK, f"{KEY_MARK} 2": "after", "c": "keep"},
+        ),
+        # Quotes escaped in the strings around it.
+        (
+            {"a": f'he said "x" {BEGIN}', "b": 'MI"IE\\"x', "c": f'{END} "ok"'},
+            {
+                "a": f'he said "x" {KEY_MARK}',
+                KEY_MARK: KEY_MARK,
+                f"{KEY_MARK} 2": f'{KEY_MARK} "ok"',
+            },
+        ),
+        # A second block after the first one ends.
+        (
+            {"a": [BEGIN, "MIIE", END, f"y {BEGIN}", "QUFB", f"{END} z"]},
+            {"a": [KEY_MARK, KEY_MARK, KEY_MARK, f"y {KEY_MARK}", KEY_MARK, f"{KEY_MARK} z"]},
+        ),
+    ],
+)
+def test_a_key_split_across_json_strings_is_not_returned(
+    document: dict[str, Any], expected: dict[str, Any]
+) -> None:
+    raw = json.dumps(document, indent=1).encode()
+    reply, _, _ = _main(_http("200 OK", [], raw))
+    assert _rendered(reply) == expected
+    for secret in ("MIIE", 'MI\\"IE', "hkiG9w0B", "QUFB"):
+        assert secret.encode() not in reply.stdout
+
+
+def test_an_escaped_header_is_read_and_the_rest_stays_as_it_came() -> None:
+    # Each string is read decoded, so a header written with escapes is a header. Only the strings
+    # that change are written again: numbers, white space and repeated keys stay as they came.
+    raw = (
+        b'{"n": 1e400, "m": -0, "k": 1, "k": 2,\n  "s": "\\u002d----BEGIN PRIVATE KEY-----\\nMIIE",'
+        b' "x": 0.1000, "e": "\\u002d----END PRIVATE KEY\\u002d----"}'
+    )
+    reply, _, _ = _main(_http("200 OK", [], raw))
+    assert b"MIIE" not in reply.stdout
+    assert reply.stdout == (
+        b'{"n": 1e400, "m": -0, "k": 1, "k": 2,\n  "s": "[redacted private key]",'
+        b' "[redacted private key]": 0.1000, "[redacted private key] 2": "[redacted private key]"}'
+    )
+
+
+def test_a_body_almost_json_is_left_to_the_hosts_pass() -> None:
+    # Cut short, or not quite JSON: the child leaves it as it came, and the host's pass takes a
+    # block from its header to its end across the strings.
+    raw = f'{{"a": "{BEGIN}", "b": "MIIEvQIB", "c": "{END}", "d": "tail'.encode()
+    reply, _, _ = _main(_http("200 OK", [], raw))
+    assert reply.stdout == raw
+    rendered, truncated = _output.render(reply.stdout, _output.STREAM_CAP)
+    assert rendered == f'{{"a": "{KEY_MARK}", "d": "tail' and truncated is False
+
+
+def test_a_key_block_in_a_json_key_and_in_a_status_body_is_redacted_too() -> None:
+    raw = json.dumps({f"x {BEGIN}": 1, "message": f"Not Found {END} after"}).encode()
+    reply, _, _ = _main(_http("404 Not Found", [], raw))
+    assert reply.code == 3
+    assert _rendered(reply) == {f"x {KEY_MARK}": 1, KEY_MARK: f"{KEY_MARK} after"}
+
+
+def test_a_body_with_no_key_block_goes_as_it_came() -> None:
+    raw = json.dumps({"a": [1, 2], "b": "x"}, indent=2).encode()
+    reply, _, _ = _main(_http("200 OK", [], raw))
+    assert reply.stdout == raw
+
+
+def test_a_body_that_is_not_json_is_left_to_the_hosts_flag() -> None:
+    raw = f"plain text\n{BEGIN}\nMIIEvQIB\n".encode()
+    reply, _, _ = _main(_http("200 OK", [], raw))
+    assert reply.stdout == raw
+    rendered, truncated = _output.render(reply.stdout, _output.STREAM_CAP)
+    assert (rendered, truncated) == ("plain text\n[redacted private key]", True)
 
 
 @pytest.mark.parametrize("status", ["301 Moved Permanently", "302 Found", "304 Not Modified"])

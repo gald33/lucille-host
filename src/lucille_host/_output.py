@@ -28,6 +28,7 @@ __all__ = [
     "cap",
     "decode",
     "json_size",
+    "key_block_end",
     "redact",
     "redact_to_end",
     "render",
@@ -66,6 +67,12 @@ _SHORT_ESCAPES = frozenset("\b\f\n\r\t")
 def decode(raw: bytes) -> str:
     """Decode a stream as UTF-8, replacing each invalid sequence with U+FFFD, and remove U+0000."""
     return raw.decode("utf-8", errors="replace").replace("\x00", "")
+
+
+def key_block_end(text: str) -> int | None:
+    """Where the first end of a private-key block in ``text`` ends; None when there is none."""
+    found = _PEM_END.search(text)
+    return None if found is None else found.end()
 
 
 def redact(text: str) -> str:
