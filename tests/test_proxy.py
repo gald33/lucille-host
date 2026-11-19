@@ -20,7 +20,7 @@ from typing import Any
 
 import pytest
 
-from lucille_host import _output, proxy
+from lucille_host import _output, nesting, proxy
 from lucille_host._output import TOKEN_MARK
 
 TOKEN = "ghp" + "_" + "Ab1" * 12
@@ -525,6 +525,39 @@ def test_two_keys_made_alike_leave_the_body_to_the_hosts_pass(
     raw = json.dumps(document).encode()
     reply, _, _ = _main(_http("200 OK", [], raw))
     assert reply.stdout == raw
+
+
+def test_a_body_nested_past_the_hosts_limit_is_left_to_its_pass() -> None:
+    # Before any parser reads it, so that neither parse meets the parser's own limit, which
+    # differs by version: at the host's limit the body is redacted and stays JSON; one level past
+    # it, it goes as it came, and the host's pass over the raw text takes the block.
+    def body(depth: int) -> bytes:
+        return (
+            "[" * (depth - 1) + json.dumps({"a": f"{BEGIN}\nMIIE"}) + "]" * (depth - 1)
+        ).encode()
+
+    at_limit = body(nesting.FILES_MOST)
+    reply, _, _ = _main(_http("200 OK", [], at_limit))
+    assert b"MIIE" not in reply.stdout and _rendered(reply)
+    past = body(nesting.FILES_MOST + 1)
+    reply, _, _ = _main(_http("200 OK", [], past))
+    assert reply.stdout == past
+    rendered, truncated = _output.render(reply.stdout, _output.STREAM_CAP)
+    assert "MIIE" not in rendered and truncated is True
+
+
+def test_a_second_parse_too_deep_leaves_the_body_as_it_came(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Should the check of the redacted body meet the parser's own limit all the same, the body
+    # goes as it came, to the host's pass: never an internal error.
+    def too_deep(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        raise RecursionError
+
+    monkeypatch.setattr(proxy, "_no_marked_twice", too_deep)
+    raw = json.dumps({"a": BEGIN, "b": "MIIE"}).encode()
+    reply, _, _ = _main(_http("200 OK", [], raw))
+    assert reply.code == 0 and reply.stdout == raw
 
 
 def test_many_keys_made_alike_are_numbered_quickly() -> None:

@@ -57,7 +57,7 @@ from typing import Any, Final, NoReturn
 
 import certifi
 
-from lucille_host import __version__
+from lucille_host import __version__, nesting
 from lucille_host._output import PRIVATE_KEY_MARK, TOKEN_MARK, key_block_end, redact_to_end
 
 __all__ = [
@@ -499,11 +499,18 @@ def redacted_json(body: bytes) -> bytes:
     JSON. Only the strings that change are written again; everything else, numbers, white space
     and repeated keys among it, stays as it came, and the body stays JSON (spec/PROTOCOL.md
     section 11). A body that is not JSON, one cut at the cap among them, is left to the host's
-    pass, which sets the truncation flag when a block takes its end."""
+    pass, which sets the truncation flag when a block takes its end; so is one whose arrays and
+    objects nest past the host's own limit (:data:`nesting.FILES_MOST`), before any parser reads
+    it, so that neither parse here meets the parser's own limit, which differs by version."""
     try:
         text = body.decode("utf-8")
+    except UnicodeDecodeError:
+        return body
+    if nesting.json_deeper(text):
+        return body
+    try:
         json.loads(text)
-    except (UnicodeDecodeError, ValueError, RecursionError):
+    except (ValueError, RecursionError):
         return body
     out: list[str] = []
     pos = 0
@@ -535,7 +542,7 @@ def redacted_json(body: bytes) -> bytes:
     result = "".join(out)
     try:
         json.loads(result, object_pairs_hook=_no_marked_twice)
-    except ValueError:
+    except (ValueError, RecursionError):
         return body
     return result.encode("utf-8")
 

@@ -606,8 +606,8 @@ exception or error text never appears in any reply, under any status. (A child's
 the host's error text.)
 
 **`github.read`.** Its child's output, capped as any child's is ([§13](#13-strings-numbers-sizes-and-output)):
-`stdout` is GitHub's response body, as it came, unless it is JSON and §13's redaction changes one of its
-strings, read decoded: a private-key block begins in one, or one holds a common key format (a token).
+`stdout` is GitHub's response body, as it came, unless it is JSON whose arrays and objects nest no more
+than 128 levels and §13's redaction changes one of its strings, read decoded: a private-key block begins in one, or one holds a common key format (a token).
 Then the child applies that redaction to its strings, keys included, in the order the body holds them. A block a string opens and does not end takes the rest of it, and the
 strings after it, keys and values alike, each whole, up to the first end of a block, as the redaction would
 over the raw text, so a key whose lines are separate strings, or an object's keys, is not returned. With no

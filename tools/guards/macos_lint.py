@@ -110,8 +110,10 @@ comments included; over the code with its comments blanked, so that a comment in
   one string literal in :data:`OPEN_FILE` whose value is :data:`GOOGLE_APP_PASSWORDS_PAGE`, the one
   web page the opener may show (the Gmail window's button, decisions/0003 "Second use"). It reads
   each literal on its own and also a file's literals one after another, decoded and joined with
-  nothing between them, so that one cut in pieces (``"https:" + "//host"``, or the pieces of an
-  array joined) is a network URL too; the opener's literal is read there as nothing, so that a URL
+  nothing between them and each interpolation read as nothing, once in the order they open and
+  once in the order they close, so that one cut in pieces (``"https:" + "//host"``, the pieces of
+  an array joined, or a literal interpolated into another, ``"\\("https:")//host"``) is a network
+  URL too; the opener's literal is read there as nothing, so that a URL
   cut around it is found as well.
 
 In what the app shows:
@@ -710,11 +712,13 @@ class SwiftSyntaxError(ValueError):
 class SwiftScan:
     """What :func:`swift_scan` read: each string literal, decoded, with the line it starts on,
     and the text with every comment blanked (each of its characters but a newline a space);
-    ``in_order`` is the same literals in the order they open in the text."""
+    ``in_order`` is the same literals in the order they open in the text, and ``in_closing_order``
+    in the order they close (a literal inside another's interpolation closes first)."""
 
     literals: tuple[tuple[int, str], ...]
     code: str
     in_order: tuple[tuple[int, str], ...] = ()
+    in_closing_order: tuple[tuple[int, str], ...] = ()
 
 
 _ESCAPES: Final = {"0": "\0", "\\": "\\", "t": "\t", "n": "\n", "r": "\r", '"': '"', "'": "'"}
@@ -893,7 +897,9 @@ def swift_scan(text: str) -> SwiftScan:
     scanner = _Scanner(text)
     scanner.code_until(0, interpolation=False)
     in_order = tuple((line, value) for _, line, value in sorted(scanner.opened))
-    return SwiftScan(tuple(sorted(scanner.literals)), "".join(scanner.code), in_order)
+    # The scanner records each literal as it closes.
+    closing = tuple(scanner.literals)
+    return SwiftScan(tuple(sorted(scanner.literals)), "".join(scanner.code), in_order, closing)
 
 
 def _is_test_swift(rel: str) -> bool:
@@ -1064,15 +1070,18 @@ def design_tokens(code: str) -> list[tuple[int, str]]:
 
 def _joined_url_findings(literals: Sequence[tuple[int, str]], rel: str) -> list[Violation]:
     """[http] over a file's string literals, decoded and joined in order with nothing between
-    them, so that a URL cut in pieces is found; each finding is on the line of the literal it
-    starts in. The opener's one page, as that whole literal in :data:`OPEN_FILE`, is read as
-    nothing: it is no URL here, and the literals on each side of it join, so that it hides none
-    cut around it."""
+    them, each interpolation in them read as nothing, so that a URL cut in pieces is found; each
+    finding is on the line of the literal it starts in. The caller passes the literals once in
+    the order they open and once in the order they close, so that a literal interpolated into
+    another (``"\\("https:")//host"``) joins it too. The opener's one page, as that whole literal
+    in :data:`OPEN_FILE`, is read as nothing: it is no URL here, and the literals on each side of
+    it join, so that it hides none cut around it."""
     pieces: list[str] = []
     starts: list[tuple[int, int]] = []
     at = 0
     for line, value in literals:
-        piece = "" if rel == OPEN_FILE and value == GOOGLE_APP_PASSWORDS_PAGE else value
+        page = rel == OPEN_FILE and value == GOOGLE_APP_PASSWORDS_PAGE
+        piece = "" if page else value.replace(PLACEHOLDER, "")
         starts.append((at, line))
         pieces.append(piece)
         at += len(piece)
@@ -1123,6 +1132,7 @@ def check_swift(
         found += _swift_rule_findings(value, rel, line)
         found += _regex_findings(value, rel, "swift-denylist", MARKDOWN_LINKS, line)
     found += _joined_url_findings(scan.in_order, rel)
+    found += _joined_url_findings(scan.in_closing_order, rel)
     if rel == OPEN_FILE:
         found += _opener_findings(text, scan, rel)
     if rel == PROCESS_FILE:

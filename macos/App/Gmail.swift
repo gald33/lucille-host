@@ -66,7 +66,9 @@ enum GmailRules {
 }
 
 /// The bytes Save sends, in memory this object owns. `data` points into it and never copies it,
-/// so every `Data` made from it, the verb's standard input among them, reads the same bytes; and
+/// for more than 14 bytes: Foundation keeps a `Data` of 14 bytes or fewer inline, as a copy, and
+/// every value Save sends is longer (an address, a space, 16 letters and a newline). So every
+/// `Data` made from it, the verb's standard input among them, reads the same bytes; and
 /// `wipe` overwrites them in place, with `memset_s`, which the compiler may not leave out. A
 /// `Data` of its own could not promise that: overwriting one whose storage another copy still
 /// shares makes a fresh copy to overwrite, and leaves the bytes sent where they were.
