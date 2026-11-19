@@ -281,6 +281,29 @@ def test_a_code_s_payload_past_the_limit_is_no_code_on_every_version() -> None:
             _switchboard.decode_code(_code(json.loads(_json(depth))))
 
 
+@pytest.mark.parametrize("encoding", ["utf-16", "utf-16-le", "utf-32"])
+def test_a_code_s_payload_in_another_encoding_is_no_code(encoding: str) -> None:
+    # The library writes its codes in ASCII; its parser would read UTF-16 and UTF-32 too, where
+    # the depth check does not count, so a payload in them is refused before it is read, deep or
+    # not, on every version.
+    for extra in (None, json.loads(_json(_switchboard.NEST_MOST))):
+        payload = json.loads(base64.urlsafe_b64decode(_code(extra)[6:] + "==="))
+        raw = json.dumps(payload).encode(encoding)
+        code = _switchboard.CODE_PREFIX + base64.urlsafe_b64encode(raw).decode().rstrip("=")
+        with pytest.raises(_switchboard.BadCode, match="not a pairing code"):
+            _switchboard.decode_code(code)
+
+
+def test_a_parser_that_stops_short_is_no_code(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Kept should the library's parser ever stop short of the host's own limit.
+    def too_deep(text: str) -> object:
+        raise RecursionError
+
+    monkeypatch.setattr(pairing.PairingCode, "decode", too_deep)
+    with pytest.raises(_switchboard.BadCode, match="not a pairing code"):
+        _switchboard.decode_code(_code(None))
+
+
 @pytest.mark.parametrize("depth", [MOST + 1, 2000, 200_000])
 def test_a_pairing_code_nested_too_deep_is_no_code(depth: int) -> None:
     # Too deep for the library's parser on some versions and not on others: never a traceback,

@@ -552,6 +552,12 @@ def test_a_body_nested_deep_is_redacted_on_every_version(depth: int) -> None:
         '{"a": "\\u002d----BEGIN PRIVATE KEY-----\\nMIIE", "b": nope}',
         '{"a": "\\u002d----BEGIN PRIVATE KEY-----\\nMIIE", "b": "\\x"}',
         '{"a": "\\u002d----BEGIN PRIVATE KEY-----\\nMIIE"}}',
+        # Words that are not JSON's between the strings.
+        '{"a": "\\u002d----BEGIN PRIVATE KEY-----\\nMIIE", "b": tru}',
+        '{"a": "\\u002d----BEGIN PRIVATE KEY-----\\nMIIE", "b": nulll}',
+        '{"a": "\\u002d----BEGIN PRIVATE KEY-----\\nMIIE", "b": 1true}',
+        '{"a": "\\u002d----BEGIN PRIVATE KEY-----\\nMIIE", "b": 01}',
+        '{"a": "\\u002d----BEGIN PRIVATE KEY-----\\nMIIE", "b": 1.5.3}',
     ],
 )
 def test_a_body_nested_deep_that_is_not_json_goes_as_it_came(inner: str) -> None:
@@ -567,6 +573,33 @@ def test_a_body_nested_deep_one_bracket_short_goes_as_it_came() -> None:
     raw = _deep_body(nesting.FILES_MOST + 2, inner)[:-1]
     reply, _, _ = _main(_http("200 OK", [], raw))
     assert reply.stdout == raw
+
+
+def test_a_body_nested_deep_that_ends_in_a_string_left_open_goes_as_it_came() -> None:
+    # Every bracket closed, then a string with no end: the body is not JSON, whatever its
+    # brackets say.
+    inner = '{"a": "\\u002d----BEGIN PRIVATE KEY-----\\nMIIE"}'
+    raw = _deep_body(nesting.FILES_MOST + 1, inner) + b' "MIIE'
+    reply, _, _ = _main(_http("200 OK", [], raw))
+    assert reply.stdout == raw
+
+
+def test_a_body_nested_deep_with_python_s_own_literals_is_redacted() -> None:
+    # The parser reads NaN and the infinities, so the shape check does too.
+    inner = '{"a": "\\u002d----BEGIN PRIVATE KEY-----\\nMIIE", "n": [NaN, -Infinity, -1.5e+3]}'
+    raw = _deep_body(nesting.FILES_MOST + 1, inner)
+    reply, _, _ = _main(_http("200 OK", [], raw))
+    assert b"MIIE" not in reply.stdout and b"[NaN, -Infinity, -1.5e+3]" in reply.stdout
+
+
+@pytest.mark.parametrize("depth", [1, nesting.FILES_MOST + 1])
+def test_a_string_with_no_end_and_many_escaped_quotes_is_read_once(depth: int) -> None:
+    # A body of 1 MiB that is no JSON: one string, never closed, of escaped quotes. It goes as
+    # it came, read once and not again from each quote in it.
+    raw = _deep_body(depth, '{"a": "' + '\\"' * 500_000)
+    started = time.monotonic()
+    assert proxy.redacted_json(raw) == raw
+    assert time.monotonic() - started < 1
 
 
 def test_a_second_parse_too_deep_leaves_the_body_as_it_came(

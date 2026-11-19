@@ -472,10 +472,12 @@ def _share_notes(raw: list[dict[str, Any]]) -> tuple[ShareNote, ...]:
 CODE_PREFIX: Final = "swbp1_"
 
 
-def _payload_too_deep(text: str) -> bool:
-    """Whether a code's payload, base64 as the library reads it, nests more than
-    :data:`NEST_MOST` levels; checked before the library's parser, whose own limit differs by
-    Python version. A payload that is not base64 is left to the library to refuse."""
+def _payload_refused(text: str) -> bool:
+    """Whether a code's payload, base64 as the library reads it, is one the host refuses before
+    the library's parser reads it: one that nests more than :data:`NEST_MOST` levels, as that
+    parser's own limit differs by Python version; and one that is not UTF-8 or holds a NUL, which
+    the library never writes (its codes are ASCII) and the parser would read as UTF-16 or UTF-32,
+    where this count does not. A payload that is not base64 is left to the library to refuse."""
     code = text.strip()
     if not code.startswith(CODE_PREFIX):
         return False
@@ -484,15 +486,22 @@ def _payload_too_deep(text: str) -> bool:
         raw = base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4))
     except ValueError:
         return False
-    return nesting.json_deeper(raw.decode("utf-8", errors="replace"), NEST_MOST)
+    if b"\x00" in raw:
+        return True
+    try:
+        decoded = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return True
+    return nesting.json_deeper(decoded, NEST_MOST)
 
 
 def decode_code(text: str) -> Code:
     """Decode a ``swbp1_`` code. Its hub and its token are the caller's to check. A code whose
     payload nests more than :data:`NEST_MOST` levels is not one, before the library's parser
     reads it: that parser's limit differs by Python version, so every version refuses it the same
-    way. A ``RecursionError`` is read the same, should the parser stop short of that."""
-    if _payload_too_deep(text):
+    way. A ``RecursionError`` is read the same, should the parser ever stop short of that, which
+    no payload the check passes makes it do."""
+    if _payload_refused(text):
         raise BadCode("this is not a pairing code; paste the whole code Lucille shows")
     try:
         code = pairing.PairingCode.decode(text)

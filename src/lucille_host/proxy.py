@@ -443,7 +443,9 @@ def scrub(data: bytes, token: str, *, cut: bool = False) -> bytes:
 
 # A JSON string token, in a body json.loads has taken whole: there a quote outside a string only
 # ever opens one.
-_JSON_STRING: Final = re.compile(r'"(?:[^"\\]|\\.)*"', re.DOTALL)
+# Or, with no closing quote, the rest of the text, so that a body with one is read once, never
+# again from each quote inside it.
+_JSON_STRING: Final = re.compile(r'"(?:[^"\\]|\\.)*(?P<end>"|\Z)', re.DOTALL)
 
 
 # What follows a string that is an object's key.
@@ -478,18 +480,25 @@ def _no_marked_twice(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     return dict(pairs)
 
 
-# What may lie between the strings of a JSON text: punctuation, numbers, the three literals, white
-# space.
-_BETWEEN_STRINGS: Final = re.compile(r"[\[\]{}:,0-9.eE+\-truefalsn \t\r\n]*")
+# What may lie between the strings of a JSON text: punctuation, white space, and numbers and
+# literals, each ending where a word does (Python's parser reads NaN and the infinities too).
+_BETWEEN_STRINGS: Final = re.compile(
+    r"(?:[\[\]{}:, \t\r\n]"
+    r"|(?:-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?"
+    r"|true|false|null|NaN|-?Infinity)"
+    r"(?![A-Za-z0-9_.+-]))*"
+)
 
 
 def _shaped_like_json(text: str, strings: Sequence[re.Match[str]]) -> bool:
     """Whether ``text``, nested too deep to hand to the parser, is shaped like JSON, read without
-    recursion: between its strings only :data:`_BETWEEN_STRINGS`, so no string is cut off or holds
-    an unescaped quote; and its brackets close in order, all of them. Each string's own form is
-    checked as it is decoded."""
+    recursion: every string closed, and between them only :data:`_BETWEEN_STRINGS`, so no string
+    is cut off or holds an unescaped quote; and its brackets close in order, all of them. Each
+    string's own form is checked as it is decoded."""
     pairs = {"]": "[", "}": "{"}
     opened: list[str] = []
+    if any(match.group("end") != '"' for match in strings):
+        return False
     starts = [0, *(match.end() for match in strings)]
     ends = [*(match.start() for match in strings), len(text)]
     for start, end in zip(starts, ends, strict=True):
@@ -534,13 +543,15 @@ def redacted_json(body: bytes) -> bytes:
         text = body.decode("utf-8")
     except UnicodeDecodeError:
         return body
-    tokens = list(_JSON_STRING.finditer(text))
     deep = nesting.json_deeper(text)
     try:
-        if deep and not _shaped_like_json(text, tokens):
-            return body
+        # Read whole before its strings are, as the parser reads it; a body too deep for it, by
+        # its shape (:func:`_shaped_like_json`).
         if not deep:
             json.loads(text)
+        tokens = list(_JSON_STRING.finditer(text))
+        if deep and not _shaped_like_json(text, tokens):
+            return body
         values = [_decoded(token.group()) for token in tokens]
     except (ValueError, RecursionError):
         return body
