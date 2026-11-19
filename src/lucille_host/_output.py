@@ -28,6 +28,7 @@ __all__ = [
     "cap",
     "decode",
     "json_size",
+    "has_key_block",
     "redact",
     "redact_to_end",
     "render",
@@ -66,6 +67,11 @@ _SHORT_ESCAPES = frozenset("\b\f\n\r\t")
 def decode(raw: bytes) -> str:
     """Decode a stream as UTF-8, replacing each invalid sequence with U+FFFD, and remove U+0000."""
     return raw.decode("utf-8", errors="replace").replace("\x00", "")
+
+
+def has_key_block(text: str) -> bool:
+    """Whether a private-key block begins in ``text``, as the redaction pass reads one."""
+    return _PEM_BEGIN.search(text) is not None
 
 
 def redact(text: str) -> str:

@@ -11,6 +11,7 @@ from __future__ import annotations
 import base64
 import io
 import ipaddress
+import json
 import subprocess
 import sys
 from collections.abc import Callable
@@ -18,7 +19,7 @@ from typing import Any
 
 import pytest
 
-from lucille_host import proxy
+from lucille_host import _output, proxy
 from lucille_host._output import TOKEN_MARK
 
 TOKEN = "ghp" + "_" + "Ab1" * 12
@@ -350,6 +351,53 @@ def test_no_connection_is_exit_4() -> None:
 def test_any_2xx_is_exit_0(status: str, code: int) -> None:
     reply, _, _ = _main(_http(status, []))
     assert reply.code == code and reply.stderr == f"HTTP {status[:3]}\n".encode()
+
+
+BEGIN = "-----BEGIN PRIVATE KEY-----"
+
+
+def test_a_json_body_with_a_key_block_stays_json() -> None:
+    # A file's contents, a commit message or an issue can hold a private-key header that never
+    # ends. The child takes the block to the end of its own string: the body stays JSON, every
+    # other field is whole, and the host's pass finds nothing to take to the stream's end.
+    document = {
+        "name": "deploy.pem",
+        "items": [{"body": f"See below.\n{BEGIN}\nMIIEvQIB", "number": 7}, {"body": "fine"}],
+        "title": "Ünïcödé stays",
+    }
+    raw = json.dumps(document, indent=2).encode()
+    reply, _, _ = _main(_http("200 OK", ["Content-Type: application/json"], raw))
+    assert reply.code == 0
+    found = json.loads(reply.stdout)
+    assert found["items"][0] == {"body": "See below.\n[redacted private key]", "number": 7}
+    assert found["items"][1] == {"body": "fine"} and found["title"] == "Ünïcödé stays"
+    assert found["name"] == "deploy.pem"
+    rendered, truncated = _output.render(reply.stdout, _output.STREAM_CAP)
+    assert truncated is False and json.loads(rendered) == found
+
+
+def test_a_body_with_no_key_block_goes_as_it_came() -> None:
+    raw = json.dumps({"a": [1, 2], "b": "x"}, indent=2).encode()
+    reply, _, _ = _main(_http("200 OK", [], raw))
+    assert reply.stdout == raw
+
+
+def test_a_body_that_is_not_json_is_left_to_the_hosts_flag() -> None:
+    raw = f"plain text\n{BEGIN}\nMIIEvQIB\n".encode()
+    reply, _, _ = _main(_http("200 OK", [], raw))
+    assert reply.stdout == raw
+    rendered, truncated = _output.render(reply.stdout, _output.STREAM_CAP)
+    assert (rendered, truncated) == ("plain text\n[redacted private key]", True)
+
+
+def test_a_key_block_in_a_json_key_and_in_a_status_body_is_redacted_too() -> None:
+    raw = json.dumps({f"x {BEGIN}": 1, "message": f"Not Found {BEGIN} MIIE"}).encode()
+    reply, _, _ = _main(_http("404 Not Found", [], raw))
+    assert reply.code == 3
+    assert json.loads(reply.stdout) == {
+        "x [redacted private key]": 1,
+        "message": "Not Found [redacted private key]",
+    }
 
 
 @pytest.mark.parametrize("status", ["301 Moved Permanently", "302 Found", "304 Not Modified"])

@@ -164,6 +164,8 @@ The first version.
     and the description in `reply.schema.json`). No field or value was added; the flag is true in more
     cases.
   - The Gmail operations' child redacts each string of its document itself before the host's pass, so a
-    block in one message's text or subject ends with that string and the document stays JSON. Editorial: §11
+    block in one message's text or subject ends with that string and the document stays JSON; so does
+    `github.read`'s, for a body that is JSON and in which a block begins, which it then writes again
+    compactly (any other body goes as it came). Editorial: §11
     says that it is the child, not the host, that leaves out what does not fit its documents.
 - First accepted by: no host release yet. Lucille: not yet.

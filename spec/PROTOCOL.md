@@ -606,7 +606,9 @@ exception or error text never appears in any reply, under any status. (A child's
 the host's error text.)
 
 **`github.read`.** Its child's output, capped as any child's is ([§13](#13-strings-numbers-sizes-and-output)):
-`stdout` is GitHub's response body; `stderr` is the line `HTTP <status>`, then, when GitHub sent one, its
+`stdout` is GitHub's response body, as it came, unless a private-key block begins in it and it is JSON:
+then the child applies §13's redaction to each of its strings alone, and writes it again compactly, so
+that the block ends with its string and the body stays JSON; `stderr` is the line `HTTP <status>`, then, when GitHub sent one, its
 `Link` header line. The credential's value is never in either: the host removes it before writing. The exit
 code says how the call went: 0 for a 2xx status; 3 for any other status, a 3xx included, which is reported
 and never followed; 2 when the credential is missing, is not bound to `api.github.com`, or is not in the form
@@ -760,7 +762,8 @@ output: PEM blocks
 stream's truncation flag, since the rest of the output is not in the reply) and common key prefixes. It is a
 convenience, not a guarantee, and nothing may claim that secrets are removed from output. A child that
 writes structured output can redact it itself, item by item, so that a block does not run past the item it
-is in: the Gmail operations do, so their documents stay JSON.
+is in: `github.read` does for a JSON body, and the Gmail operations for their documents, so both stay
+JSON.
 
 **Order of the steps.** For each stream of a child's output: decode, remove U+0000, redact, then cap last.
 Capping drops whole characters from

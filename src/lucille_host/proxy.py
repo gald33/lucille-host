@@ -21,9 +21,12 @@ order, each refusal writing one fixed line on standard error, holding no value a
 4. It follows no redirect, reads at most :data:`HEADER_CAP` bytes of headers and
    :data:`BODY_CAP` of body (exit 5 past either, with what it read of the body), and reads no
    compressed body and no transfer coding but a plain ``chunked`` (exit 5, no body).
-5. It replaces the token, raw and in base64 at each of the three byte alignments, in the whole
-   body and in what goes on standard error (:func:`scrub`), and at a cut drops any tail that
-   begins the token.
+5. When a private-key block begins in a body that is JSON, it applies the host's redaction to
+   each of its strings alone and writes the body again compactly, so that the block ends with its
+   string and the body stays JSON (:func:`redacted_json`); any other body goes as it came. It
+   replaces the token, raw and in base64 at each of the three byte alignments, in the whole body
+   and in what goes on standard error (:func:`scrub`), and at a cut drops any tail that begins
+   the token.
 6. It writes standard output once, at the end, then standard error (``HTTP <status>``, and
    GitHub's ``Link`` header when there is one), and ends with ``os._exit``, so no finalizer's text
    or failed final flush follows. From its start, descriptors 1 and 2 point at the null device and
@@ -40,6 +43,7 @@ from __future__ import annotations
 import binascii
 import http.client
 import ipaddress
+import json
 import os
 import re
 import socket
@@ -53,7 +57,7 @@ from typing import Any, Final, NoReturn
 import certifi
 
 from lucille_host import __version__
-from lucille_host._output import TOKEN_MARK
+from lucille_host._output import TOKEN_MARK, has_key_block, redact
 
 __all__ = [
     "resolve",
@@ -436,6 +440,40 @@ def scrub(data: bytes, token: str, *, cut: bool = False) -> bytes:
 # --- the whole ------------------------------------------------------------------------------
 
 
+def _redacted(value: Any) -> Any:
+    if isinstance(value, str):
+        return redact(value)
+    if isinstance(value, list):
+        return [_redacted(item) for item in value]
+    if isinstance(value, dict):
+        return {redact(key): _redacted(item) for key, item in value.items()}
+    return value
+
+
+def redacted_json(body: bytes) -> bytes:
+    """GitHub's body as it came, unless a private-key block begins in it and it is JSON: then each
+    of its strings with the host's own redaction applied to it alone, written again compactly. A
+    block that does not end in its string is taken to that string's end, never past it, so the
+    body stays JSON, and the host's pass over the whole stream finds no block left to take to the
+    stream's end (spec/PROTOCOL.md section 11). A body that is not JSON, one cut at the cap among
+    them, is left to the host's pass, which then sets the truncation flag."""
+    try:
+        text = body.decode("utf-8")
+    except UnicodeDecodeError:
+        return body
+    if not has_key_block(text):
+        return body
+    try:
+        document = _redacted(json.loads(text))
+    except (ValueError, RecursionError):
+        return body
+    try:
+        return json.dumps(document, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    except UnicodeEncodeError:
+        # A string with a lone surrogate, from a \uD800 escape, which UTF-8 cannot hold.
+        return json.dumps(document, ensure_ascii=True, separators=(",", ":")).encode("ascii")
+
+
 def main(
     argv: Sequence[str],
     *,
@@ -457,7 +495,9 @@ def main(
                 sock.close()
             except OSError:
                 pass
-        return Reply(code, scrub(body, token), scrub(head.encode("utf-8") + b"\n", token))
+        return Reply(
+            code, scrub(redacted_json(body), token), scrub(head.encode("utf-8") + b"\n", token)
+        )
     except _Stop as stop:
         err = (stop.head + "\n" if stop.head else "") + stop.line + "\n"
         if token is None:
