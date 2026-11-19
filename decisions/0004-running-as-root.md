@@ -278,14 +278,14 @@ paths under `/data`, the file store, and no credential operation.
 ### 4.2 Recommendation: A
 
 Refuse uid 0 for every verb except `--version` and `--help` (the read-only `log`, `ops list` and `roots list`
-could stay open to root; that is the operator's call); give an add-on an unprivileged user in its own
+could stay open to root; that is for the ruling to say); give an add-on an unprivileged user in its own
 image; settle the keyring question for the add-on separately, in 0003, before any add-on claims
 credential operations.
 
 Why: the refusal already exists and is already the documented invariant; the only gap found (1.2) is that
 seven verbs skip it (`log`, `pause`, `resume`, `kill`, `ops`, `roots`, `policy`), with an observed effect of locking the real user out of their own profile; and every
 option that allows root buys the add-on convenience with code that makes the host larger and its claim
-conditional. If the operator rules that an add-on must run as root, C is the narrower of the two, and the
+conditional. If the ruling is that an add-on must run as root, C is the narrower of the two, and the
 conditions in B (state under `/data`, file store, no credential operation, and a privilege drop for
 children) should be its minimum.
 
