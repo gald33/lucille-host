@@ -478,6 +478,32 @@ def _no_marked_twice(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     return dict(pairs)
 
 
+# What may lie between the strings of a JSON text: punctuation, numbers, the three literals, white
+# space.
+_BETWEEN_STRINGS: Final = re.compile(r"[\[\]{}:,0-9.eE+\-truefalsn \t\r\n]*")
+
+
+def _shaped_like_json(text: str, strings: Sequence[re.Match[str]]) -> bool:
+    """Whether ``text``, nested too deep to hand to the parser, is shaped like JSON, read without
+    recursion: between its strings only :data:`_BETWEEN_STRINGS`, so no string is cut off or holds
+    an unescaped quote; and its brackets close in order, all of them. Each string's own form is
+    checked as it is decoded."""
+    pairs = {"]": "[", "}": "{"}
+    opened: list[str] = []
+    starts = [0, *(match.end() for match in strings)]
+    ends = [*(match.start() for match in strings), len(text)]
+    for start, end in zip(starts, ends, strict=True):
+        gap = text[start:end]
+        if not _BETWEEN_STRINGS.fullmatch(gap):
+            return False
+        for c in gap:
+            if c in "[{":
+                opened.append(c)
+            elif c in "]}" and (not opened or opened.pop() != pairs[c]):
+                return False
+    return not opened
+
+
 def _decoded(raw: str) -> str:
     """A JSON string token's value."""
     value: str = raw[1:-1] if "\\" not in raw else json.loads(raw)
@@ -499,29 +525,36 @@ def redacted_json(body: bytes) -> bytes:
     JSON. Only the strings that change are written again; everything else, numbers, white space
     and repeated keys among it, stays as it came, and the body stays JSON (spec/PROTOCOL.md
     section 11). A body that is not JSON, one cut at the cap among them, is left to the host's
-    pass, which sets the truncation flag when a block takes its end; so is one whose arrays and
-    objects nest past the host's own limit (:data:`nesting.FILES_MOST`), before any parser reads
-    it, so that neither parse here meets the parser's own limit, which differs by version."""
+    pass, which sets the truncation flag when a block takes its end. A body whose arrays and
+    objects nest past the host's own limit (:data:`nesting.FILES_MOST`) is handed to no parser,
+    whose own limit differs by version: its shape is checked without recursion
+    (:func:`_shaped_like_json`) and each string as it is decoded, and its strings are redacted the
+    same way; one not shaped like JSON is left to the host's pass."""
     try:
         text = body.decode("utf-8")
     except UnicodeDecodeError:
         return body
-    if nesting.json_deeper(text):
-        return body
+    tokens = list(_JSON_STRING.finditer(text))
+    deep = nesting.json_deeper(text)
     try:
-        json.loads(text)
+        if deep and not _shaped_like_json(text, tokens):
+            return body
+        if not deep:
+            json.loads(text)
+        values = [_decoded(token.group()) for token in tokens]
     except (ValueError, RecursionError):
         return body
     out: list[str] = []
     pos = 0
     open_block = False
-    tokens = list(_JSON_STRING.finditer(text))
     # The keys the body holds and those redaction made, so that none it makes is one of them.
-    taken = {_decoded(t.group()) for t in tokens if _KEY_COLON.match(text, t.end())}
+    taken = {
+        value
+        for token, value in zip(tokens, values, strict=True)
+        if _KEY_COLON.match(text, token.end())
+    }
     counts: dict[str, int] = {}
-    for token in tokens:
-        raw = token.group()
-        value = _decoded(raw)
+    for token, value in zip(tokens, values, strict=True):
         if open_block:
             end = key_block_end(value)
             if end is None:
@@ -540,6 +573,10 @@ def redacted_json(body: bytes) -> bytes:
         return body
     out.append(text[pos:])
     result = "".join(out)
+    if deep:
+        # Only strings changed, each written as JSON, and the numbering kept every key it made
+        # apart from every other: the shape checked above still holds.
+        return result.encode("utf-8")
     try:
         json.loads(result, object_pairs_hook=_no_marked_twice)
     except (ValueError, RecursionError):

@@ -527,23 +527,46 @@ def test_two_keys_made_alike_leave_the_body_to_the_hosts_pass(
     assert reply.stdout == raw
 
 
-def test_a_body_nested_past_the_hosts_limit_is_left_to_its_pass() -> None:
-    # Before any parser reads it, so that neither parse meets the parser's own limit, which
-    # differs by version: at the host's limit the body is redacted and stays JSON; one level past
-    # it, it goes as it came, and the host's pass over the raw text takes the block.
-    def body(depth: int) -> bytes:
-        return (
-            "[" * (depth - 1) + json.dumps({"a": f"{BEGIN}\nMIIE"}) + "]" * (depth - 1)
-        ).encode()
+def _deep_body(depth: int, inner: str) -> bytes:
+    """``inner``, a JSON value, inside arrays to ``depth`` levels in all."""
+    return ("[" * (depth - 1) + inner + "]" * (depth - 1)).encode()
 
-    at_limit = body(nesting.FILES_MOST)
-    reply, _, _ = _main(_http("200 OK", [], at_limit))
-    assert b"MIIE" not in reply.stdout and _rendered(reply)
-    past = body(nesting.FILES_MOST + 1)
-    reply, _, _ = _main(_http("200 OK", [], past))
-    assert reply.stdout == past
-    rendered, truncated = _output.render(reply.stdout, _output.STREAM_CAP)
-    assert "MIIE" not in rendered and truncated is True
+
+@pytest.mark.parametrize("depth", [nesting.FILES_MOST, nesting.FILES_MOST + 1, 2000, 200_000])
+def test_a_body_nested_deep_is_redacted_on_every_version(depth: int) -> None:
+    # Past the host's limit the body goes to no parser, whose own limit differs by version: its
+    # shape is checked without one and its strings redacted the same way, an escaped header among
+    # them, which the host's pass over the raw text would not see.
+    inner = '{"a": "\\u002d----BEGIN PRIVATE KEY-----\\nMIIE", "MIIEkey": 1}'
+    raw = _deep_body(depth, inner)
+    reply, _, _ = _main(_http("200 OK", [], raw))
+    assert reply.code == 0 and b"MIIE" not in reply.stdout
+    expected = _deep_body(depth, f'{{"a": "{KEY_MARK}", "{KEY_MARK}": 1}}')
+    assert reply.stdout == expected
+
+
+@pytest.mark.parametrize(
+    "inner",
+    [
+        '{"a": "\\u002d----BEGIN PRIVATE KEY-----\\nMIIE", "b": "cut',
+        '{"a": "\\u002d----BEGIN PRIVATE KEY-----\\nMIIE", "b": nope}',
+        '{"a": "\\u002d----BEGIN PRIVATE KEY-----\\nMIIE", "b": "\\x"}',
+        '{"a": "\\u002d----BEGIN PRIVATE KEY-----\\nMIIE"}}',
+    ],
+)
+def test_a_body_nested_deep_that_is_not_json_goes_as_it_came(inner: str) -> None:
+    # Cut short, a word that is not JSON's, an escape JSON has not, brackets that do not close in
+    # order, or never close: the child leaves it to the host's pass, as any body that is not JSON.
+    raw = _deep_body(nesting.FILES_MOST + 1, inner)
+    reply, _, _ = _main(_http("200 OK", [], raw))
+    assert reply.stdout == raw
+
+
+def test_a_body_nested_deep_one_bracket_short_goes_as_it_came() -> None:
+    inner = '{"a": "\\u002d----BEGIN PRIVATE KEY-----\\nMIIE"}'
+    raw = _deep_body(nesting.FILES_MOST + 2, inner)[:-1]
+    reply, _, _ = _main(_http("200 OK", [], raw))
+    assert reply.stdout == raw
 
 
 def test_a_second_parse_too_deep_leaves_the_body_as_it_came(

@@ -1669,6 +1669,8 @@ def test_the_web_page_is_allowed_only_as_that_literal_in_the_opener() -> None:
         'let page = "https:\\("")//example.com"',
         'let page = "\\("ht" + "tps:")//example.com"',
         'let page = "https:\\(rest)//example.com"',
+        'let page = "ht\\("tp\\("s:")")//example.com"',
+        'let page = "\\("\\("ht")tps:")//example.com"',
     ],
 )
 def test_a_url_cut_into_literals_is_a_network_url(line: str) -> None:

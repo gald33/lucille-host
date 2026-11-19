@@ -606,15 +606,19 @@ exception or error text never appears in any reply, under any status. (A child's
 the host's error text.)
 
 **`github.read`.** Its child's output, capped as any child's is ([§13](#13-strings-numbers-sizes-and-output)):
-`stdout` is GitHub's response body, as it came, unless it is JSON whose arrays and objects nest no more
-than 128 levels and §13's redaction changes one of its strings, read decoded: a private-key block begins in one, or one holds a common key format (a token).
+`stdout` is GitHub's response body, as it came, unless it is JSON and §13's redaction changes one of its
+strings, read decoded: a private-key block begins in one, or one holds a common key format (a token).
 Then the child applies that redaction to its strings, keys included, in the order the body holds them. A block a string opens and does not end takes the rest of it, and the
 strings after it, keys and values alike, each whole, up to the first end of a block, as the redaction would
 over the raw text, so a key whose lines are separate strings, or an object's keys, is not returned. With no
 end, it takes every string after the header, and the reply is not flagged: the body is whole. Each key it
 changes is numbered when it would be a key the body holds or one it made before (`[redacted private key]
 2`), so an object keeps no two keys alike; were two alike all the same, the child leaves the body as it came, to §13's pass over
-the raw text. Only the strings that change are written again, so the body stays JSON. The marks can make a
+the raw text. Only the strings that change are written again, so the body stays JSON. A body whose arrays
+and objects nest past 128 levels is handed to no parser, whose own limit differs by version: the child
+checks its shape without one (between its strings only JSON's punctuation, numbers and literals, its
+brackets closing in order, each string a JSON string), redacts it the same way, and leaves one of another
+shape to §13's pass. The marks can make a
 body longer than it came; past the 64 KiB cap (§13) the host cuts it, sets the truncation flag, and the
 body is then not JSON; `stderr` is the line `HTTP <status>`, then, when GitHub sent one, its
 `Link` header line. The credential's value is never in either: the host removes it before writing. The exit

@@ -66,6 +66,7 @@ out of it.
 
 from __future__ import annotations
 
+import base64
 import contextlib
 import datetime
 import math
@@ -467,11 +468,32 @@ def _share_notes(raw: list[dict[str, Any]]) -> tuple[ShareNote, ...]:
     )
 
 
+# What a pairing code starts with (sb ``pairing.CODE_PREFIX``, which the tests hold this to).
+CODE_PREFIX: Final = "swbp1_"
+
+
+def _payload_too_deep(text: str) -> bool:
+    """Whether a code's payload, base64 as the library reads it, nests more than
+    :data:`NEST_MOST` levels; checked before the library's parser, whose own limit differs by
+    Python version. A payload that is not base64 is left to the library to refuse."""
+    code = text.strip()
+    if not code.startswith(CODE_PREFIX):
+        return False
+    payload = code[len(CODE_PREFIX) :]
+    try:
+        raw = base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4))
+    except ValueError:
+        return False
+    return nesting.json_deeper(raw.decode("utf-8", errors="replace"), NEST_MOST)
+
+
 def decode_code(text: str) -> Code:
-    """Decode a ``swbp1_`` code. Its hub and its token are the caller's to check. A payload
-    nested past what the library's parser follows is not a code either: the parser's limit
-    differs by Python version, and a payload a newer one reads at that depth is no code object,
-    so every version refuses it the same way."""
+    """Decode a ``swbp1_`` code. Its hub and its token are the caller's to check. A code whose
+    payload nests more than :data:`NEST_MOST` levels is not one, before the library's parser
+    reads it: that parser's limit differs by Python version, so every version refuses it the same
+    way. A ``RecursionError`` is read the same, should the parser stop short of that."""
+    if _payload_too_deep(text):
+        raise BadCode("this is not a pairing code; paste the whole code Lucille shows")
     try:
         code = pairing.PairingCode.decode(text)
     except (pairing.PairingError, RecursionError):

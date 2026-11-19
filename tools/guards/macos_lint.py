@@ -110,11 +110,11 @@ comments included; over the code with its comments blanked, so that a comment in
   one string literal in :data:`OPEN_FILE` whose value is :data:`GOOGLE_APP_PASSWORDS_PAGE`, the one
   web page the opener may show (the Gmail window's button, decisions/0003 "Second use"). It reads
   each literal on its own and also a file's literals one after another, decoded and joined with
-  nothing between them and each interpolation read as nothing, once in the order they open and
-  once in the order they close, so that one cut in pieces (``"https:" + "//host"``, the pieces of
-  an array joined, or a literal interpolated into another, ``"\\("https:")//host"``) is a network
-  URL too; the opener's literal is read there as nothing, so that a URL
-  cut around it is found as well.
+  nothing between them, once in the order they open with each interpolation read as nothing, and
+  once with the literals written in each interpolation put in its place, at any depth; so that one
+  cut in pieces (``"https:" + "//host"``, the pieces of an array joined, or a literal interpolated
+  into another, ``"ht\\("tp\\("s:")")//host"``) is a network URL too; the opener's literal is read
+  there as nothing, so that a URL cut around it is found as well.
 
 In what the app shows:
 
@@ -712,13 +712,14 @@ class SwiftSyntaxError(ValueError):
 class SwiftScan:
     """What :func:`swift_scan` read: each string literal, decoded, with the line it starts on,
     and the text with every comment blanked (each of its characters but a newline a space);
-    ``in_order`` is the same literals in the order they open in the text, and ``in_closing_order``
-    in the order they close (a literal inside another's interpolation closes first)."""
+    ``in_order`` is the same literals in the order they open in the text, and ``spliced`` those
+    outside any interpolation, in that order, each with the literals inside its interpolations
+    put in their places (:func:`_spliced`)."""
 
     literals: tuple[tuple[int, str], ...]
     code: str
     in_order: tuple[tuple[int, str], ...] = ()
-    in_closing_order: tuple[tuple[int, str], ...] = ()
+    spliced: tuple[tuple[int, str], ...] = ()
 
 
 _ESCAPES: Final = {"0": "\0", "\\": "\\", "t": "\t", "n": "\n", "r": "\r", '"': '"', "'": "'"}
@@ -733,6 +734,8 @@ class _Scanner:
         self.literals: list[tuple[int, str]] = []
         # Each literal with the index it opens at.
         self.opened: list[tuple[int, int, str]] = []
+        # Each literal's span, line, value and its interpolations' spans.
+        self.spans: list[_Literal] = []
         self.starts = [0, *(match.end() for match in re.finditer("\n", text))]
 
     def line(self, index: int) -> int:
@@ -819,6 +822,7 @@ class _Scanner:
             i += 1
             close = '"' + "#" * hashes
         escape = "\\" + "#" * hashes
+        interpolations: list[tuple[int, int]] = []
         # The literal's source lines; joined[k] is True when line k continues line k - 1.
         lines: list[list[str]] = [[]]
         joined = [False]
@@ -844,7 +848,9 @@ class _Scanner:
             kind = text[j] if j < n else ""
             if kind == "(":
                 lines[-1].append(PLACEHOLDER)
-                i = self.code_until(j + 1, interpolation=True) + 1
+                inside = self.code_until(j + 1, interpolation=True)
+                interpolations.append((j + 1, inside))
+                i = inside + 1
             elif kind == "u":
                 match = _UNICODE_ESCAPE.match(text, j + 1)
                 point = int(match.group(1), 16) if match is not None else -1
@@ -864,7 +870,46 @@ class _Scanner:
         value = _multiline_value(lines, joined, line) if multiline else "".join(lines[0])
         self.literals.append((line, value))
         self.opened.append((opened_at, line, value))
+        self.spans.append(_Literal(opened_at, i, line, value, tuple(interpolations)))
         return i
+
+
+@dataclass(frozen=True)
+class _Literal:
+    start: int
+    end: int
+    line: int
+    value: str
+    interpolations: tuple[tuple[int, int], ...]
+
+
+def _spliced(literals: Sequence[_Literal], length: int) -> tuple[tuple[int, str], ...]:
+    """The literals outside any interpolation, in the order they open, each value with every
+    interpolation replaced by the literals written in it, joined and spliced the same way, so
+    that ``"ht\\("tp\\("s:")")//host"`` reads ``https://host``. An interpolation with no literal
+    in it (a value) reads as nothing. A value whose placeholders do not match its interpolations
+    one for one (one typed in the source) reads with them all as nothing."""
+    ordered = sorted(literals, key=lambda lit: lit.start)
+
+    def within(start: int, end: int) -> list[_Literal]:
+        found: list[_Literal] = []
+        at = start
+        for lit in ordered:
+            if at <= lit.start < end:
+                found.append(lit)
+                at = lit.end
+        return found
+
+    def splice(lit: _Literal) -> str:
+        pieces = lit.value.split(PLACEHOLDER)
+        if len(pieces) != len(lit.interpolations) + 1:
+            return "".join(pieces)
+        out = pieces[0]
+        for (start, end), piece in zip(lit.interpolations, pieces[1:], strict=True):
+            out += "".join(splice(inner) for inner in within(start, end)) + piece
+        return out
+
+    return tuple((lit.line, splice(lit)) for lit in within(0, length))
 
 
 def _multiline_value(lines: list[list[str]], joined: list[bool], line: int) -> str:
@@ -897,9 +942,8 @@ def swift_scan(text: str) -> SwiftScan:
     scanner = _Scanner(text)
     scanner.code_until(0, interpolation=False)
     in_order = tuple((line, value) for _, line, value in sorted(scanner.opened))
-    # The scanner records each literal as it closes.
-    closing = tuple(scanner.literals)
-    return SwiftScan(tuple(sorted(scanner.literals)), "".join(scanner.code), in_order, closing)
+    spliced = _spliced(scanner.spans, len(text))
+    return SwiftScan(tuple(sorted(scanner.literals)), "".join(scanner.code), in_order, spliced)
 
 
 def _is_test_swift(rel: str) -> bool:
@@ -1069,13 +1113,13 @@ def design_tokens(code: str) -> list[tuple[int, str]]:
 
 
 def _joined_url_findings(literals: Sequence[tuple[int, str]], rel: str) -> list[Violation]:
-    """[http] over a file's string literals, decoded and joined in order with nothing between
-    them, each interpolation in them read as nothing, so that a URL cut in pieces is found; each
-    finding is on the line of the literal it starts in. The caller passes the literals once in
-    the order they open and once in the order they close, so that a literal interpolated into
-    another (``"\\("https:")//host"``) joins it too. The opener's one page, as that whole literal
-    in :data:`OPEN_FILE`, is read as nothing: it is no URL here, and the literals on each side of
-    it join, so that it hides none cut around it."""
+    """[http] over a file's string literals, decoded and joined in order with nothing between them,
+    each interpolation in them read as nothing, so that a URL cut in pieces is found; each finding
+    is on the line of the literal it starts in. The caller passes the literals once in the order
+    they open, and once spliced (:func:`_spliced`), so that a literal interpolated into another, at
+    any depth (``"\\("https:")//host"``), joins it too. The opener's one page, as that whole literal
+    in :data:`OPEN_FILE`, is read as nothing: it is no URL here, and the literals on each side of it
+    join, so that it hides none cut around it."""
     pieces: list[str] = []
     starts: list[tuple[int, int]] = []
     at = 0
@@ -1132,7 +1176,7 @@ def check_swift(
         found += _swift_rule_findings(value, rel, line)
         found += _regex_findings(value, rel, "swift-denylist", MARKDOWN_LINKS, line)
     found += _joined_url_findings(scan.in_order, rel)
-    found += _joined_url_findings(scan.in_closing_order, rel)
+    found += _joined_url_findings(scan.spliced, rel)
     if rel == OPEN_FILE:
         found += _opener_findings(text, scan, rel)
     if rel == PROCESS_FILE:
