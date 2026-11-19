@@ -156,4 +156,14 @@ The first version.
     install enables it, changes ([PROTOCOL.md §11](PROTOCOL.md#11-replies), and the description in
     `host.describe.schema.json`). Each catalog entry now carries words for a shell, which are outside it.
     The value is what it was: this changes nothing either side may send.
+- **Revised in the draft, 2026-11-19, after the review of the Gmail operations.**
+  - A truncation flag is also set when redaction took the end of a stream: an unterminated
+    `BEGIN ... PRIVATE KEY` block, which runs to the end, left the rest of the output out of the reply with
+    the flag false, so a reader could not tell that it was not whole
+    ([PROTOCOL.md §11](PROTOCOL.md#11-replies) and [§13](PROTOCOL.md#13-strings-numbers-sizes-and-output),
+    and the description in `reply.schema.json`). No field or value was added; the flag is true in more
+    cases.
+  - The Gmail operations' child redacts each string of its document itself before the host's pass, so a
+    block in one message's text or subject ends with that string and the document stays JSON. Editorial: §11
+    says that it is the child, not the host, that leaves out what does not fit its documents.
 - First accepted by: no host release yet. Lucille: not yet.

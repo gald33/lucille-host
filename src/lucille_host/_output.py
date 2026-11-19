@@ -2,7 +2,9 @@
 
 For each stream, in this order: decode as UTF-8 with ``errors="replace"``, remove every U+0000,
 redact, then cap last. Capping drops whole characters from the end until the stream's JSON-encoded
-string fits the cap, and sets the stream's truncation flag. Only capping sets it.
+string fits the cap, and sets the stream's truncation flag. Redaction sets it too when an
+unterminated ``BEGIN ... PRIVATE KEY`` block took the rest of the stream: the end of the output is
+gone from the reply either way.
 
 The host keeps at most :data:`RAW_CEILING` bytes of each stream's raw output and reads and drops the
 rest, so a child never blocks on a full pipe and memory stays bounded. Dropping that rest counts as
@@ -10,7 +12,8 @@ capping (the spec's rule ``raw-ceiling``), so it sets the flag too.
 
 Redaction is best effort, a convenience and not a guarantee: it replaces PEM private-key blocks and
 some well-known key formats. An unterminated ``BEGIN ... PRIVATE KEY`` block counts as running to
-the end of the stream. Nothing may claim that secrets are removed from output.
+the end of the stream, and sets its truncation flag. Nothing may claim that secrets are removed
+from output.
 """
 
 from __future__ import annotations
@@ -26,6 +29,7 @@ __all__ = [
     "decode",
     "json_size",
     "redact",
+    "redact_to_end",
     "render",
 ]
 
@@ -66,7 +70,14 @@ def decode(raw: bytes) -> str:
 
 def redact(text: str) -> str:
     """The best-effort redaction pass."""
+    return redact_to_end(text)[0]
+
+
+def redact_to_end(text: str) -> tuple[str, bool]:
+    """The best-effort redaction pass, and whether an unterminated private-key block took the rest
+    of ``text``."""
     out = []
+    to_end = False
     pos = 0
     while True:
         begin = _PEM_BEGIN.search(text, pos)
@@ -79,9 +90,10 @@ def redact(text: str) -> str:
         if end is None:
             # Unterminated: the block runs to the end of the stream.
             pos = len(text)
+            to_end = True
             break
         pos = end.end()
-    return _TOKENS.sub(TOKEN_MARK, "".join(out))
+    return _TOKENS.sub(TOKEN_MARK, "".join(out)), to_end
 
 
 def json_size(text: str) -> int:
@@ -118,7 +130,9 @@ def render(raw: bytes, limit: int, *, dropped: bool = False) -> tuple[str, bool]
     """One stream of a child's output, ready for a reply: decoded, redacted and capped.
 
     ``dropped`` says the host stopped keeping the stream before its end (rule ``raw-ceiling``);
-    the truncation flag is then set whatever the cap leaves.
+    the truncation flag is then set whatever the cap leaves. It is set too when an unterminated
+    private-key block took the rest of the stream.
     """
-    text, truncated = cap(redact(decode(raw)), limit)
-    return text, truncated or dropped
+    redacted, to_end = redact_to_end(decode(raw))
+    text, truncated = cap(redacted, limit)
+    return text, truncated or dropped or to_end
