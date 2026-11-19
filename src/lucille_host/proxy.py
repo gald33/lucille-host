@@ -56,6 +56,11 @@ from lucille_host import __version__
 from lucille_host._output import TOKEN_MARK
 
 __all__ = [
+    "resolve",
+    "secret_forms",
+    "set_aside_streams",
+    "tls_connect",
+    "write_all",
     "BODY_CAP",
     "HEADER_CAP",
     "HOST",
@@ -226,16 +231,27 @@ def _vetted(resolve: Callable[[str, int], list[str]]) -> list[str]:
     return addresses
 
 
-def _connect(address: str) -> Any:
-    """A TLS connection to ``address`` for :data:`HOST`, checked against certifi's bundle."""
+def resolve(host: str, port: int) -> list[str]:
+    """Every address ``host`` resolves to for TCP, each once, in the resolver's order."""
+    return _resolve(host, port)
+
+
+def tls_connect(address: str, host: str, port: int) -> Any:
+    """A TLS connection to ``address``, never to ``host``'s name, with ``host`` as the server name
+    and the certificate checked for it against certifi's bundle alone, TLS 1.2 or later."""
     context = ssl.create_default_context(cafile=certifi.where())
     context.minimum_version = ssl.TLSVersion.TLSv1_2
-    raw = socket.create_connection((address, PORT), timeout=NET_TIMEOUT_S)
+    raw = socket.create_connection((address, port), timeout=NET_TIMEOUT_S)
     try:
-        return context.wrap_socket(raw, server_hostname=HOST)
+        return context.wrap_socket(raw, server_hostname=host)
     except BaseException:
         raw.close()
         raise
+
+
+def _connect(address: str) -> Any:
+    """A TLS connection to ``address`` for :data:`HOST` (:func:`tls_connect`)."""
+    return tls_connect(address, HOST, PORT)
 
 
 def _connected(connect: Callable[[str], Any], addresses: list[str]) -> Any:
@@ -397,6 +413,11 @@ def _forms(token: str) -> list[bytes]:
     return forms
 
 
+def secret_forms(secret: str) -> list[bytes]:
+    """An ASCII secret and its base64 at each of the three byte alignments (:func:`_forms`)."""
+    return _forms(secret)
+
+
 def scrub(data: bytes, token: str, *, cut: bool = False) -> bytes:
     """``data`` with every form of the token replaced. With ``cut``, a tail that is a beginning
     of the raw token is dropped as well."""
@@ -472,6 +493,17 @@ def _set_aside_streams() -> tuple[int, int]:
     finally:
         os.close(null)
     return out, err
+
+
+def write_all(descriptor: int, data: bytes) -> None:
+    """All of ``data`` to ``descriptor``, through interruptions; nothing on a broken pipe."""
+    _write(descriptor, data)
+
+
+def set_aside_streams() -> tuple[int, int]:
+    """Copies of standard output and error, with 1 and 2 pointed at the null device
+    (:func:`_set_aside_streams`)."""
+    return _set_aside_streams()
 
 
 def run() -> NoReturn:

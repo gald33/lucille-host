@@ -20,7 +20,7 @@ from pathlib import Path
 import pytest
 from keyring.backends.fail import Keyring as FailKeyring
 
-from lucille_host import cli, credentials, store
+from lucille_host import _exec, cli, credentials, store
 from tests._host import HostEnv
 from tests._keyring import MemoryKeyring, turned_off
 
@@ -45,8 +45,8 @@ def test_set_list_remove(
     said = capsys.readouterr()
     assert said.out == (
         "saved gmail/app-password, to be sent only to imap.gmail.com, smtp.gmail.com. "
-        "Only github.read uses saved credentials: those of the service github, bound to "
-        "api.github.com.\n"
+        "Only github.read and the gmail operations use saved credentials: those of the service "
+        "github, bound to api.github.com, and of the service gmail, bound to imap.gmail.com.\n"
     )
     assert _store(host_env).value("gmail", "app-password") == SECRET
 
@@ -853,7 +853,7 @@ def test_a_lone_surrogate_typed_at_the_prompt_is_refused(
 _IN_A_LOCALE = """
 import sys
 import keyring.core
-from lucille_host import cli, credentials, store
+from lucille_host import _exec, cli, credentials, store
 from tests._keyring import MemoryKeyring
 backend = MemoryKeyring()
 keyring.core._keyring_backend = backend
@@ -961,3 +961,168 @@ def test_a_usage_error_of_a_line_that_names_the_verb_is_gated_by_its_words() -> 
     assert _shown(said) == [], said
     other = cli._usage_said(parser, parser, ["roots", W], f"unrecognized arguments: {W}")
     assert other == f"unrecognized arguments: {W}"
+
+
+# --- credential test (decisions/0003, "Second use") ------------------------------------------
+
+GMAIL_VALUE = "reader@example.org " + "abcd" + "efgh" + "ijkl" + "mnop"
+
+
+def _save_gmail(host_env: HostEnv) -> None:
+    _store(host_env).save("gmail", "default", GMAIL_VALUE, ["imap.gmail.com"])
+
+
+def _fake_child(
+    monkeypatch: pytest.MonkeyPatch, exit_code: int, stderr: str = ""
+) -> list[_exec.Command]:
+    ran: list[_exec.Command] = []
+
+    def run(command: _exec.Command, **kwargs: object) -> _exec.Result:
+        ran.append(command)
+        return _exec.Result(
+            ended="exited",
+            exit_code=exit_code,
+            stdout="",
+            stdout_truncated=False,
+            stderr=stderr,
+            stderr_truncated=False,
+            duration_ms=5,
+            executable_sha256="0" * 64,
+            stdout_bytes=0,
+            stderr_bytes=len(stderr),
+        )
+
+    monkeypatch.setattr(_exec, "run", run)
+    return ran
+
+
+def test_credential_test_runs_gmail_checks_child_and_says_it_signed_in(
+    host_env: HostEnv, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _save_gmail(host_env)
+    capsys.readouterr()
+    ran = _fake_child(monkeypatch, 0)
+    assert _main(["credential", "test", "gmail", "default"], monkeypatch) == 0
+    said = capsys.readouterr()
+    assert said.out == "gmail/default: signed in to imap.gmail.com\n"
+    [command] = ran
+    # gmail.check's own argv, its args the credential's name alone, and its environment.
+    assert command.argv[0] == sys.executable
+    assert command.argv[-3:] == ("--", "gmail.check", '{"credential":"default"}')
+    assert set(command.env or {}) <= {
+        "PATH",
+        "LANG",
+        "LC_ALL",
+        "HOME",
+        "DBUS_SESSION_BUS_ADDRESS",
+        "XDG_RUNTIME_DIR",
+    }
+    assert GMAIL_VALUE not in said.out + said.err and "abcdefgh" not in " ".join(command.argv)
+    lines = (host_env.dirs.state / "audit.log").read_text().splitlines()
+    last = json.loads(lines[-1])
+    assert (last["kind"], last["service"], last["name"], last["code"]) == (
+        "credential_test",
+        "gmail",
+        "default",
+        "ok",
+    )
+
+
+def test_credential_test_runs_whether_or_not_gmail_check_is_enabled(
+    host_env: HostEnv, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _save_gmail(host_env)
+    ran = _fake_child(monkeypatch, 0)
+    assert "gmail.check" not in cli._load(host_env.dirs).enabled
+    assert _main(["credential", "test", "gmail", "default"], monkeypatch) == 0
+    assert len(ran) == 1
+
+
+@pytest.mark.parametrize(
+    ("exit_code", "code"),
+    [
+        (2, "bad_credential"),
+        (4, "unreachable"),
+        (5, "limit_reached"),
+        (7, "sign_in_refused"),
+        (3, "internal"),
+        (6, "internal"),
+        (1, "internal"),
+    ],
+)
+def test_credential_test_names_each_failure(
+    host_env: HostEnv,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    exit_code: int,
+    code: str,
+) -> None:
+    _save_gmail(host_env)
+    capsys.readouterr()
+    _fake_child(monkeypatch, exit_code, "lucille-host gmail: what the child said\n")
+    assert _main(["credential", "test", "gmail", "default"], monkeypatch) == 1
+    said = capsys.readouterr()
+    last = json.loads((host_env.dirs.state / "audit.log").read_text().splitlines()[-1])
+    assert (last["kind"], last["code"]) == ("credential_test", code)
+    if exit_code != 1:
+        assert "what the child said" in said.err
+    else:
+        assert "what the child said" not in said.err
+
+
+@pytest.mark.parametrize(
+    ("service", "save", "words"),
+    [("github", True, "has no test"), ("gmail", False, "no credential gmail/default")],
+)
+def test_credential_test_refuses_before_starting_anything(
+    host_env: HostEnv,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    service: str,
+    save: bool,
+    words: str,
+) -> None:
+    if save:
+        _save_gmail(host_env)
+    capsys.readouterr()
+    ran = _fake_child(monkeypatch, 0)
+    assert _main(["credential", "test", service, "default"], monkeypatch) == 1
+    assert words in capsys.readouterr().err
+    assert ran == []
+
+
+def test_credential_test_is_refused_while_paused(
+    host_env: HostEnv, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _save_gmail(host_env)
+    assert _main(["pause"], monkeypatch) == 0
+    capsys.readouterr()
+    ran = _fake_child(monkeypatch, 0)
+    assert _main(["credential", "test", "gmail", "default"], monkeypatch) == 1
+    assert "paused" in capsys.readouterr().err
+    assert ran == []
+
+
+def test_credential_test_is_refused_while_keyring_is_turned_off(
+    host_env: HostEnv, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _save_gmail(host_env)
+    capsys.readouterr()
+    ran = _fake_child(monkeypatch, 0)
+    monkeypatch.setattr(store, "keyring_turned_off", lambda: True)
+    assert _main(["credential", "test", "gmail", "default"], monkeypatch) == 1
+    assert "turn the keyring off" in capsys.readouterr().err
+    assert ran == []
+
+
+def test_no_request_can_reach_credential_test() -> None:
+    """Only the command line's credential verb names it; nothing a request runs through (the
+    read loop, the job runner, the catalog, the library) imports the command line."""
+    root = Path(cli.__file__).parent
+    naming = sorted(
+        path.name for path in root.rglob("*.py") if "_credential_test" in path.read_text()
+    )
+    assert naming == ["cli.py"]
+    for name in ("loop.py", "jobs.py", "library.py", "link.py", "envelope.py"):
+        source = (root / name).read_text()
+        assert "lucille_host.cli" not in source and "import cli" not in source, name

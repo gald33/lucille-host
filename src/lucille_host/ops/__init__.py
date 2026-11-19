@@ -67,6 +67,7 @@ it is true.
 
 from __future__ import annotations
 
+import datetime
 import functools
 import hashlib
 import json
@@ -83,6 +84,7 @@ from lucille_host._exec import CHILD_ENV
 
 __all__ = [
     "CATALOG_VERSION",
+    "ARGS_JSON",
     "HOST_FILLED",
     "HOST_PROFILE",
     "HOST_PYTHON",
@@ -98,6 +100,9 @@ __all__ = [
     "Result",
     "Stopped",
     "TimedOut",
+    "ARGS_RULES",
+    "GMAIL_ID_MAX",
+    "args_json",
     "args_valid",
     "catalog_version",
     "host_interpreter",
@@ -123,6 +128,10 @@ HOST_PYTHON: Final = "{@python}"
 HOST_STATE: Final = "{@state}"
 HOST_PROFILE: Final = "{@profile}"
 HOST_FILLED: Final = frozenset({HOST_PYTHON, HOST_STATE, HOST_PROFILE})
+# The one template element filled from the request as a whole: its ``args``, which passed the
+# schema and the entry's rule, written as compact JSON with sorted keys, in ASCII
+# (decisions/0003, "Second use"). It always follows "--".
+ARGS_JSON: Final = "{@args}"
 
 
 def host_interpreter() -> str | None:
@@ -251,6 +260,8 @@ class Operation:
     env_copy: Mapping[str, tuple[str, ...]] | None = None
     # The function it calls in the host's own process, for an entry with no argv.
     in_process: InProcess | None = None
+    # A rule beyond the schema that its args must hold to (:data:`ARGS_RULES`), by name, or None.
+    args_rule: str | None = None
 
     def __post_init__(self) -> None:
         if self.in_process is None:
@@ -326,6 +337,9 @@ class Operation:
             raise ValueError(f"{self.name} runs no process")
         built = []
         for element in self.argv[os_family]:
+            if element == ARGS_JSON:
+                built.append(args_json(args))
+                continue
             if element in HOST_FILLED:
                 filled = (host or {}).get(element)
                 if not filled:
@@ -376,6 +390,8 @@ class Operation:
                 if self.env_copy
                 else {}
             ),
+            # Written only when there is one, for the same reason.
+            **({"args_rule": self.args_rule} if self.args_rule else {}),
             # Written only when true, so that the hashes of entries that send no file contents
             # are the ones they had before the field existed.
             **({"sends_file_content": True} if self.about.sends_file_content else {}),
@@ -437,6 +453,7 @@ def _entry(
     default_enabled: bool = False,
     file_operands: tuple[str, ...] = (),
     env_copy: dict[str, tuple[str, ...]] | None = None,
+    args_rule: str | None = None,
 ) -> Operation:
     return Operation(
         name=name,
@@ -448,8 +465,102 @@ def _entry(
         about=about,
         file_operands=file_operands,
         env_copy=None if env_copy is None else MappingProxyType(env_copy),
+        args_rule=args_rule,
     )
 
+
+# What a child that reads the keyring needs from the host's environment, per OS.
+_KEYRING_ENV: Final = {"macos": ("HOME",), "linux": ("DBUS_SESSION_BUS_ADDRESS", "XDG_RUNTIME_DIR")}
+_GMAIL_CREDENTIAL: Final = {
+    "type": "string",
+    "minLength": 1,
+    "maxLength": 64,
+    "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$",
+}
+_NO_NUL: Final = "^[^\\u0000]*$"
+_DATE: Final = "^[0-9]{4}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])$"
+
+
+def _text(most: int) -> dict[str, Any]:
+    return {"type": "string", "minLength": 1, "maxLength": most, "pattern": _NO_NUL}
+
+
+def _date() -> dict[str, Any]:
+    return {"type": "string", "minLength": 10, "maxLength": 10, "pattern": _DATE}
+
+
+def _gmail_argv(name: str) -> tuple[str, ...]:
+    return (
+        HOST_PYTHON,
+        *("-I", "-B", "-W", "ignore", "-X", "utf8", "-m", "lucille_host.gmail"),
+        *("--state", HOST_STATE, "--profile", HOST_PROFILE, "--", name, ARGS_JSON),
+    )
+
+
+_GMAIL_ENTRIES: Final = (
+    (
+        "gmail.check",
+        ["credential"],
+        {"credential": _GMAIL_CREDENTIAL},
+        About(
+            summary="Check that Gmail can be read",
+            sends="Lucille learns whether the app password kept here still signs in to Gmail.",
+        ),
+    ),
+    (
+        "gmail.mailboxes",
+        ["credential"],
+        {"credential": _GMAIL_CREDENTIAL},
+        About(
+            summary="List your Gmail mailboxes",
+            sends="Lucille gets the names of your Gmail mailboxes and labels.",
+        ),
+    ),
+    (
+        "gmail.search",
+        ["credential"],
+        {
+            "credential": _GMAIL_CREDENTIAL,
+            "mailbox": _text(128),
+            "query": _text(256),
+            "from": _text(128),
+            "to": _text(128),
+            "subject": _text(128),
+            "since": _date(),
+            "before": _date(),
+            "unseen": {"type": "boolean"},
+            "limit": {"type": "integer", "minimum": 1, "maximum": 50},
+        },
+        About(
+            summary="Search your Gmail",
+            sends=(
+                "Lucille gets the sender, recipients, subject, date and size of up to 50 "
+                "messages that match its search, never their text. The app password goes only "
+                "to imap.gmail.com."
+            ),
+        ),
+    ),
+    (
+        "gmail.read",
+        ["credential", "id"],
+        {
+            "credential": _GMAIL_CREDENTIAL,
+            "id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 20,
+                "pattern": "^[1-9][0-9]{0,19}$",
+            },
+        },
+        About(
+            summary="Read one Gmail message",
+            sends=(
+                "Lucille gets one message it names: its headers, up to 32 KB of its text, and "
+                "its attachments' names, types and sizes, never their contents."
+            ),
+        ),
+    ),
+)
 
 _ENTRIES = (
     # Runs no process. Its reply is the document of spec/PROTOCOL.md section 11.
@@ -551,6 +662,20 @@ _ENTRIES = (
         ),
         env_copy={"macos": ("HOME",), "linux": ("DBUS_SESSION_BUS_ADDRESS", "XDG_RUNTIME_DIR")},
     ),
+    # Read Gmail over IMAP with an app password stored on this computer (decisions/0003, "Second
+    # use"). Each runs lucille_host.gmail, which reads the credential, checks the address, signs
+    # in over TLS, reads only, and removes the app password from what it writes.
+    *(
+        _entry(
+            name,
+            _object(required, properties),
+            {family: _gmail_argv(name) for family in OS_FAMILIES},
+            about,
+            env_copy=_KEYRING_ENV,
+            args_rule="gmail-args",
+        )
+        for name, required, properties, about in _GMAIL_ENTRIES
+    ),
 )
 
 OPERATIONS: Final[Mapping[str, Operation]] = MappingProxyType({op.name: op for op in _ENTRIES})
@@ -609,6 +734,39 @@ for _op in _ENTRIES:
     _patterns(_op.name, _op.params_json)
 
 
+GMAIL_ID_MAX: Final = 2**64 - 1
+_CONTROL: Final = re.compile(r"[\x00-\x1f\x7f]")
+
+
+def _gmail_args(args: Mapping[str, Any]) -> bool:
+    """Rule gmail-args (spec/PROTOCOL.md section 10): no argument holds a control character, a
+    date is one the calendar has, and an id is at most 2^64 - 1."""
+    for key, value in args.items():
+        if not isinstance(value, str):
+            continue
+        if _CONTROL.search(value):
+            return False
+        if key in ("since", "before"):
+            try:
+                datetime.date.fromisoformat(value)
+            except ValueError:
+                return False
+        if key == "id" and int(value) > GMAIL_ID_MAX:
+            return False
+    return True
+
+
+# The rules beyond the schema an entry's args may be held to, by the name its ``args_rule`` gives.
+ARGS_RULES: Final[Mapping[str, Callable[[Mapping[str, Any]], bool]]] = MappingProxyType(
+    {"gmail-args": _gmail_args}
+)
+
+
+def args_json(args: Mapping[str, Any]) -> str:
+    """``args`` as :data:`ARGS_JSON` writes it: compact, keys sorted, ASCII."""
+    return json.dumps(dict(args), sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+
+
 def args_valid(op: Operation, args: Any) -> bool:
     """Whether ``args`` holds to the operation's parameter schema.
 
@@ -643,4 +801,6 @@ def args_valid(op: Operation, args: Any) -> bool:
             pattern = patterns.get(key)
             if pattern is not None and pattern.search(value) is None:
                 return False
+    if op.args_rule is not None and not ARGS_RULES[op.args_rule](args):
+        return False
     return True

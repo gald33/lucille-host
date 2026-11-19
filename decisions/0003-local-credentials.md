@@ -1,13 +1,14 @@
 # 0003: Local credentials (draft)
 
-**Status: storage, entry from the command line, and the first use, `github.read`, built; the second use,
-Gmail over IMAP with an app password, decided 2026-11-18, not built; entry at Lucille's request chosen,
-not built.** `src/lucille_host/credentials.py` can save, list, read and
+**Status: storage, entry from the command line, the first use, `github.read`, and the second use, Gmail
+over IMAP with an app password, built, except the second use's Capsule screen; entry at Lucille's request
+chosen, not built.** `src/lucille_host/credentials.py` can save, list, read and
 remove a credential for an online service, kept only on this computer. `lucille-host credential set`,
 `list` and `remove` write to it from the command line, each credential bound to the hosts it may be
-sent to (spec/CLI.md §15). One operation uses a stored credential: `github.read`, off by default, whose
-child process reads the one credential a request names and sends it to `api.github.com` alone ("First
-use", below). Nothing Lucille sends can list or change a credential, nor read one any other way. This
+sent to (spec/CLI.md §15). Five operations use a stored credential, each off by default: `github.read`,
+whose child process reads the one credential a request names and sends it to `api.github.com` alone
+("First use", below), and the four `gmail.` operations, whose child sends it to `imap.gmail.com` alone
+("Second use"). Nothing Lucille sends can list or change a credential, nor read one any other way. This
 record says what was built, and what is still to be decided before a credential kept here can be used
 for anything else.
 
@@ -47,14 +48,17 @@ This repository builds only the first. The other two belong to Lucille's backend
   value is returned only by `value()`.
 - **An item this version did not write is left as it is.** It may hold the only copy of the user's
   credentials.
-- **Unreachable from Lucille, but through `github.read`.** No runtime module but `credentials.py`
-  imports it, except the command line's `credential` verb, in its own function, and `github.read`'s
-  child, `proxy.py`, in the one function that reads the credential. So no other verb's process, `run`
-  among them, loads it; the verb never reads a value back; and only the child reads a value, on a
-  request for an enabled `github.read` (`tests/test_credentials.py`,
+- **Unreachable from Lucille, but through `github.read` and the `gmail.` operations.** No runtime
+  module but `credentials.py` imports it, except the command line's `credential` verb, in its own
+  function, `github.read`'s child, `proxy.py`, and the `gmail.` operations' child, `gmail.py`, each in
+  the one function that reads the credential. So no other verb's process, `run` among them, loads it;
+  the verb never reads a value back; and only a child reads a value, on a request for an enabled
+  `github.read` or `gmail.` operation, or, for `gmail.check`'s child, on the user's own `credential test`
+  at this computer, which no request can reach (`tests/test_credentials.py`,
   `test_only_the_credential_verb_and_the_proxy_import_it`,
-  `test_importing_the_command_line_does_not_load_it`, `test_the_credential_verb_never_reads_a_value`).
-  No request or reply can write or list it, and only `github.read` can have one read.
+  `test_importing_the_command_line_does_not_load_it`, `test_the_credential_verb_never_reads_a_value`;
+  `tests/test_credential_verb.py`, `test_no_request_can_reach_credential_test`). No request or reply can
+  write or list it, and only those five operations can have one read.
 
 ## What was open, and how it was decided
 
@@ -172,7 +176,8 @@ Every string from the request comes after `--`, as in every entry. So:
   `PYTHON_KEYRING_BACKEND` nor `XDG_CONFIG_HOME`, so the child cannot see an off switch set through
   either. So `run` decides: while keyring's own settings turn the keyring off in the host's environment
   (`store.keyring_turned_off`: `PYTHON_KEYRING_BACKEND` naming keyring's `null` or `fail` backend, or a
-  `keyringrc.cfg` under `XDG_CONFIG_HOME` or `~/.config` that does), `github.read` is unavailable, refused
+  `keyringrc.cfg` that does, in keyring's own configuration folder: on Linux, under `$XDG_CONFIG_HOME`,
+  or under `~/.config` when that is not set), `github.read` is unavailable, refused
   `not_enabled` before its child starts, and left out of `host.describe`'s `enabled_ops`
   (`tests/test_jobs.py`, `test_github_read_is_refused_before_its_child_starts_while_keyring_is_off`).
   The child still reads its own default `keyringrc.cfg`, and refuses every backend but the system's own.
@@ -284,7 +289,24 @@ that built `github.read`, and not before, since until then it stayed true:
 - This record's "Unreachable from Lucille": the credential verb and the proxy's child import
   `credentials`, and only the child reads a value, on a request for an enabled `github.read`.
 
-## Second use: Gmail over IMAP, with an app password (decided 2026-11-18, not built)
+## Second use: Gmail over IMAP, with an app password (decided 2026-11-18, built but for Capsule's screen)
+
+**Built.** `src/lucille_host/gmail.py` is the child; the four catalog entries, the `{@args}` element and
+the rule `gmail-args` are in `src/lucille_host/ops/__init__.py`; `credential test` is in
+`src/lucille_host/cli.py`. The tests run the child against a fake IMAP server (`tests/_fake_gmail.py`,
+`tests/test_gmail.py`); no test signs in to Google. Two points of how, beyond what follows:
+
+- `imaplib` never opens a connection. The child resolves and vets the addresses and opens the TLS
+  connection with `proxy.py`'s `resolve` and `tls_connect`, then hands that socket to a subclass of
+  `imaplib.IMAP4` whose `open` uses it; `IMAP4_SSL`, which would connect to the name itself, is not used
+  (`test_imaplib_never_opens_a_connection_of_its_own`).
+- `imaplib`'s debug transcript, which would hold the `LOGIN` line, is off: the subclass sets its debug
+  level to 0, whatever `imaplib.Debug` says, and nothing `imaplib` writes reaches the output, since the
+  child sets its standard streams aside as `github.read`'s does.
+
+Capsule's Gmail screen ("Entering the app password: Capsule", below) comes in a later change; until it
+does, the credential is saved with `lucille-host credential set gmail default --host imap.gmail.com` and
+checked with `lucille-host credential test gmail default`.
 
 The repository owner ruled on 2026-11-18: the second use of a stored credential reads Gmail over IMAP
 with a Google app password, read-only, in four operations, `gmail.check`, `gmail.mailboxes`,

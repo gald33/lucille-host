@@ -7,8 +7,10 @@ There is no release. This repository holds version `0.1.0.dev0`: the guards, CI,
 drive it ([spec/CLI.md](spec/CLI.md)), the catalog, the executor, the local policy, the audit log,
 `pause`, `resume` and `kill`, and the parts that reach Lucille: `pair`, `run`, `status`, `log` and
 `forget`, with `run`'s event stream and exit codes for an app that supervises it, `policy reset`, and
-`credential`, which stores credentials for online services on this computer, and `github.read`, an
-operation, off by default, that reads one GitHub REST API endpoint with a credential stored here.
+`credential`, which stores credentials for online services on this computer, `github.read`, an
+operation, off by default, that reads one GitHub REST API endpoint with a credential stored here, and
+four Gmail operations, off by default, that list, search and read a Gmail account over IMAP with a Google
+app password stored here (`gmail.check`, `gmail.mailboxes`, `gmail.search`, `gmail.read`).
 Those are tested against Switchboard's in-process hub and a stand-in for Lucille, not against Lucille
 itself. Do not install it.
 
@@ -46,8 +48,9 @@ can install.
 > this release (listed in `src/lucille_host/ops/` and by `lucille-host ops list`), and only on folders
 > you add. Nothing Lucille sends can add an operation, add a folder, or loosen a limit. It never runs code,
 > a shell or a command line sent by Lucille, and the programs it starts get none of its keys and none of
-> your environment variables, except `github.read`'s: it reads a credential you saved for it, and gets
-> `HOME` (macOS) or `DBUS_SESSION_BUS_ADDRESS` and `XDG_RUNTIME_DIR` (Linux), which the keyring needs.
+> your environment variables, except those of `github.read` and the four `gmail.` operations: each reads
+> a credential you saved for it, and gets `HOME` (macOS) or `DBUS_SESSION_BUS_ADDRESS` and
+> `XDG_RUNTIME_DIR` (Linux), which the keyring needs.
 >
 > Any file no enabled operation reads stays on your computer. So do your passwords, keys and browser
 > sessions, unless they are inside a file an enabled operation reads.
@@ -55,7 +58,11 @@ can install.
 > What leaves it: each request Lucille makes (which operation, and its inputs, such as a file name or a
 > search pattern), and what an enabled operation returns, up to 64 KiB of output and 64 KiB of errors.
 > `files.search` returns lines of the files it searches. `github.read` returns GitHub's reply to the read
-> it names, and Lucille learns the names of the credentials it asks it to use, never their values.
+> it names. `gmail.mailboxes` returns the names of your Gmail mailboxes and labels. `gmail.search` returns
+> the sender, recipients, subject, date, size and ids of up to 50 messages, and `gmail.read` returns one
+> message's headers, up to 32 KiB of its text, and its attachments' names, types and sizes, never their
+> contents. Lucille learns the names of the credentials it asks these operations to use, never their
+> values.
 > Lucille also learns the host's version, OS family, enabled operation names and folder aliases (never
 > folder paths), each run's exit code and duration, a fingerprint that changes when your local policy
 > changes, and, to within a day, when lucille-host was last running and when your computer last
@@ -66,7 +73,9 @@ can install.
 > when it connects, and roughly how large each message is; they cannot read the messages. Lucille's
 > backend can. A request your computer has not answered within its wait (an hour unless chosen otherwise,
 > never more than 23 h 45 min) expires and the job fails. With `github.read` on, your computer also
-> connects to `api.github.com`, for each read Lucille asks for, with the token you saved for it.
+> connects to `api.github.com`, for each read Lucille asks for, with the token you saved for it. With a
+> `gmail.` operation on, it connects to `imap.gmail.com`, for each request to it, with the Gmail address
+> and app password you saved for it, and only reads: it changes, moves, sends and deletes no mail.
 >
 > Lucille stores what is returned with the job. Lucille's operators, Lucille's assistant and the AI
 > provider it uses can read it. Lucille blanks it 24 hours after the job ends. That is Lucille's policy,

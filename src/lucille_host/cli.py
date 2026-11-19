@@ -93,7 +93,14 @@ from lucille_host import (
 from lucille_host import state as host_state
 from lucille_host.containment import inside_own, on_proc
 from lucille_host.controls import Controls
-from lucille_host.ops import OPERATIONS, host_interpreter
+from lucille_host.ops import (
+    HOST_PROFILE,
+    HOST_PYTHON,
+    HOST_STATE,
+    OPERATIONS,
+    args_valid,
+    host_interpreter,
+)
 
 # The words ``pair`` takes in place of a code.
 PAIR_ACTIONS: Final = ("status", "confirm", "reject")
@@ -654,12 +661,15 @@ def build_parser() -> argparse.ArgumentParser:
     # No --json: the verb has no JSON form in contract version 1 (spec/CLI.md section 14).
     credential = verbs.add_parser(
         "credential",
-        help="save, list or remove credentials for online services, kept only on this computer",
+        help=(
+            "save, list, test or remove credentials for online services, kept only on this computer"
+        ),
         description=(
             "Keeps credentials for online services (a password, an app token) in the system "
             "keyring of this computer, each bound to the hosts it may be sent to. The value is "
             "typed here, never given on the command line, and is never shown. Only github.read "
-            "uses one: a credential of the service github, bound to api.github.com, read by a "
+            "and the gmail operations use one: a credential of the service github, bound to "
+            "api.github.com, or of the service gmail, bound to imap.gmail.com, read by a "
             "separate process when that operation is on. Nothing Lucille sends can list or "
             "change them."
         ),
@@ -700,9 +710,14 @@ def build_parser() -> argparse.ArgumentParser:
     credential_remove = credential_verbs.add_parser("remove", help="delete one credential")
     credential_remove.add_argument("service", help="the service")
     credential_remove.add_argument("name", help="the credential's name")
+    credential_test = credential_verbs.add_parser(
+        "test", help="sign in with one credential and out again, reading nothing (gmail only)"
+    )
+    credential_test.add_argument("service", help="the service")
+    credential_test.add_argument("name", help="the credential's name")
     parser.forms = {"run": run, "pair": pair, "roots add": add, "credential": credential}
     parser.credential_parsers = frozenset(
-        {credential, credential_set, credential_list, credential_remove}
+        {credential, credential_set, credential_list, credential_remove, credential_test}
     )
     return parser
 
@@ -1590,6 +1605,9 @@ def _credential_verb(args: argparse.Namespace, dirs: paths.Dirs, out: _Out) -> N
     host_state.startup_checks()
     creds = credentials.CredentialStore(paths.ensure_dir(dirs.state), dirs.profile)
     try:
+        if args.credential_verb == "test":
+            _credential_test(args, dirs, out, creds.saved(args.service, args.name) is not None)
+            return
         if args.credential_verb == "list":
             saved = creds.names()
             if not saved:
@@ -1625,8 +1643,9 @@ def _credential_verb(args: argparse.Namespace, dirs: paths.Dirs, out: _Out) -> N
         saved = creds.save(args.service, args.name, value, hosts, replace=args.replace)
         out.text(
             f"{'replaced' if before else 'saved'} {key}, to be sent only to "
-            f"{', '.join(saved.hosts)}. Only github.read uses saved credentials: those of the "
-            "service github, bound to api.github.com."
+            f"{', '.join(saved.hosts)}. Only github.read and the gmail operations use saved "
+            "credentials: those of the service github, bound to api.github.com, and of the "
+            "service gmail, bound to imap.gmail.com."
         )
     except credentials.CredentialExists as exc:
         raise _Refused(
@@ -1636,6 +1655,80 @@ def _credential_verb(args: argparse.Namespace, dirs: paths.Dirs, out: _Out) -> N
         ) from exc
     except credentials.CredentialError as exc:
         raise _Refused("bad_credential", str(exc)) from exc
+
+
+# What `credential test` says for each exit of gmail.check's child (decisions/0003, "Second use").
+_TEST_CODES: Final = {
+    2: "bad_credential",
+    4: "unreachable",
+    5: "limit_reached",
+    7: "sign_in_refused",
+}
+
+
+def _credential_test(args: argparse.Namespace, dirs: paths.Dirs, out: _Out, saved: bool) -> None:
+    """``credential test gmail <name>``: run ``gmail.check``'s child for that credential, which
+    signs in to Gmail and out again and reads nothing. It is the user's own act at this computer:
+    it runs whether or not ``gmail.check`` is enabled, never because of a request (no request
+    handler names this function), and is refused while the host is paused or keyring's own
+    settings turn the keyring off. It never shows the value; only the child reads it."""
+    from lucille_host import _exec  # noqa: PLC0415 - only this action runs a child
+
+    key = f"{args.service}/{args.name}"
+    if args.service != "gmail":
+        raise _Refused("no_test", f"{args.service} has no test; only gmail credentials do")
+    if not saved:
+        raise _Refused("no_such_credential", f"no credential {key} is saved")
+    if Controls(dirs.state).paused():
+        raise _Refused("paused", "the host is paused, so it starts nothing; resume it first")
+    if store.keyring_turned_off():
+        raise _Refused(
+            "insecure_keyring",
+            "keyring's own settings turn the keyring off here, so no credential is read",
+        )
+    interpreter = host_interpreter()
+    if interpreter is None:
+        raise _Refused("internal", "the host does not know its own interpreter")
+    family = paths.os_family()
+    operation = OPERATIONS["gmail.check"]
+    test_args = {"credential": args.name}
+    if not args_valid(operation, test_args):
+        raise _Refused("bad_credential", f"{args.name} is not a credential's name")
+    host = {
+        HOST_PYTHON: interpreter,
+        HOST_STATE: str(paths.ensure_dir(dirs.state)),
+        HOST_PROFILE: dirs.profile,
+    }
+    command = _exec.Command(
+        argv=operation.build_argv(family, test_args, host),
+        cwd="/",
+        timeout_s=operation.timeout(test_args),
+        env=operation.child_env(family, os.environ),
+    )
+    try:
+        result = _exec.run(command)
+    except _exec.NotStarted as exc:
+        raise _Refused("internal", "the test could not be started") from exc
+    exit_code = result.exit_code if result.ended == "exited" else None
+    code = "ok" if exit_code == 0 else _TEST_CODES.get(exit_code or -1, "internal")
+    audit.AuditLog(dirs.state).write(
+        "credential_test", service=args.service, name=args.name, code=code
+    )
+    if code == "ok":
+        out.text(f"{key}: signed in to imap.gmail.com")
+        return
+    line = result.stderr.strip().splitlines()
+    said = line[0].removeprefix("lucille-host gmail: ") if line and exit_code != 1 else ""
+    said = said or "the test did not finish"
+    if exit_code == 2:
+        raise _Refused("bad_credential", said)
+    if exit_code == 4:
+        raise _Refused("unreachable", said)
+    if exit_code == 5:
+        raise _Refused("limit_reached", said)
+    if exit_code == 7:
+        raise _Refused("sign_in_refused", said)
+    raise _Refused("internal", said)
 
 
 def _control(verb: str) -> Callable[[argparse.Namespace, paths.Dirs, _Out], None]:

@@ -123,7 +123,8 @@ In the runtime package, ``src/lucille_host/`` except ``src/lucille_host/conforma
   reason it is there, plus ``keyring`` (through :data:`KEYRING_SURFACE`), ``switchboard`` (which
   the Switchboard-surface lint keeps to one module and a listed surface) and ``lucille_host``
   itself. ``src/lucille_host/_exec.py`` may also import the modules in :data:`EXEC_IMPORTS`, and
-  ``src/lucille_host/proxy.py`` (``github.read``'s child) those in :data:`PROXY_IMPORTS`. A
+  ``src/lucille_host/proxy.py`` (``github.read``'s child) and ``src/lucille_host/gmail.py`` (the
+  Gmail operations' child) those in :data:`PROXY_IMPORTS`. A
   relative import resolves into this package and is allowed, except one of the conformance
   package: the runtime may not import or use ``lucille_host.conformance``, which is not held to
   this list. The list names top-level modules, so a submodule of an allowed module comes with it
@@ -294,6 +295,10 @@ CONFORMANCE_PREFIX = "src/lucille_host/conformance/"
 CONFORMANCE_PACKAGE = "lucille_host.conformance"
 EXEC_MODULE = "src/lucille_host/_exec.py"
 PROXY_MODULE = "src/lucille_host/proxy.py"
+GMAIL_MODULE = "src/lucille_host/gmail.py"
+# The credential children: separate processes the catalog starts, which open connections of
+# their own (decisions/0003, "First use" and "Second use").
+PROXY_MODULES = frozenset({PROXY_MODULE, GMAIL_MODULE})
 SPAWN_MODULE = "src/lucille_host/conformance/_spawn.py"
 
 # What the runtime package may import: top-level modules, each for the reason given. Each is a
@@ -398,6 +403,9 @@ EXEC_IMPORTS = frozenset(
 PROXY_IMPORTS = frozenset(
     {
         "certifi",  # the trust the hub client already uses, for api.github.com's certificate
+        "email",  # gmail.py: parses a message and its headers, MIME parts and charsets
+        "html",  # gmail.py: html.parser turns an HTML part into text
+        "imaplib",  # gmail.py: speaks IMAP on the TLS connection it is given
         "http",  # http.client reads the response: status, headers, chunked bodies
         "ipaddress",  # the fixed list of addresses the proxy may connect to
         "socket",  # resolves api.github.com and connects to a vetted address
@@ -731,7 +739,7 @@ def zone_of(rel: str) -> str:
     """Which rule set a file falls under: exec, proxy, spawn, conformance, runtime or other."""
     if rel == EXEC_MODULE:
         return "exec"
-    if rel == PROXY_MODULE:
+    if rel in PROXY_MODULES:
         return "proxy"
     if rel == SPAWN_MODULE:
         return "spawn"

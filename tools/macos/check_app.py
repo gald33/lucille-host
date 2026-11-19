@@ -397,6 +397,10 @@ APP_NAME: Final = build_app.load_pins().app_name
 ABILITY_TITLES: Final = {
     "files.sha256": "Check a file's fingerprint",
     "github.read": "Read from GitHub with a token kept here",
+    "gmail.check": "Check that Gmail can be read",
+    "gmail.mailboxes": "List your Gmail mailboxes",
+    "gmail.search": "Search your Gmail",
+    "gmail.read": "Read one Gmail message",
 }
 ABILITY_DETAILS: Final = {
     "files.sha256": (
@@ -406,6 +410,17 @@ ABILITY_DETAILS: Final = {
         "Lucille gets GitHub's reply to one read it names: your repositories, issues, pull "
         "requests, commits or a README. The token goes only to api.github.com; Lucille learns "
         "only its name."
+    ),
+    "gmail.check": "Lucille learns whether the app password kept here still signs in to Gmail.",
+    "gmail.mailboxes": "Lucille gets the names of your Gmail mailboxes and labels.",
+    "gmail.search": (
+        "Lucille gets the sender, recipients, subject, date and size of up to 50 messages "
+        "that match its search, never their text. The app password goes only to "
+        "imap.gmail.com."
+    ),
+    "gmail.read": (
+        "Lucille gets one message it names: its headers, up to 32 KB of its text, and its "
+        "attachments' names, types and sizes, never their contents."
     ),
 }
 WELCOME_TITLE: Final = f"{APP_NAME} is in your menu bar"

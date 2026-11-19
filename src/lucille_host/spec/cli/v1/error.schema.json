@@ -92,7 +92,12 @@
             "no_such_credential",
             "no_value",
             "values_differ",
-            "bad_value"
+            "bad_value",
+            "no_test",
+            "paused",
+            "sign_in_refused",
+            "unreachable",
+            "limit_reached"
           ]
         },
         "message": {

@@ -37,15 +37,16 @@ backstop ([VERIFYING.md](VERIFYING.md) says what each guard cannot see).
 ## Paragraph 1: what the host can do
 
 **C1.** "lucille-host does only what you switch on, on your computer."
-- Code: `src/lucille_host/ops/__init__.py` (the closed operation set: four entries in an immutable
+- Code: `src/lucille_host/ops/__init__.py` (the closed operation set: eight entries in an immutable
   mapping); `src/lucille_host/_exec.py` (the only place the program may start a process);
   `src/lucille_host/policy.py` (the local policy file; with no file, only `host.describe` is enabled,
   and a new pair starts from that fresh policy, the earlier one set aside unused).
 - Tests: `tests/guards/test_ast_lint.py` (no process-spawning call in the runtime package outside
   `_exec.py`, in the forms the lint lists, and no import there of a module outside the lint's
   allowlist, as the lint resolves imports and the re-exports it follows; with the limit stated under
-  C2); `tests/test_catalog.py` (`test_catalog_entries`: the operation set is exactly four entries and
-  read-only; `github.read` makes one `GET`, `tests/test_proxy.py`); `tests/test_policy.py` (`test_fresh_policy`: only `host.describe` is on after install);
+  C2); `tests/test_catalog.py` (`test_catalog_entries`: the operation set is exactly eight entries and
+  read-only; `github.read` makes one `GET`, `tests/test_proxy.py`; the `gmail.` operations send only
+  read-only IMAP commands, `tests/test_gmail.py`); `tests/test_policy.py` (`test_fresh_policy`: only `host.describe` is on after install);
   `tests/test_pair.py` (`test_new_pair_starts_from_fresh_policy`,
   `test_previous_policy_archived_not_applied`: only `host.describe` is on after a new pair, and the
   policy set aside is listed by `lucille-host policy previous` but not applied); invariant "Nothing
@@ -171,9 +172,9 @@ backstop ([VERIFYING.md](VERIFYING.md) says what each guard cannot see).
   folder); invariant "An upgrade never runs a changed op under old consent" (pending, conformance).
 
 **C4.** "It never runs code, a shell or a command line sent by Lucille, and the programs it starts get none
-of its keys and none of your environment variables, except `github.read`'s: it reads a credential you
-saved for it, and gets `HOME` (macOS) or `DBUS_SESSION_BUS_ADDRESS` and `XDG_RUNTIME_DIR` (Linux), which
-the keyring needs."
+of its keys and none of your environment variables, except those of `github.read` and the four `gmail.`
+operations: each reads a credential you saved for it, and gets `HOME` (macOS) or
+`DBUS_SESSION_BUS_ADDRESS` and `XDG_RUNTIME_DIR` (Linux), which the keyring needs."
 - Code: `src/lucille_host/_exec.py` (argv only, `shell=False`, the environment `CHILD_ENV` and nothing
   else, stdin `/dev/null`, each child in its own session); the catalog's argv templates in
   `src/lucille_host/ops/__init__.py` (an absolute executable; each string from a request after `--`, as
@@ -206,6 +207,18 @@ the keyring needs."
   `test_only_the_credential_verb_and_the_proxy_import_it`); `tests/test_catalog.py`
   (`test_definition_hash_covers_operands_schema_limits_and_environment`: a change to the allow-list, or
   to which elements the host fills, turns an enabled `github.read` off).
+- The `gmail.` operations. Code: their catalog entries share `github.read`'s `env_copy` and fill the
+  same host elements, plus the request's arguments as one JSON element after `--`
+  (`src/lucille_host/ops/__init__.py`); `src/lucille_host/gmail.py`, the child, reads the one
+  `gmail/<name>` credential the request names (decisions/0003, "Second use"). Tests:
+  `tests/test_credentials.py` (`test_importing_the_command_line_does_not_load_it`: importing the command
+  line loads none of `lucille_host.credentials`, `lucille_host.proxy` and `lucille_host.gmail`;
+  `test_only_the_credential_verb_and_the_proxy_import_it`: the importers are the command line,
+  `proxy.py` and `gmail.py`); `tests/test_catalog.py` (`test_catalog_entries`: the four entries' argv
+  and environment); `tests/test_gmail.py` (`test_the_child_writes_only_its_reply_and_ends_with_os_exit`:
+  run as a real process). `lucille-host credential test gmail <name>` starts the same child, as
+  `gmail.check`, from the command line only (`tests/test_credential_verb.py`,
+  `test_no_request_can_reach_credential_test`).
 - Note: "get none of its keys" means the host passes them no key. An enabled operation that reads a
   folder holding the host's own state could still read what is stored there. That is inferred from the
   design, not tested. [PRIVACY.md](PRIVACY.md) says that keys leave if they are inside a file an enabled
@@ -264,8 +277,8 @@ changes, and, to within a day, when lucille-host was last running and when your 
   or `$HOME`); `tests/test_rooms.py` (`test_resolves_at_least_daily`: with nothing else asking, the
   session resolves the pair again a day after the last resolve).
 
-**C8a.** "`github.read` returns GitHub's reply to the read it names, and Lucille learns the names of the
-credentials it asks it to use, never their values."
+**C8a.** "`github.read` returns GitHub's reply to the read it names. ... Lucille learns the names of the
+credentials it asks these operations to use, never their values."
 - Code: `src/lucille_host/proxy.py` (standard output is the response body, standard error `HTTP
   <status>` and GitHub's `Link` header, each with the token replaced, raw and in base64, before anything
   is written); the request schema's `args.github.read` (`credential` is a name; nothing carries a value).
@@ -276,6 +289,33 @@ credentials it asks it to use, never their values."
 - Note: the scrub is defence in depth, with the limits decisions/0003 states (JSON's optional `\uXXXX`
   escapes, base64 wrapped across lines, a change of case, a part of the token). What the token can read
   on GitHub is what Lucille can ask for while `github.read` is on (THREAT_MODEL.md).
+
+**C8b.** "`gmail.mailboxes` returns the names of your Gmail mailboxes and labels. `gmail.search` returns the
+sender, recipients, subject, date, size and ids of up to 50 messages, and `gmail.read` returns one
+message's headers, up to 32 KiB of its text, and its attachments' names, types and sizes, never their
+contents."
+- Code: `src/lucille_host/gmail.py`: search fetches only `UID`, `FLAGS`, `INTERNALDATE`, `RFC822.SIZE`,
+  `X-GM-MSGID`, `X-GM-THRID` and seven header fields with `BODY.PEEK[HEADER.FIELDS (...)]`, and returns
+  the ids, date, size, whether the message is unread, `From`, `To` and `Subject`; read fetches
+  `BODY.PEEK[]<0.4194304>`, parses it with `email`, keeps a text part (HTML turned into text, with
+  scripts, styles and hidden elements dropped) cut at 32 KiB, and lists attachments by name, type and
+  size; each document is fit to the 64 KiB stream; the app password, raw, spaced and in base64 at each
+  alignment, is replaced in everything written. The request schema's `args.gmail.*` (`credential` is a
+  name; nothing carries a value).
+- Tests: `tests/test_gmail.py` (`test_mailboxes_with_special_use_and_hebrew_names`,
+  `test_at_most_500_mailboxes`, `test_many_results_newest_first_and_cut_at_the_limit`,
+  `test_only_the_read_only_commands_and_fetch_items_are_sent`, `test_a_plain_text_message`,
+  `test_an_html_only_message_is_read_as_text_with_hidden_text_dropped`,
+  `test_a_multipart_alternative_message_prefers_the_plain_part`, `test_hebrew_in_headers_and_body`,
+  `test_attachments_are_named_never_sent`,
+  `test_a_long_text_is_cut_at_32_kib_and_the_document_fits_the_stream`,
+  `test_a_message_over_4_mib_is_fetched_in_part_and_flagged`,
+  `test_the_app_password_is_removed_from_everything_written`,
+  `test_nothing_gmail_writes_reaches_a_failure_line`).
+- Note: what a message says can be aimed at Lucille's assistant (prompt injection), and HTML can hide
+  text by ways the drop does not know (THREAT_MODEL.md). The scrub has the limits decisions/0003
+  states. What the app password can read is the whole mailbox, every label; Lucille can ask for any of
+  it while a `gmail.` operation is on.
 
 ## Paragraph 4: transport
 
@@ -361,6 +401,25 @@ asks for, with the token you saved for it."
   `test_github_read_is_refused_before_its_child_starts_while_keyring_is_off`: with keyring turned off
   by `PYTHON_KEYRING_BACKEND` (its `null` or `fail` backend) or by a `keyringrc.cfg` under a custom
   `XDG_CONFIG_HOME`, `run` refuses it `not_enabled` and starts nothing).
+
+**C13b.** "With a `gmail.` operation on, it connects to `imap.gmail.com`, for each request to it, with the
+Gmail address and app password you saved for it, and only reads: it changes, moves, sends and deletes no
+mail."
+- Code: `src/lucille_host/gmail.py`: the name `imap.gmail.com` and port 993 are fixed; it resolves and
+  vets the addresses with `proxy.py`'s `resolve` and connects with its `tls_connect` (implicit TLS
+  checked for `imap.gmail.com` against certifi's bundle), then hands the socket to `imaplib`, whose own
+  connect is never used and whose debug transcript is off. It sends only `CAPABILITY`, `LOGIN`,
+  `LIST "" "*"`, `EXAMINE` (never `SELECT`), `UID SEARCH`, `UID FETCH` of `BODY.PEEK` items (which
+  leave a message unread) and `LOGOUT`. At most 60 sign-ins in 10 minutes, and none for 15 minutes after
+  Gmail refuses one. `tools/guards/ast_lint.py`: among the host's modules, only `proxy.py` and
+  `gmail.py` may import `socket`, `ssl`, `imaplib` or `certifi`.
+- Tests: `tests/test_gmail.py` (`test_it_connects_to_the_vetted_address_on_993_with_tls_for_imap_gmail_com`,
+  `test_imaplib_never_opens_a_connection_of_its_own`, `test_one_refused_address_refuses_the_whole_request`,
+  `test_only_the_read_only_commands_and_fetch_items_are_sent`,
+  `test_a_wrong_or_revoked_app_password_is_exit_7_and_not_tried_again_for_15_minutes`,
+  `test_more_than_60_sign_ins_in_10_minutes_is_exit_5_without_connecting`).
+- Note: the IMAP session reads with the account's full IMAP access; read-only is a property of the
+  commands this program sends, not of the app password, which Google does not scope.
 
 ## Paragraph 5: what Lucille keeps
 
@@ -592,6 +651,7 @@ These existing tests back the design rather than one sentence of the claim.
 | `tests/guards/test_macos_lint.py` | The Mac app's part of decisions/0002 §20 and of its invariants M1, M2, M9 and M20, in the forms the lint lists: its Swift names no network, listener, XPC, shell or other way to start a process (a Swift file under `Tests` may start a multi-line string with `#!/bin/sh`, the stand-in the self-test runs through `HostCLI.swift`), starts `Process` only in `macos/App/HostCLI.swift`, which writes the bundled runtime's path and arguments, names `NSWorkspace` and makes a URL from a string only in `macos/App/SystemPlaces.swift`, the app's one opener, in one call of the two System Settings pages and the Applications folder written there, each place its own, in that file's designed code; names the opener elsewhere only in a call, extends none of its types, gives none another name and holds no backtick in its code; names a System Settings address nowhere else and Full Disk Access's page (`Privacy_AllFiles`) nowhere; uses none of the other ways it lists to open a URL or another application (the login item's `openSystemSettingsLoginItems()` is not its to see), reads no pasteboard and holds no `http(s)` URL; the app's strings, the `Info.plist` template and the pins it reads use no phrase [PRIVACY.md](PRIVACY.md) says this project must never claim; and nothing declares a URL scheme, a daemon or an installer package. It reads the source, not the built app. |
 | `tests/guards/test_workflow_lint.py` | Invariant "Every release comes from a hosted runner and environment `pypi`" (the hosted-runner half; that a release publishes from environment `pypi` is checked by the provenance step in [VERIFYING.md](VERIFYING.md), not by this test). |
 | `tests/test_import_graph.py` | The runtime imports no hub server. (That the base install has none is `pyproject.toml`'s dependency list: the server comes only with the `[conformance]` extra.) The README's "opens no listening port" also needs `tests/test_read_loop.py` (`test_no_listening_socket`). |
+| `tests/test_gmail.py` | The `gmail.` operations' child (decisions/0003, "Second use"), against a fake IMAP server: a credential that is missing, removed, not bound to `imap.gmail.com` or not an address and a 16-letter app password, and a keyring's error, are exit 2 before anything is sent; a refused address, an unreachable service and a timeout are exit 4; a refused sign-in is exit 7 and starts a 15-minute wait; more than 60 sign-ins in 10 minutes, more than 8 MiB read, a line past its cap and more than 500 mailboxes are caps; only the read-only commands and `BODY.PEEK` fetch items are sent, each mailbox name quoted in modified UTF-7 and each text criterion as a UTF-8 literal; empty and many results, plain, HTML-only, multipart, Hebrew and other-charset messages, attachments named but never sent, text cut at 32 KiB, a message past 4 MiB fetched in part; no \All mailbox or no Gmail extensions is exit 3; the app password is scrubbed from everything written, and no text of Gmail's or an exception's reaches a failure line; the child ends with `os._exit`, writing only its reply. |
 | `tests/test_proxy.py` | `github.read`'s child (decisions/0003, "First use"): it reads its arguments by position and writes one fixed line, never an exception's text, for a malformed list or anything unexpected (exit 6), also as a real process; it refuses a credential that is missing, not bound to `api.github.com` or not in a GitHub token's form, and a keyring's error, before anything is sent (exit 2); every address must be allowed by its fixed list, the shared address space for carrier-grade NAT built from its integer, with each network's edges and the addresses just outside them, and one refused address refuses the whole request (exit 4); it sends one `GET` with the fixed headers, the token in `Authorization` alone; a 3xx is reported, never followed; headers past 64 KiB or 100, a body past 1 MiB (cut there, a beginning of the token dropped at the cut) and a compressed body are exit 5; a connection that breaks before the response has been read is exit 4; the scrub replaces the token and its base64 at each alignment, after chunks are joined; each stream is written once, and the process ends with the exit code its reply carries. Each of these rules has a test that fails when the rule is removed: it connects to the vetted address, never the name; a real TLS handshake with a certificate for `api.github.com` that no root in certifi's bundle signed is refused, with `api.github.com` sent as the server name and certifi's bundle the only trust; the interpreter is `sys.executable` as given, never resolved through a link; the process ends with `os._exit`, so no `atexit` handler runs; it reads no further than one read past the 1 MiB cap, with or without a length; a transfer coding other than a plain `chunked` (`gzip, chunked` among them) is not read (exit 5); and nothing a library writes on standard output or error, through Python or from C, reaches the reply. |
 | `tests/test_cli.py` | `lucille-host` and `lucille-host --version` print the version, and the version has one source; every verb the parser takes has a handler of its own, and a verb without one is refused. |
 | `tests/test_cli_json.py` | The command line's `--json` contract, [spec/CLI.md](spec/CLI.md). Every golden fixture's command line, run in a home set up for it, writes on stdout exactly the fixture's objects, each one its schema accepts, in ASCII, written compactly with its fields in the fixture's order, and the exit code the fixture gives; run without `--json` from the same set-up, it exits the same and writes the same stderr. `--json` works before the verb, after it and after its action, for every verb and action, and before `--` only; `--version` writes one `version` object with it in either order; a usage error exits 2 with one `usage` object that quotes nothing of the command line, and `run --json` without `--json-events`, `pair --json` without `--code-stdin`, and `run`'s options with another verb are usage errors; `run`'s fixtures end with the `stopped` its exit code goes with, and `policy reset`'s set an invalid file aside or refuse `not_invalid`. Every literal failure code in `cli.py`, `link.py` and `loop.py` is in the contract's list, every other failure `main` catches has the code spec/CLI.md section 10 gives it, in that table's order, with its own line on stderr, and a bug writes `internal` and then its traceback, and never a value that is not JSON. Each failure reachable without a hub, and several through the in-process hub, ends stdout with an `error` object whose code spec/CLI.md lists for that verb, with the same exit and stderr as without `--json`: among them a hub error and a refused answer, a loopback code with no `--hub`, a pair the library refuses, a pair held in the other store, and a profile that holds two pairs. A refusal of the library's that ends nothing says why in the host's words, after the host's words and the library's state, in the `error` object and on stderr alike, and repeats no text of the library's: an answer refused for want of `cryptography`, which leaves no pair and no gate record; the same refusal at a resolve, which keeps the pair; a record of the file store that is not JSON, in `status`, `forget`, `pair status` and `run`, which forget nothing and name neither the file nor any folder of the host's; a healing strategy Lucille wrote in the pair room, which `pair status` and `run` never repeat, whether it is shaped as a strategy's name or holds a code, a token and a SAS; and sentences and states holding a code, a pair's export, a room's join code, a token, a SAS, a path or words the other side wrote, at an answer, at a resolve and reading the pair's record, which no verb repeats in its `error`, its `status` or on stderr, saying instead that the host does not repeat the library's reason. With stdout a pipe, each object and each line is written while the next folder still stalls. `ops list` tells an enabled operation this computer cannot run from a disabled one, and its words and its flags come from the catalog; `roots add --suggest-alias` gives the Mac app's aliases for every Latin name in its test vectors, folds every letter from U+00C0 to U+017F and every full-width form as section 9.1 says, and drops every combining mark, so a letter from U+00C0 to U+017F gives the same decomposed as composed, while a decomposed Latin letter past U+017F keeps its plain letter where its composed form is `-`, gives `folder` for a name in another script, writes nothing and takes no lock; `roots add -- <alias> <path>` works, and a broad folder's refusal says which kind it is, while one added with `--allow-home-or-root` is `broad` in `roots add` and `roots list`; `roots check` reports each folder's state by its error number, a folder that opens and cannot be listed included, opens no session and writes nothing; a file name that is not UTF-8 is written as U+FFFD; and `status` reports a store it cannot read (a keyring that refuses the read included), or a pair the library refuses, in its `pair`, and the rest as it is, and stops as `state_invalid` on a run record, a room record or a gate record holding a value the host never writes there (NaN, an infinity, a pid or a time out of range, or a value of another type). A file nested too deep to parse is invalid as any other is, never `internal`: the policy gives `policy_invalid`, and `pair` sets it aside and pairs; a state file gives `state_invalid`; the keyring item or the file store's record of the pair gives `status` a `pair` `unreadable`, and `pair status` `store_error`. |

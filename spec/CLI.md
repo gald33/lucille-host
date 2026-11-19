@@ -611,6 +611,10 @@ list of what this project must never claim; a test checks them against it.
 | `host.sleep` | Wait up to 4 minutes, for testing | Lucille gets how long the wait took and how it ended. | false | true |
 | `files.sha256` | Check a file's fingerprint | Lucille gets a code that identifies the file's exact contents, not the contents. | false | false |
 | `github.read` | Read from GitHub with a token kept here | Lucille gets GitHub's reply to one read it names: your repositories, issues, pull requests, commits or a README. The token goes only to api.github.com; Lucille learns only its name. | false | false |
+| `gmail.check` | Check that Gmail can be read | Lucille learns whether the app password kept here still signs in to Gmail. | false | false |
+| `gmail.mailboxes` | List your Gmail mailboxes | Lucille gets the names of your Gmail mailboxes and labels. | false | false |
+| `gmail.search` | Search your Gmail | Lucille gets the sender, recipients, subject, date and size of up to 50 messages that match its search, never their text. The app password goes only to imap.gmail.com. | false | false |
+| `gmail.read` | Read one Gmail message | Lucille gets one message it names: its headers, up to 32 KB of its text, and its attachments' names, types and sizes, never their contents. | false | false |
 
 ## 9. Folder aliases and folder checks
 
@@ -723,6 +727,11 @@ limit, as it runs every verb, and stops it when the limit passes.
 | `no_value` | `credential set`: no value was given, or standard input is of the wrong kind to give one: not a terminal without `--value-stdin`, or a terminal with it. Nothing was stored. |
 | `values_differ` | `credential set`: the value typed twice differed. Nothing was stored. |
 | `bad_value` | `credential set`: the value holds a control character, or is not text in standard input's encoding (a line that does not decode, or one holding a lone surrogate). Nothing was stored. |
+| `no_test` | `credential test`: the service has no test; only `gmail` has one. Nothing was read. |
+| `paused` | `credential test`: the host is paused, and so starts nothing. Nothing was read. |
+| `sign_in_refused` | `credential test`: Gmail refused the app password (wrong or revoked), or did within the last 15 minutes and was not asked again. |
+| `unreachable` | `credential test`: `imap.gmail.com` did not resolve, resolved to an address the host does not allow, could not be connected to, or the connection broke. |
+| `limit_reached` | `credential test`: the credential was used for more than 60 sign-ins in 10 minutes, or Gmail sent more than the host reads. |
 
 ## 11. Golden fixtures
 
@@ -1037,17 +1046,19 @@ leaves it out of `enabled_ops` (decisions/0003, "First use").
 ## 15. `credential`: credentials kept on this computer
 
 `credential` stores credentials for online services (a password, an app token) in the system keyring of
-this computer ([decisions/0003-local-credentials.md](../decisions/0003-local-credentials.md)). One
-operation uses a stored credential: `github.read`, off by default, reads one stored under the service
-`github` and bound to `api.github.com`, in a separate process, for the request that names it
-(decisions/0003, "First use"). Nothing Lucille sends can list or change one, nor read one any other way.
-The verb writes text only in version 1 (section 14).
+this computer ([decisions/0003-local-credentials.md](../decisions/0003-local-credentials.md)). Two kinds
+of operation use a stored credential, each off by default, each in a separate process, for the request
+that names it: `github.read` reads one stored under the service `github` and bound to `api.github.com`
+(decisions/0003, "First use"), and the `gmail` operations one stored under `gmail` and bound to
+`imap.gmail.com` ("Second use"). Nothing Lucille sends can list or change one, nor read one any other
+way. The verb writes text only in version 1 (section 14).
 
 | Form | What it does |
 |---|---|
 | `credential set <service> <name> --host <host> [--host <host> ...] [--value-stdin] [--replace]` | Stores one credential, bound to the hosts given. |
 | `credential list` | One line per credential, by service then name: its service and name, its hosts and when it was stored. Never its value. With none stored, nothing on standard output, a line on standard error, and exit 0. |
 | `credential remove <service> <name>` | Deletes that credential and no other. One not stored is refused, exit 1. |
+| `credential test <service> <name>` | Signs in with that credential and out again, reading nothing, by running `gmail.check`'s child, as a request would, whether or not `gmail.check` is enabled. `gmail` only. On success, one line, `gmail/<name>: signed in to imap.gmail.com`, and exit 0; otherwise the child's own fixed line and exit 1. Refused, starting nothing, for another service (`no_test`), a credential not stored (`no_such_credential`), while the host is paused (`paused`), and while keyring's own settings turn the keyring off (`insecure_keyring`). The child's exits give `bad_credential` (2), `unreachable` (4), `limit_reached` (5), `sign_in_refused` (7) and `internal` (any other). Each test writes one `credential_test` line to the audit log: the service, the name and the code (`ok` on success), never the value. Nothing Lucille sends can run it. |
 
 **Names.** A service and a credential name are each 1 to 64 characters of `a`-`z`, `0`-`9`, `.`, `_` and
 `-`, starting with a letter or a digit: `gmail`, `github.com`, `app-password`. The whole name is matched:

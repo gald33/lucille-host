@@ -545,3 +545,90 @@ def test_github_read_runs_with_keyring_on_and_the_off_switch_spares_other_operat
     assert isinstance(check(Job(job_id=JOB_ID, op="github.read", args=GITHUB_ARGS), ctx), Ready)
     monkeypatch.setenv("PYTHON_KEYRING_BACKEND", "keyring.backends.null.Keyring")
     assert isinstance(check(Job(job_id=JOB_ID, op="host.sleep", args={"n": 1}), ctx), Ready)
+
+
+# --- the gmail. operations: the args element, the same interpreter and keyring rules ----------
+
+GMAIL_OPS = ("gmail.check", "gmail.mailboxes", "gmail.search", "gmail.read")
+GMAIL_ARGS = {
+    "gmail.check": {"credential": "default"},
+    "gmail.mailboxes": {"credential": "default"},
+    "gmail.search": {"credential": "default", "subject": "שלום", "unseen": True, "limit": 5},
+    "gmail.read": {"credential": "default", "id": "1795581384121139226"},
+}
+
+
+@pytest.mark.parametrize("op", GMAIL_OPS)
+def test_gmail_runs_the_hosts_interpreter_with_its_args_as_one_json_element(
+    tmp_path: Path, make_context: MakeContext, state_dir: Path, op: str
+) -> None:
+    interpreter = _stand_in_interpreter(tmp_path, "")
+    environ = {"HOME": "/h", "XDG_RUNTIME_DIR": "/r", "DBUS_SESSION_BUS_ADDRESS": "unix:x"}
+    ctx = make_context(enabled=[op], interpreter=interpreter, environ=environ)
+    ready = check(Job(job_id=JOB_ID, op=op, args=GMAIL_ARGS[op]), ctx)
+    assert isinstance(ready, Ready)
+    assert ready.argv == (
+        interpreter,
+        *("-I", "-B", "-W", "ignore", "-X", "utf8", "-m", "lucille_host.gmail"),
+        *("--state", str(state_dir), "--profile", "default", "--", op),
+        json.dumps(GMAIL_ARGS[op], sort_keys=True, separators=(",", ":"), ensure_ascii=True),
+    )
+    outcome = execute(ready, ctx)
+    assert (outcome.status, outcome.exit_code) == ("done", 0)
+    assert outcome.stdout is not None
+    lines = outcome.stdout.splitlines()
+    env = dict(line.split("=", 1) for line in lines if not line.startswith("arg="))
+    passed = {k: v for k, v in env.items() if k not in ("PWD", "SHLVL", "_", "OLDPWD")}
+    copied = (
+        {"HOME": "/h"}
+        if sys.platform == "darwin"
+        else {"DBUS_SESSION_BUS_ADDRESS": "unix:x", "XDG_RUNTIME_DIR": "/r"}
+    )
+    assert passed == {"PATH": "/usr/bin:/bin", "LANG": "C", "LC_ALL": "C", **copied}
+
+
+@pytest.mark.parametrize("op", GMAIL_OPS)
+def test_gmail_is_not_enabled_where_the_host_knows_no_interpreter(
+    make_context: MakeContext, op: str
+) -> None:
+    ctx = make_context(enabled=["host.describe", op], interpreter=None)
+    assert check(Job(job_id=JOB_ID, op=op, args=GMAIL_ARGS[op]), ctx) == "not_enabled"
+    assert describe_document(ctx)["enabled_ops"] == ["host.describe"]
+
+
+@pytest.mark.parametrize("op", GMAIL_OPS)
+def test_gmail_is_refused_before_its_child_starts_while_keyring_is_off(
+    tmp_path: Path, make_context: MakeContext, monkeypatch: pytest.MonkeyPatch, op: str
+) -> None:
+    started = tmp_path / "started"
+    script = tmp_path / "python-stand-in"
+    script.write_text(f"#!/bin/sh\ntouch '{started}'\n")
+    script.chmod(0o755)
+    _keyring_settings(tmp_path, monkeypatch, "keyringrc")
+    ctx = make_context(enabled=["host.describe", op], interpreter=str(script))
+    job = Job(job_id=JOB_ID, op=op, args=GMAIL_ARGS[op])
+    reply = json.loads(process(job, ctx))
+    assert (reply["status"], reply["code"]) == ("refused", "not_enabled")
+    assert not started.exists()
+    assert describe_document(ctx)["enabled_ops"] == ["host.describe"]
+
+
+@pytest.mark.parametrize(
+    ("op", "args"),
+    [
+        ("gmail.search", {"credential": "default", "subject": "a\r\nb"}),
+        ("gmail.search", {"credential": "default", "since": "2026-02-31"}),
+        ("gmail.read", {"credential": "default", "id": "18446744073709551616"}),
+    ],
+)
+def test_gmail_args_the_prose_rule_refuses_start_nothing(
+    tmp_path: Path, make_context: MakeContext, op: str, args: dict[str, object]
+) -> None:
+    started = tmp_path / "started"
+    script = tmp_path / "python-stand-in"
+    script.write_text(f"#!/bin/sh\ntouch '{started}'\n")
+    script.chmod(0o755)
+    ctx = make_context(enabled=[op], interpreter=str(script))
+    reply = json.loads(process(Job(job_id=JOB_ID, op=op, args=args), ctx))
+    assert (reply["status"], reply["code"]) == ("refused", "bad_args")
+    assert not started.exists()
