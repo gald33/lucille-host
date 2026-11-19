@@ -1647,6 +1647,12 @@ def test_the_web_page_is_allowed_only_as_that_literal_in_the_opener() -> None:
     for line in (f'let page = "{GOOGLE_PAGE}"', f"// {GOOGLE_PAGE}"):
         assert "http" in swift_rules(line, APP), line
     assert "http" in swift_rules(f"// {GOOGLE_PAGE}\n" + SYSTEM_PLACES, OPENER)
+    # Quoted as the literal is, in a comment of that file, it is still a network URL: only the
+    # literal in the code is the opener's.
+    for comment in (f'// see "{GOOGLE_PAGE}"\n', f'/* "{GOOGLE_PAGE}" */\n'):
+        assert "http" in swift_rules(comment + SYSTEM_PLACES, OPENER), comment
+    trailing = _opener(f'"{GOOGLE_PAGE}")', f'"{GOOGLE_PAGE}") // "{GOOGLE_PAGE}"')
+    assert "http" in swift_rules(trailing, OPENER)
 
 
 def test_the_open_file_is_one_path() -> None:

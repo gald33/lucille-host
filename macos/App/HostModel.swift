@@ -441,11 +441,13 @@ final class HostModel: ObservableObject {
 
     private lazy var gmailPanel: GmailPanel = makeGmailPanel()
 
-    /// The menu's Gmail… item: the window, and what the host says is kept.
+    /// The menu's Gmail… item: the window, and what the host says is kept. While a verb of the
+    /// window's runs, the read leaves what the window says, and the buttons wait for both.
     func gmailChosen() {
+        let quietly = gmailPanel.isBusy
         gmailPanel.show()
         Task {
-            await readGmail()
+            await readGmail(quietly: quietly)
         }
     }
 
@@ -493,19 +495,22 @@ final class HostModel: ObservableObject {
     }
 
     /// Save: the value goes on the verb's standard input, and nowhere else; the field is emptied
-    /// before the verb starts. A value not in the form the host takes is never sent.
+    /// before the verb starts. A value not in the form the host takes is never sent. Once the verb
+    /// has returned, the bytes sent are overwritten where no other copy holds them; the strings
+    /// typed and made from them are dropped, not zeroed, which Swift does not allow.
     private func saveGmail(address: String, password: String) {
         guard let value = GmailRules.value(address: address, password: password) else {
             gmailPanel.say(GmailText.notInForm)
             return
         }
         gmailPanel.clearPassword()
-        let input = GmailRules.input(value)
         Task {
+            var input = GmailRules.input(value)
             gmailPanel.setBusy(true, saying: GmailText.saving)
             let result = await VerbQueue.run(
                 cli, GmailRules.saveArguments, on: VerbQueue.store, input: input, timeout: GmailRules.keychainTimeout
             )
+            input.resetBytes(in: 0..<input.count)
             let outcome = VerbOutcome(result)
             gmailPanel.setBusy(false)
             if case .done = outcome, let saved = GmailRules.saved(outcome.credentials) {

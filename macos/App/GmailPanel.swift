@@ -22,6 +22,8 @@ final class GmailPanel: NSObject, NSWindowDelegate {
     private let kept: NSTextField
     private let said: NSTextField
     private var buttons: [NSButton] = []
+    /// How many verbs are running: the buttons wait until none is.
+    private var busyCount = 0
     private var content: NSView
 
     override init() {
@@ -81,19 +83,29 @@ final class GmailPanel: NSObject, NSWindowDelegate {
         fit()
     }
 
-    /// While a verb runs, the buttons wait, and the window says what is happening.
+    /// Whether a verb the window started is running.
+    var isBusy: Bool { busyCount > 0 }
+
+    /// While a verb runs, the buttons wait, and the window says what is happening. The calls are
+    /// counted, so one verb that ends while another runs (a read when the window is opened again
+    /// during a Save) leaves the buttons waiting.
     func setBusy(_ busy: Bool, saying text: String? = nil) {
+        busyCount = max(0, busyCount + (busy ? 1 : -1))
         for button in buttons {
-            button.isEnabled = !busy
+            button.isEnabled = busyCount == 0
         }
         if let text {
             say(text)
         }
     }
 
-    /// Empty the app password's field, and what the window's field editor and its undo still
-    /// hold of it.
+    /// Empty the app password's field, the editor that edits it while it has the focus, the
+    /// window's shared field editor, and their undo.
     func clearPassword() {
+        if let editor = password.currentEditor() {
+            editor.string = ""
+            editor.undoManager?.removeAllActions()
+        }
         panel.endEditing(for: nil)
         password.stringValue = ""
         panel.fieldEditor(false, for: nil)?.string = ""

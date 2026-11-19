@@ -934,14 +934,10 @@ def _swift_rule_findings(text: str, rel: str, first_line: int = 1) -> list[Viola
     outside :data:`OPEN_FILE`."""
     found: list[Violation] = []
     for rule, patterns in SWIFT_RULES:
-        # The opener's one web page is the one network address the app may hold, as that exact
-        # literal, in that one file, and as that literal's value when its string is read on its
-        # own; [open] holds it to its place there.
-        seen = text
-        if rel == OPEN_FILE:
-            seen = "" if text == GOOGLE_APP_PASSWORDS_PAGE else text
-            seen = seen.replace(f'"{GOOGLE_APP_PASSWORDS_PAGE}"', '""')
-        found += _regex_findings(seen if rule == "http" else text, rel, rule, patterns, first_line)
+        # The opener's one web page, read as a string literal's value on its own, in that one
+        # file (check_swift blanks it where it is that literal in the code, never in a comment).
+        page = rel == OPEN_FILE and rule == "http" and text == GOOGLE_APP_PASSWORDS_PAGE
+        found += _regex_findings("" if page else text, rel, rule, patterns, first_line)
     if rel != PROCESS_FILE:
         found += _regex_findings(text, rel, "process", _PROCESS, first_line)
     found += _regex_findings(text, rel, "open", FULL_DISK_ACCESS, first_line)
@@ -1069,8 +1065,17 @@ def check_swift(
     shebangs: set[int] = set()
     if _is_test_swift(rel):
         spans, shebangs = allowed_test_shebangs(text, scan)
-    found = _swift_rule_findings(_blanked(text, spans), rel)
-    found += _swift_rule_findings(_blanked(scan.code, spans), rel)
+    # The opener's one web page is the one network address the app may hold: as that exact string
+    # literal, in the code of that one file, which [open] holds to its place there. Its copies in
+    # the code are blanked for the rules; a copy in a comment is not, and [http] finds it.
+    page = f'"{GOOGLE_APP_PASSWORDS_PAGE}"'
+    in_code = [
+        (found.start(), found.end())
+        for found in re.finditer(re.escape(page), scan.code)
+        if rel == OPEN_FILE
+    ]
+    found = _swift_rule_findings(_blanked(text, [*spans, *in_code]), rel)
+    found += _swift_rule_findings(_blanked(scan.code, [*spans, *in_code]), rel)
     if rel != OPEN_FILE:
         found += _regex_findings(_blanked(scan.code, spans), rel, "open", OPENER_NAMES)
     for line, value in scan.literals:

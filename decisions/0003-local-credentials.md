@@ -500,8 +500,8 @@ reads only what a request asks for.
   repository owner chose the button over plain text, `credential --json` over the exit status, and the
   menu's own item over Settings, on 2026-11-19.
 - Save runs `credential set gmail default --host imap.gmail.com --value-stdin --replace` with the value on
-  standard input, never in the arguments, with `--json`. Remove runs `credential remove gmail default`,
-  and the window reads whether one is kept from `credential list --json`.
+  standard input, never in the arguments, with `--json`. Remove runs `credential remove gmail default
+  --json`, and the window reads whether one is kept from `credential list --json`.
 - Test runs a new action, `credential test <service> <name>` (spec/CLI.md §15, with the implementation):
   - It takes the service `gmail` only; any other service is refused (`no_test`, exit 1), as is a name
     with no credential stored (`no_such_credential`, exit 1).
@@ -510,7 +510,8 @@ reads only what a request asks for.
   - It is refused, and starts nothing, while the host is paused (`paused`, exit 1), so that `pause` still
     stops it starting anything; and while keyring's own settings turn the keyring off (`insecure_keyring`,
     exit 1), as the operation is.
-  - It writes text only, like the rest of the verb. On success, one line, `gmail/<name>: signed in to
+  - As the rest of the verb, it writes text, or with `--json` the objects of spec/CLI.md §7 (a
+    `credential_test`, or an `error` with the code below). On success, one line, `gmail/<name>: signed in to
     imap.gmail.com`, and exit 0. Otherwise the child's fixed line and exit 1, with the code named by the
     child's exit: `bad_credential` (2), `sign_in_refused` (7), `unreachable` (4), `limit_reached` (5) or
     `internal` (1, 3 and 6; with exit 1, the interpreter's own failure, the line is the host's, never the
