@@ -341,7 +341,9 @@ def test_args_valid_refuses_what_json_schema_lets_through() -> None:
 
 SPEC_STEPS_HERE = {"paused", "unknown_op", "not_enabled", "bad_args", "path_outside_root"}
 # Operations the spec has and this release's catalog does not yet.
-SPEC_ONLY = frozenset({"files.search"})
+SPEC_ONLY = frozenset(
+    {"files.search", "gmail.check", "gmail.mailboxes", "gmail.search", "gmail.read"}
+)
 
 
 def _fixture_context(

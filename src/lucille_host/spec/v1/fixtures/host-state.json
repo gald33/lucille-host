@@ -6,7 +6,11 @@
     "host.sleep",
     "files.sha256",
     "files.search",
-    "github.read"
+    "github.read",
+    "gmail.check",
+    "gmail.mailboxes",
+    "gmail.search",
+    "gmail.read"
   ],
   "roots": [
     "docs"

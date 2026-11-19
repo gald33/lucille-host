@@ -1,0 +1,22 @@
+{
+  "description": "gmail.search asking for more than 50 messages.",
+  "valid": false,
+  "schema_valid": false,
+  "expect": {
+    "reply": {
+      "status": "refused",
+      "code": "bad_args"
+    }
+  },
+  "body": {
+    "v": "lucille.exec/1",
+    "dir": "request",
+    "job_id": "00000000-0000-4000-8000-000000001458",
+    "op": "gmail.search",
+    "args": {
+      "credential": "default",
+      "limit": 51
+    },
+    "not_after": 1767229200
+  }
+}

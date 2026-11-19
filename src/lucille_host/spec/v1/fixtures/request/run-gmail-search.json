@@ -1,0 +1,27 @@
+{
+  "description": "gmail.search of the inbox by sender, subject and dates, ten at most.",
+  "valid": true,
+  "schema_valid": true,
+  "expect": {
+    "reply": {
+      "status": "done"
+    }
+  },
+  "body": {
+    "v": "lucille.exec/1",
+    "dir": "request",
+    "job_id": "00000000-0000-4000-8000-000000001453",
+    "op": "gmail.search",
+    "args": {
+      "credential": "default",
+      "mailbox": "INBOX",
+      "from": "billing@example.com",
+      "subject": "invoice",
+      "since": "2026-10-01",
+      "before": "2026-11-18",
+      "unseen": true,
+      "limit": 10
+    },
+    "not_after": 1767229200
+  }
+}

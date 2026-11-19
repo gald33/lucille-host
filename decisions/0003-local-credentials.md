@@ -1,7 +1,8 @@
 # 0003: Local credentials (draft)
 
-**Status: storage, entry from the command line, and the first use, `github.read`, built; entry at
-Lucille's request chosen, not built.** `src/lucille_host/credentials.py` can save, list, read and
+**Status: storage, entry from the command line, and the first use, `github.read`, built; the second use,
+Gmail over IMAP with an app password, decided 2026-11-18, not built; entry at Lucille's request chosen,
+not built.** `src/lucille_host/credentials.py` can save, list, read and
 remove a credential for an online service, kept only on this computer. `lucille-host credential set`,
 `list` and `remove` write to it from the command line, each credential bound to the hosts it may be
 sent to (spec/CLI.md §15). One operation uses a stored credential: `github.read`, off by default, whose
@@ -282,6 +283,258 @@ that built `github.read`, and not before, since until then it stayed true:
   `github.read`'s child, when it is on.
 - This record's "Unreachable from Lucille": the credential verb and the proxy's child import
   `credentials`, and only the child reads a value, on a request for an enabled `github.read`.
+
+## Second use: Gmail over IMAP, with an app password (decided 2026-11-18, not built)
+
+The repository owner ruled on 2026-11-18: the second use of a stored credential reads Gmail over IMAP
+with a Google app password, read-only, in four operations, `gmail.check`, `gmail.mailboxes`,
+`gmail.search` and `gmail.read`; the app password is entered in Capsule; `gmail.read` returns a capped
+text body. As for `github.read`, this text and the protocol's come first, then the code, with the claim
+documents listed at the end of this section.
+
+**Why IMAP and an app password.** Gmail's API, and IMAP through OAuth, need a restricted OAuth scope
+(IMAP needs `https://mail.google.com/`), and a Google Cloud project that asks for one goes through
+restricted-scope verification, with a yearly security assessment (CASA). An app password is the user's
+own credential for their own account: no Google Cloud project, OAuth client or scope is involved, so that
+verification has nothing to attach to. What Google's own pages say, as of 2026-11-18:
+
+- An app password needs 2-Step Verification. The option is missing where 2-Step Verification uses only
+  security keys, on a work, school or other organization's account, and with Advanced Protection. Google
+  says app passwords "aren't recommended and are unnecessary in most cases", and revokes them all when the
+  account's password changes ([Sign in with app passwords](https://support.google.com/accounts/answer/185833)).
+- IMAP is always on for personal Gmail since January 2025
+  ([Use IMAP to check Gmail](https://support.google.com/mail/answer/7126229)).
+- Google Workspace stopped password sign-in to IMAP ("less secure apps") for its accounts as of May 1,
+  2025, and names an app password as the alternative for what cannot use OAuth; an administrator may not
+  allow them
+  ([Winding down Google Sync and less secure apps support](https://workspaceupdates.googleblog.com/2023/09/winding-down-google-sync-and-less-secure-apps-support.html)).
+- An account takes at most 15 IMAP connections at once and 2,500 MB of IMAP download a day
+  ([Gmail bandwidth limits](https://support.google.com/a/answer/1071518)).
+- IMAP through OAuth would need `https://mail.google.com/`, a restricted scope, and so verification and the
+  assessment ([OAuth verification FAQ](https://support.google.com/cloud/answer/13463817)).
+
+So: **supported**, a personal Gmail account with 2-Step Verification by any means but security keys alone,
+without Advanced Protection; **not supported**, the others, and a Workspace account unless its
+administrator allows app passwords. **Not settled, and to be confirmed before a public release:** whether
+Google's terms, Gmail's program policies or its user-data policies limit a commercial service that asks its
+users to make an app password for it, and whether Google withdraws app passwords as it withdrew password
+access for Workspace. This record does not say that IMAP exempts anything from any policy.
+
+**The operations.** Four catalog entries, each off by default and enabled on its own. Each reads; none
+sends, moves, deletes, flags or marks a message read. Each takes `credential`, a credential's name by
+Lucille's rule; the host uses the one stored as `gmail/<credential>`.
+
+- `gmail.check {credential}`: signs in and out. It reads no message and no mailbox.
+- `gmail.mailboxes {credential}`: the account's mailboxes (Gmail's labels), at most 500.
+- `gmail.search {credential, mailbox?, query?, from?, to?, subject?, since?, before?, unseen?, limit?}`:
+  the newest `limit` messages (1 to 50, 20 when not given) of `mailbox` (`INBOX` when not given) that match
+  every criterion given. `query` is Gmail's own search syntax (Gmail's `X-GM-RAW`); `from`, `to` and
+  `subject` match those headers; `since` and `before` are dates; `unseen` is a boolean. `query` is 1 to 256
+  characters, `mailbox`, `from`, `to` and `subject` 1 to 128. How each is sent is under "IMAP, exactly".
+- `gmail.read {credential, id}`: one message, by `id`, Gmail's own message id (`X-GM-MSGID`, a decimal
+  integer of at most 2^64 − 1). That id is the same in every mailbox and stays the same, where an IMAP UID
+  changes with the mailbox and with its `UIDVALIDITY`. The host finds the message in the mailbox Gmail marks
+  `\All` (its name depends on the account's language). A user can hide that mailbox from IMAP in Gmail's
+  settings; `gmail.read` then exits 3, with a line that says so, and reads nothing else. Gmail keeps
+  messages in Spam and Trash out of `\All`, so an id that `gmail.search` found there, in `\Junk` or
+  `\Trash`, is not found by `gmail.read`: exit 3. Reading them too would mean looking in those mailboxes as
+  well, which this design does not do.
+
+**The host's own check of the arguments,** after the schema's and before any child starts (step 8 of the
+refusal order), refuses `bad_args`:
+
+- any argument holding a control character, U+0000 to U+001F or U+007F, so no line break, carriage return
+  or NUL reaches the child; the schema alone cannot say this, since its one free-text pattern refuses only
+  U+0000;
+- a date that does not exist (`2026-02-31`), read as the calendar reads it;
+- an `id` above 2^64 − 1 (18446744073709551615).
+
+The child checks the same again and exits 6 if one gets through.
+
+**Where it runs.** As `github.read`: a child of the host's own interpreter, `<the host's interpreter> -I -B
+-W ignore -X utf8 -m lucille_host.gmail --state <the profile's state folder> --profile <the host's profile>
+-- <operation> <args>`, with the same environment allow-list, the same keyring and interpreter rules (not
+run where the host does not know its interpreter, nor while keyring's own settings turn it off), and the
+same definition hash rules. `<args>` is the request's `args`, which passed the schema, written by the host
+as compact JSON with sorted keys; the child checks them again against the schema. The catalog's template
+gains this one new element, which the definition hash covers. `src/lucille_host/gmail.py` joins
+`proxy.py`'s import zone, which gains `imaplib`, `email` and `html` (for `html.parser`), and uses
+`proxy.py`'s address list, TLS set-up, scrub and stream handling, not copies of them.
+
+**The credential.**
+
+- Bound hosts must include `imap.gmail.com`.
+- Its value is the account's address, one space, and the app password's 16 lowercase letters (Google shows
+  them in four groups of four; the screen and the command line drop the spaces). The address is no secret;
+  it is kept in the value so that the store's format does not change. The whole value must match, as one
+  ECMA-262 and Python regex with no flag:
+  `^[A-Za-z0-9._%+-]{1,64}@([A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.){1,8}[A-Za-z]{2,63} [a-z]{16}$`,
+  and its address be at most 254 characters. The child matches the whole value, as Python's
+  `re.fullmatch` does (never `re.match`, under which `$` also takes a final line break). A value not in
+  that form is refused (exit 2), so an account's
+  real password saved by mistake is never sent. The form leaves neither part a quote, a backslash, a space
+  or a control character, so both go in `LOGIN` as IMAP quoted strings that nothing can break out of.
+- The app password goes in the IMAP `LOGIN` command and nowhere else (rule 3 of "Use"). It is replaced,
+  raw, in Google's spaced form and in base64 at the three alignments, in everything the child writes.
+
+**What the child does, in order.**
+
+0. Its arguments, by position, and a catch-all, as `github.read`'s (exit 6).
+1. The credential: none, not bound to `imap.gmail.com`, or not in the form above: exit 2.
+2. The address: `imap.gmail.com` only, port 993, every address it resolves to allowed by `github.read`'s
+   fixed list, or exit 4.
+3. One connection to a vetted address, TLS from the first byte (no `STARTTLS`), `imap.gmail.com` as the
+   server name, the certificate checked against certifi's bundle.
+4. Only the commands and fetch items under "IMAP, exactly", below. A test records every command the child
+   sends, with every fetch item, and fails on any other.
+5. Limits on what it returns, which are not failures: at most 500 mailboxes, at most 50 messages, and at
+   most the first 4 MiB of a message (`BODY.PEEK[]<0.4194304>`), past which the message is parsed as far as
+   it goes. Each sets its document's flag (`truncated`, `message_truncated`), and the exit is 0.
+6. One limit that is a failure: at most 8 MiB read from Gmail in a request, counted on the connection,
+   with IMAP lines within `imaplib`'s own limit. Past it, the child stops reading, writes nothing on standard
+   output, writes one fixed line on standard error, and exits 5.
+7. `LOGIN` answered `NO` (a wrong or revoked app password, or IMAP closed to the account): exit 7, with a
+   fixed line that says to make a new app password. Any other `NO` (no such mailbox, no such message, a
+   search Gmail refused): exit 3. A `BAD` to any command, `LOGIN` included, means the child sent something
+   Gmail could not parse, a fault of the child's own: exit 6. In every case the line is the child's own,
+   fixed; nothing Gmail wrote, not the text of a `NO` or `BAD`, nor an `[ALERT]`, reaches the output.
+8. On success it writes one JSON document on standard output (§11 of the protocol), scrubbed, and nothing
+   on standard error.
+
+**IMAP, exactly.**
+
+- **Commands**: `CAPABILITY`; `LOGIN` with the address and the app password as quoted strings; `LIST "" "*"`;
+  `EXAMINE` (a mailbox opened read-only; `SELECT` is never sent, nor `ENABLE`); `UID SEARCH`; `UID FETCH`
+  with the items below; `LOGOUT`. Nothing else: no `STORE`, `COPY`, `MOVE`, `EXPUNGE`, `APPEND`, `CREATE`,
+  `DELETE`, `RENAME`, `SUBSCRIBE`, `IDLE`, `ENABLE`, `COMPRESS` or `AUTHENTICATE`.
+- **Fetch items**, the closed list: `UID`, `FLAGS`, `INTERNALDATE`, `RFC822.SIZE`, `X-GM-MSGID`, `X-GM-THRID`,
+  `BODY.PEEK[HEADER.FIELDS (FROM TO CC SUBJECT DATE MESSAGE-ID IN-REPLY-TO)]` and `BODY.PEEK[]<0.4194304>`.
+  Not `RFC822`, `RFC822.TEXT` or any `BODY[...]` without `.PEEK`, each of which marks a message read, and
+  not `RFC822.HEADER`, `BODYSTRUCTURE` or `X-GM-LABELS`, which nothing here needs.
+- **Mailbox names** go in modified UTF-7 (RFC 3501 §5.1.3), the encoding Gmail's IMAP uses unless `ENABLE
+  UTF8=ACCEPT` is sent, which it never is. The host encodes a `mailbox` argument to it and decodes the names
+  `LIST` returns from it. A name in modified UTF-7 is ASCII, and goes as an IMAP quoted string in which
+  each `\` and `"` is escaped with a `\` (RFC 3501 §4.3); modified UTF-7 leaves both as they are, so the
+  escaping is the child's to do. It sends no other character that a quoted string cannot hold: a name with
+  a control character never reaches it (rule `gmail-args`).
+- **Search criteria**: each text criterion (`query` as `X-GM-RAW`, and `from`, `to`, `subject`) goes in a
+  `UID SEARCH CHARSET UTF-8`, as a synchronizing literal (`{n}`, then the server's continuation; never
+  `LITERAL+`'s `{n+}`), whose length `n` counts the UTF-8 octets. `imaplib` sends one literal per command,
+  so the child sends one `UID SEARCH` for each text criterion given, each with the non-text criteria
+  (`SINCE`, `BEFORE`, `UNSEEN`) beside it, and keeps only the UIDs that all of them returned. With no text
+  criterion, one `UID SEARCH` with the others, or `ALL`. The UIDs that come back count toward the 8 MiB:
+  a search that matches about a million messages (a whole large mailbox, with no criterion) returns more
+  than that and exits 5. A narrower criterion (`since`, `from`, `query`) answers it.
+  `gmail.read` finds its message with `UID SEARCH X-GM-MSGID <id>`, the id an atom of digits.
+- **Gmail's extensions.** `X-GM-RAW`, `X-GM-MSGID` and `X-GM-THRID` are Gmail's, offered when `CAPABILITY`
+  lists `X-GM-EXT-1`. The child reads `CAPABILITY` after `LOGIN`; without `X-GM-EXT-1`, `gmail.search` and
+  `gmail.read` exit 3 with their own line and send nothing more. `gmail.check` and `gmail.mailboxes` need
+  none of them.
+
+**What `gmail.read` returns.** From, to, cc, date, subject, `Message-ID`, `In-Reply-To`, Gmail's thread id,
+the text body, and each attachment's file name, content type and size. Never an attachment's contents.
+
+- The text body is the message's `text/plain` part, or, with none, its `text/html` part turned into text
+  by `html.parser` (`script` and `style` dropped, no link followed, no image fetched), decoded by each
+  part's charset (`email`'s default policy; an unknown charset is read as UTF-8 with replacement).
+- Text that HTML hides from a reader is dropped where the markup says so plainly: an element with the
+  `hidden` attribute, `aria-hidden="true"`, or an inline style of `display:none`, `visibility:hidden`,
+  `font-size:0` or `opacity:0`. Not caught: hiding by a stylesheet, by colour or by position, and anything
+  else; such text reaches Lucille as text (THREAT_MODEL.md).
+- A `multipart/alternative` message's `text/plain` part is preferred, and its sender can make it say other
+  things than the HTML part a reader sees. Lucille then reads text no reader saw. That is not caught either.
+- It is cut at 32 KiB of UTF-8, with a flag saying so. Each header value is cut at 1 KiB, a recipient list
+  at 4 KiB. The document always fits §13's 64 KiB.
+
+**Retries, limits, background.** The child retries nothing; Lucille may ask again. Each request opens one
+connection and closes it, well inside Gmail's 15. No synchronization and no background polling: the host
+reads only what a request asks for.
+
+- **Requests in a row.** At most 60 sign-ins with one credential in any 10 minutes, counted in a file in
+  the state folder, under the credential store's lock. Past that, the child signs in to nothing and exits 5,
+  with its own fixed line. That bounds how often it signs in, and so Google's reasons to lock the account.
+  It does not protect the account's 2,500 MB of IMAP a day: 60 requests of 8 MiB each in 10 minutes could
+  still use it up in under an hour.
+- **After a refused sign-in.** A `LOGIN` answered `NO` is recorded the same way. For the next 15 minutes the
+  child does not try that credential again: it exits 7 without connecting, so Lucille cannot drive repeated
+  failed sign-ins, which Google may answer by locking the account. Saving the credential again (Capsule's
+  Save, or `credential set --replace`) clears the record.
+
+**Entering the app password: Capsule.**
+
+- A Gmail section in Capsule's settings: the address, the app password (a secure field), and Save, Test and
+  Remove, with a link to Google's page on app passwords and the account limits above.
+- Save runs `credential set gmail default --host imap.gmail.com --value-stdin --replace` with the value on
+  standard input, never in the arguments. Remove runs `credential remove gmail default`.
+- Test runs a new action, `credential test <service> <name>` (spec/CLI.md §15, with the implementation):
+  - It takes the service `gmail` only; any other service is refused (`no_test`, exit 1), as is a name
+    with no credential stored (`no_such_credential`, exit 1).
+  - It runs `gmail.check`'s child for that credential, whether or not `gmail.check` is enabled: it is the
+    user's own act at this computer, not a request from Lucille, and reads no mail.
+  - It is refused, and starts nothing, while the host is paused (`paused`, exit 1), so that `pause` still
+    stops it starting anything; and while keyring's own settings turn the keyring off (`insecure_keyring`,
+    exit 1), as the operation is.
+  - It writes text only, like the rest of the verb. On success, one line, `gmail/<name>: signed in to
+    imap.gmail.com`, and exit 0. Otherwise the child's fixed line and exit 1, with the code named by the
+    child's exit: `bad_credential` (2), `sign_in_refused` (7), `unreachable` (4), `limit_reached` (5) or
+    `internal` (1, 3 and 6; with exit 1, the interpreter's own failure, the line is the host's, never the
+    traceback). It never shows the value.
+  - The audit log gets one `credential_test` line: the service, the name, and the code, never the value.
+  - It is the credential verb's only action that uses a value, and it does so only through the child.
+- The credential's name is `default`. Lucille sends `credential: "default"`.
+- The command line stays as it is for everyone else: `lucille-host credential set gmail <name> --host
+  imap.gmail.com`.
+
+**What crosses the device boundary.** The app password never does: it goes only to `imap.gmail.com`, in
+`LOGIN`. What an operation returns does, to Lucille, as every reply does (PRIVACY.md): mailbox names,
+search results' headers, and, for `gmail.read`, up to 32 KiB of a message's text and its attachments'
+names, types and sizes. Lucille's operators, its assistant and the AI provider it uses can read them. So
+the claim is that the credential stays on the computer, never that the mail does. Keeping a message's
+text on the computer would need the model to run here, which this record does not cover.
+
+**What a compromised Lucille can do,** while these operations are on: read any message of the account,
+50 at a time, and search it. It cannot send, delete, move or mark anything, and cannot learn the app
+password. Two consequences go in THREAT_MODEL.md:
+
+- **Taking over other accounts.** A mailbox holds password-reset links and one-time codes. A compromised
+  Lucille that can ask another service to reset a password, or to send a code, can then search for the
+  message and read it, and so take over that account. Nothing here stops that while `gmail.search` and
+  `gmail.read` are on; `pause`, and turning them off, do.
+- **Instructions in mail.** A message's text, hidden text that gets past the rule above included, can hold
+  instructions aimed at Lucille's assistant. That is Lucille's to handle.
+
+**The claim documents, with the implementation.** As for `github.read`, each changes in the pull request
+that builds these operations: PRIVACY.md (the child's credential; what leaves; the connection to
+`imap.gmail.com`), CLAIMS.md (the catalog's entries; rows for the tests), THREAT_MODEL.md (the row above),
+decisions/0001 (the transport section), spec/CLI.md (§8's words; §15's `credential test`), macos/README.md
+(the Gmail section), and this record's "Unreachable from Lucille".
+
+**The questions this design left open, as the repository owner settled them on 2026-11-18.** Gmail is the
+host's first protocol other than HTTPS and its first access to mail, so these were put to the owner before
+merge:
+
+1. **Which commands and which mailboxes.** The commands and fetch items under "IMAP, exactly", read-only.
+   Any mailbox the account shows to IMAP, opened only with `EXAMINE`; none is held out of reach, and there
+   is no list of allowed labels.
+2. **The transport.** TLS from the first byte on port 993 only: no `STARTTLS`, so nothing to downgrade, and
+   no port 143. The certificate is checked for `imap.gmail.com` against certifi's bundle, and the address
+   against `github.read`'s fixed list.
+3. **Bodies.** At most 4 MiB of a message fetched; its text cut at 32 KiB, header values at 1 KiB and
+   recipient lists at 4 KiB; the app password replaced, raw, spaced and in base64 at three alignments, in
+   all output, and the host's own redaction of child output (§13) runs as well.
+4. **Attachments.** Each one's file name, content type and size; never its contents, and no operation reads
+   one.
+5. **The app password's scope and revocation.** It opens the whole account over IMAP (Google offers nothing
+   narrower), so its scope here is these operations' read-only rules. Google revokes it when the account's
+   password changes; the user revokes it at Google's app-password page; Capsule's Remove or `credential
+   remove` deletes it here. A revoked one makes each operation exit 7. Capsule's Gmail screen gives no
+   warning when one is saved: its fields, and the link to Google's page on app passwords.
+6. **`credential test`.** It runs whether or not `gmail.check` is enabled, and is refused while the host is
+   paused, so that `pause` still stops it starting anything.
+
+**Field check, not a claim.** That a real app password signs in from a Mac, through Capsule's bundled
+runtime, and that the Keychain gives the child the value without a prompt, is checked with a dedicated
+test account on the repository owner's Mac, with the implementation's first build.
 
 ## Entry: Lucille asks, the user types it here (chosen 2026-11-11, not built)
 
