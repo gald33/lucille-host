@@ -152,7 +152,7 @@ from keyring.backends.fail import Keyring as FailKeyring
 from keyring.backends.null import Keyring as NullKeyring
 from keyring.errors import KeyringError
 
-from lucille_host import paths, state
+from lucille_host import nesting, paths, state
 
 __all__ = [
     "KNOWN_BACKENDS",
@@ -749,7 +749,9 @@ class Item:
         if raw is None:
             return _empty()
         try:
-            doc = json.loads(raw)
+            # Past the host's own depth limit, an item this version did not write, whatever
+            # Python's parser would make of it.
+            doc = None if nesting.json_deeper(raw) else json.loads(raw)
         except (ValueError, RecursionError):
             doc = None
         pairs = doc.get("pairs") if isinstance(doc, dict) else None

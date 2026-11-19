@@ -160,6 +160,8 @@ import _frozen_importlib_external as bootstrap
 
 USAGE = "usage: lucille-host-runtime -I -B -S -W ignore -X utf8 -c PROGRAM write|check RUNTIME LIB"
 CHECKED_HASH = (3).to_bytes(4, "little")
+# What importlib.util.source_hash keys the hash with: the magic number as one integer.
+MAGIC_TOKEN = int.from_bytes(bootstrap.MAGIC_NUMBER, "little")
 
 
 def main():
@@ -199,7 +201,7 @@ def main():
         cached = os.path.join(folder, "__pycache__", name[:-3] + "." + tag + ".pyc")
         with open(os.path.join(runtime, source), "rb") as handle:
             data = handle.read()
-        source_hash = _imp.source_hash(bootstrap._RAW_MAGIC_NUMBER, data)
+        source_hash = _imp.source_hash(MAGIC_TOKEN, data)
         try:
             code = compile(data, source, "exec", dont_inherit=True, optimize=0)
         except (SyntaxError, ValueError) as error:

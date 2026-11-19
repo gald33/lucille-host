@@ -168,7 +168,8 @@ enforces.
    `os.system`), and then through the re-exports it can see, at any place in a chain: a table of the
    modules the runtime's allowed standard-library modules bind (`tempfile._os` is `os`), which
    `tools/guards/reexport_probe.py` writes and `tests/guards/test_reexports.py` checks on every
-   interpreter CI tests; what this package's own modules bind by an import or by assigning an
+   interpreter CI tests (when it fails, it prints one line with everything the table lacks, which
+   `reexport_probe.py --add <log>` adds, for an interpreter not at hand); what this package's own modules bind by an import or by assigning an
    imported name (`paths.osmod` is `os` when `paths` has `import os as osmod`); and a watched
    module's name, or that name with leading underscores (`random._os`). It reads a file's imports
    without regard to scope, so a name the imports bind to two different things (`import os as x`

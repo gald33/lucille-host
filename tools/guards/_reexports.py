@@ -1,12 +1,6 @@
 """Modules the runtime's standard-library modules re-export. Generated: do not edit.
 
-Written by ``python tools/guards/reexport_probe.py``, which says how. Probed:
-
-- CPython 3.11.15 on linux
-- CPython 3.11.18 on linux
-- CPython 3.12.3 on linux
-- CPython 3.13.14 on linux
-- CPython 3.13.18 on linux
+Written by ``python tools/guards/reexport_probe.py``, which says how.
 
 ``tests/guards/test_reexports.py`` fails if this table does not cover the interpreter
 running the tests.
@@ -15,6 +9,15 @@ running the tests.
 from __future__ import annotations
 
 from collections.abc import Mapping
+
+# The interpreters probed.
+PROBED: tuple[str, ...] = (
+    "CPython 3.11.15 on linux",
+    "CPython 3.11.18 on linux",
+    "CPython 3.12.3 on linux",
+    "CPython 3.13.14 on linux",
+    "CPython 3.13.18 on linux",
+)
 
 # The standard-library modules scanned: RUNTIME_IMPORTS, EXEC_IMPORTS and PROXY_IMPORTS,
 # less the rest.
