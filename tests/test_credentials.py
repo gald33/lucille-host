@@ -267,13 +267,18 @@ def _importers() -> list[tuple[str, str]]:
     return sorted(found)
 
 
-def test_only_the_credential_verb_and_the_proxy_import_it() -> None:
+def test_only_the_credential_verb_and_the_credential_children_import_it() -> None:
     """No request handler or reply can reach a credential: no runtime module but this one names
     the module, except the command line's ``credential`` verb, in its own function, so that no
-    other verb's process (``run`` among them) loads it, and ``github.read``'s child, ``proxy.py``,
-    a separate process, in the one function that reads the credential (decisions/0003, "First
-    use")."""
-    assert _importers() == [("cli.py", "_credential_verb"), ("proxy.py", "_read_credential")]
+    other verb's process (``run`` among them) loads it, and the credential children, separate
+    processes, each in the one function that reads the credential: ``github.read``'s
+    (``proxy.py``) and the Gmail operations' (``gmail.py``) (decisions/0003, "First use" and
+    "Second use")."""
+    assert _importers() == [
+        ("cli.py", "_credential_verb"),
+        ("gmail.py", "_read_credential"),
+        ("proxy.py", "_read_credential"),
+    ]
 
 
 def test_the_credential_verb_never_reads_a_value() -> None:
@@ -299,7 +304,8 @@ def test_importing_the_command_line_does_not_load_it() -> None:
     the proxy's: ``github.read`` reads a credential only in its own child process."""
     code = (
         "import sys, lucille_host.cli, lucille_host.loop, lucille_host.jobs, lucille_host.library\n"
-        "print(sorted(m for m in ('lucille_host.credentials', 'lucille_host.proxy')"
+        "print(sorted(m for m in ('lucille_host.credentials', 'lucille_host.proxy',"
+        " 'lucille_host.gmail')"
         " if m in sys.modules))"
     )
     done = subprocess.run(

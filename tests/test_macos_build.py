@@ -720,7 +720,14 @@ def test_the_abilities_menu_says_the_cores_words() -> None:
         for name, op in OPERATIONS.items()
         if not op.about.diagnostic and name != "host.describe"
     }
-    assert set(listed) == {"files.sha256", "github.read"}
+    assert set(listed) == {
+        "files.sha256",
+        "github.read",
+        "gmail.check",
+        "gmail.mailboxes",
+        "gmail.search",
+        "gmail.read",
+    }
     assert OPERATIONS["host.sleep"].about.diagnostic
     # What the ui check looks for in the menu is the core's words for each listed ability.
     assert check_app.ABILITY_TITLES == {name: about.summary for name, about in listed.items()}
@@ -1200,13 +1207,14 @@ def test_content_sending_ops_ask_first() -> None:
     stub = json.loads(
         (check_app.CLI_FIXTURES / "ops-list-sends-file-content.json").read_text(encoding="utf-8")
     )
-    assert [op["sends_file_content"] for op in stub["stdout"]] == [False, False, True, False]
+    assert [op["sends_file_content"] for op in stub["stdout"]] == [False, False, True] + [False] * 5
     selftest = _SELF_TEST.read_text(encoding="utf-8")
     assert "ops-list-sends-file-content" in selftest
     assert "let questionOn: [Bool] = content.map { $0.asksFirst(turningOn: true) }" in selftest
     assert (
-        "questionOn == [false, false, true, false] && questionOff == [false, false, false, false]"
-        in selftest
+        "questionOn == [false, false, true, false, false, false, false, false]\n"
+        "                          && questionOff == "
+        "[false, false, false, false, false, false, false, false]" in selftest
     )
 
 

@@ -55,6 +55,50 @@
     {
       "v": 1,
       "type": "op",
+      "name": "gmail.check",
+      "state": "disabled",
+      "enabled": false,
+      "summary": "Check that Gmail can be read",
+      "sends": "Lucille learns whether the app password kept here still signs in to Gmail.",
+      "sends_file_content": false,
+      "diagnostic": false
+    },
+    {
+      "v": 1,
+      "type": "op",
+      "name": "gmail.mailboxes",
+      "state": "disabled",
+      "enabled": false,
+      "summary": "List your Gmail mailboxes",
+      "sends": "Lucille gets the names of your Gmail mailboxes and labels.",
+      "sends_file_content": false,
+      "diagnostic": false
+    },
+    {
+      "v": 1,
+      "type": "op",
+      "name": "gmail.search",
+      "state": "disabled",
+      "enabled": false,
+      "summary": "Search your Gmail",
+      "sends": "Lucille gets the sender, recipients, subject, date and size of up to 50 messages that match its search, never their text. The app password goes only to imap.gmail.com.",
+      "sends_file_content": false,
+      "diagnostic": false
+    },
+    {
+      "v": 1,
+      "type": "op",
+      "name": "gmail.read",
+      "state": "disabled",
+      "enabled": false,
+      "summary": "Read one Gmail message",
+      "sends": "Lucille gets one message it names: its headers, up to 32 KB of its text, and its attachments' names, types and sizes, never their contents.",
+      "sends_file_content": false,
+      "diagnostic": false
+    },
+    {
+      "v": 1,
+      "type": "op",
       "name": "host.nothing",
       "state": "not_in_catalog",
       "enabled": false

@@ -164,8 +164,13 @@ def test_this_release_catalog_is_unchanged() -> None:
     them)."""
     assert all(op.in_process is None for op in OPERATIONS.values())
     assert "in_process" not in OPERATIONS["host.describe"]._definition()
-    # github.read, added later, changed the catalog version; the three entries before it did not.
-    first_three = tuple(op for op in OPERATIONS.values() if op.name != "github.read")
+    # github.read and the gmail. entries, added later, changed the catalog version; the three
+    # entries before them did not.
+    first_three = tuple(
+        op
+        for op in OPERATIONS.values()
+        if op.name != "github.read" and not op.name.startswith("gmail.")
+    )
     assert (
         catalog_version(first_three)
         == "06fe2f327b0916227970e377eaad94b064a7631bd7ff2696b3cef675bd607f35"

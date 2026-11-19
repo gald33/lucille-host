@@ -14,8 +14,9 @@ sentence to the code and test behind it, or marks it as Lucille policy that this
 > this release (listed in `src/lucille_host/ops/` and by `lucille-host ops list`), and only on folders
 > you add. Nothing Lucille sends can add an operation, add a folder, or loosen a limit. It never runs code,
 > a shell or a command line sent by Lucille, and the programs it starts get none of its keys and none of
-> your environment variables, except `github.read`'s: it reads a credential you saved for it, and gets
-> `HOME` (macOS) or `DBUS_SESSION_BUS_ADDRESS` and `XDG_RUNTIME_DIR` (Linux), which the keyring needs.
+> your environment variables, except those of `github.read` and the four `gmail.` operations: each reads
+> a credential you saved for it, and gets `HOME` (macOS) or `DBUS_SESSION_BUS_ADDRESS` and
+> `XDG_RUNTIME_DIR` (Linux), which the keyring needs.
 >
 > Any file no enabled operation reads stays on your computer. So do your passwords, keys and browser
 > sessions, unless they are inside a file an enabled operation reads.
@@ -23,7 +24,12 @@ sentence to the code and test behind it, or marks it as Lucille policy that this
 > What leaves it: each request Lucille makes (which operation, and its inputs, such as a file name or a
 > search pattern), and what an enabled operation returns, up to 64 KiB of output and 64 KiB of errors.
 > `files.search` returns lines of the files it searches. `github.read` returns GitHub's reply to the read
-> it names, and Lucille learns the names of the credentials it asks it to use, never their values.
+> it names. `gmail.mailboxes` returns the names of your Gmail mailboxes and labels. `gmail.search` returns
+> how many messages matched, and the sender, recipients, subject, date, size, ids and whether it is unread
+> of up to 50 of them, and `gmail.read` returns one
+> message's headers, up to 32 KiB of its text, and its attachments' names, types and sizes, never their
+> contents. Lucille learns the names of the credentials it asks these operations to use, never their
+> values.
 > Lucille also learns the host's version, OS family, enabled operation names and folder aliases (never
 > folder paths), each run's exit code and duration, a fingerprint that changes when your local policy
 > changes, and, to within a day, when lucille-host was last running and when your computer last
@@ -34,7 +40,9 @@ sentence to the code and test behind it, or marks it as Lucille policy that this
 > when it connects, and roughly how large each message is; they cannot read the messages. Lucille's
 > backend can. A request your computer has not answered within its wait (an hour unless chosen otherwise,
 > never more than 23 h 45 min) expires and the job fails. With `github.read` on, your computer also
-> connects to `api.github.com`, for each read Lucille asks for, with the token you saved for it.
+> connects to `api.github.com`, for each read Lucille asks for, with the token you saved for it. With a
+> `gmail.` operation on, it connects to `imap.gmail.com`, for each request to it, with the Gmail address
+> and app password you saved for it, and only reads: it changes, moves, sends and deletes no mail.
 >
 > Lucille stores what is returned with the job. Lucille's operators, Lucille's assistant and the AI
 > provider it uses can read it. Lucille blanks it 24 hours after the job ends. That is Lucille's policy,
@@ -63,6 +71,13 @@ sentence to the code and test behind it, or marks it as Lucille policy that this
 - **"Encrypted", and where the far end is.** Messages are sealed between your computer and Lucille's
   backend. The hub cannot read them. Lucille's backend can. That is why this project does not call the
   traffic "end-to-end encrypted" without naming the far end.
+- **Gmail.** The Gmail operations sign in to `imap.gmail.com` with a Google app password, not with
+  OAuth. The password stays on your computer and goes only to Google, in the sign-in command. What a
+  Gmail operation returns is not kept on your computer: it goes to Lucille like any other operation's
+  reply, so Lucille's operators, assistant and AI provider can read the messages Lucille asks to read.
+  Google, not this program, decides whether app passwords may be used with an account, and it can stop
+  allowing them. The privacy boundary and the questions about Google's policies are in
+  [decisions/0003](decisions/0003-local-credentials.md), "Second use".
 - **When the claim must change.** This repository changes the claim before it ships any change of its own
   that would make one of the claim's sentences false. That Lucille amends the claim before it changes its
   own stated policy in a way that would make a sentence false is Lucille policy as of 2026-10-27; not
@@ -96,6 +111,11 @@ repository, in a release, or in what `lucille-host` prints.
   also sit sealed on the hub until their time-to-live runs out.
 - **"Verified" for a user who has not verified, "reproducible" for a release whose rebuild was not green,
   or "audited" before anyone has audited it.** As of 2026-10-27, nobody has audited this program.
+- **"Your email stays on your computer" or "Lucille never sees your email".** What a Gmail operation
+  returns goes to Lucille's backend.
+- **"Approved by Google", "exempt from Google's verification" or "no security assessment needed".**
+  Signing in over IMAP with an app password uses no OAuth client, so Google's OAuth verification does
+  not apply to it, but this project has no ruling from Google on its use and claims none.
 - **Anything about the AI provider's own retention.**
 - **That open source, or a verified release, proves anything about Lucille's backend.** It proves things
   about this program only.

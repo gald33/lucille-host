@@ -33,6 +33,7 @@ RUNTIME_MODULES = (
     "lucille_host.controls",
     "lucille_host.credentials",
     "lucille_host.envelope",
+    "lucille_host.gmail",
     "lucille_host.gate",
     "lucille_host.jobs",
     "lucille_host.journal",

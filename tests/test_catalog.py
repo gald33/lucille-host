@@ -51,7 +51,16 @@ def _spec_args(op: str) -> dict[str, Any]:
 
 
 def test_catalog_entries() -> None:
-    assert set(OPERATIONS) == {"host.describe", "host.sleep", "files.sha256", "github.read"}
+    assert set(OPERATIONS) == {
+        "host.describe",
+        "host.sleep",
+        "files.sha256",
+        "github.read",
+        "gmail.check",
+        "gmail.mailboxes",
+        "gmail.search",
+        "gmail.read",
+    }
     with pytest.raises(TypeError):
         OPERATIONS["host.shell"] = OPERATIONS["host.describe"]  # type: ignore[index]
 
@@ -204,9 +213,14 @@ HASHES = {
     "host.sleep": "868830c4433044a8d4cb3e3a39ab7985d44a6cce394362a23ae7fcfaa79a5e8d",
     "files.sha256": "1c29598400572d7e1f93e5cc3ee6df17edfad5be1a78c7e33432a2704bfdddea",
     "github.read": "7f32ad23f86007c7a605027655ff2edd341b2395e9a9554ba08cddaedff60906",
+    "gmail.check": "ec32dd5a84cdb7e9049d53f9d45856f91ad485f035e730891c6c31f0b4262d3f",
+    "gmail.mailboxes": "6e83854a220198786480f5351698afeb31772b063b85d6d36ec27a869a652c7a",
+    "gmail.search": "23ddbfe59aa0647a5700b2c50999c23934e71e0b851c6997519743ce475aeca1",
+    "gmail.read": "edfd1db766b04b134996e29935f3d480eca2931aaadc7119c854ad9a7c71c556",
 }
 VERSION_BEFORE_WORDS = "06fe2f327b0916227970e377eaad94b064a7631bd7ff2696b3cef675bd607f35"
 VERSION_WITH_GITHUB_READ = "49f81c2d24e04c15a0b38268434523da60ee4cb5bbb8283c8f4f725e15711652"
+VERSION_WITH_GMAIL = "dc430cc7c08f0f36be46233c2d807ddb7ec7de07746ddb990e3247a950ca2bd0"
 
 
 def _with_about(op: Operation, **changes: Any) -> Operation:
@@ -215,10 +229,10 @@ def _with_about(op: Operation, **changes: Any) -> Operation:
 
 def test_copy_fields_outside_definition_hash() -> None:
     assert {name: op.definition_hash for name, op in OPERATIONS.items()} == HASHES
-    assert (
-        CATALOG_VERSION == VERSION_WITH_GITHUB_READ == catalog_version(tuple(OPERATIONS.values()))
-    )
-    first_three = tuple(op for op in OPERATIONS.values() if op.name != "github.read")
+    assert CATALOG_VERSION == VERSION_WITH_GMAIL == catalog_version(tuple(OPERATIONS.values()))
+    before_gmail = tuple(op for op in OPERATIONS.values() if not op.name.startswith("gmail."))
+    assert catalog_version(before_gmail) == VERSION_WITH_GITHUB_READ
+    first_three = tuple(op for op in before_gmail if op.name != "github.read")
     assert catalog_version(first_three) == VERSION_BEFORE_WORDS
     # summary, sends and diagnostic describe an entry and decide nothing: changing them leaves
     # every hash, and the catalog version, as they are.
@@ -341,9 +355,7 @@ def test_args_valid_refuses_what_json_schema_lets_through() -> None:
 
 SPEC_STEPS_HERE = {"paused", "unknown_op", "not_enabled", "bad_args", "path_outside_root"}
 # Operations the spec has and this release's catalog does not yet.
-SPEC_ONLY = frozenset(
-    {"files.search", "gmail.check", "gmail.mailboxes", "gmail.search", "gmail.read"}
-)
+SPEC_ONLY = frozenset({"files.search"})
 
 
 def _fixture_context(

@@ -625,18 +625,26 @@ either stream.
 
 - `gmail.check`: `{"ok": true}`.
 - `gmail.mailboxes`: `{"mailboxes": [{"name", "special_use"}], "truncated"}`. `name` is the mailbox's name,
-  decoded from IMAP's modified UTF-7; `special_use` is Gmail's mark (`\All`, `\Sent`, `\Trash`, ...) or
-  null; `truncated` is true when there were more than 500.
+  decoded from IMAP's modified UTF-7 and cut at 1 KiB; `special_use` is Gmail's mark (`\All`, `\Sent`,
+  `\Trash`, ...) or null; `truncated` is true when not every mailbox is listed: there were more than 500,
+  or the last were left out to fit, below.
 - `gmail.search`: `{"mailbox", "total", "messages": [{"id", "thread", "date", "from", "to", "subject",
   "size", "unseen"}], "truncated"}`, newest first. `id` and `thread` are Gmail's message and thread ids, as
   decimal strings; `date` is the message's `INTERNALDATE` in RFC 3339; `total` counts every match;
-  `truncated` is true when `total` passed `limit`. Each header value is cut at 1 KiB.
+  `truncated` is true when `messages` holds fewer than `total`: `total` passed `limit`, or the oldest were
+  left out to fit, below. `from` and `subject` are cut at 1 KiB, `to` at 4 KiB.
 - `gmail.read`: `{"id", "thread", "date", "from", "to", "cc", "subject", "message_id", "in_reply_to",
   "text", "text_from", "text_truncated", "attachments": [{"filename", "content_type", "size"}],
-  "message_truncated"}`. `text` is the `text/plain` part, or, with none, the `text/html` part turned into
-  text (`text_from` says which, or is null with neither), cut at 32 KiB of UTF-8 (`text_truncated`).
-  `message_truncated` is true when the message passed the 4 MiB the host fetches. Header values are cut at
-  1 KiB, `to` and `cc` at 4 KiB.
+  "attachments_truncated", "message_truncated"}`. `text` is the `text/plain` part, or, with none, the
+  `text/html` part turned into text (`text_from` says which, or is null with neither), cut at 32 KiB of
+  UTF-8 (`text_truncated`). `message_truncated` is true when the message passed the 4 MiB the host
+  fetches. Header values and `content_type` are cut at 1 KiB, `to` and `cc` at 4 KiB, `filename` at 255
+  bytes; `attachments_truncated` is true when attachments were left out to fit, below.
+- Every document fits: its stdout's `stream-size` ([§13](#13-strings-numbers-sizes-and-output)) is at
+  most 60 KiB. Past that, the host leaves out, in order: a read's last attachments while they take more
+  than 8 KiB of it; the end of its text; its other attachments; a search's oldest results; the last
+  mailboxes. Each sets its flag. The app password is replaced before any of these cuts, so none leaves a
+  part of it.
 - The counts above (500 mailboxes, 50 messages, the first 4 MiB of a message, 32 KiB of text) are limits on
   what is returned, not failures: each sets its flag, and the exit is 0.
 - The exit code says how it went:

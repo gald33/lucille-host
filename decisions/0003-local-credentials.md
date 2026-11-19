@@ -1,13 +1,14 @@
 # 0003: Local credentials (draft)
 
-**Status: storage, entry from the command line, and the first use, `github.read`, built; the second use,
-Gmail over IMAP with an app password, decided 2026-11-18, not built; entry at Lucille's request chosen,
-not built.** `src/lucille_host/credentials.py` can save, list, read and
+**Status: storage, entry from the command line, the first use, `github.read`, and the second use, Gmail
+over IMAP with an app password, built, except the second use's Capsule screen; entry at Lucille's request
+chosen, not built.** `src/lucille_host/credentials.py` can save, list, read and
 remove a credential for an online service, kept only on this computer. `lucille-host credential set`,
 `list` and `remove` write to it from the command line, each credential bound to the hosts it may be
-sent to (spec/CLI.md §15). One operation uses a stored credential: `github.read`, off by default, whose
-child process reads the one credential a request names and sends it to `api.github.com` alone ("First
-use", below). Nothing Lucille sends can list or change a credential, nor read one any other way. This
+sent to (spec/CLI.md §15). Five operations use a stored credential, each off by default: `github.read`,
+whose child process reads the one credential a request names and sends it to `api.github.com` alone
+("First use", below), and the four `gmail.` operations, whose child sends it to `imap.gmail.com` alone
+("Second use"). Nothing Lucille sends can list or change a credential, nor read one any other way. This
 record says what was built, and what is still to be decided before a credential kept here can be used
 for anything else.
 
@@ -47,14 +48,17 @@ This repository builds only the first. The other two belong to Lucille's backend
   value is returned only by `value()`.
 - **An item this version did not write is left as it is.** It may hold the only copy of the user's
   credentials.
-- **Unreachable from Lucille, but through `github.read`.** No runtime module but `credentials.py`
-  imports it, except the command line's `credential` verb, in its own function, and `github.read`'s
-  child, `proxy.py`, in the one function that reads the credential. So no other verb's process, `run`
-  among them, loads it; the verb never reads a value back; and only the child reads a value, on a
-  request for an enabled `github.read` (`tests/test_credentials.py`,
+- **Unreachable from Lucille, but through `github.read` and the `gmail.` operations.** No runtime
+  module but `credentials.py` imports it, except the command line's `credential` verb, in its own
+  function, `github.read`'s child, `proxy.py`, and the `gmail.` operations' child, `gmail.py`, each in
+  the one function that reads the credential. So no other verb's process, `run` among them, loads it;
+  the verb never reads a value back; and only a child reads a value, on a request for an enabled
+  `github.read` or `gmail.` operation, or, for `gmail.check`'s child, on the user's own `credential test`
+  at this computer, which no request can reach (`tests/test_credentials.py`,
   `test_only_the_credential_verb_and_the_proxy_import_it`,
-  `test_importing_the_command_line_does_not_load_it`, `test_the_credential_verb_never_reads_a_value`).
-  No request or reply can write or list it, and only `github.read` can have one read.
+  `test_importing_the_command_line_does_not_load_it`, `test_the_credential_verb_never_reads_a_value`;
+  `tests/test_credential_verb.py`, `test_no_request_can_reach_credential_test`). No request or reply can
+  write or list it, and only those five operations can have one read.
 
 ## What was open, and how it was decided
 
@@ -172,7 +176,8 @@ Every string from the request comes after `--`, as in every entry. So:
   `PYTHON_KEYRING_BACKEND` nor `XDG_CONFIG_HOME`, so the child cannot see an off switch set through
   either. So `run` decides: while keyring's own settings turn the keyring off in the host's environment
   (`store.keyring_turned_off`: `PYTHON_KEYRING_BACKEND` naming keyring's `null` or `fail` backend, or a
-  `keyringrc.cfg` under `XDG_CONFIG_HOME` or `~/.config` that does), `github.read` is unavailable, refused
+  `keyringrc.cfg` that does, in keyring's own configuration folder: on Linux, under `$XDG_CONFIG_HOME`,
+  or under `~/.config` when that is not set), `github.read` is unavailable, refused
   `not_enabled` before its child starts, and left out of `host.describe`'s `enabled_ops`
   (`tests/test_jobs.py`, `test_github_read_is_refused_before_its_child_starts_while_keyring_is_off`).
   The child still reads its own default `keyringrc.cfg`, and refuses every backend but the system's own.
@@ -284,7 +289,24 @@ that built `github.read`, and not before, since until then it stayed true:
 - This record's "Unreachable from Lucille": the credential verb and the proxy's child import
   `credentials`, and only the child reads a value, on a request for an enabled `github.read`.
 
-## Second use: Gmail over IMAP, with an app password (decided 2026-11-18, not built)
+## Second use: Gmail over IMAP, with an app password (decided 2026-11-18, built but for Capsule's screen)
+
+**Built.** `src/lucille_host/gmail.py` is the child; the four catalog entries, the `{@args}` element and
+the rule `gmail-args` are in `src/lucille_host/ops/__init__.py`; `credential test` is in
+`src/lucille_host/cli.py`. The tests run the child against a fake IMAP server (`tests/_fake_gmail.py`,
+`tests/test_gmail.py`); no test signs in to Google. Two points of how, beyond what follows:
+
+- `imaplib` never opens a connection. The child resolves and vets the addresses and opens the TLS
+  connection with `proxy.py`'s `resolve` and `tls_connect`, then hands that socket to a subclass of
+  `imaplib.IMAP4` whose `open` uses it; `IMAP4_SSL`, which would connect to the name itself, is not used
+  (`test_imaplib_never_opens_a_connection_of_its_own`).
+- `imaplib`'s debug transcript, which would hold the `LOGIN` line, is off: the subclass sets its debug
+  level to 0, whatever `imaplib.Debug` says, and nothing `imaplib` writes reaches the output, since the
+  child sets its standard streams aside as `github.read`'s does.
+
+Capsule's Gmail screen ("Entering the app password: Capsule", below) comes in a later change; until it
+does, the credential is saved with `lucille-host credential set gmail default --host imap.gmail.com` and
+checked with `lucille-host credential test gmail default`.
 
 The repository owner ruled on 2026-11-18: the second use of a stored credential reads Gmail over IMAP
 with a Google app password, read-only, in four operations, `gmail.check`, `gmail.mailboxes`,
@@ -375,7 +397,9 @@ gains this one new element, which the definition hash covers. `src/lucille_host/
   real password saved by mistake is never sent. The form leaves neither part a quote, a backslash, a space
   or a control character, so both go in `LOGIN` as IMAP quoted strings that nothing can break out of.
 - The app password goes in the IMAP `LOGIN` command and nowhere else (rule 3 of "Use"). It is replaced,
-  raw, in Google's spaced form and in base64 at the three alignments, in everything the child writes.
+  raw, in Google's spaced form and in base64 at the three alignments, in everything the child writes. In
+  a document, each string is scrubbed before any cut, and its letters are also matched in any case and
+  with up to three spaces or hyphens between any two, so a cut never leaves a part of it.
 
 **What the child does, in order.**
 
@@ -391,7 +415,8 @@ gains this one new element, which the definition hash covers. `src/lucille_host/
    most the first 4 MiB of a message (`BODY.PEEK[]<0.4194304>`), past which the message is parsed as far as
    it goes. Each sets its document's flag (`truncated`, `message_truncated`), and the exit is 0.
 6. One limit that is a failure: at most 8 MiB read from Gmail in a request, counted on the connection,
-   with IMAP lines within `imaplib`'s own limit. Past it, the child stops reading, writes nothing on standard
+   with IMAP lines within `imaplib`'s own limit; no read asks for more than one byte past what is left,
+   and a literal Gmail announces past it is not read. Past it, the child stops reading, writes nothing on standard
    output, writes one fixed line on standard error, and exits 5.
 7. `LOGIN` answered `NO` (a wrong or revoked app password, or IMAP closed to the account): exit 7, with a
    fixed line that says to make a new app password. Any other `NO` (no such mailbox, no such message, a
@@ -444,14 +469,16 @@ the text body, and each attachment's file name, content type and size. Never an 
 - A `multipart/alternative` message's `text/plain` part is preferred, and its sender can make it say other
   things than the HTML part a reader sees. Lucille then reads text no reader saw. That is not caught either.
 - It is cut at 32 KiB of UTF-8, with a flag saying so. Each header value is cut at 1 KiB, a recipient list
-  at 4 KiB. The document always fits §13's 64 KiB.
+  at 4 KiB. The document always fits §13's 64 KiB, measured as rule `stream-size` measures it: past
+  60 KiB, the child leaves out what does not fit, each with its flag (spec/PROTOCOL.md §11).
 
 **Retries, limits, background.** The child retries nothing; Lucille may ask again. Each request opens one
 connection and closes it, well inside Gmail's 15. No synchronization and no background polling: the host
 reads only what a request asks for.
 
 - **Requests in a row.** At most 60 sign-ins with one credential in any 10 minutes, counted in a file in
-  the state folder, under the credential store's lock. Past that, the child signs in to nothing and exits 5,
+  the state folder, under a lock of its own there (`.gmail-signins.lock`), so that it never waits on a
+  `credential set`. Past that, the child signs in to nothing and exits 5,
   with its own fixed line. That bounds how often it signs in, and so Google's reasons to lock the account.
   It does not protect the account's 2,500 MB of IMAP a day: 60 requests of 8 MiB each in 10 minutes could
   still use it up in under an hour.
