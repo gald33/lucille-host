@@ -18,16 +18,20 @@ on standard error, holding no value and nothing Gmail wrote:
    ``proxy.address_allowed``; it connects to a vetted address, never to the name, with TLS from
    the first byte on port 993, checked for ``imap.gmail.com`` against certifi's bundle
    (``proxy.tls_connect``). ``imaplib`` never opens a connection of its own: :class:`_Imap`
-   replaces its ``open`` with that socket. Its debug transcript is never on (``debug`` 0) and
-   nothing of it is written.
+   replaces its ``open``, ``read`` and ``readline`` with that socket's. Its debug transcript is
+   never on (``debug`` 0) and nothing of it is written.
 4. It sends only ``CAPABILITY``, ``LOGIN``, ``LIST``, ``EXAMINE``, ``UID SEARCH``, ``UID FETCH`` of
    :data:`SEARCH_ITEMS` or :data:`READ_ITEMS`, and ``LOGOUT``. No command changes anything, and no
    fetch item marks a message read.
-5. It reads at most :data:`READ_CAP` from Gmail (exit 5 past it, nothing on standard output).
+5. It reads at most :data:`READ_CAP` from Gmail, never asking for more than one byte past what is
+   left (exit 5 past it, nothing on standard output).
 6. ``LOGIN`` answered ``NO`` is exit 7; any other ``NO`` is exit 3; a ``BAD`` to anything is exit 6.
-7. It writes one JSON document on standard output on success, with the app password replaced,
-   raw, spaced and in base64 at each alignment; descriptors 1 and 2 point at the null device from
-   its start, and it ends with ``os._exit``.
+7. It writes one JSON document on standard output on success. Every string in it has the app
+   password replaced (in any case, with or without spaces or hyphens between its letters, and in
+   base64 at each alignment) before anything is cut; then each field is cut to its limit, and the
+   document is made to fit :data:`DOCUMENT_CAP` as rule ``stream-size`` measures it
+   (:func:`_fit`). Descriptors 1 and 2 point at the null device from its start, and it ends with
+   ``os._exit``.
 """
 
 from __future__ import annotations
@@ -76,7 +80,11 @@ MESSAGE_FETCH: Final = 4 * 1024 * 1024
 TEXT_CAP: Final = 32 * 1024
 HEADER_CAP: Final = 1024
 RECIPIENTS_CAP: Final = 4 * 1024
+FILENAME_CAP: Final = 255
+# The most of rule stream-size's 64 KiB a document may take (spec/PROTOCOL.md section 13).
 DOCUMENT_CAP: Final = 60 * 1024
+# What a read's attachment list keeps of it before its text is cut to fit.
+ATTACHMENTS_SHARE: Final = 8 * 1024
 MAILBOXES_MAX: Final = 500
 # The longest line read from Gmail, as imaplib's own limit.
 LINE_MAX: Final = 1_000_000
@@ -345,10 +353,14 @@ class _Counted:
             raise _TooMuch
         return data
 
-    def readline(self, limit: int = -1) -> bytes:
-        return self._add(self._raw.readline(limit))
+    def readline(self, limit: int) -> bytes:
+        # Never more than one byte past what is left: at the cap it stops reading.
+        return self._add(self._raw.readline(min(limit, READ_CAP - self.count + 1)))
 
-    def read(self, size: int = -1) -> bytes:
+    def read(self, size: int) -> bytes:
+        # A literal Gmail announces past what is left is not read at all.
+        if size < 0 or size > READ_CAP - self.count:
+            raise _TooMuch
         return self._add(self._raw.read(size))
 
     def close(self) -> None:
@@ -366,14 +378,22 @@ class _Imap(imaplib.IMAP4):
         self.host = host
         self.port = port
         self.sock = self._given
-        self.file = _Counted(self.sock.makefile("rb"))
+        self._counted = _Counted(self.sock.makefile("rb"))
+        # Every read goes through read and readline below. imaplib closes its file in shutdown:
+        # ``file`` up to Python 3.13, ``_file`` from 3.14, where ``file`` is a read-only property.
+        self._file = self._counted
+        if not isinstance(getattr(type(self), "file", None), property):
+            self.file = self._counted
         # imaplib's transcript of what it sends and reads, which would hold the app password,
         # is never on, whatever imaplib.Debug says.
         self.debug = 0
 
+    def read(self, size: int) -> bytes:
+        return self._counted.read(size)
+
     def readline(self) -> bytes:
         """One line from Gmail; one longer than :data:`LINE_MAX` is a cap reached (exit 5)."""
-        line = self.file.readline(LINE_MAX + 1)
+        line = self._counted.readline(LINE_MAX + 1)
         if not line:
             raise self.abort("socket error: EOF")
         if len(line) > LINE_MAX:
@@ -589,15 +609,15 @@ def _cut(text: str, most: int) -> tuple[str, bool]:
     return raw[:most].decode("utf-8", "ignore"), True
 
 
-def _header(message: Any, name: str, most: int = HEADER_CAP) -> str | None:
+def _header(message: Any, name: str) -> str | None:
+    """A header's value, whole: it is cut only after the scrub (:func:`_bounded`)."""
     try:
         value = message.get(name)
     except Exception:  # noqa: BLE001 - a malformed header reads as none
         return None
     if value is None:
         return None
-    text = _CONTROLS.sub(" ", str(value))
-    return _cut(text, most)[0]
+    return _CONTROLS.sub(" ", str(value))
 
 
 _CONTROLS: Final = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")
@@ -760,36 +780,160 @@ def _message(raw: bytes) -> dict[str, Any]:
                 continue
             attachments.append(
                 {
-                    "filename": None if name is None else _cut(_CONTROLS.sub(" ", name), 255)[0],
+                    "filename": None if name is None else _CONTROLS.sub(" ", name),
                     "content_type": part.get_content_type(),
                     "size": len(payload),
                 }
             )
-    cut_text, text_truncated = _cut(text, TEXT_CAP) if text is not None else (None, False)
     return {
         "from": _header(message, "From"),
-        "to": _header(message, "To", RECIPIENTS_CAP),
-        "cc": _header(message, "Cc", RECIPIENTS_CAP),
+        "to": _header(message, "To"),
+        "cc": _header(message, "Cc"),
         "subject": _header(message, "Subject"),
         "message_id": _header(message, "Message-ID"),
         "in_reply_to": _header(message, "In-Reply-To"),
-        "text": cut_text,
+        "text": text,
         "text_from": text_from,
-        "text_truncated": text_truncated,
+        "text_truncated": False,
         "attachments": attachments,
+        "attachments_truncated": False,
     }
 
 
-def _fit(document: dict[str, Any]) -> bytes:
-    """The document as JSON, its text cut further if escaping took it past the stream's room."""
-    encoded = json.dumps(document, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-    while len(encoded) > DOCUMENT_CAP and document.get("text"):
-        excess = len(encoded) - DOCUMENT_CAP
-        keep = max(0, len(document["text"].encode("utf-8")) - excess - 64)
-        document["text"] = _cut(document["text"], keep)[0]
+# --- the scrub, the cuts and the fit ----------------------------------------------------------
+
+# Each field's limit, in bytes of UTF-8, wherever it occurs in a document.
+_CUTS: Final = {
+    "from": HEADER_CAP,
+    "to": RECIPIENTS_CAP,
+    "cc": RECIPIENTS_CAP,
+    "subject": HEADER_CAP,
+    "message_id": HEADER_CAP,
+    "in_reply_to": HEADER_CAP,
+    "content_type": HEADER_CAP,
+    "filename": FILENAME_CAP,
+    "name": HEADER_CAP,
+    "text": TEXT_CAP,
+}
+_SURROGATE: Final = re.compile("[\ud800-\udfff]")
+
+
+class _Scrub:
+    """Every form of the app password this child replaces in what it writes."""
+
+    def __init__(self, password: str) -> None:
+        # Its 16 letters in any case, with up to three spaces or hyphens between any two.
+        self.pattern = re.compile(
+            "[\\s-]{0,3}".join(re.escape(letter) for letter in password), re.IGNORECASE
+        )
+        self.forms = [form.decode("ascii") for form in _secrets(password)]
+
+    def text(self, value: str) -> str:
+        value = self.pattern.sub(TOKEN_MARK, value)
+        for form in self.forms:
+            value = value.replace(form, TOKEN_MARK)
+        # A lone surrogate (an undecodable byte) cannot be written as UTF-8.
+        return _SURROGATE.sub("\ufffd", value)
+
+    def walk(self, value: Any) -> Any:
+        if isinstance(value, str):
+            return self.text(value)
+        if isinstance(value, list):
+            return [self.walk(item) for item in value]
+        if isinstance(value, dict):
+            return {key: self.walk(item) for key, item in value.items()}
+        return value
+
+
+def _cut_fields(value: Any) -> None:
+    """Each field of :data:`_CUTS` cut to its limit, in place; ``text`` sets ``text_truncated``."""
+    if isinstance(value, list):
+        for item in value:
+            _cut_fields(item)
+    elif isinstance(value, dict):
+        for key in list(value):
+            item = value[key]
+            if isinstance(item, str) and key in _CUTS:
+                value[key], cut = _cut(item, _CUTS[key])
+                if key == "text" and cut:
+                    value["text_truncated"] = True
+            else:
+                _cut_fields(item)
+
+
+def _bounded(document: dict[str, Any], password: str) -> bytes:
+    """What the child writes for ``document``: scrubbed first, so no cut can leave a part of the
+    password, then cut field by field, then fit to the stream, then scrubbed once more as
+    bytes."""
+    cleaned = _Scrub(password).walk(document)
+    _cut_fields(cleaned)
+    return scrub(_fit(cleaned).encode("utf-8"), password)
+
+
+def _stream_size(stdout: str) -> int:
+    """Rule ``stream-size`` of a standard output the host reads as ``stdout``: its JSON string,
+    quotes included, every non-ASCII character escaped (``envelope.size``)."""
+    return len(json.dumps(stdout, ensure_ascii=True, separators=(",", ":")))
+
+
+def _encoded(value: Any) -> str:
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+
+
+def _piece_cost(value: Any) -> int:
+    """What ``value``, written inside the document, adds to its stream size."""
+    return _stream_size(_encoded(value)) - 2
+
+
+def _fit(document: dict[str, Any]) -> str:
+    """The document as JSON whose stream size is at most :data:`DOCUMENT_CAP`.
+
+    Past it, what is cut, in order: attachments, from the last, while the list takes more than
+    :data:`ATTACHMENTS_SHARE` (``attachments_truncated``); the end of ``text``
+    (``text_truncated``); the other attachments; search results, from the oldest, and mailboxes,
+    from the last (``truncated``). A quote, the costliest character, takes 4 of the stream for its
+    byte, so a read's headers at their limits (12 KiB) take at most 48 KiB, and with the share
+    the attachments keep it fits without the third step, which is there so that the loop always
+    ends. One search result at its limits takes at most 24 KiB, one mailbox's name 4 KiB.
+    """
+    out = _encoded(document)
+    while (excess := _stream_size(out) - DOCUMENT_CAP) > 0:
+        _shrink(document, excess)
+        out = _encoded(document)
+    return out
+
+
+def _shrink(document: dict[str, Any], excess: int) -> None:
+    attachments = document.get("attachments")
+    if attachments and (over := _piece_cost(attachments) - ATTACHMENTS_SHARE) > 0:
+        removed = 0
+        while attachments and removed < min(over, excess):
+            removed += _piece_cost(attachments.pop()) + 1
+        document["attachments_truncated"] = True
+        return
+    text = document.get("text")
+    if text:
+        end, removed = len(text), 0
+        while end > 0 and removed < excess:
+            end -= 1
+            # One character's own cost: its piece less the two quotes, each 2 in the stream.
+            removed += _piece_cost(text[end]) - 4
+        document["text"] = text[:end]
         document["text_truncated"] = True
-        encoded = json.dumps(document, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-    return encoded
+        return
+    for key, flag in (
+        ("attachments", "attachments_truncated"),
+        ("messages", "truncated"),
+        ("mailboxes", "truncated"),
+    ):
+        items = document.get(key)
+        if items:
+            removed = 0
+            while items and removed < excess:
+                removed += _piece_cost(items.pop()) + 1
+            document[flag] = True
+            return
+    raise _Stop(INTERNAL, "internal")
 
 
 # --- the operations ---------------------------------------------------------------------------
@@ -845,7 +989,7 @@ def _search(imap: _Imap, args: Mapping[str, Any]) -> dict[str, Any]:
                 "thread": values["thrid"],
                 "date": _rfc3339(values["date"] or ""),
                 "from": _header(headers, "From"),
-                "to": _header(headers, "To", RECIPIENTS_CAP),
+                "to": _header(headers, "To"),
                 "subject": _header(headers, "Subject"),
                 "size": int(values["size"]) if values["size"] else None,
                 "unseen": "\\Seen" not in (values["flags"] or "").split(),
@@ -855,7 +999,7 @@ def _search(imap: _Imap, args: Mapping[str, Any]) -> dict[str, Any]:
         "mailbox": mailbox,
         "total": len(ordered),
         "messages": messages,
-        "truncated": len(ordered) > limit,
+        "truncated": len(messages) < len(ordered),
     }
 
 
@@ -950,7 +1094,7 @@ def main(
                 sock.close()
             except OSError:
                 pass
-        return Reply(OK, scrub(_fit(document), password), b"")
+        return Reply(OK, _bounded(document, password), b"")
     except _Stop as stop:
         err = (stop.line + "\n").encode("utf-8")
         return Reply(stop.code, b"", err if password is None else scrub(err, password))

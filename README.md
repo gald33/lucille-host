@@ -59,7 +59,8 @@ can install.
 > search pattern), and what an enabled operation returns, up to 64 KiB of output and 64 KiB of errors.
 > `files.search` returns lines of the files it searches. `github.read` returns GitHub's reply to the read
 > it names. `gmail.mailboxes` returns the names of your Gmail mailboxes and labels. `gmail.search` returns
-> the sender, recipients, subject, date, size and ids of up to 50 messages, and `gmail.read` returns one
+> how many messages matched, and the sender, recipients, subject, date, size, ids and whether it is unread
+> of up to 50 of them, and `gmail.read` returns one
 > message's headers, up to 32 KiB of its text, and its attachments' names, types and sizes, never their
 > contents. Lucille learns the names of the credentials it asks these operations to use, never their
 > values.

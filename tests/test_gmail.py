@@ -9,6 +9,7 @@ when the tests run.
 from __future__ import annotations
 
 import base64
+import imaplib
 import json
 import subprocess
 import sys
@@ -18,7 +19,7 @@ from typing import Any
 
 import pytest
 
-from lucille_host import gmail
+from lucille_host import envelope, gmail
 from tests._fake_gmail import ADDRESS, PASSWORD, FakeGmail, Message
 
 MSGID = 1785634910293847562
@@ -243,6 +244,50 @@ def test_it_connects_to_the_vetted_address_on_993_with_tls_for_imap_gmail_com(
     )
     gmail._connect(VETTED)
     assert asked == [(VETTED, "imap.gmail.com", 993)]
+
+
+@pytest.mark.parametrize("operation", ["gmail.check", "gmail.search", "gmail.read"])
+def test_it_never_sets_imaplibs_file_which_python_3_14_makes_read_only(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, operation: str
+) -> None:
+    # As in Python 3.14: IMAP4.file is a property with no setter, reading the private _file.
+    monkeypatch.setattr(imaplib.IMAP4, "file", property(lambda self: self._file), raising=False)
+    args = {"id": str(MSGID)} if operation == "gmail.read" else {}
+    reply, server, _ = _run(tmp_path, operation, args, _server(_message()))
+    assert reply.code == 0, reply.stderr
+    assert server.verbs()[-1] == "LOGOUT"
+
+
+class _Raw:
+    """A connection's file that records what it is asked for."""
+
+    def __init__(self, data: bytes) -> None:
+        self.data = data
+        self.asked: list[tuple[str, int]] = []
+
+    def read(self, size: int) -> bytes:
+        self.asked.append(("read", size))
+        out, self.data = self.data[:size], self.data[size:]
+        return out
+
+    def readline(self, limit: int) -> bytes:
+        self.asked.append(("readline", limit))
+        end = self.data.find(b"\n") + 1 or len(self.data)
+        out, self.data = self.data[: min(end, limit)], self.data[min(end, limit) :]
+        return out
+
+
+def test_it_never_asks_for_more_than_one_byte_past_the_8_mib() -> None:
+    raw = _Raw(b"x" * 100)
+    counted = gmail._Counted(raw)
+    counted.count = gmail.READ_CAP - 5
+    with pytest.raises(gmail._TooMuch):
+        counted.read(6)  # a literal announced past what is left is not read at all
+    assert raw.asked == []
+    assert counted.read(5) == b"xxxxx"
+    with pytest.raises(gmail._TooMuch):
+        counted.readline(gmail.LINE_MAX + 1)
+    assert raw.asked == [("read", 5), ("readline", 1)]
 
 
 def test_imaplib_never_opens_a_connection_of_its_own(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -484,12 +529,100 @@ def test_attachments_are_named_never_sent(tmp_path: Path) -> None:
     assert b"the attachment's own contents" not in reply.stdout
 
 
+def _stream(reply: gmail.Reply) -> int:
+    """Rule stream-size of the reply's standard output, as the host measures it."""
+    return envelope.size(reply.stdout.decode("utf-8"))
+
+
+def test_the_childs_measure_is_the_hosts() -> None:
+    for text in ['{"a":"\\"x\\""}', "שלום עולם", "\U0001f600\n\t\\ \u2028", ""]:
+        assert gmail._stream_size(text) == envelope.size(text)
+
+
 def test_a_long_text_is_cut_at_32_kib_and_the_document_fits_the_stream(tmp_path: Path) -> None:
     raw = _message(text='"quoted" ' * 20000)
-    doc = _doc(_run(tmp_path, "gmail.read", {"id": str(MSGID)}, _server(raw))[0])
+    reply = _run(tmp_path, "gmail.read", {"id": str(MSGID)}, _server(raw))[0]
+    doc = _doc(reply)
     assert doc["text_truncated"] is True
     assert len(doc["text"].encode()) <= 32 * 1024
-    assert len(json.dumps(doc, ensure_ascii=False, separators=(",", ":")).encode()) <= 60 * 1024
+    assert _stream(reply) <= gmail.DOCUMENT_CAP
+
+
+def test_a_long_hebrew_text_is_cut_to_what_the_stream_holds(tmp_path: Path) -> None:
+    # 32 KiB of Hebrew is about 115 KB as the stream counts it: the text is cut further, to the
+    # most that fits, and the document still parses.
+    raw = _message(text="שלום עולם " * 4000)
+    reply = _run(tmp_path, "gmail.read", {"id": str(MSGID)}, _server(raw))[0]
+    doc = _doc(reply)
+    assert doc["text_truncated"] is True and doc["text"].startswith("שלום עולם")
+    assert gmail.DOCUMENT_CAP - 64 < _stream(reply) <= gmail.DOCUMENT_CAP
+
+
+def test_many_attachments_are_cut_to_fit_and_the_text_is_kept(tmp_path: Path) -> None:
+    names = tuple(
+        (f"{n:04d}-" + "n" * 200 + ".bin", "application/octet-stream", b"") for n in range(1500)
+    )
+    raw = _message(attachments=names)
+    reply = _run(tmp_path, "gmail.read", {"id": str(MSGID)}, _server(raw))[0]
+    doc = _doc(reply)
+    assert _stream(reply) <= gmail.DOCUMENT_CAP
+    assert doc["attachments_truncated"] is True and 0 < len(doc["attachments"]) < 1500
+    assert doc["attachments"][0]["filename"].startswith("0000-")
+    assert "Your invoice" in doc["text"] and doc["text_truncated"] is False
+
+
+def test_a_search_of_long_recipient_lists_drops_the_oldest_to_fit(tmp_path: Path) -> None:
+    box = []
+    for n in range(50):
+        message = EmailMessage()
+        message["From"] = "sender@example.com"
+        message["To"] = ", ".join(f"person{i}@example.com" for i in range(250))
+        message["Subject"] = f"Message {n}"
+        message.set_content("x")
+        box.append(Message(n + 1, MSGID + n, MSGID, message.as_bytes()))
+    reply = _run(tmp_path, "gmail.search", {"limit": 50}, FakeGmail(messages={"INBOX": box}))[0]
+    doc = _doc(reply)
+    assert _stream(reply) <= gmail.DOCUMENT_CAP
+    assert doc["total"] == 50 and doc["truncated"] is True and 0 < len(doc["messages"]) < 50
+    kept = [m["subject"] for m in doc["messages"]]
+    assert kept == [f"Message {n}" for n in range(49, 49 - len(kept), -1)]
+    assert all(len(m["to"].encode()) <= gmail.RECIPIENTS_CAP for m in doc["messages"])
+
+
+def test_many_long_mailbox_names_are_cut_to_fit(tmp_path: Path) -> None:
+    names = [("\\HasNoChildren", f"{n:03d} " + "label" * 60) for n in range(500)]
+    reply = _run(tmp_path, "gmail.mailboxes", server=FakeGmail(mailboxes=names))[0]
+    doc = _doc(reply)
+    assert _stream(reply) <= gmail.DOCUMENT_CAP
+    assert doc["truncated"] is True and 0 < len(doc["mailboxes"]) < 500
+    assert doc["mailboxes"][0]["name"].startswith("000 ")
+
+
+def test_a_read_whose_headers_take_the_most_their_cuts_allow_still_fits() -> None:
+    # The costliest character in the stream is a quote (4 for its byte): even then, the headers
+    # at their limits fit uncut, beside what is left of the text and the attachments.
+    headers = ("from", "to", "cc", "subject", "message_id", "in_reply_to")
+    doc: dict[str, Any] = {
+        "id": str(2**64 - 1),
+        "thread": str(2**64 - 1),
+        "date": "2026-11-17T10:00:00+00:00",
+        **{key: '"' * gmail._CUTS[key] for key in headers},
+        "text": '"' * gmail.TEXT_CAP,
+        "text_from": "plain",
+        "text_truncated": False,
+        "attachments": [
+            {"filename": '"' * gmail.FILENAME_CAP, "content_type": '"' * 1024, "size": 1}
+            for _ in range(50)
+        ],
+        "attachments_truncated": False,
+        "message_truncated": True,
+    }
+    out = gmail._fit(doc)
+    assert gmail._stream_size(out) <= gmail.DOCUMENT_CAP
+    fitted = json.loads(out)
+    assert fitted["text_truncated"] is True and fitted["attachments_truncated"] is True
+    assert len(fitted["text"]) < gmail.TEXT_CAP and len(fitted["attachments"]) < 50
+    assert all(fitted[key] == '"' * gmail._CUTS[key] for key in headers)
 
 
 def test_a_message_over_4_mib_is_fetched_in_part_and_flagged(tmp_path: Path) -> None:
@@ -526,6 +659,85 @@ def test_the_app_password_is_removed_from_everything_written(tmp_path: Path, bef
     for form in gmail._secrets(PASSWORD):
         assert form not in reply.stdout
     assert PASSWORD.encode() not in reply.stdout and spaced.encode() not in reply.stdout
+
+
+def test_no_cut_leaves_a_part_of_the_app_password(tmp_path: Path) -> None:
+    # The scrub comes before every cut: a password across a field's limit leaves only the mark's
+    # beginning, never its own.
+    doc = gmail._bounded(
+        {
+            "subject": "1" * (gmail.HEADER_CAP - 8) + PASSWORD,
+            "text": "0" * (gmail.TEXT_CAP - 8) + PASSWORD + " tail",
+            "text_truncated": False,
+            "attachments": [{"filename": "2" * (gmail.FILENAME_CAP - 8) + PASSWORD}],
+        },
+        PASSWORD,
+    )
+    fitted = json.loads(doc)
+    assert fitted["subject"] == "1" * (gmail.HEADER_CAP - 8) + "[redacte"
+    assert fitted["text"] == "0" * (gmail.TEXT_CAP - 8) + "[redacte"
+    assert fitted["attachments"][0]["filename"] == "2" * (gmail.FILENAME_CAP - 8) + "[redacte"
+    raw = _message(text="0" * (gmail.TEXT_CAP - 8) + PASSWORD + " tail")
+    reply = _run(tmp_path, "gmail.read", {"id": str(MSGID)}, _server(raw))[0]
+    assert _doc(reply)["text"] == "0" * (gmail.TEXT_CAP - 8) + "[redacte"
+
+
+@pytest.mark.parametrize("key", sorted(gmail._CUTS))
+@pytest.mark.parametrize("form", ["raw", "spaced", "upper", "base64"])
+@pytest.mark.parametrize("into", range(1, 16))
+def test_a_password_straddling_any_fields_limit_leaves_none_of_it(
+    key: str, form: str, into: int
+) -> None:
+    # Each field's limit falls ``into`` characters into the password's form, nested as the
+    # documents nest it: nothing of the form, and no beginning of it, is left.
+    secret = {
+        "raw": PASSWORD,
+        "spaced": " ".join(PASSWORD[i : i + 4] for i in range(0, 16, 4)),
+        "upper": PASSWORD.upper(),
+        "base64": base64.b64encode(PASSWORD.encode()).decode(),
+    }[form]
+    most = gmail._CUTS[key]
+    value = "0" * (most - into) + secret + "0" * 16
+    # Three copies of a 32 KiB text would not fit the stream: text is a read's alone.
+    nested = [] if key == "text" else [{key: value}]
+    document = {"text_truncated": False, key: value, "attachments": nested, "messages": nested}
+    fitted = json.loads(gmail._bounded(document, PASSWORD))
+    found = [fitted[key], *(item[key] for item in fitted["attachments"] + fitted["messages"])]
+    assert len(found) == (1 if key == "text" else 3)
+    for got in found:
+        assert len(got.encode()) <= most and got.startswith("0" * (most - into))
+        tail = got[most - into :][: len(gmail.TOKEN_MARK)]
+        assert tail == gmail.TOKEN_MARK[: len(tail)]
+    out = json.dumps(fitted)
+    assert secret[: max(into, 4)] not in out and PASSWORD[:4] not in out.lower()
+
+
+def test_a_password_where_the_fit_cuts_the_text_leaves_none_of_it(tmp_path: Path) -> None:
+    # The stream's fit cuts this Hebrew text near its 10,184th character, well inside 32 KiB: a
+    # password at each point across that cut is scrubbed before it.
+    kept = set()
+    for at in range(10160, 10200):
+        raw = _message(text="ש" * at + PASSWORD + "ש" * 8000)
+        reply = _run(tmp_path, "gmail.read", {"id": str(MSGID)}, _server(raw))[0]
+        assert reply.code == 0 and PASSWORD[:4].encode() not in reply.stdout
+        text = json.loads(reply.stdout)["text"]
+        kept.add(len(text) - at)
+    # Some cuts fell inside the password: what was left of it is the mark's beginning.
+    assert any(0 < n < len(gmail.TOKEN_MARK) for n in kept)
+
+
+def test_the_scrub_covers_any_case_and_spaces_or_hyphens_between_letters() -> None:
+    groups = [PASSWORD[i : i + 4] for i in range(0, 16, 4)]
+    forms = [
+        PASSWORD.upper(),
+        PASSWORD.title(),
+        "-".join(groups),
+        "  ".join(groups),
+        "\n".join(groups),
+        " ".join(PASSWORD.upper()),
+    ]
+    out = json.loads(gmail._bounded({"text": " | ".join(forms)}, PASSWORD))
+    assert out["text"] == " | ".join(["[redacted]"] * len(forms))
 
 
 def test_nothing_gmail_writes_reaches_a_failure_line(tmp_path: Path) -> None:

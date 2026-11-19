@@ -397,7 +397,9 @@ gains this one new element, which the definition hash covers. `src/lucille_host/
   real password saved by mistake is never sent. The form leaves neither part a quote, a backslash, a space
   or a control character, so both go in `LOGIN` as IMAP quoted strings that nothing can break out of.
 - The app password goes in the IMAP `LOGIN` command and nowhere else (rule 3 of "Use"). It is replaced,
-  raw, in Google's spaced form and in base64 at the three alignments, in everything the child writes.
+  raw, in Google's spaced form and in base64 at the three alignments, in everything the child writes. In
+  a document, each string is scrubbed before any cut, and its letters are also matched in any case and
+  with up to three spaces or hyphens between any two, so a cut never leaves a part of it.
 
 **What the child does, in order.**
 
@@ -413,7 +415,8 @@ gains this one new element, which the definition hash covers. `src/lucille_host/
    most the first 4 MiB of a message (`BODY.PEEK[]<0.4194304>`), past which the message is parsed as far as
    it goes. Each sets its document's flag (`truncated`, `message_truncated`), and the exit is 0.
 6. One limit that is a failure: at most 8 MiB read from Gmail in a request, counted on the connection,
-   with IMAP lines within `imaplib`'s own limit. Past it, the child stops reading, writes nothing on standard
+   with IMAP lines within `imaplib`'s own limit; no read asks for more than one byte past what is left,
+   and a literal Gmail announces past it is not read. Past it, the child stops reading, writes nothing on standard
    output, writes one fixed line on standard error, and exits 5.
 7. `LOGIN` answered `NO` (a wrong or revoked app password, or IMAP closed to the account): exit 7, with a
    fixed line that says to make a new app password. Any other `NO` (no such mailbox, no such message, a
@@ -466,14 +469,16 @@ the text body, and each attachment's file name, content type and size. Never an 
 - A `multipart/alternative` message's `text/plain` part is preferred, and its sender can make it say other
   things than the HTML part a reader sees. Lucille then reads text no reader saw. That is not caught either.
 - It is cut at 32 KiB of UTF-8, with a flag saying so. Each header value is cut at 1 KiB, a recipient list
-  at 4 KiB. The document always fits §13's 64 KiB.
+  at 4 KiB. The document always fits §13's 64 KiB, measured as rule `stream-size` measures it: past
+  60 KiB, the child leaves out what does not fit, each with its flag (spec/PROTOCOL.md §11).
 
 **Retries, limits, background.** The child retries nothing; Lucille may ask again. Each request opens one
 connection and closes it, well inside Gmail's 15. No synchronization and no background polling: the host
 reads only what a request asks for.
 
 - **Requests in a row.** At most 60 sign-ins with one credential in any 10 minutes, counted in a file in
-  the state folder, under the credential store's lock. Past that, the child signs in to nothing and exits 5,
+  the state folder, under a lock of its own there (`.gmail-signins.lock`), so that it never waits on a
+  `credential set`. Past that, the child signs in to nothing and exits 5,
   with its own fixed line. That bounds how often it signs in, and so Google's reasons to lock the account.
   It does not protect the account's 2,500 MB of IMAP a day: 60 requests of 8 MiB each in 10 minutes could
   still use it up in under an hour.
