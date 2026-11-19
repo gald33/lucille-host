@@ -32,7 +32,7 @@ files it may read")` when `os.geteuid() == 0` (`src/lucille_host/state.py:202-20
 | `library.start`, `library.py:182` | the in-process `Host` API |
 
 The refusal is `startup_refused`: exit 1 for a command, 24 for `run` (`spec/CLI.md:710`, `:907`),
-and a `{"type":"error","code":"startup_refused"}` object under `--json` (`cli.py:1370`).
+and a `{"type":"error","code":"startup_refused"}` object under `--json` (`run`: `cli.py:1370`; the other verbs: `FAILURE_CODES` and `_failure`, `cli.py:1785`, `:1800`).
 
 **Observed as root:** `status`, `pair status`, `credential list`, `forget` exit 1 with that sentence, `run`
 exits 24, `status --json` writes the `startup_refused` object, and `pair --store-file` is refused too.
@@ -42,21 +42,32 @@ exits 24, `status --json` writes the `startup_refused` object, and `pair --store
 
 No uid check stands before `log`, `pause`, `resume`, `kill`, `ops`, `roots`, `policy` or `--version`.
 Observed as root, each worked and exited 0: `log`, `pause`, `resume`, `kill`, `ops list`, `roots add`,
-`roots list`, `policy previous`. They write the profile's own files, as uid 0:
+`roots list`, `policy previous`. Of these, `log`, `ops list`, `roots list` and `policy previous` only read, and wrote nothing as root. The others write the profile's own files, as uid 0:
 
-- `pause`/`kill` create `<state>/.controls.lock`, `paused` and `kill-request` (`controls.py:70`, `:114`);
-- `roots add` and `ops` write `policy.toml` (`policy.py:511`);
+- `pause`, `resume` and `kill` create `<state>/.controls.lock`, `paused` and `kill-request` (`controls.py:70`, `:114`);
+- `roots add` and `ops enable`/`disable` replace `policy.toml` (`policy.py:507-512`, a temporary file renamed over the old one, so the new file is owned by whoever ran it);
+- every verb that takes the policy lock creates `<config>/.policy.lock` first (`cli.py:789-793`), so even a refused `ops enable` leaves it;
 - `paths.ensure_dir` (`paths.py:168-182`) creates **every missing parent** of the state folder with mode
   0700, so a missing `HOME` itself is created 0700 and owned by the caller (observed: `HOME` made by the
   first `pause` was `drwx------ root`).
 
-**Consequence, observed.** After `sudo`-style `pause` as root in a `HOME` a user also uses, the profile
-folder is `drwx------ root`, and the user's `status` and `resume` fail with `Permission denied
-(.../lucille-host/default)` (exit 1). In the other order (the user first, root second) root read and
-changed the user's files without error, because root ignores the modes. Nothing in `src/` compares a file's
-owner with the process: a search for `st_uid`, `getuid`, `umask`, `chown`, `setuid`, `setgid`,
-`initgroups`, `preexec_fn` and `user=`/`group=` in `src/lucille_host/` finds only the one `geteuid` in
-`state.py:205` and the one in `runs.py:133`.
+**Consequence, observed, in either order.**
+- *Root first.* After a root `pause` in a `HOME` a user also uses, the profile folder is `drwx------ root`,
+  and the user's `status` and `resume` fail with `Permission denied (.../lucille-host/default)` (exit 1).
+- *Root after the user.* A root `roots add` writes `policy.toml` by renaming a new file over the user's, and
+  the file is then `-rw------- root`. The user's `roots list`, `ops list` and `roots add` then fail with
+  `the policy file ... is invalid: ... cannot be read: Permission denied` (exit 1; `ops list` printed it and
+  exited 0). The folders stay the user's, since a rename needs no change of owner there.
+- *A refused root verb.* `ops enable nosuch.op` as root exits 1 ("not in this release's catalog"), yet left
+  `.config/lucille-host/default/.policy.lock` and every folder above it owned by root, in a `HOME` that had
+  none; the user's `status` then failed reading `host.json`.
+- *Root reading the user's files* works without error, because root ignores the modes.
+
+So it is not true that "the seven verbs lock the user out": `log`, `ops list`, `roots list` and `policy
+previous` do not. The five that write do, and so does a refused one that took the policy lock. Nothing in
+`src/` compares a file's owner with the process: a search for `st_uid`, `getuid`, `umask`, `chown`,
+`setuid`, `setgid`, `initgroups`, `preexec_fn` and `user=`/`group=` in `src/lucille_host/` finds only the
+one `geteuid` in `state.py:205` and the one in `runs.py:133`.
 
 ### 1.3 Files, modes and ownership
 
@@ -147,9 +158,10 @@ is refused. `credential` has no `--store-file`, so no credential can be saved wi
 ### 2.3 Can root's files be read by other users, or the reverse?
 
 Observed (1.2): files and folders root creates are 0600/0700 owned by root, so a user gets `Permission
-denied`; root can read and rewrite a user's files, because the modes do not bind it. A profile whose first
-command ran as root therefore breaks the user's later commands until someone removes or `chown`s it. The
-host does nothing about it.
+denied`; root can read and rewrite a user's files, because the modes do not bind it. A profile that a root
+command touched, first or later (1.2), therefore breaks the user's commands until someone `chown`s or removes
+the root-owned file or folder. The host does nothing about it, and nothing in this record or in the code
+repairs a profile that is already root-owned.
 
 ### 2.4 The test suite as root and as a user
 
@@ -256,9 +268,11 @@ another way to drop privileges is not checked.
 The host's own check stays, and moves to the front of the command line so that no verb (`pause`, `roots`,
 `policy`, `ops` included) can write a profile as root. The app's image creates a user, a setup step of the
 S6 overlay makes the state folders under `/data` its own, and the service starts the host as that user.
-- For: keeps invariant 0001 and the claim "files only your user can read" true everywhere; the
-  inconsistency in 1.2 and the `/home` hole in 1.5 close without new policy; no code runs as root.
-- Against: the image must carry the privilege drop and a `chown` step (neither checked here); the keyring is
+- For: keeps invariant 0001 and the claim "files only your user can read" true everywhere; stops *new*
+  root-owned files and folders from any verb (1.2) and the `/home` hole in 1.5 without new policy; no code runs
+  as root.
+- Against: it does nothing for a profile that is already root-owned (4.3); the image must carry the
+  privilege drop and a `chown` step (neither checked here); the keyring is
   still missing, so the app can only use `--store-file` and no credential operation.
 
 **B. Allow uid 0 under conditions.** For example: an explicit flag; `XDG_CONFIG_HOME` and `XDG_STATE_HOME`
@@ -283,7 +297,7 @@ image; settle the keyring question for the add-on separately, in 0003, before an
 credential operations.
 
 Why: the refusal already exists and is already the documented invariant; the only gap found (1.2) is that
-seven verbs skip it (`log`, `pause`, `resume`, `kill`, `ops`, `roots`, `policy`), with an observed effect of locking the real user out of their own profile; and every
+seven verbs skip it (`log`, `pause`, `resume`, `kill`, `ops`, `roots`, `policy`), and the ones that write (all but the read-only `log`, `ops list`, `roots list`, `policy previous`) leave root-owned files or folders that lock the real user out of their own profile; and every
 option that allows root buys the add-on convenience with code that makes the host larger and its claim
 conditional. If the ruling is that an add-on must run as root, C is the narrower of the two, and the
 conditions in B (state under `/data`, file store, no credential operation, and a privilege drop for
@@ -305,6 +319,11 @@ For A:
 - The add-on's image (outside this repository): a user, a setup step for `/data`, and the service started
   as that user.
 
+Not covered by A or by any option here: a profile that is **already** root-owned. Refusing root from now on
+leaves such a profile as it is, and the user's commands keep failing (1.2). The host could name the cause in
+its refusal (a profile file or folder owned by another uid), or the instructions could say to `chown` it; that
+is code or text to be decided, and is listed in 5.
+
 For B or C, add to the above: a privilege drop in `_exec.py:235-243` and its tests; a root-aware
 `policy.is_broad` (or a rule that a root caller's "home" is every home); the path conditions in `paths.py`;
 and a new row in `CLAIMS.md` that says what the host promises when run as root.
@@ -314,6 +333,12 @@ and a new row in `CLAIMS.md` that says what the host promises when run as root.
 - Whether a file-held credential store should exist at all (0003). Without it, an add-on cannot use
   `github.read` or the Gmail operations under any option above.
 - How an add-on confirms a pairing (5 in 3.2).
+- What to do for a profile that is already root-owned (4.3): a clearer error that names the owner, a one-line
+  instruction, or nothing. Neither was tried here.
+- How an add-on's image drops privileges for the service (A): the S6 pages read describe a oneshot setup step
+  and the user bundle, and no step that starts a service as another user; whether the base images carry a
+  tool for it is not checked. The `apparmor: false` switch (security page) also means the app's AppArmor
+  profile is a limit only while the app keeps it on.
 - Whether to document `sudo` use (`sudo` may keep the user's `HOME`, in which case the files would be the
   user's but made by root). Not tested.
 - Whether `run --json` as root writes the `startup_refused` object: `run --json` ended in a `usage` error in
