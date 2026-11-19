@@ -333,8 +333,8 @@ For A:
 - `cli.py`: run the uid check once, before dispatch, for every verb but `--version` and `--help`; keep
   `state.startup_checks`'s other half (the `SWITCHBOARD_*` check) where it is, or fold both together.
 - `state.py:205-211`, `library.py:171-182`: keep the check in the library entry point.
-- `paths.py` or the verbs' entry: the owner check and the refusal above, walking up from the profile folder to the first folder the
-  running uid owns,
+- `paths.py` or the verbs' entry: the owner check and the refusal above, climbing to the nearest folder the running uid owns and
+  going down (the script in 4.3),
   with tests that plant a root-owned file, a root-owned profile folder and a root-owned ancestor, in the default
   layout and with a deep `XDG_STATE_HOME`, and one that a user-owned profile passes.
 - `runs.py:133`: becomes unreachable; keep it as a second guard or remove it.
@@ -355,27 +355,51 @@ as it is. Checked on cbec58f, as a user with a profile that root had written to 
 - *Detection.* The host does not detect it. It reports `Permission denied` or `cannot be read` with a path
   and never says the owner is another uid (1.2). Looking inside the profile folders cannot work: with an
   ancestor root-owned 0700, `find <config> <state> ! -user $(id -u)` prints `Permission denied` and lists
-  nothing (run). Two things do work, as the user, from above the damage (all run, each on a `HOME` the user
-  owned, with the profile at the default place and with `XDG_STATE_HOME` six folders down):
-  - `find "$HOME" -user root -prune -print` lists the topmost root-owned folder of each branch, at any
-    depth, and exits 0. (It also lists any other root-owned folder under `HOME`, such as one `sudo` made for
-    another program; read the list.) `find "$HOME" -maxdepth 4 -user root` does **not** do this: with the
+  nothing (run). Two things do work, as the user, from above the damage (run, each on a `HOME` the user
+  owned, at the default place and with `XDG_STATE_HOME` six folders down):
+  - `find "$HOME" -user root -prune -print` lists the topmost root-owned folder of each branch under `HOME`,
+    at any depth, and exits 0. (It does not follow symbolic links, so a symlinked `~/.local/state` is not
+    seen; it also lists any other root-owned folder under `HOME`, such as one `sudo` made for another
+    program, so read the list.) `find "$HOME" -maxdepth 4 -user root` does **not** do this: with the
     root-created folders at depth 5 or more it printed nothing and exited 0, while the user was locked out.
-  - A walk up from the profile folder to the first folder the user owns; the last folder before that is the
-    one to repair. It needs the profile folder's path, `${XDG_STATE_HOME:-$HOME/.local/state}/lucille-host/<profile>`
-    (and the same for config):
+  - A script that resolves the profile folders as the host does and checks them, below. It climbs to the
+    nearest existing folder the user owns, then goes down: the first folder that exists and is not the
+    user's is the one to repair; a folder that does not exist is not damage. It uses GNU `stat -c`, so it is
+    for Linux; macOS was not checked. It does not follow symbolic links (a profile path through a symlink to
+    a root-owned folder reads as `none`) and it looks at folders, not files (a root-owned `policy.toml` in a
+    folder the user owns reads as `none`; that case is the next bullet).
 
     ```sh
-    p="$1"; top=
-    while [ "$p" != / ]; do
-      [ "$(stat -c %u "$p" 2>/dev/null)" = "$(id -u)" ] && break
-      top=$p; p=$(dirname "$p")
+    # Names the topmost folder of lucille-host's profile that root created, if any. GNU/Linux (stat -c).
+    # usage: lhcheck.sh [profile]      (profile defaults to "default")
+    profile=${1:-default}
+    me=$(id -u)
+    abs() { case $1 in /*) printf %s "$1";; esac; }   # the host ignores a relative value
+    home=$(abs "$HOME"); [ -n "$home" ] || home=$(getent passwd "$me" | cut -d: -f6)
+    state=$(abs "$XDG_STATE_HOME"); [ -n "$state" ] || state=$home/.local/state
+    config=$(abs "$XDG_CONFIG_HOME"); [ -n "$config" ] || config=$home/.config
+    owner() { stat -c %u "$1" 2>/dev/null; }
+    for dir in "$state/lucille-host/$profile" "$config/lucille-host/$profile"; do
+      # 1. climb to the nearest existing folder the user owns
+      u=$dir
+      while [ "$u" != / ] && [ "$(owner "$u")" != "$me" ]; do u=$(dirname "$u"); done
+      if [ "$u" = / ]; then echo "$dir: no folder above it is yours; not checked"; continue; fi
+      # 2. go down from there: the first folder that exists and is not yours is the one to repair
+      rest=${dir#"$u"/}; here=$u; top=none
+      for part in $(printf %s "$rest" | tr / ' '); do
+        here=$here/$part
+        o=$(owner "$here") || break          # missing: nothing created below it
+        [ "$o" = "$me" ] || { top=$here; break; }
+      done
+      echo "$dir: $top"
     done
-    echo "${top:-none}"
     ```
 
-    It named `.local` for the default layout, `.../d/state` for the deep one, and `none` where nothing was
-    wrong (run as a user, as the script `walk.sh <profile folder>`).
+    Run as the user (`lhcheck.sh [profile]`) it printed, for the first line of each case: `none` for a fresh
+    `HOME` and again after the user's own `resume`; `.local` after a root `resume` and `.config` after a root
+    `ops enable`; the `state` folder of a deep `XDG_STATE_HOME` after a root `resume`; `no folder above it is
+    yours; not checked` for a profile under `/srv/x` owned by nobody the user is; and the default places for a
+    relative `XDG_STATE_HOME`, which the host ignores. After the `chown -R` below it printed `none`.
 - *A root-owned `policy.toml` in a folder the user owns.* The user's `lucille-host policy reset` works: it
   sets the file aside as `policy.invalid.toml` and starts from the fresh policy (only `host.describe` enabled,
   no folder). The set-aside file stays root-owned and unreadable, and whatever the user's own policy was is
@@ -385,15 +409,16 @@ as it is. Checked on cbec58f, as a user with a profile that root had written to 
   `.local/state/lucille-host/default` left the user's `resume` failing with the same `Permission denied`
   (run), because `.local` and `.local/state` above it are root-owned 0700. `chown -R` from the topmost
   root-owned folder the detection names (`.local`, or `.../d/state` in the deep layout) to the user made
-  `resume` work (run, exit 0 both times). Why that is safe: a folder root created, 0700, was closed to the
-  user, so everything under it is either what the host made or something root put there; the user's own files
-  are not below it. `chown -R` changes only ownership, but look first (`ls -lR` as root) for anything else
-  root keeps there, as a shared `~/.local` or `~/.config` that root created may hold other programs' files.
+  `resume` work (run, exit 0 both times). Why that is safe, for folders the host created: it made them as
+  root, 0700, so the user could not put anything in them, and the host's own files are what is below. It is
+  not safe to assume that for every folder the detection lists, since a shared `~/.local` or `~/.config`
+  root created may by now hold other programs' files; look first (`ls -lR` as root) and repair only what is
+  the host's, or the folders leading to it.
   Removing the folders also works in principle (not run).
 - *What the host says.* Today: the sentences above. Proposed, for the later code: a check, at the start of
-  every verb, that the profile's files and every folder from the profile folder up to the first one the
-  running uid owns (the walk above, so it holds wherever the XDG variables put the profile) belong to the
-  running uid, and a refusal that names the topmost folder that does not and its owner,
+  every verb, as the script above does (climb to the nearest folder the running uid owns, then go down;
+  ignore a folder that does not exist; stop when no folder above is the user's), plus the profile's files,
+  and a refusal that names the topmost folder that is not the user's and its owner,
   and gives the one command that fixes it (`sudo chown -R "$USER" <that folder>`). That check is new code
   (nothing compares owners today, 1.2) and is listed above. Without it, A only stops new damage.
 
@@ -411,8 +436,10 @@ and a new row in `CLAIMS.md` that says what the host promises when run as root.
 - How an add-on's image drops privileges for the service (A): the S6 pages read describe a oneshot setup step
   and the user bundle, and no step that starts a service as another user; whether the base images carry a
   tool for it is not checked.
-- Profile paths with no folder the user owns above them (an `XDG_*_HOME` on a root-owned mount, say) are not
-  handled by the detection or the walk, which would climb to `/`; and a relative `XDG_*_HOME` is ignored by
-  the host (`paths.py:143-145`) and so never reaches this case. Not checked.
+- Not checked: profile paths with no folder the user owns above them (an `XDG_*_HOME` on a root-owned mount,
+  say), for which the script says so and stops; profile paths through symbolic links; macOS, where `stat -c`
+  does not exist (inferred, not run); and whether root-owned files inside user-owned folders are all found
+  (the script looks at folders only). A relative `XDG_*_HOME` or `HOME` is ignored by the host
+  (`paths.py:143-145`, `:138-140`), and by the script.
 - Whether to document `sudo` use (`sudo` may keep the user's `HOME`, in which case the files would be the
   user's but made by root). Not tested.
