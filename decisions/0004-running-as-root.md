@@ -182,8 +182,8 @@ is refused. `credential` has no `--store-file`, so no credential can be saved wi
 Observed (1.2): files and folders root creates are 0600/0700 owned by root, so a user gets `Permission
 denied`; root can read and rewrite a user's files, because the modes do not bind it. A profile that a root
 command touched, first or later (1.2), therefore breaks the user's commands until someone `chown`s or removes
-the root-owned file or folder. The host does nothing about it, and nothing in this record or in the code
-repairs a profile that is already root-owned.
+the root-owned file or folder. The host does nothing about it today; 4.3 gives manual steps for the default
+layout, and proposes a host verb for the rest.
 
 ### 2.4 The test suite as root and as a user
 
@@ -365,14 +365,18 @@ no `XDG_*_HOME` set).
   `ensure_dir`, `paths.py:168-182`; `.local` and `.config` only where they did not exist). Run
   `ls -ld` on each of them from `HOME`. A folder root owns shows as `root`; the ones below it show `Permission
   denied` (the user cannot look inside), which is expected and is not a second finding; `No such file or
-  directory` means it was never made, which is not damage. The **highest** folder shown owned by root is the
-  one to repair. Looking inside the profile folders cannot find it (`find <config> <state> ! -user $(id -u)`
-  printed `Permission denied` and listed nothing, run), and a `find` with a fixed depth can miss it (with a
+  directory` means it was never made, which is not damage. On each side, state and config, the **highest** folder shown
+  owned by root is the one to repair (a profile can be damaged on one side only, or both). Looking inside the
+  profile folders cannot find it (`find ~/.config/lucille-host/<profile> ~/.local/state/lucille-host/<profile>
+  ! -user $(id -u)` printed `Permission denied` and listed nothing, run), and a `find` with a fixed depth can miss it (with a
   deeper layout `find "$HOME" -maxdepth 4 -user root` printed nothing and exited 0 while the user was locked
-  out, run). For a root-owned *file* in a folder the user owns, `ls -l <config>/lucille-host/<profile>` shows
-  it.
-- *Repair, default layout.* It needs root. Run `chown -R <user> <folder>` on the highest folder owned by root,
-  stopping at `HOME` (never `HOME` itself or anything above it). The profile folder alone is **not** enough:
+  out, run). For a root-owned *file* in a folder the user owns, `ls -l ~/.config/lucille-host/<profile>` (for
+  `policy.toml`) shows it as owned by `root`. Write the path in full: the `<config>` and `<state>` of 1.2 already
+  include `lucille-host/<profile>`, so appending that to them names a folder that does not exist, and `ls`
+  then says `No such file or directory`, which must not be read as "no damage".
+- *Repair, default layout.* It needs root. Run `chown -R <user> <folder>` on the highest folder owned by root on
+  each side, stopping at `HOME` (never `HOME` itself or anything above it); the folder's group stays root's,
+  which does no harm (`<user>:<group>` changes it too). The profile folder alone is **not** enough:
   `chown -R` of `.local/state/lucille-host/default` left the user's `resume` failing with the same
   `Permission denied`, because `.local` and `.local/state` above it were root-owned 0700; `chown -R` of
   `.local` made it work (run, exit 0). For a root-owned file such as `policy.toml`, `chown` the file, or
@@ -408,8 +412,6 @@ and a new row in `CLAIMS.md` that says what the host promises when run as root.
 - Whether a file-held credential store should exist at all (0003). Without it, an add-on cannot use
   `github.read` or the Gmail operations under any option above.
 - How an add-on confirms a pairing (5 in 3.2).
-- Whether to adopt the owner check and its refusal for profiles that are already root-owned (4.3), or to leave
-  those users with `policy reset` and a manual `chown`. The refusal's wording was not tried.
 - How an add-on's image drops privileges for the service (A): the S6 pages read describe a oneshot setup step
   and the user bundle, and no step that starts a service as another user; whether the base images carry a
   tool for it is not checked.
