@@ -55,7 +55,7 @@ developing the app. Its builds stay ad hoc signed, for the repository owner's ow
   environment (`PATH=/var/empty`). It runs every verb on its own profile, `mac-app` (§9); builds before it
   used `default`, and nothing moves from one to the other. It reads JSON (§8) from every verb it runs:
   `--version`, `ops` and `roots`, `status`, the pairing verbs, `forget`, `kill`, `pause`, `resume`, `log`,
-  `policy reset`, `policy previous` and `run`'s events. It decides only on their fields, a refusal by its
+  `policy reset`, `policy previous`, `credential` (the Gmail window's) and `run`'s events. It decides only on their fields, a refusal by its
   `code`, and shows their words. It reads and writes none of the host's files, and opens no network
   connection.
 - **Pairing by paste, on 0001's gate** (§11.3). The maintainer decided on 2026-11-02 to build it now on
@@ -160,7 +160,8 @@ developing the app. Its builds stay ad hoc signed, for the repository owner's ow
   can carry a file's contents is turned on only after a question, though no operation in this release
   sends file contents), Set Up Folders and Abilities… while Set Up's window was closed before its last
   page, Add a Folder… (its name dialog starting from the alias the host suggests), the folders with
-  Remove, Activity…, while connected the Settings submenu, the pairing items (Connect to Lucille…,
+  Remove, Activity…, Gmail… (the Gmail window, decisions/0003 "Second use", connected or not), while
+  connected the Settings submenu, the pairing items (Connect to Lucille…,
   Finish Connecting…, Stop Connecting…, Disconnect from Lucille…), and Quit Capsule;
   while a request's process runs, Stop What's Running; and, while Lucille needs a newer release, the
   update notice's line and Prepare to Update…. A copy that is not at `/Applications/Capsule.app` shows only
@@ -880,11 +881,13 @@ ripgrep.
   The app reads every verb it runs through the JSON contract ([spec/CLI.md](../spec/CLI.md)), and shows
   the lines on standard error only as details: those of a usage error, and of a run that wrote no `error`
   object.
-- **Secrets never go on a command line.** A pairing code goes to `pair --code-stdin` on standard input. With the typed gate
+- **Secrets never go on a command line.** A pairing code goes to `pair --code-stdin` on standard input,
+  and the Gmail window's app password to `credential set --value-stdin` on standard input. With the typed gate
   (§11.2, proposed, pending the maintainer's decision), the typed number goes to `pair confirm` on standard
   input.
 - **URLs come from the core.** Lucille's web origin, the releases page and the hub are constants in the core,
-  beside the hub's. The Swift source holds no `https://` literal.
+  beside the hub's. The Swift source holds one `https://` literal, Google's App Passwords page, in the
+  app's one opener, for the Gmail window's button (§20); no other.
 - **Copy that every shell needs comes from the core:** each operation's plain-language summary and what it
   sends (§13), alias suggestions (§12), the claim text, and the uninstall steps (section 17).
 - **The app decides nothing from prose.** Where it must branch on the core's answer (which switch is on,
@@ -1854,16 +1857,21 @@ in 10 minutes or less.
   - no read of a pasteboard, or of what is dropped on the app (the user pastes into a field, §11.3; writing,
     for Copy Diagnostics, is allowed by this rule). Until Copy Diagnostics is built, a build test and
     `check_app.py links` refuse `NSPasteboard` altogether; the change that adds it lifts both;
-  - no `http://`, `https://`, `ws://`, `wss://` or `ftp://` in Swift;
+  - no `http://`, `https://`, `ws://`, `wss://` or `ftp://` in Swift, but for the one web page below, as
+    one exact string literal in the opener's file and nowhere else;
   - one exception for the app's one opener, added with Open Date & Time Settings, Open Privacy Settings and
     Show Applications Folder: `macos/App/SystemPlaces.swift`, that exact path, may name `NSWorkspace` and
     make a URL from a string, and no other file may (`[open]` and the denylist in the lint). It names
     `NSWorkspace` once, comments included, in one call, `NSWorkspace.shared.open(<a name>)`, with no
     `configuration:` and no `withApplicationAt`. Each `URL(string:` there takes one string literal and
-    nothing else, and the two literals are the two System Settings pages it may open, each once:
-    `x-apple.systempreferences:com.apple.Date-Time-Settings.extension` and
-    `x-apple.systempreferences:com.apple.preference.security?Privacy_FilesAndFolders` (`OPENABLE` in the
-    lint). Its one other URL is `URL(fileURLWithPath: "/Applications", isDirectory: true)`, with nothing
+    nothing else, and the three literals are the places it may open, each once: two System Settings
+    pages, `x-apple.systempreferences:com.apple.Date-Time-Settings.extension` and
+    `x-apple.systempreferences:com.apple.preference.security?Privacy_FilesAndFolders`, and, added with
+    the Gmail window (decisions/0003, "Second use"), one web page, Google's App Passwords page,
+    `https://myaccount.google.com/apppasswords`, which the Gmail window's Open Google's App Passwords
+    Page button shows in the web browser, so that the user can make the app password that window saves
+    (`OPENABLE` in the lint). The page is fixed, holds nothing of the user's, and no text or request
+    from Lucille names it. Its one other URL is `URL(fileURLWithPath: "/Applications", isDirectory: true)`, with nothing
     taken from it or added to it. It holds no other string. Its code, comments aside and each one-line
     string read as one token, is the designed file's token for token (`OPEN_DESIGN`): one function,
     `open(_ place: SystemPlace) -> Bool`, a `switch` that makes one URL for each place, one `guard`, and the
@@ -1872,12 +1880,12 @@ in 10 minutes or less.
     so that each place opens its own address and Open Date & Time Settings never opens Files & Folders.
     The places are a closed list, `SystemPlace`, in `macos/App/PlaceRules.swift`, whose cases carry no
     value, so that nothing read at run time can make an address or reach the call except as one of these
-    three cases; what the app sees only picks among them. Which problem offers which place is decided
+    four cases; what the app sees only picks among them. Which problem offers which place is decided
     there, from what the app itself sees: the clock state `run` reports (which the hub's refusals of the
     host's writes set, spec/CLI.md), macOS's refusal of a folder, where this copy is, and the host's
     `not_a_folder` for a folder the app itself was adding. No text or request from Lucille, and no
-    refusal of a request, offers one. Every call of the opener is in a button's action, a note's or Set
-    Up's: a build test reads each call by its text, and the lint holds every other file to naming the
+    refusal of a request, offers one. Every call of the opener is in a button's action, a note's, Set
+    Up's or the Gmail window's: a build test reads each call by its text, and the lint holds every other file to naming the
     opener only in such a call, `SystemPlaces.open(`, and to no `extension` of `SystemPlaces`,
     `SystemPlace`, `URL`, `NSURL`, `Optional`, `Equatable` or `Sendable`, no `typealias` that names one of
     them, and no new declaration of `URL`, `NSURL` or `SystemPlaces`, any of which could change what the
@@ -2009,7 +2017,7 @@ These join 0001's "Host invariants and their tests".
 | M17 | Every new pair starts from the fresh policy | pair, enable, forget, pair again: only `host.describe`, no folders |
 | M18 | The app never offers to widen access in answer to Lucille | review, and a UI snapshot of a `not_enabled` entry with no button: the pairing check's `p-activity-not-enabled.png`, where Activity's only button is its disclosure |
 | M19 | Text from Lucille is shown only in Activity, its path and operation in quotes and its folder only as a valid alias, and reaches no argument, menu line, button or note. The one exception is `host_too_old`'s `min_host_version`, which the app reads only as MAJOR.MINOR.PATCH digits (`HostObject.isMinHostVersion`, spec/PROTOCOL.md §10) and shows only in the update notice's title and in the menu's line that shows the notice again (§16) | `tests/test_macos_build.py`: only `HostJSON.swift`, which decodes a request's op, folder and path, and `RequestLog.swift`, which keeps them `fileprivate`, read them, and only the Activity panel shows `RequestText`'s words; `HostJSON.swift` decodes `host_too_old` only when `isMinHostVersion` holds; the self-test: its list of minimums not in that form (`checkJSON`), each dropped, and a path with a control, format, line or paragraph separator character, a quotation mark that opens or closes, or a quotation mark, apostrophe or prime of the fixed list `RequestText.quoteLookalikes` (which `tests/test_macos_build.py` makes again from Python's `unicodedata`), is not shown, and a long one is cut. The list is chosen by name, not by looks: a modifier letter double prime (U+02BA), a ditto mark (U+3003), a Hebrew gershayim (U+05F4) and the corner brackets are still shown |
-| M20 | The app's one opener opens only the three places §20 lists, each from a click: two System Settings pages and the Applications folder, never Full Disk Access, and none in answer to a text or request of Lucille's; the app's one other call that opens anything is the login item's `openSystemSettingsLoginItems()` (§9) | `macos_lint` (`[open]` and the denylist): in `macos/App/SystemPlaces.swift`, one call, in the designed code token for token, of the URLs written there, each place its own, and in every other file no call that opens, the opener named only in a call, and no extension of a type its code names; the denylist's other ways to open a URL or another application, which the lint lists and says what it cannot see; `tests/test_macos_build.py`: the places are a closed `SystemPlace`, each URL is its place's, every call of the opener is in a button's action and opens only from that button, and the files that decode or show Lucille's requests and the pairing (`HostJSON`, `RequestLog`, Activity, `Pairing` and its window, `Supervisor`) name none of the opener's types; the self-test (`checkPlaces`): which problem offers which place, and that no refusal of a request offers one; `check_app.py places`, which opens each System Settings page and reads its window (a gate on macOS 15, a record on 26 and 27); `placement`, which presses Show Applications Folder and reads the Finder's window; `ui`, best effort, which presses Open Privacy Settings where macOS asks about a folder in Documents |
+| M20 | The app's one opener opens only the four places §20 lists, each from a click: two System Settings pages, Google's App Passwords page and the Applications folder, never Full Disk Access, and none in answer to a text or request of Lucille's; the app's one other call that opens anything is the login item's `openSystemSettingsLoginItems()` (§9) | `macos_lint` (`[open]` and the denylist): in `macos/App/SystemPlaces.swift`, one call, in the designed code token for token, of the URLs written there, each place its own, and in every other file no call that opens, the opener named only in a call, and no extension of a type its code names; the denylist's other ways to open a URL or another application, which the lint lists and says what it cannot see; `tests/test_macos_build.py`: the places are a closed `SystemPlace`, each URL is its place's, every call of the opener is in a button's action and opens only from that button, and the files that decode or show Lucille's requests and the pairing (`HostJSON`, `RequestLog`, Activity, `Pairing` and its window, `Supervisor`) name none of the opener's types; the self-test (`checkPlaces`): which problem offers which place, and that no refusal of a request offers one; `check_app.py places`, which opens each System Settings page and reads its window (a gate on macOS 15, a record on 26 and 27); `placement`, which presses Show Applications Folder and reads the Finder's window; `ui`, best effort, which presses Open Privacy Settings where macOS asks about a folder in Documents |
 
 **What M12's check cannot see.** It is weaker than the invariant. It walks `~/Library` before the app is
 launched and after the menu has been driven, and fails only on a new, changed or removed path whose name
@@ -2040,7 +2048,7 @@ those writes itself first (`pause`, then `resume`).
 | A leaked Developer ID key or API key | environment secrets, used only in the signing job, deleted at its end; certificate revocation; notarization's audit trail | software signed under this project's name until revocation |
 | A Lucille page that links a different app | the link targets this repository's releases; README and About name the Team ID | a user who checks nothing |
 | Apple | trusted for Gatekeeper only; copy never says "verified" | Apple can revoke the certificate or a ticket |
-| The app's one opener sends the user somewhere they did not choose | a closed list of three places, whose URLs are written in one file, each its place's; one call, from a button's click; no text or request from Lucille, and no refusal of a request, offers a place (§20, M20); `check_app.py links` refuses Launch Services' and the Apple Event Manager's C calls | what `NSWorkspace` does with the URL, which is macOS's; the two pages' addresses, not yet seen on a Mac, may open another page or none; a hub that refuses the host's writes makes the app offer Date & Time Settings, since the clock's place follows the clock state `run` reports |
+| The app's one opener sends the user somewhere they did not choose | a closed list of four places, whose URLs are written in one file, each its place's; one call, from a button's click; no text or request from Lucille, and no refusal of a request, offers a place (§20, M20); `check_app.py links` refuses Launch Services' and the Apple Event Manager's C calls | what `NSWorkspace` does with the URL, which is macOS's; the two pages' addresses, not yet seen on a Mac, may open another page or none; a hub that refuses the host's writes makes the app offer Date & Time Settings, since the clock's place follows the clock state `run` reports |
 | macOS prompts at a moment the user did not cause | `roots check` during setup; the inference, not yet tested on a Mac, that the app is the responsible process (§12) | a prompt in the interpreter's own name, or a folder whose grant does not reach the child (§12) |
 | Same-user malware | out of scope, as before; on Developer ID builds only (§7), hardened runtime and library validation are defence in depth, never claimed | it can run the bundled interpreter and read the host's Keychain items, run verbs, and rewrite the log |
 

@@ -291,6 +291,7 @@ LOGIC_SOURCES: Final = (
     "Setup.swift",
     "LoginRules.swift",
     "PlaceRules.swift",
+    "Gmail.swift",
 )
 # The host's golden fixtures (spec/CLI.md section 11), which the self-test reads through the
 # app's JSON reader and its pairing, supervision and Set Up state machines.

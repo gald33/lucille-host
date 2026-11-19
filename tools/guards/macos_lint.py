@@ -106,7 +106,9 @@ comments included; over the code with its comments blanked, so that a comment in
   of what is dropped on the app (``draggingPasteboard``, ``onDrop(``, ``dropDestination(``). The
   user pastes a code into a text field, which reads it (0002 §11.3). Writing, for Copy
   Diagnostics (``clearContents()``, ``setString(``, ``writeObjects(``), is allowed.
-- [http] no ``http://``, ``https://``, ``ws://``, ``wss://`` or ``ftp://``, in any case.
+- [http] no ``http://``, ``https://``, ``ws://``, ``wss://`` or ``ftp://``, in any case, but for
+  one string literal in :data:`OPEN_FILE` whose value is :data:`GOOGLE_APP_PASSWORDS_PAGE`, the one
+  web page the opener may show (the Gmail window's button, decisions/0003 "Second use").
 
 In what the app shows:
 
@@ -217,16 +219,22 @@ PROCESS_FILE: Final = "macos/App/HostCLI.swift"
 RUNTIME_IN_APP: Final = "Contents/Resources/runtime/bin/lucille-host-runtime"
 RUNTIME_ARGV: Final = ("-I", "-B", "-X", "utf8", "-m", "lucille_host")
 # The app's one opener (decisions/0002 §20): the one Swift file that may name NSWorkspace and make a
-# URL from a string, to show the user a place in macOS from a click. It may open the two System
-# Settings pages here, and the Applications folder. The spellings are the best known for macOS 13
-# and later, not yet seen on a Mac: check_app.py places opens each and says what it shows, and its
-# SETTINGS_PANES holds the same two (tests/test_macos_build.py checks).
+# URL from a string, to show the user a place from a click. It may open the two System Settings
+# pages here, Google's App Passwords page, and the Applications folder. The two pages' spellings
+# are the best known for macOS 13 and later, not yet seen on a Mac: check_app.py places opens each
+# and says what it shows, and its SETTINGS_PANES holds the same two (tests/test_macos_build.py
+# checks).
 OPEN_FILE: Final = "macos/App/SystemPlaces.swift"
 DATE_AND_TIME_PAGE: Final = "x-apple.systempreferences:com.apple.Date-Time-Settings.extension"
 FILES_AND_FOLDERS_PAGE: Final = (
     "x-apple.systempreferences:com.apple.preference.security?Privacy_FilesAndFolders"
 )
-OPENABLE: Final[frozenset[str]] = frozenset({DATE_AND_TIME_PAGE, FILES_AND_FOLDERS_PAGE})
+# The one web page it may open, from the Gmail window's button: Google's App Passwords page, where
+# the user makes the app password that window saves (decisions/0003, "Second use").
+GOOGLE_APP_PASSWORDS_PAGE: Final = "https://myaccount.google.com/apppasswords"
+OPENABLE: Final[frozenset[str]] = frozenset(
+    {DATE_AND_TIME_PAGE, FILES_AND_FOLDERS_PAGE, GOOGLE_APP_PASSWORDS_PAGE}
+)
 # The one other place the opener shows, as a file URL.
 APPLICATIONS_FOLDER: Final = "/Applications"
 # The functions that render Info.plist, their file, and the pins they take values from.
@@ -530,6 +538,8 @@ enum SystemPlaces {
             url = URL(string: "")
         case .filesAndFolders:
             url = URL(string: "")
+        case .appPasswords:
+            url = URL(string: "")
         case .applicationsFolder:
             url = URL(fileURLWithPath: "", isDirectory: true)
         }
@@ -540,7 +550,12 @@ enum SystemPlaces {
     }
 }
 """
-OPEN_LITERALS: Final = (DATE_AND_TIME_PAGE, FILES_AND_FOLDERS_PAGE, APPLICATIONS_FOLDER)
+OPEN_LITERALS: Final = (
+    DATE_AND_TIME_PAGE,
+    FILES_AND_FOLDERS_PAGE,
+    GOOGLE_APP_PASSWORDS_PAGE,
+    APPLICATIONS_FOLDER,
+)
 _ONE_LINE_LITERAL = re.compile(r'(#*)"(?:[^"\\\n]|\\.)*"\1')
 _TOKEN = re.compile(r'""|[A-Za-z_]\w*|\S')
 _RUNTIME_ARGV_LITERAL = re.compile(
@@ -919,7 +934,14 @@ def _swift_rule_findings(text: str, rel: str, first_line: int = 1) -> list[Viola
     outside :data:`OPEN_FILE`."""
     found: list[Violation] = []
     for rule, patterns in SWIFT_RULES:
-        found += _regex_findings(text, rel, rule, patterns, first_line)
+        # The opener's one web page is the one network address the app may hold, as that exact
+        # literal, in that one file, and as that literal's value when its string is read on its
+        # own; [open] holds it to its place there.
+        seen = text
+        if rel == OPEN_FILE:
+            seen = "" if text == GOOGLE_APP_PASSWORDS_PAGE else text
+            seen = seen.replace(f'"{GOOGLE_APP_PASSWORDS_PAGE}"', '""')
+        found += _regex_findings(seen if rule == "http" else text, rel, rule, patterns, first_line)
     if rel != PROCESS_FILE:
         found += _regex_findings(text, rel, "process", _PROCESS, first_line)
     found += _regex_findings(text, rel, "open", FULL_DISK_ACCESS, first_line)

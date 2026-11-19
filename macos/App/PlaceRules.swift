@@ -15,6 +15,8 @@ enum SystemPlace: Equatable, Sendable {
     case dateAndTime
     /// System Settings, Privacy & Security, Files & Folders. Never Full Disk Access.
     case filesAndFolders
+    /// Google's App Passwords page, in the web browser, from the Gmail window's button.
+    case appPasswords
     /// The Applications folder, in the Finder.
     case applicationsFolder
 }
@@ -78,6 +80,8 @@ enum PlaceText {
             return "Open Date & Time Settings"
         case .filesAndFolders:
             return "Open Privacy Settings"
+        case .appPasswords:
+            return GmailText.openPageButton
         case .applicationsFolder:
             return "Show Applications Folder"
         }
@@ -89,6 +93,8 @@ enum PlaceText {
         switch place {
         case .dateAndTime, .filesAndFolders:
             return "\(appName) couldn't open System Settings."
+        case .appPasswords:
+            return "\(appName) couldn't open your web browser. Go to myaccount.google.com/apppasswords in it."
         case .applicationsFolder:
             return "\(appName) couldn't open your Applications folder."
         }

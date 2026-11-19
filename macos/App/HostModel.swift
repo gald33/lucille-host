@@ -437,6 +437,119 @@ final class HostModel: ObservableObject {
         await VerbQueue.run(cli, verb, on: VerbQueue.other, cancel: cancel, timeout: timeout)
     }
 
+    // MARK: The Gmail window (decisions/0003, "Second use")
+
+    private lazy var gmailPanel: GmailPanel = makeGmailPanel()
+
+    /// The menu's Gmail… item: the window, and what the host says is kept.
+    func gmailChosen() {
+        gmailPanel.show()
+        Task {
+            await readGmail()
+        }
+    }
+
+    private func makeGmailPanel() -> GmailPanel {
+        let panel = GmailPanel()
+        panel.onSave = { [weak self] address, password in
+            self?.saveGmail(address: address, password: password)
+        }
+        panel.onTest = { [weak self] in
+            self?.gmailVerb(GmailRules.testArguments, saying: GmailText.testing, timeout: GmailRules.testTimeout) { outcome in
+                outcome.signedIn(service: GmailRules.service, name: GmailRules.name, host: GmailRules.host)
+                    ? GmailText.signedIn : nil
+            }
+        }
+        panel.onRemove = { [weak self] in
+            self?.gmailVerb(
+                GmailRules.removeArguments, saying: GmailText.removing, timeout: GmailRules.keychainTimeout,
+                refusedAsDone: "no_such_credential"
+            ) { _ in
+                GmailText.removed
+            }
+        }
+        panel.onOpenPage = { [weak self] in
+            if !SystemPlaces.open(.appPasswords) {
+                self?.gmailPanel.say(PlaceText.couldNotOpen(.appPasswords))
+            }
+        }
+        return panel
+    }
+
+    /// Ask the host whether gmail/default is kept, and say so. `quietly`, after another verb,
+    /// it leaves what the window said of that verb.
+    private func readGmail(quietly: Bool = false) async {
+        gmailPanel.setBusy(true, saying: quietly ? nil : GmailText.checking)
+        let result = await VerbQueue.run(
+            cli, GmailRules.listArguments, on: VerbQueue.store, timeout: GmailRules.keychainTimeout
+        )
+        let outcome = VerbOutcome(result)
+        gmailPanel.setBusy(false, saying: quietly ? nil : "")
+        if case .done = outcome {
+            gmailPanel.setKept(GmailRules.saved(outcome.credentials))
+        } else if !quietly {
+            gmailPanel.say(gmailWords(result))
+        }
+    }
+
+    /// Save: the value goes on the verb's standard input, and nowhere else; the field is emptied
+    /// before the verb starts. A value not in the form the host takes is never sent.
+    private func saveGmail(address: String, password: String) {
+        guard let value = GmailRules.value(address: address, password: password) else {
+            gmailPanel.say(GmailText.notInForm)
+            return
+        }
+        gmailPanel.clearPassword()
+        let input = GmailRules.input(value)
+        Task {
+            gmailPanel.setBusy(true, saying: GmailText.saving)
+            let result = await VerbQueue.run(
+                cli, GmailRules.saveArguments, on: VerbQueue.store, input: input, timeout: GmailRules.keychainTimeout
+            )
+            let outcome = VerbOutcome(result)
+            gmailPanel.setBusy(false)
+            if case .done = outcome, let saved = GmailRules.saved(outcome.credentials) {
+                gmailPanel.setKept(saved)
+                gmailPanel.say(GmailText.saved)
+            } else {
+                gmailPanel.say(gmailWords(result))
+            }
+        }
+    }
+
+    /// Run one of the window's other verbs, then say what `done` makes of its objects, or why it
+    /// failed. A refusal whose code is `refusedAsDone` is things already as the user asked.
+    private func gmailVerb(
+        _ verb: [String],
+        saying: String,
+        timeout: TimeInterval? = nil,
+        refusedAsDone: String? = nil,
+        done: @escaping (VerbOutcome) -> String?
+    ) {
+        Task {
+            gmailPanel.setBusy(true, saying: saying)
+            let result = await VerbQueue.run(cli, verb, on: VerbQueue.store, timeout: timeout)
+            let outcome = VerbOutcome(result)
+            gmailPanel.setBusy(false)
+            if case .refused(let error) = outcome, error.code == refusedAsDone {
+                gmailPanel.say(GmailText.noneToRemove)
+            } else if case .done = outcome, let words = done(outcome) {
+                gmailPanel.say(words)
+            } else {
+                gmailPanel.say(gmailWords(result))
+            }
+            await readGmail(quietly: true)
+        }
+    }
+
+    /// Why a Gmail verb failed: the refusal's code, or what the app says of any other failure.
+    private func gmailWords(_ result: CLIResult) -> String {
+        if case .refused(let error) = VerbOutcome(result) {
+            return GmailText.refusal(error)
+        }
+        return HostText.explain(result, earlierRunStuck: HostCLI.stuckRuns > 0).message
+    }
+
     /// Run a verb that changes something, with a window that has a Cancel button if it takes more
     /// than a moment, then hand its result to `then`. A run the user cancels is not a failure,
     /// unless one the app gave up on still holds things up; nor is a refusal whose code is in
