@@ -165,8 +165,9 @@ The first version.
     cases.
   - The Gmail operations' child redacts each string of its document itself before the host's pass, so a
     block in one message's text or subject ends with that string and the document stays JSON; so does
-    `github.read`'s, for a body that is JSON and in which a block begins, which it then writes again
-    compactly (any other body goes as it came). In `gmail.read`'s document, a block that takes the end
+    `github.read`'s, for a body that is JSON and in one of whose strings a block begins: a block a
+    string does not end goes on into the string values after it, up to its end, and only the strings
+    that change are written again (any other body goes as it came). In `gmail.read`'s document, a block that takes the end
     of the text sets `text_truncated`, and one that begins in another field and does not end there
     takes the text up to the first end of a block, or the whole text, so a key split between a
     subject and the text is not returned. Editorial: §11

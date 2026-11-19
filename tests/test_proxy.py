@@ -356,24 +356,88 @@ def test_any_2xx_is_exit_0(status: str, code: int) -> None:
 BEGIN = "-----BEGIN PRIVATE KEY-----"
 
 
+END = "-----END PRIVATE KEY-----"
+KEY_MARK = "[redacted private key]"
+
+
+def _rendered(reply: proxy.Reply) -> Any:
+    # The host's own pass finds nothing more to take: the stream is whole and parses.
+    rendered, truncated = _output.render(reply.stdout, _output.STREAM_CAP)
+    assert truncated is False
+    return json.loads(rendered)
+
+
 def test_a_json_body_with_a_key_block_stays_json() -> None:
     # A file's contents, a commit message or an issue can hold a private-key header that never
-    # ends. The child takes the block to the end of its own string: the body stays JSON, every
-    # other field is whole, and the host's pass finds nothing to take to the stream's end.
+    # ends. The child takes the block to the end of its string: the body stays JSON, every other
+    # field is whole, and the host's pass finds nothing to take to the stream's end.
     document = {
         "name": "deploy.pem",
-        "items": [{"body": f"See below.\n{BEGIN}\nMIIEvQIB", "number": 7}, {"body": "fine"}],
         "title": "Ünïcödé stays",
+        "items": [{"body": f"See below.\n{BEGIN}\nMIIEvQIB", "number": 7}],
     }
     raw = json.dumps(document, indent=2).encode()
     reply, _, _ = _main(_http("200 OK", ["Content-Type: application/json"], raw))
     assert reply.code == 0
-    found = json.loads(reply.stdout)
-    assert found["items"][0] == {"body": "See below.\n[redacted private key]", "number": 7}
-    assert found["items"][1] == {"body": "fine"} and found["title"] == "Ünïcödé stays"
-    assert found["name"] == "deploy.pem"
-    rendered, truncated = _output.render(reply.stdout, _output.STREAM_CAP)
-    assert truncated is False and json.loads(rendered) == found
+    found = _rendered(reply)
+    assert found["items"][0] == {"body": f"See below.\n{KEY_MARK}", "number": 7}
+    assert found["name"] == "deploy.pem" and found["title"] == "Ünïcödé stays"
+
+
+@pytest.mark.parametrize(
+    ("document", "expected"),
+    [
+        # A key's lines as the strings of an array.
+        (
+            {"lines": [BEGIN, "MIIEvQIBADANBgkq", "hkiG9w0BAQEFAASC", END, "after"], "n": 1},
+            {"lines": [KEY_MARK, KEY_MARK, KEY_MARK, KEY_MARK, "after"], "n": 1},
+        ),
+        # Its header, body and end in sibling fields: the keys between keep their names.
+        (
+            {"a": f"x {BEGIN}", "b": "MIIEvQIBADANBgkq", "c": f"hkiG9w0B\n{END} ok", "d": "keep"},
+            {"a": f"x {KEY_MARK}", "b": KEY_MARK, "c": f"{KEY_MARK} ok", "d": "keep"},
+        ),
+        # No end anywhere: every string value after it is taken.
+        (
+            {"a": BEGIN, "b": ["MIIE", 5, True, None], "c": "MIIE"},
+            {"a": KEY_MARK, "b": [KEY_MARK, 5, True, None], "c": KEY_MARK},
+        ),
+        # A second block after the first one ends.
+        (
+            {"a": [BEGIN, "MIIE", END, f"y {BEGIN}", "QUFB", f"{END} z"]},
+            {"a": [KEY_MARK, KEY_MARK, KEY_MARK, f"y {KEY_MARK}", KEY_MARK, f"{KEY_MARK} z"]},
+        ),
+    ],
+)
+def test_a_key_split_across_json_strings_is_not_returned(
+    document: dict[str, Any], expected: dict[str, Any]
+) -> None:
+    raw = json.dumps(document, indent=1).encode()
+    reply, _, _ = _main(_http("200 OK", [], raw))
+    assert _rendered(reply) == expected
+    for secret in ("MIIE", "hkiG9w0B", "QUFB"):
+        assert secret.encode() not in reply.stdout
+
+
+def test_an_escaped_header_is_read_and_the_rest_stays_as_it_came() -> None:
+    # Each string is read decoded, so a header written with escapes is a header. Only the strings
+    # that change are written again: numbers, white space and repeated keys stay as they came.
+    raw = (
+        b'{"n": 1e400, "m": -0, "k": 1, "k": 2,\n  "s": "\\u002d----BEGIN PRIVATE KEY-----\\nMIIE",'
+        b' "x": 0.1000}'
+    )
+    reply, _, _ = _main(_http("200 OK", [], raw))
+    assert b"MIIE" not in reply.stdout
+    assert reply.stdout == (
+        b'{"n": 1e400, "m": -0, "k": 1, "k": 2,\n  "s": "[redacted private key]", "x": 0.1000}'
+    )
+
+
+def test_a_key_block_in_a_json_key_and_in_a_status_body_is_redacted_too() -> None:
+    raw = json.dumps({f"x {BEGIN}": 1, "message": f"Not Found {END} after"}).encode()
+    reply, _, _ = _main(_http("404 Not Found", [], raw))
+    assert reply.code == 3
+    assert _rendered(reply) == {f"x {KEY_MARK}": 1, "message": f"{KEY_MARK} after"}
 
 
 def test_a_body_with_no_key_block_goes_as_it_came() -> None:
@@ -388,16 +452,6 @@ def test_a_body_that_is_not_json_is_left_to_the_hosts_flag() -> None:
     assert reply.stdout == raw
     rendered, truncated = _output.render(reply.stdout, _output.STREAM_CAP)
     assert (rendered, truncated) == ("plain text\n[redacted private key]", True)
-
-
-def test_a_key_block_in_a_json_key_and_in_a_status_body_is_redacted_too() -> None:
-    raw = json.dumps({f"x {BEGIN}": 1, "message": f"Not Found {BEGIN} MIIE"}).encode()
-    reply, _, _ = _main(_http("404 Not Found", [], raw))
-    assert reply.code == 3
-    assert json.loads(reply.stdout) == {
-        "x [redacted private key]": 1,
-        "message": "Not Found [redacted private key]",
-    }
 
 
 @pytest.mark.parametrize("status", ["301 Moved Permanently", "302 Found", "304 Not Modified"])

@@ -21,9 +21,10 @@ order, each refusal writing one fixed line on standard error, holding no value a
 4. It follows no redirect, reads at most :data:`HEADER_CAP` bytes of headers and
    :data:`BODY_CAP` of body (exit 5 past either, with what it read of the body), and reads no
    compressed body and no transfer coding but a plain ``chunked`` (exit 5, no body).
-5. When a private-key block begins in a body that is JSON, it applies the host's redaction to
-   each of its strings alone and writes the body again compactly, so that the block ends with its
-   string and the body stays JSON (:func:`redacted_json`); any other body goes as it came. It
+5. When a private-key block begins in a string of a body that is JSON, it applies the host's
+   redaction to the strings in order, a block one string leaves open going on into the string
+   values after it up to its end, and writes again only the strings that change, so the body stays
+   JSON (:func:`redacted_json`); any other body goes as it came. It
    replaces the token, raw and in base64 at each of the three byte alignments, in the whole body
    and in what goes on standard error (:func:`scrub`), and at a cut drops any tail that begins
    the token.
@@ -57,7 +58,7 @@ from typing import Any, Final, NoReturn
 import certifi
 
 from lucille_host import __version__
-from lucille_host._output import TOKEN_MARK, has_key_block, redact
+from lucille_host._output import PRIVATE_KEY_MARK, TOKEN_MARK, key_block_end, redact_to_end
 
 __all__ = [
     "resolve",
@@ -440,38 +441,54 @@ def scrub(data: bytes, token: str, *, cut: bool = False) -> bytes:
 # --- the whole ------------------------------------------------------------------------------
 
 
-def _redacted(value: Any) -> Any:
-    if isinstance(value, str):
-        return redact(value)
-    if isinstance(value, list):
-        return [_redacted(item) for item in value]
-    if isinstance(value, dict):
-        return {redact(key): _redacted(item) for key, item in value.items()}
-    return value
+# A JSON string token, in a body json.loads has taken whole: there a quote outside a string only
+# ever opens one.
+_JSON_STRING: Final = re.compile(r'"(?:[^"\\]|\\.)*"', re.DOTALL)
+# What follows a string that is an object's key.
+_KEY_COLON: Final = re.compile(r"[ \t\r\n]*:")
 
 
 def redacted_json(body: bytes) -> bytes:
-    """GitHub's body as it came, unless a private-key block begins in it and it is JSON: then each
-    of its strings with the host's own redaction applied to it alone, written again compactly. A
-    block that does not end in its string is taken to that string's end, never past it, so the
-    body stays JSON, and the host's pass over the whole stream finds no block left to take to the
-    stream's end (spec/PROTOCOL.md section 11). A body that is not JSON, one cut at the cap among
-    them, is left to the host's pass, which then sets the truncation flag."""
+    """GitHub's body as it came, unless it is JSON and a private-key block begins in one of its
+    strings (an escaped one too, since each string is read decoded): then each string, keys
+    included, in the order the body holds them, with the host's own redaction applied. A block
+    that a string opens and does not end takes the rest of that string and goes on into the
+    values after it, each string taken whole, up to the first end of a block, as the host's pass
+    over the raw text would; so a key whose lines are strings of an array, or sibling fields, is
+    not returned. The objects' keys between keep their names, so the body keeps its shape. Only
+    the strings that change are written again; everything else, numbers, white space and repeated
+    keys among it, stays as it came, and the body stays JSON (spec/PROTOCOL.md section 11). A
+    body that is not JSON, one cut at the cap among them, is left to the host's pass, which sets
+    the truncation flag when a block takes its end."""
     try:
         text = body.decode("utf-8")
-    except UnicodeDecodeError:
+        json.loads(text)
+    except (UnicodeDecodeError, ValueError, RecursionError):
         return body
-    if not has_key_block(text):
+    out: list[str] = []
+    pos = 0
+    open_block = False
+    for token in _JSON_STRING.finditer(text):
+        raw = token.group()
+        value = raw[1:-1] if "\\" not in raw else json.loads(raw)
+        if open_block and _KEY_COLON.match(text, token.end()):
+            continue
+        if open_block:
+            end = key_block_end(value)
+            if end is None:
+                new = PRIVATE_KEY_MARK
+            else:
+                rest, open_block = redact_to_end(value[end:])
+                new = PRIVATE_KEY_MARK + rest
+        else:
+            new, open_block = redact_to_end(value)
+        if new != value:
+            out += [text[pos : token.start()], json.dumps(new)]
+            pos = token.end()
+    if not out:
         return body
-    try:
-        document = _redacted(json.loads(text))
-    except (ValueError, RecursionError):
-        return body
-    try:
-        return json.dumps(document, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-    except UnicodeEncodeError:
-        # A string with a lone surrogate, from a \uD800 escape, which UTF-8 cannot hold.
-        return json.dumps(document, ensure_ascii=True, separators=(",", ":")).encode("ascii")
+    out.append(text[pos:])
+    return "".join(out).encode("utf-8")
 
 
 def main(
