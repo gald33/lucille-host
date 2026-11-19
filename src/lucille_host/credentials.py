@@ -43,7 +43,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Final
 
-from lucille_host import paths, store
+from lucille_host import nesting, paths, store
 
 __all__ = [
     "REFUSAL",
@@ -324,7 +324,9 @@ class CredentialStore:
         if raw is None:
             return _empty()
         try:
-            doc = json.loads(raw)
+            # Past the host's own depth limit, an item this version did not write, whatever
+            # Python's parser would make of it.
+            doc = None if nesting.json_deeper(raw) else json.loads(raw)
         except (ValueError, RecursionError):
             doc = None
         if not _well_formed(doc):

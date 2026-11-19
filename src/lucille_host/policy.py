@@ -64,7 +64,7 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Final
 
-from lucille_host import mounts
+from lucille_host import mounts, nesting
 from lucille_host.ops import OPERATIONS
 
 __all__ = [
@@ -422,11 +422,18 @@ def _read(path: Path) -> Mapping[str, Any] | None:
     except OSError as exc:
         raise PolicyError(f"{path} cannot be read: {exc.strerror}") from exc
     try:
-        return tomllib.loads(raw.decode("utf-8"))
-    except (UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise PolicyError(f"{path} is not valid TOML") from exc
+    # Checked before the parser reads it, whose own limit differs by Python version.
+    if nesting.toml_deeper(text):
+        raise PolicyError(f"{path} nests too deep to be read")
+    try:
+        return tomllib.loads(text)
+    except tomllib.TOMLDecodeError as exc:
         raise PolicyError(f"{path} is not valid TOML") from exc
     except RecursionError as exc:
-        # Nested past what the parser follows, which no policy the host writes is.
+        # Kept should the parser stop short of the host's own limit.
         raise PolicyError(f"{path} nests too deep to be read") from exc
 
 

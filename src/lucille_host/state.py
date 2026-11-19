@@ -40,7 +40,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Final
 
-from lucille_host import paths
+from lucille_host import nesting, paths
 
 __all__ = [
     "STORE_KINDS",
@@ -141,12 +141,15 @@ def read_json(path: Path) -> Any:
         return None
     except (OSError, UnicodeDecodeError) as exc:
         raise StateError(f"{path} cannot be read ({exc})") from exc
+    # Checked before the parser reads it, whose own limit differs by Python version.
+    if nesting.json_deeper(text):
+        raise StateError(f"{path} nests too deep to be read")
     try:
         return json.loads(text)
     except ValueError as exc:
         raise StateError(f"{path} is not valid JSON ({exc})") from exc
     except RecursionError as exc:
-        # Nested past what the parser follows, which no file the host writes is.
+        # Kept should the parser stop short of the host's own limit.
         raise StateError(f"{path} nests too deep to be read") from exc
 
 

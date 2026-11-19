@@ -41,6 +41,7 @@ RUNTIME_MODULES = (
     "lucille_host.link",
     "lucille_host.loop",
     "lucille_host.mounts",
+    "lucille_host.nesting",
     "lucille_host.ops",
     "lucille_host.paths",
     "lucille_host.policy",

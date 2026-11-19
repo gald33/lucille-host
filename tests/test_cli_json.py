@@ -2314,8 +2314,8 @@ def test_status_json_reports_a_keyring_that_cannot_be_read(
     assert ran.err == text.err == f"lucille-host: {message}\n"
 
 
-# Nested past what Python's parsers follow, on 3.11 and on 3.13: TOML from about 500 arrays, JSON
-# from about 1000 on 3.11 and about 10000 on 3.13.
+# Nested past the host's own limit (src/lucille_host/nesting.py), and past what Python's parsers
+# follow on 3.11 and 3.13; 3.14's parse them, and the host refuses them all the same.
 _DEEP_TOML = "version = 1\nx = " + "[" * 5000 + "]" * 5000 + "\n"
 _DEEP_JSON = "[" * 100000 + "]" * 100000
 
@@ -2327,8 +2327,8 @@ def test_a_file_nested_too_deep_is_an_invalid_one(
     capsys: pytest.CaptureFixture[str],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # A file of the host's own nested too deep to parse is invalid as any other is: the parser's
-    # RecursionError is never an `internal` error.
+    # A file of the host's own nested too deep is invalid as any other is, on every Python version,
+    # and never an `internal` error.
     w = World(tmp_path, stack, capsys, monkeypatch, with_hub=True)
     paths.ensure_dir(w.dirs.config)
     w.dirs.policy_file.write_text(_DEEP_TOML)

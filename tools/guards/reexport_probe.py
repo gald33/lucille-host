@@ -16,7 +16,11 @@ interpreters given, because a module's attributes change between Python versions
 ``tests/guards/test_reexports.py`` runs the probe on the interpreter running the tests, on every
 CI runner, and fails if the table does not cover it.
 
-Usage: ``python tools/guards/reexport_probe.py [PYTHON ...]`` (default: this interpreter).
+Usage: ``python tools/guards/reexport_probe.py [PYTHON ...]`` (default: this interpreter), which
+writes the table for the interpreters named; or ``python tools/guards/reexport_probe.py --add LOG
+[LOG ...]``, which adds to the table as it is what an interpreter not at hand lacked: when the test
+fails, it prints one line, :data:`RECORD` and then JSON, with the interpreter and every entry the
+table lacks for it, so a CI run's log is enough.
 """
 
 from __future__ import annotations
@@ -25,6 +29,7 @@ import json
 import subprocess
 import sys
 from pathlib import Path
+from typing import Any
 
 if __package__ in (None, ""):  # run as a script: make ``tools.guards`` importable
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
@@ -35,6 +40,8 @@ TABLE = Path(__file__).resolve().parent / "_reexports.py"
 # Allowlisted top-level modules that are not part of the standard library.
 NOT_STDLIB = frozenset({"certifi", "keyring", "switchboard", "lucille_host"})
 MARKER = "REEXPORT-PROBE:"
+# What starts the line ``tests/guards/test_reexports.py`` prints when the table lacks something.
+RECORD = "REEXPORT-PROBE-RECORD:"
 
 
 def scanned_modules() -> tuple[str, ...]:
@@ -123,9 +130,7 @@ def render(reexports: dict[str, set[str]], submodules: set[str], interpreters: l
     lines = [
         '"""Modules the runtime\'s standard-library modules re-export. Generated: do not edit.',
         "",
-        "Written by ``python tools/guards/reexport_probe.py``, which says how. Probed:",
-        "",
-        *(f"- {name}" for name in interpreters),
+        "Written by ``python tools/guards/reexport_probe.py``, which says how.",
         "",
         "``tests/guards/test_reexports.py`` fails if this table does not cover the interpreter",
         "running the tests.",
@@ -134,6 +139,11 @@ def render(reexports: dict[str, set[str]], submodules: set[str], interpreters: l
         "from __future__ import annotations",
         "",
         "from collections.abc import Mapping",
+        "",
+        "# The interpreters probed.",
+        "PROBED: tuple[str, ...] = (",
+        *(f'    "{name}",' for name in sorted(set(interpreters))),
+        ")",
         "",
         "# The standard-library modules scanned: RUNTIME_IMPORTS, EXEC_IMPORTS and PROXY_IMPORTS,",
         "# less the rest.",
@@ -168,9 +178,61 @@ def _describe(python: str) -> str:
     )
 
 
+def lacking(python: str = sys.executable) -> dict[str, Any]:
+    """What the table lacks for ``python``: its description, and the re-exports and submodules
+    the probe finds there that the table does not hold."""
+    from tools.guards import _reexports
+
+    found, submodules = probe(python)
+    return {
+        "python": _describe(python),
+        "reexports": {
+            name: target
+            for name, target in sorted(found.items())
+            if target not in _reexports.REEXPORTS.get(name, ())
+        },
+        "submodules": sorted(submodules - _reexports.SUBMODULES),
+    }
+
+
+def added(records: list[dict[str, Any]]) -> str:
+    """The table as it is, with what each of ``records`` (:func:`lacking`) says it lacked."""
+    from tools.guards import _reexports
+
+    reexports = {name: set(targets) for name, targets in _reexports.REEXPORTS.items()}
+    submodules = set(_reexports.SUBMODULES)
+    interpreters = list(_reexports.PROBED)
+    for record in records:
+        for name, target in record["reexports"].items():
+            reexports.setdefault(name, set()).add(target)
+        submodules |= set(record["submodules"])
+        interpreters.append(record["python"])
+    return render(reexports, submodules, interpreters)
+
+
+def records_in(text: str) -> list[dict[str, Any]]:
+    """Each record in ``text``, a log: what follows :data:`RECORD` on a line, to its end."""
+    found = []
+    for line in text.splitlines():
+        at = line.find(RECORD)
+        if at >= 0:
+            found.append(json.loads(line[at + len(RECORD) :]))
+    return found
+
+
 def main(argv: list[str] | None = None) -> int:
-    """Probe each interpreter named (default: this one) and write the union to the table."""
-    pythons = (sys.argv[1:] if argv is None else argv) or [sys.executable]
+    """Probe each interpreter named (default: this one) and write the union to the table; or,
+    with ``--add``, add to the table what the records in each log named say it lacked."""
+    args = sys.argv[1:] if argv is None else argv
+    if args[:1] == ["--add"]:
+        records = [record for log in args[1:] for record in records_in(Path(log).read_text())]
+        if not records:
+            print(f"no {RECORD} line in {', '.join(args[1:]) or 'no log'}", file=sys.stderr)
+            return 2
+        TABLE.write_text(added(records))
+        print(f"wrote {TABLE}: added {len(records)} record(s)")
+        return 0
+    pythons = args or [sys.executable]
     reexports: dict[str, set[str]] = {}
     submodules: set[str] = set()
     described: list[str] = []

@@ -77,7 +77,7 @@ from typing import Any, Final
 
 from switchboard import client, crypto, pairing, sharing, signing
 
-from lucille_host import paths, store
+from lucille_host import nesting, paths, store
 from lucille_host import state as host_state
 
 # Nothing here is for ``from lucille_host._switchboard import *``, which the lints refuse anyway.
@@ -594,10 +594,38 @@ def _stored() -> Iterator[None]:
         reason = exc.strerror or type(exc).__name__
         raise store.StoreError(exc.errno, f"the file store could not be used ({reason})") from exc
     except RecursionError as exc:
-        # A file in it nested past what the library's parser follows, which none it writes is.
-        raise store.StoreError(
-            None, "the file store could not be used (a file in it nests too deep to be read)"
-        ) from exc
+        # Kept should a file change between the depth check and the library's read.
+        raise store.StoreError(None, _TOO_DEEP) from exc
+
+
+_TOO_DEEP: Final = "the file store could not be used (a file in it nests too deep to be read)"
+
+
+def _nests_too_deep(folder: Path | None) -> bool:
+    """Whether a JSON file in the file store's folder, at any level, nests past
+    :data:`nesting.FILES_MOST`. Checked before the library reads any of them, since its parser's
+    own limit differs by Python version. Each file is read here as text only; one that is gone or
+    not UTF-8 is left to the library to report."""
+    if folder is None:
+        return False
+    for path in sorted(folder.rglob("*.json")):
+        try:
+            text = path.read_text()
+        except (FileNotFoundError, IsADirectoryError, UnicodeDecodeError):
+            continue
+        if nesting.json_deeper(text):
+            return True
+    return False
+
+
+class _ShareFiles(sharing.ShareStore):
+    """The library's share store, refusing to load while a file in its folder nests too deep, as
+    a refusal of the store, the way the library refuses a share store that is not JSON."""
+
+    def load(self) -> dict[str, Any]:
+        if _nests_too_deep(self.require()):
+            raise sharing.SharingError(_TOO_DEEP, state="store")
+        return super().load()
 
 
 class FilePairs:
@@ -606,6 +634,11 @@ class FilePairs:
 
     def __init__(self, inner: pairing.PairStore) -> None:
         self._inner = inner
+
+    def _read(self) -> None:
+        """Before each call that reads a file of the store."""
+        if _nests_too_deep(self._inner.path):
+            raise store.StoreError(None, _TOO_DEEP)
 
     @property
     def enabled(self) -> bool:
@@ -624,6 +657,7 @@ class FilePairs:
 
     def get(self, name: str) -> pairing.PairRecord | None:
         with _stored():
+            self._read()
             return self._inner.get(name)
 
     def save(self, record: pairing.PairRecord) -> None:
@@ -640,6 +674,7 @@ class FilePairs:
 
     def pending(self, name: str) -> pairing.PendingHandshake | None:
         with _stored():
+            self._read()
             return self._inner.pending(name)
 
     def save_pending(self, pending: pairing.PendingHandshake) -> None:
@@ -656,6 +691,7 @@ class FilePairs:
 
     def verdict(self, name: str, *, now: float | None = None) -> dict[str, Any] | None:
         with _stored():
+            self._read()
             return self._inner.verdict(name, now=now)
 
     def save_verdict(self, name: str, state: str, message: str, *, now: float) -> None:
@@ -1074,9 +1110,10 @@ def open_link(
     options = {"runtime": dirs.runtime, "client_class": client_class, "clock": clock}
     if config.store == "file":
         folder = paths.ensure_dir(dirs.store_files)
-        # The share store needs no such view: sharing turns its storage failures into a refusal.
+        # The share store needs no such view of its storage failures, since sharing turns them into
+        # a refusal; it only checks the folder's depth before it loads (:class:`_ShareFiles`).
         pairs = FilePairs(pairing.PairStore(folder, env={}))
-        rooms = sharing.ShareStore(folder, env={})
+        rooms = _ShareFiles(folder, env={})
         return Link(pairs, rooms, warning=FILE_STORE_WARNING, **options)
     store.check_backend()
     item = store.Item(dirs.state, dirs.profile, clock=time.time if clock is None else clock)

@@ -1592,9 +1592,12 @@ def environment_vectors(
 ) -> list[EnvironmentVector]:
     """The vectors M6 names, each planted under ``scratch`` (the user sites are under it too:
     HOME and PYTHONUSERBASE point there). ``stdlib`` is the runtime's ``lib/python3.X``: the
-    fake PYTHONHOME links to every entry of it but ``site-packages``, so that an interpreter that
-    honoured PYTHONHOME would start, and load the sitecustomize planted in its own
-    ``site-packages``."""
+    fake PYTHONHOME links to every entry of it but ``site-packages`` and ``sitecustomize.py``, so
+    that an interpreter that honoured PYTHONHOME would start, and load the sitecustomize planted in
+    that standard library itself. It is planted there, not in a ``site-packages``, because the
+    standard library is on the path of every interpreter that honours PYTHONHOME, ahead of its
+    site folders: Debian's Python names those ``dist-packages``, and keeps a sitecustomize of its
+    own in the standard library, which would load in place of one planted further along."""
     marks = scratch / "markers"
     pythonpath = scratch / "pythonpath"
     fake_stdlib = scratch / "pythonhome" / "lib" / stdlib.name
@@ -1602,7 +1605,7 @@ def environment_vectors(
         {
             fake_stdlib / entry.name: entry
             for entry in sorted(stdlib.iterdir())
-            if entry.name != "site-packages"
+            if entry.name not in ("site-packages", "sitecustomize.py")
         }
         if stdlib.is_dir()
         else {}
@@ -1627,11 +1630,7 @@ def environment_vectors(
         EnvironmentVector(
             name="PYTHONHOME",
             env={"PYTHONHOME": str(scratch / "pythonhome")},
-            files={
-                fake_stdlib / "site-packages" / "sitecustomize.py": _touch(
-                    marks, "pythonhome-sitecustomize"
-                )
-            },
+            files={fake_stdlib / "sitecustomize.py": _touch(marks, "pythonhome-sitecustomize")},
             links=links,
             markers=("pythonhome-sitecustomize",),
             control=plain,
