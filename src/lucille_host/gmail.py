@@ -56,7 +56,7 @@ from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any, Final, NoReturn
 
-from lucille_host import proxy
+from lucille_host import nesting, proxy
 from lucille_host._output import PRIVATE_KEY_MARK, TOKEN_MARK, key_block_end, redact_to_end
 
 __all__ = [
@@ -204,9 +204,11 @@ def _arguments(argv: Sequence[str]) -> tuple[str, str, str, dict[str, Any]]:
 
     if not os.path.isabs(state) or not paths.valid_profile(profile) or operation not in OPERATIONS:
         raise _Stop(INTERNAL, "internal")
+    if nesting.json_deeper(text):
+        raise _Stop(INTERNAL, "internal")
     try:
         args = json.loads(text)
-    except ValueError:
+    except (ValueError, RecursionError):
         raise _Stop(INTERNAL, "internal") from None
     if not ops.args_valid(ops.OPERATIONS[operation], args):
         raise _Stop(INTERNAL, "internal")
@@ -257,8 +259,9 @@ _SIGNINS_LOCK: Final = ".gmail-signins.lock"
 
 def _signins_load(path: Path) -> dict[str, Any]:
     try:
-        doc = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+        text = path.read_text(encoding="utf-8")
+        doc = None if nesting.json_deeper(text) else json.loads(text)
+    except (OSError, ValueError, RecursionError):
         return {}
     return doc if isinstance(doc, dict) else {}
 

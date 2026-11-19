@@ -1,12 +1,6 @@
 """Modules the runtime's standard-library modules re-export. Generated: do not edit.
 
-Written by ``python tools/guards/reexport_probe.py``, which says how. Probed:
-
-- CPython 3.11.15 on linux
-- CPython 3.11.18 on linux
-- CPython 3.12.3 on linux
-- CPython 3.13.14 on linux
-- CPython 3.13.18 on linux
+Written by ``python tools/guards/reexport_probe.py``, which says how.
 
 ``tests/guards/test_reexports.py`` fails if this table does not cover the interpreter
 running the tests.
@@ -15,6 +9,17 @@ running the tests.
 from __future__ import annotations
 
 from collections.abc import Mapping
+
+# The interpreters probed.
+PROBED: tuple[str, ...] = (
+    "CPython 3.11.15 on linux",
+    "CPython 3.11.18 on linux",
+    "CPython 3.12.3 on linux",
+    "CPython 3.13.14 on linux",
+    "CPython 3.13.18 on linux",
+    "CPython 3.14.10 on darwin",
+    "CPython 3.14.4 on linux",
+)
 
 # The standard-library modules scanned: RUNTIME_IMPORTS, EXEC_IMPORTS and PROXY_IMPORTS,
 # less the rest.
@@ -94,6 +99,7 @@ REEXPORTS: Mapping[str, tuple[str, ...]] = {
     "contextlib.sys": ("sys",),
     "dataclasses._thread": ("_thread",),
     "dataclasses.abc": ("abc",),
+    "dataclasses.annotationlib": ("annotationlib",),
     "dataclasses.builtins": ("builtins",),
     "dataclasses.copy": ("copy",),
     "dataclasses.functools": ("functools",),
@@ -120,6 +126,7 @@ REEXPORTS: Mapping[str, tuple[str, ...]] = {
     "email._policybase._charset": ("email.charset",),
     "email._policybase.abc": ("abc",),
     "email._policybase.header": ("email.header",),
+    "email._policybase.re": ("re",),
     "email.charset.email": ("email",),
     "email.charset.errors": ("email.errors",),
     "email.contentmanager.binascii": ("binascii",),
@@ -168,6 +175,7 @@ REEXPORTS: Mapping[str, tuple[str, ...]] = {
     "hashlib._hashlib": ("_hashlib",),
     "hmac._hashlib": ("hashlib",),
     "hmac._hashopenssl": ("_hashlib",),
+    "hmac._hmac": ("_hmac",),
     "hmac._warnings": ("warnings",),
     "html._re": ("re",),
     "html.parser._markupbase": ("_markupbase",),
@@ -229,6 +237,7 @@ REEXPORTS: Mapping[str, tuple[str, ...]] = {
     "json.scanner.re": ("re",),
     "json.tool.argparse": ("argparse",),
     "json.tool.json": ("json",),
+    "json.tool.re": ("re",),
     "json.tool.sys": ("sys",),
     "logging.atexit": ("atexit",),
     "logging.collections": ("collections",),
@@ -281,12 +290,19 @@ REEXPORTS: Mapping[str, tuple[str, ...]] = {
     "pathlib._local.pwd": ("pwd",),
     "pathlib._local.sys": ("sys",),
     "pathlib._local.warnings": ("warnings",),
+    "pathlib._os.fcntl": ("fcntl",),
+    "pathlib._os.os": ("os",),
+    "pathlib._os.posix": ("posix",),
+    "pathlib._os.sys": ("sys",),
     "pathlib.fnmatch": ("fnmatch",),
     "pathlib.functools": ("functools",),
+    "pathlib.grp": ("grp",),
     "pathlib.io": ("io",),
     "pathlib.ntpath": ("ntpath",),
+    "pathlib.operator": ("operator",),
     "pathlib.os": ("os",),
     "pathlib.posixpath": ("posixpath",),
+    "pathlib.pwd": ("pwd",),
     "pathlib.re": ("re",),
     "pathlib.sys": ("sys",),
     "pathlib.warnings": ("warnings",),
@@ -336,6 +352,7 @@ REEXPORTS: Mapping[str, tuple[str, ...]] = {
     "subprocess.time": ("time",),
     "subprocess.types": ("types",),
     "subprocess.warnings": ("warnings",),
+    "sys._jit": ("sys._jit",),
     "sys.monitoring": ("sys.monitoring",),
     "tempfile._errno": ("errno",),
     "tempfile._functools": ("functools",),
@@ -349,6 +366,7 @@ REEXPORTS: Mapping[str, tuple[str, ...]] = {
     "tempfile._warnings": ("warnings",),
     "tempfile._weakref": ("weakref",),
     "textwrap.re": ("re",),
+    "threading._contextvars": ("_contextvars",),
     "threading._os": ("os",),
     "threading._sys": ("sys",),
     "threading.functools": ("functools",),
@@ -414,6 +432,8 @@ SUBMODULES: frozenset[str] = frozenset(
         "os.path",
         "pathlib._abc",
         "pathlib._local",
+        "pathlib._os",
+        "pathlib.types",
         "re._casefix",
         "re._compiler",
         "re._constants",
