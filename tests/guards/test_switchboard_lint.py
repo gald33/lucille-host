@@ -631,6 +631,18 @@ def test_the_runtime_may_use_its_own_private_members(source: str) -> None:
     assert rules(source, RUNTIME) == set()
 
 
+PROXY = "src/lucille_host/proxy.py"
+
+
+def test_os_exit_is_allowed_in_the_proxy_alone() -> None:
+    source = "import os\nos._exit(0)\n"
+    assert rules(source, PROXY) == set()
+    assert "private-member" in rules(source, RUNTIME)
+    # Only that function, as itself: no other private name, nor os._exit under another name.
+    assert "private-member" in rules("import os\nos._wrap_close\n", PROXY)
+    assert "private-member" in rules("import sys\nsys._getframe()\n", PROXY)
+
+
 def test_own_modules_are_this_packages_modules() -> None:
     modules = switchboard_lint.own_modules(REPO_ROOT)
     assert {"lucille_host", "lucille_host._exec", "lucille_host.ops", "lucille_host.cli"} <= modules

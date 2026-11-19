@@ -34,6 +34,8 @@ classifiers = [
 # Runtime dependencies. uv.lock pins these and everything they pull in to exact versions.
 dependencies = [
     "agent-switchboard==2.6.*",
+    # github.read's child (proxy.py) checks api.github.com's certificate against its bundle.
+    "certifi>=2024.2.2",
     "keyring>=25",
 ]
 

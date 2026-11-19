@@ -23,7 +23,7 @@ import pytest
 
 from lucille_host import jobs, spec
 from lucille_host.jobs import Abandoned, Job, Ready, check, execute, process, reply_body
-from lucille_host.ops import CATALOG_VERSION, OPERATIONS, About, InProcess, Operation
+from lucille_host.ops import OPERATIONS, About, InProcess, Operation, catalog_version
 from tests import _in_process
 from tests._host import MakeContext
 
@@ -164,7 +164,12 @@ def test_this_release_catalog_is_unchanged() -> None:
     them)."""
     assert all(op.in_process is None for op in OPERATIONS.values())
     assert "in_process" not in OPERATIONS["host.describe"]._definition()
-    assert CATALOG_VERSION == "06fe2f327b0916227970e377eaad94b064a7631bd7ff2696b3cef675bd607f35"
+    # github.read, added later, changed the catalog version; the three entries before it did not.
+    first_three = tuple(op for op in OPERATIONS.values() if op.name != "github.read")
+    assert (
+        catalog_version(first_three)
+        == "06fe2f327b0916227970e377eaad94b064a7631bd7ff2696b3cef675bd607f35"
+    )
 
 
 # --- running it -----------------------------------------------------------------------------------

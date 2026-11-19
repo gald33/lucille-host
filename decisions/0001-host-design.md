@@ -69,7 +69,11 @@ The host:
 
   Never the CLI, the MCP bridge, `sharing.share_new`, `register()`, an invite, or a hosted bridge. The
   host follows a heal the other side makes. It never starts one, and v0.1 has no heal verb.
-- **Outbound HTTPS to one hub only.**
+- **Outbound HTTPS to one hub only, and to `api.github.com` from `github.read`'s child when it is on.**
+  - `github.read`'s child (`src/lucille_host/proxy.py`), a separate process the catalog starts,
+    connects to `api.github.com` alone, port 443, to an address its fixed list allows, with TLS checked
+    against certifi's bundle (decisions/0003, "First use"). The `run` process itself talks only to the
+    hub.
   - The host talks only to the hub its pairing code named. It refuses any code that names a hub other
     than the configured Lucille hub (`https://switchboard.lucille-ai.com`), and any code that carries a
     token.

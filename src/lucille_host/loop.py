@@ -623,7 +623,10 @@ def _finished(outcome: jobs.Outcome, size: int) -> dict[str, Any]:
 
 class Runner:
     """One ``lucille-host run``: its threads, and what they share. ``tell``, when given, writes
-    one event of ``run --json-events``; ``lifeline``, when given, drains ``run`` at its end."""
+    one event of ``run --json-events``; ``lifeline``, when given, drains ``run`` at its end.
+    ``interpreter`` is the one the host runs on, which an entry whose program is the host's own
+    interpreter runs (``ops.HOST_PYTHON``); None, as a program that embeds the host gives, leaves
+    such an entry unavailable."""
 
     def __init__(
         self,
@@ -634,8 +637,10 @@ class Runner:
         say: Callable[[str], None],
         tell: Callable[[str, dict[str, Any]], None] | None = None,
         lifeline: Lifeline | None = None,
+        interpreter: str | None = None,
     ) -> None:
         self.dirs = dirs
+        self.interpreter = interpreter
         self.session = session
         self.link = session.link
         self.controls = controls
@@ -1618,6 +1623,10 @@ class Runner:
             own_dirs=tuple(str(own) for own in self.dirs.own),
             stop=lambda: self._halted(room),
             observe=observe,
+            interpreter=self.interpreter,
+            state_dir=str(self.dirs.state),
+            profile=self.dirs.profile,
+            environ=os.environ,
         )
 
     def _observer(self, job_id: str, body: dict[str, Any]) -> Callable[..., None] | None:

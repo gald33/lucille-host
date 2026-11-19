@@ -45,7 +45,8 @@ def test_set_list_remove(
     said = capsys.readouterr()
     assert said.out == (
         "saved gmail/app-password, to be sent only to imap.gmail.com, smtp.gmail.com. "
-        "Nothing uses saved credentials yet.\n"
+        "Only github.read uses saved credentials: those of the service github, bound to "
+        "api.github.com.\n"
     )
     assert _store(host_env).value("gmail", "app-password") == SECRET
 

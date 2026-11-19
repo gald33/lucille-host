@@ -9,11 +9,12 @@ import a module to look, because its own rules refuse a dynamic import, so it re
 
 The probe runs each interpreter it is given in a fresh, isolated process (``python -I``). That
 process imports, by explicit ``import`` statements, every standard-library module the runtime may
-import (``RUNTIME_IMPORTS`` and ``EXEC_IMPORTS`` in ``tools/guards/ast_lint.py``) and every
-submodule of those that are packages, then lists each attribute of each of them whose value is a
-module. The table keeps the union over the interpreters given, because a module's attributes
-change between Python versions. ``tests/guards/test_reexports.py`` runs the probe on the
-interpreter running the tests, on every CI runner, and fails if the table does not cover it.
+import (``RUNTIME_IMPORTS``, ``EXEC_IMPORTS`` and ``PROXY_IMPORTS`` in
+``tools/guards/ast_lint.py``) and every submodule of those that are packages, then lists each
+attribute of each of them whose value is a module. The table keeps the union over the
+interpreters given, because a module's attributes change between Python versions.
+``tests/guards/test_reexports.py`` runs the probe on the interpreter running the tests, on every
+CI runner, and fails if the table does not cover it.
 
 Usage: ``python tools/guards/reexport_probe.py [PYTHON ...]`` (default: this interpreter).
 """
@@ -28,17 +29,17 @@ from pathlib import Path
 if __package__ in (None, ""):  # run as a script: make ``tools.guards`` importable
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from tools.guards.ast_lint import EXEC_IMPORTS, RUNTIME_IMPORTS  # noqa: E402
+from tools.guards.ast_lint import EXEC_IMPORTS, PROXY_IMPORTS, RUNTIME_IMPORTS  # noqa: E402
 
 TABLE = Path(__file__).resolve().parent / "_reexports.py"
 # Allowlisted top-level modules that are not part of the standard library.
-NOT_STDLIB = frozenset({"keyring", "switchboard", "lucille_host"})
+NOT_STDLIB = frozenset({"certifi", "keyring", "switchboard", "lucille_host"})
 MARKER = "REEXPORT-PROBE:"
 
 
 def scanned_modules() -> tuple[str, ...]:
     """The standard-library modules the runtime may import, which the probe scans."""
-    return tuple(sorted((RUNTIME_IMPORTS | EXEC_IMPORTS) - NOT_STDLIB))
+    return tuple(sorted((RUNTIME_IMPORTS | EXEC_IMPORTS | PROXY_IMPORTS) - NOT_STDLIB))
 
 
 def _run(python: str, code: str) -> str:
@@ -134,7 +135,8 @@ def render(reexports: dict[str, set[str]], submodules: set[str], interpreters: l
         "",
         "from collections.abc import Mapping",
         "",
-        "# The standard-library modules scanned: RUNTIME_IMPORTS and EXEC_IMPORTS, less the rest.",
+        "# The standard-library modules scanned: RUNTIME_IMPORTS, EXEC_IMPORTS and PROXY_IMPORTS,",
+        "# less the rest.",
         "SCANNED: frozenset[str] = frozenset(",
         "    {",
         *(f'        "{name}",' for name in scanned_modules()),

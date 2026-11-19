@@ -610,6 +610,7 @@ list of what this project must never claim; a test checks them against it.
 | `host.describe` | Describe this computer's host | Lucille gets the host's version and protocol, the operating system family, which release's catalog it has, which operations are on, the names you gave your folders (never where they are), and a fingerprint of the local policy. | false | false |
 | `host.sleep` | Wait up to 4 minutes, for testing | Lucille gets how long the wait took and how it ended. | false | true |
 | `files.sha256` | Check a file's fingerprint | Lucille gets a code that identifies the file's exact contents, not the contents. | false | false |
+| `github.read` | Read from GitHub with a token kept here | Lucille gets GitHub's reply to one read it names: your repositories, issues, pull requests, commits or a README. The token goes only to api.github.com; Lucille learns only its name. | false | false |
 
 ## 9. Folder aliases and folder checks
 
@@ -990,6 +991,11 @@ anything is written) and its one-run lock, but it installs no signal handler, an
 the run record (section 16), which has one line per command of the CLI. Its environment check comes
 before the host-config read, the reverse of `run` (both only read).
 
+It runs no `github.read`: that operation's program is the host's own interpreter, which a program that
+embeds the host does not name (its `sys.executable` is its own, and may not run `-I -m
+lucille_host.proxy`). Enabled or not, `github.read` is refused `not_enabled` there, and `host.describe`
+leaves it out of `enabled_ops` (decisions/0003, "First use").
+
 - **`stop(raise_error=False)`** returns None for however the host ended, an `Exception` or not, and
   leaves it in `error`. `TimeoutError` (the host still runs after `timeout`) and an interruption of the
   caller's own wait still raise.
@@ -1031,9 +1037,11 @@ before the host-config read, the reverse of `run` (both only read).
 ## 15. `credential`: credentials kept on this computer
 
 `credential` stores credentials for online services (a password, an app token) in the system keyring of
-this computer ([decisions/0003-local-credentials.md](../decisions/0003-local-credentials.md)). Nothing
-uses a stored credential yet: no operation reads one, and nothing Lucille sends can read, list or change
-one. The verb writes text only in version 1 (section 14).
+this computer ([decisions/0003-local-credentials.md](../decisions/0003-local-credentials.md)). One
+operation uses a stored credential: `github.read`, off by default, reads one stored under the service
+`github` and bound to `api.github.com`, in a separate process, for the request that names it
+(decisions/0003, "First use"). Nothing Lucille sends can list or change one, nor read one any other way.
+The verb writes text only in version 1 (section 14).
 
 | Form | What it does |
 |---|---|
@@ -1046,8 +1054,8 @@ one. The verb writes text only in version 1 (section 14).
 a name with a newline at its end is refused.
 
 **Hosts.** Each credential is bound to the hosts given with `--host`, the only hosts it may ever be sent
-to, once something uses credentials (decisions/0003, "Use", rule 1). That use will enforce exactly what is
-stored here:
+to (decisions/0003, "Use", rule 1): `github.read` sends one only when its hosts include `api.github.com`.
+That use enforces exactly what is stored here:
 - A host is an exact DNS name: two labels or more, separated by `.`, each label 1 to 63 characters of
   `a`-`z`, `0`-`9` and `-`, not starting or ending with `-`, the last starting with a letter; 253
   characters at most. The whole host is matched: a host with a newline at its end is refused.

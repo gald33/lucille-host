@@ -362,3 +362,186 @@ def test_abandoned_while_running_kills_with_no_reply(
     assert (lines[3]["ended"], lines[3]["abandoned"]) == ("killed", True)
     # A user's kill request, if any, is left as it was: the room's abandonment is not one.
     assert kills == []
+
+
+# --- github.read: what the host fills, the child's environment, the HTTP status ---------------
+
+GITHUB_ARGS = {"credential": "personal", "path": "/user"}
+
+
+@pytest.fixture(autouse=True)
+def _no_keyring_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # keyring's keyringrc.cfg is looked for under XDG_CONFIG_HOME: point it at an empty folder, so
+    # a setting of the computer running the tests cannot turn github.read off here.
+    empty = tmp_path / "no-keyring-config"
+    empty.mkdir()
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(empty))
+
+
+def _stand_in_interpreter(tmp_path: Path, stderr_line: str, code: int = 0) -> str:
+    """An executable that stands in for the host's interpreter: it prints its environment and
+    its arguments, one per line, and writes ``stderr_line`` on standard error."""
+    script = tmp_path / "python-stand-in"
+    script.write_text(
+        "#!/bin/sh\n"
+        "/usr/bin/env\n"
+        'for a in "$@"; do echo "arg=$a"; done\n'
+        f"echo '{stderr_line}' >&2\n"
+        f"exit {code}\n"
+    )
+    script.chmod(0o755)
+    return str(script)
+
+
+def test_github_read_is_not_enabled_where_the_host_knows_no_interpreter(
+    make_context: MakeContext,
+) -> None:
+    # A program that embeds the host (library.py) gives none: the entry is unavailable there.
+    ctx = make_context(enabled=["host.describe", "github.read"], interpreter=None)
+    assert "github.read" in ctx.policy.enabled_ops
+    job = Job(job_id=JOB_ID, op="github.read", args=GITHUB_ARGS)
+    assert check(job, ctx) == "not_enabled"
+    assert describe_document(ctx)["enabled_ops"] == ["host.describe"]
+
+
+def test_github_read_runs_the_hosts_interpreter_with_the_values_the_host_fills(
+    tmp_path: Path, make_context: MakeContext, state_dir: Path
+) -> None:
+    interpreter = _stand_in_interpreter(tmp_path, "HTTP 200")
+    environ = {
+        "HOME": "/home/someone",
+        "DBUS_SESSION_BUS_ADDRESS": "unix:path=/run/user/1000/bus",
+        "XDG_RUNTIME_DIR": "/run/user/1000",
+        "HTTPS_PROXY": "http://proxy.example:3128",
+        "SSL_CERT_FILE": "/tmp/evil.pem",
+        "PYTHONPATH": "/tmp/evil",
+        "LD_PRELOAD": "/tmp/evil.so",
+    }
+    ctx = make_context(enabled=["github.read"], interpreter=interpreter, environ=environ)
+    assert describe_document(ctx)["enabled_ops"] == ["github.read"]
+    ready = check(Job(job_id=JOB_ID, op="github.read", args=GITHUB_ARGS), ctx)
+    assert isinstance(ready, Ready)
+    assert ready.cwd == "/"
+    assert ready.argv == (
+        interpreter,
+        *("-I", "-B", "-W", "ignore", "-X", "utf8", "-m", "lucille_host.proxy"),
+        *("--state", str(state_dir), "--profile", "default", "--", "personal", "/user"),
+    )
+    outcome = execute(ready, ctx)
+    assert (outcome.status, outcome.exit_code, outcome.stderr) == ("done", 0, "HTTP 200\n")
+    assert outcome.stdout is not None
+    lines = outcome.stdout.splitlines()
+    env = dict(line.split("=", 1) for line in lines if not line.startswith("arg="))
+    copied = (
+        {"HOME": "/home/someone"}
+        if sys.platform == "darwin"
+        else {
+            "DBUS_SESSION_BUS_ADDRESS": "unix:path=/run/user/1000/bus",
+            "XDG_RUNTIME_DIR": "/run/user/1000",
+        }
+    )
+    # macOS's /bin/sh adds a few of its own (PWD, SHLVL, _): only what the host passed counts.
+    passed = {k: v for k, v in env.items() if k not in ("PWD", "SHLVL", "_", "OLDPWD")}
+    assert passed == {"PATH": "/usr/bin:/bin", "LANG": "C", "LC_ALL": "C", **copied}
+    assert [line[4:] for line in lines if line.startswith("arg=")] == list(ready.argv[1:])
+    execution = json.loads(ctx.audit.path.read_text().splitlines()[-1])
+    assert execution["kind"] == "execution" and execution["http_status"] == 200
+    assert execution["executable"] == interpreter
+
+
+@pytest.mark.parametrize(
+    "stderr_line",
+    [
+        "lucille-host proxy: no such credential",
+        "HTTP 2000",
+        "HTTP 099",
+        "HTTP 600",
+        "HTTP ٢٠٠",
+    ],
+)
+def test_no_http_status_is_recorded_when_the_child_reported_none(
+    tmp_path: Path, make_context: MakeContext, stderr_line: str
+) -> None:
+    interpreter = _stand_in_interpreter(tmp_path, stderr_line, code=2)
+    ctx = make_context(enabled=["github.read"], interpreter=interpreter)
+    ready = check(Job(job_id=JOB_ID, op="github.read", args=GITHUB_ARGS), ctx)
+    assert isinstance(ready, Ready)
+    outcome = execute(ready, ctx)
+    # The child's exit codes are data under done, never a refusal of the protocol.
+    assert (outcome.status, outcome.exit_code) == ("done", 2)
+    execution = json.loads(ctx.audit.path.read_text().splitlines()[-1])
+    assert "http_status" not in execution
+
+
+def test_other_children_get_the_fixed_environment_only(
+    tmp_path: Path, make_context: MakeContext
+) -> None:
+    root = tmp_path / "root"
+    root.mkdir()
+    (root / "a.txt").write_text("a")
+    ctx = make_context(
+        enabled=["files.sha256"],
+        roots={"docs": root},
+        environ={"HOME": "/h", "XDG_RUNTIME_DIR": "/r"},
+    )
+    ready = check(
+        Job(job_id=JOB_ID, op="files.sha256", args={"root": "docs", "path": "a.txt"}), ctx
+    )
+    assert isinstance(ready, Ready)
+    assert ready.operation.child_env(ctx.os_family, {"HOME": "/h"}) == {
+        "PATH": "/usr/bin:/bin",
+        "LANG": "C",
+        "LC_ALL": "C",
+    }
+    assert execute(ready, ctx).status == "done"
+
+
+def _keyring_settings(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, how: str) -> None:
+    """Keyring's own settings, in the host's environment: none, or one that turns it off."""
+    monkeypatch.delenv("PYTHON_KEYRING_BACKEND", raising=False)
+    config = tmp_path / "custom-config"
+    config.mkdir()
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(config))
+    if how == "null":
+        monkeypatch.setenv("PYTHON_KEYRING_BACKEND", "keyring.backends.null.Keyring")
+    elif how == "fail":
+        monkeypatch.setenv("PYTHON_KEYRING_BACKEND", "keyring.backends.fail.Keyring")
+    elif how == "keyringrc":
+        folder = config / "python_keyring"
+        folder.mkdir()
+        (folder / "keyringrc.cfg").write_text(
+            "[backend]\ndefault-keyring = keyring.backends.null.Keyring\n"
+        )
+
+
+@pytest.mark.parametrize("how", ["null", "fail", "keyringrc"])
+def test_github_read_is_refused_before_its_child_starts_while_keyring_is_off(
+    tmp_path: Path, make_context: MakeContext, monkeypatch: pytest.MonkeyPatch, how: str
+) -> None:
+    """The child's environment carries neither PYTHON_KEYRING_BACKEND nor XDG_CONFIG_HOME, so it
+    cannot see keyring's off switch: the host refuses the request itself, and starts nothing."""
+    started = tmp_path / "started"
+    script = tmp_path / "python-stand-in"
+    script.write_text(f"#!/bin/sh\ntouch '{started}'\necho 'HTTP 200' >&2\n")
+    script.chmod(0o755)
+    _keyring_settings(tmp_path, monkeypatch, how)
+    ctx = make_context(enabled=["host.describe", "github.read"], interpreter=str(script))
+    job = Job(job_id=JOB_ID, op="github.read", args=GITHUB_ARGS)
+    assert check(job, ctx) == "not_enabled"
+    reply = json.loads(process(job, ctx))
+    assert (reply["status"], reply["code"]) == ("refused", "not_enabled")
+    assert not started.exists()
+    kinds = [json.loads(line)["kind"] for line in ctx.audit.path.read_text().splitlines()]
+    assert "start" not in kinds
+    assert describe_document(ctx)["enabled_ops"] == ["host.describe"]
+
+
+def test_github_read_runs_with_keyring_on_and_the_off_switch_spares_other_operations(
+    tmp_path: Path, make_context: MakeContext, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    script = _stand_in_interpreter(tmp_path, "HTTP 200")
+    _keyring_settings(tmp_path, monkeypatch, "none")
+    ctx = make_context(enabled=["github.read", "host.sleep"], interpreter=script)
+    assert isinstance(check(Job(job_id=JOB_ID, op="github.read", args=GITHUB_ARGS), ctx), Ready)
+    monkeypatch.setenv("PYTHON_KEYRING_BACKEND", "keyring.backends.null.Keyring")
+    assert isinstance(check(Job(job_id=JOB_ID, op="host.sleep", args={"n": 1}), ctx), Ready)

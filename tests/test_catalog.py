@@ -15,6 +15,10 @@ from lucille_host import _exec, spec
 from lucille_host.jobs import Context, Job, Ready, check
 from lucille_host.ops import (
     CATALOG_VERSION,
+    HOST_FILLED,
+    HOST_PROFILE,
+    HOST_PYTHON,
+    HOST_STATE,
     MAX_TIMEOUT_S,
     OPERATIONS,
     Operation,
@@ -47,7 +51,7 @@ def _spec_args(op: str) -> dict[str, Any]:
 
 
 def test_catalog_entries() -> None:
-    assert set(OPERATIONS) == {"host.describe", "host.sleep", "files.sha256"}
+    assert set(OPERATIONS) == {"host.describe", "host.sleep", "files.sha256", "github.read"}
     with pytest.raises(TypeError):
         OPERATIONS["host.shell"] = OPERATIONS["host.describe"]  # type: ignore[index]
 
@@ -79,11 +83,40 @@ def test_catalog_entries() -> None:
         hostile,
     )
 
+    github = OPERATIONS["github.read"]
+    assert not github.default_enabled and github.runs_host_python
+    proxy_argv = (
+        HOST_PYTHON,
+        *("-I", "-B", "-W", "ignore", "-X", "utf8", "-m", "lucille_host.proxy"),
+        *("--state", HOST_STATE, "--profile", HOST_PROFILE, "--", "{credential}", "{path}"),
+    )
+    assert dict(github.argv or {}) == {"linux": proxy_argv, "macos": proxy_argv}
+    assert dict(github.env_copy or {}) == {
+        "macos": ("HOME",),
+        "linux": ("DBUS_SESSION_BUS_ADDRESS", "XDG_RUNTIME_DIR"),
+    }
+    assert github.timeout({"credential": "personal", "path": "/user"}) == 30
+    host = {HOST_PYTHON: "/opt/py/bin/python3", HOST_STATE: "/s t", HOST_PROFILE: "work"}
+    assert github.build_argv("linux", {"credential": "personal", "path": "/user"}, host) == (
+        "/opt/py/bin/python3",
+        *("-I", "-B", "-W", "ignore", "-X", "utf8", "-m", "lucille_host.proxy"),
+        *("--state", "/s t", "--profile", "work", "--", "personal", "/user"),
+    )
+    # A value the host fills is never taken from a request, and one it lacks fails the build.
+    with pytest.raises(ValueError):
+        github.build_argv("linux", {"credential": "personal", "path": "/user"})
+    with pytest.raises(ValueError):
+        github.build_argv(
+            "linux", {"credential": "personal", "path": "/user"}, {HOST_PYTHON: "/py"}
+        )
+
     for op in OPERATIONS.values():
         if op.argv is None:
             continue
         for family, template in op.argv.items():
-            assert template[0].startswith("/"), (op.name, family)
+            assert template[0].startswith("/") or template[0] == HOST_PYTHON, (op.name, family)
+            # A host-filled element is never a request's placeholder.
+            assert not HOST_FILLED & {e for e in template if PLACEHOLDER.fullmatch(e)}
             properties = op.params()["properties"]
             for index, element in enumerate(template):
                 if PLACEHOLDER.fullmatch(element) is None:
@@ -136,16 +169,44 @@ def test_definition_hash_covers_operands_schema_limits_and_environment(
     monkeypatch.undo()
     monkeypatch.setattr("lucille_host.ops.MAX_TIMEOUT_S", 301)
     assert sha.definition_hash != before
+    monkeypatch.undo()
+    # The names copied from the host's environment, per OS, and which elements the host fills.
+    github = OPERATIONS["github.read"]
+    template = dict(github.argv or {})
+    for changed in (
+        dataclasses.replace(github, env_copy=MappingProxyType({"macos": ("HOME",)})),
+        dataclasses.replace(
+            github,
+            env_copy=MappingProxyType(
+                {**dict(github.env_copy or {}), "linux": ("XDG_RUNTIME_DIR", "SSL_CERT_FILE")}
+            ),
+        ),
+        dataclasses.replace(
+            github,
+            argv=MappingProxyType(
+                {f: tuple("/s" if e == HOST_STATE else e for e in t) for f, t in template.items()}
+            ),
+        ),
+        dataclasses.replace(
+            github,
+            argv=MappingProxyType({f: ("/usr/bin/python3", *t[1:]) for f, t in template.items()}),
+        ),
+    ):
+        assert changed.definition_hash != github.definition_hash, changed
 
 
 # This release's hashes, from before the catalog carried words for shells: adding the words changed
 # none of them, so no install's enabled entry turned off.
+# github.read was added later, with a field the others do not write (env_copy): adding the field
+# changed none of the three hashes before it.
 HASHES = {
     "host.describe": "734b854a4e4e0fb7128dc9cce6147de7e7386c20a92b44cf77086031240cc0c4",
     "host.sleep": "868830c4433044a8d4cb3e3a39ab7985d44a6cce394362a23ae7fcfaa79a5e8d",
     "files.sha256": "1c29598400572d7e1f93e5cc3ee6df17edfad5be1a78c7e33432a2704bfdddea",
+    "github.read": "7f32ad23f86007c7a605027655ff2edd341b2395e9a9554ba08cddaedff60906",
 }
 VERSION_BEFORE_WORDS = "06fe2f327b0916227970e377eaad94b064a7631bd7ff2696b3cef675bd607f35"
+VERSION_WITH_GITHUB_READ = "49f81c2d24e04c15a0b38268434523da60ee4cb5bbb8283c8f4f725e15711652"
 
 
 def _with_about(op: Operation, **changes: Any) -> Operation:
@@ -154,7 +215,11 @@ def _with_about(op: Operation, **changes: Any) -> Operation:
 
 def test_copy_fields_outside_definition_hash() -> None:
     assert {name: op.definition_hash for name, op in OPERATIONS.items()} == HASHES
-    assert CATALOG_VERSION == VERSION_BEFORE_WORDS == catalog_version(tuple(OPERATIONS.values()))
+    assert (
+        CATALOG_VERSION == VERSION_WITH_GITHUB_READ == catalog_version(tuple(OPERATIONS.values()))
+    )
+    first_three = tuple(op for op in OPERATIONS.values() if op.name != "github.read")
+    assert catalog_version(first_three) == VERSION_BEFORE_WORDS
     # summary, sends and diagnostic describe an entry and decide nothing: changing them leaves
     # every hash, and the catalog version, as they are.
     reworded = []
@@ -276,7 +341,7 @@ def test_args_valid_refuses_what_json_schema_lets_through() -> None:
 
 SPEC_STEPS_HERE = {"paused", "unknown_op", "not_enabled", "bad_args", "path_outside_root"}
 # Operations the spec has and this release's catalog does not yet.
-SPEC_ONLY = frozenset({"files.search", "github.read"})
+SPEC_ONLY = frozenset({"files.search"})
 
 
 def _fixture_context(

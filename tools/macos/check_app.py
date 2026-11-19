@@ -394,11 +394,19 @@ FORBIDDEN_LIBRARIES: Final = (
 # item's name, and the Open panel's button. The app's name in them comes from tools/macos/pins.toml,
 # which the app reads back from its Info.plist.
 APP_NAME: Final = build_app.load_pins().app_name
-ABILITY_TITLES: Final = {"files.sha256": "Check a file's fingerprint"}
+ABILITY_TITLES: Final = {
+    "files.sha256": "Check a file's fingerprint",
+    "github.read": "Read from GitHub with a token kept here",
+}
 ABILITY_DETAILS: Final = {
     "files.sha256": (
         "Lucille gets a code that identifies the file's exact contents, not the contents."
-    )
+    ),
+    "github.read": (
+        "Lucille gets GitHub's reply to one read it names: your repositories, issues, pull "
+        "requests, commits or a README. The token goes only to api.github.com; Lucille learns "
+        "only its name."
+    ),
 }
 WELCOME_TITLE: Final = f"{APP_NAME} is in your menu bar"
 PURPOSE: Final = build_app.folder_usage(APP_NAME)

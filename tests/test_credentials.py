@@ -267,16 +267,17 @@ def _importers() -> list[tuple[str, str]]:
     return sorted(found)
 
 
-def test_only_the_credential_verb_imports_it() -> None:
-    """No request handler, operation or reply can reach a credential: no runtime module but this
-    one names the module, except the command line's ``credential`` verb, in its own function, so
-    that no other verb's process (``run`` among them) loads it. When an operation is allowed to
-    use one, this test changes with the design record."""
-    assert _importers() == [("cli.py", "_credential_verb")]
+def test_only_the_credential_verb_and_the_proxy_import_it() -> None:
+    """No request handler or reply can reach a credential: no runtime module but this one names
+    the module, except the command line's ``credential`` verb, in its own function, so that no
+    other verb's process (``run`` among them) loads it, and ``github.read``'s child, ``proxy.py``,
+    a separate process, in the one function that reads the credential (decisions/0003, "First
+    use")."""
+    assert _importers() == [("cli.py", "_credential_verb"), ("proxy.py", "_read_credential")]
 
 
 def test_the_credential_verb_never_reads_a_value() -> None:
-    """The verb saves, lists and removes; it never reads a value back (nothing uses one yet)."""
+    """The verb saves, lists and removes; it never reads a value back (only the proxy does)."""
     tree = ast.parse((PACKAGE / "cli.py").read_text(encoding="utf-8"))
     verb = [
         node
@@ -294,12 +295,17 @@ def test_the_credential_verb_never_reads_a_value() -> None:
 
 
 def test_importing_the_command_line_does_not_load_it() -> None:
-    """``run`` and every other verb but ``credential`` run without the module loaded."""
-    code = "import sys, lucille_host.cli; print('lucille_host.credentials' in sys.modules)"
+    """``run`` and every other verb but ``credential`` run without the module loaded, and without
+    the proxy's: ``github.read`` reads a credential only in its own child process."""
+    code = (
+        "import sys, lucille_host.cli, lucille_host.loop, lucille_host.jobs, lucille_host.library\n"
+        "print(sorted(m for m in ('lucille_host.credentials', 'lucille_host.proxy')"
+        " if m in sys.modules))"
+    )
     done = subprocess.run(
         [sys.executable, "-I", "-c", code], capture_output=True, text=True, check=True
     )
-    assert done.stdout.strip() == "False", done.stdout + done.stderr
+    assert done.stdout.strip() == "[]", done.stdout + done.stderr
 
 
 @pytest.mark.parametrize(

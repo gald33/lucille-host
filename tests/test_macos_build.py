@@ -720,7 +720,7 @@ def test_the_abilities_menu_says_the_cores_words() -> None:
         for name, op in OPERATIONS.items()
         if not op.about.diagnostic and name != "host.describe"
     }
-    assert set(listed) == {"files.sha256"}
+    assert set(listed) == {"files.sha256", "github.read"}
     assert OPERATIONS["host.sleep"].about.diagnostic
     # What the ui check looks for in the menu is the core's words for each listed ability.
     assert check_app.ABILITY_TITLES == {name: about.summary for name, about in listed.items()}
@@ -1200,11 +1200,14 @@ def test_content_sending_ops_ask_first() -> None:
     stub = json.loads(
         (check_app.CLI_FIXTURES / "ops-list-sends-file-content.json").read_text(encoding="utf-8")
     )
-    assert [op["sends_file_content"] for op in stub["stdout"]] == [False, False, True]
+    assert [op["sends_file_content"] for op in stub["stdout"]] == [False, False, True, False]
     selftest = _SELF_TEST.read_text(encoding="utf-8")
     assert "ops-list-sends-file-content" in selftest
     assert "let questionOn: [Bool] = content.map { $0.asksFirst(turningOn: true) }" in selftest
-    assert "questionOn == [false, false, true] && questionOff == [false, false, false]" in selftest
+    assert (
+        "questionOn == [false, false, true, false] && questionOff == [false, false, false, false]"
+        in selftest
+    )
 
 
 def test_the_broad_question_follows_the_hosts_kind() -> None:

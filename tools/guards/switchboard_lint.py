@@ -75,7 +75,9 @@ In the runtime package:
   package's own modules (``lucille_host._exec._run``, not ``_switchboard.CLIENT._call``), and no
   such name imported from a module outside this package (``from tempfile import _os``). A
   private member of a library object, such as ``Client._call``, which posts to any hub path,
-  would get past every rule above.
+  would get past every rule above. One exception, :data:`DOCUMENTED_UNDERSCORE`: ``os._exit``,
+  which Python documents as public, in ``github.read``'s child (``src/lucille_host/proxy.py``)
+  alone.
 
 What this lint cannot see. It checks names written in the source, resolved through the file's
 imports and through the wrapper; a module re-exported by another module is not followed (the AST
@@ -122,6 +124,13 @@ from tools.guards._common import (  # noqa: E402
 RUNTIME_PREFIX = "src/lucille_host/"
 CONFORMANCE_PREFIX = "src/lucille_host/conformance/"
 SWITCHBOARD_MODULE = "src/lucille_host/_switchboard.py"
+# Standard-library functions whose names start with an underscore and which Python documents as
+# public, by the one file allowed each. github.read's child ends with os._exit, so that nothing it
+# did not write itself (a finalizer's text, a failed final flush) reaches standard error after its
+# own handler (decisions/0003, "First use", step 0).
+DOCUMENTED_UNDERSCORE: Mapping[str, frozenset[str]] = {
+    "src/lucille_host/proxy.py": frozenset({"os._exit"}),
+}
 WRAPPER = "lucille_host._switchboard"
 # Where the fake Lucille lives: exempt from the share-new, sharing-member and surface rules only.
 SURFACE_EXEMPT_PREFIXES = (CONFORMANCE_PREFIX, "tests/")
@@ -573,7 +582,10 @@ def check_source(
             )
         if _is_runtime(rel):
             private = _private_member(ref, names, modules)
-            if private is not None:
+            documented = DOCUMENTED_UNDERSCORE.get(rel, frozenset())
+            if private is not None and not (
+                ref.qualified in documented and names == [ref.qualified]
+            ):
                 found.append(
                     Violation(
                         rel,

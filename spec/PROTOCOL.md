@@ -493,7 +493,7 @@ change ([§21](#21-versioning)).
 | `host.sleep` | `{n}`: an integer from 1 to 240 | Sleeps `n` seconds. Diagnostic. Its catalog timeout is `n` + 30 s. |
 | `files.sha256` | `{root, path}` | The SHA-256 digest of one file. `root` is a folder alias; `path` is a string of 1 to 1024 characters with no U+0000. |
 | `files.search` | `{root, pattern, fixed_strings, max_count}` | Searches the files under `root`. `pattern` is a string of 1 to 256 characters with no U+0000; `fixed_strings` is a boolean; `max_count` is an integer from 1 to 200, the most matches per file. All four are required. Its reply carries lines of the files it searched. |
-| `github.read` | `{credential, path}` | Reads one GitHub REST API endpoint with a credential stored on the computer, which never leaves it. `credential` is a credential's name, 1 to 64 characters matching `^[a-z0-9][a-z0-9._-]{0,63}$`; the host uses the one it stores as `github/<credential>`. `path` is a string of 1 to 1024 characters matching the schema's pattern: one of the listed read endpoints, with only the listed query keys (below). Both are required. Its reply carries GitHub's response. |
+| `github.read` | `{credential, path}` | Reads one GitHub REST API endpoint with a credential stored on the computer, which the host sends to `api.github.com` alone and never to Lucille. `credential` is a credential's name, 1 to 64 characters matching `^[a-z0-9][a-z0-9._-]{0,63}$`; the host uses the one it stores as `github/<credential>`. `path` is a string of 1 to 1024 characters matching the schema's pattern: one of the listed read endpoints, with only the listed query keys (below). Both are required. Its reply carries GitHub's response. |
 
 - **`github.read`'s paths.** `path` is `/user`, `/user/repos`, `/search/issues`, or, under
   `/repos/{owner}/{repo}`, the repository itself, `/issues`, `/issues/{number}`, `/issues/{number}/comments`,
@@ -504,7 +504,11 @@ change ([§21](#21-versioning)).
   is a positive integer of at most 10 digits. Any other path is refused `bad_args`, before the host reads a
   credential or opens a connection. The host sends only `GET`, only to `https://api.github.com`, and never
   follows a redirect. How it uses the credential, and what it refuses, is in
-  [decisions/0003](../decisions/0003-local-credentials.md) ("First use").
+  [decisions/0003](../decisions/0003-local-credentials.md) ("First use"). The host also refuses it
+  `not_enabled`, though its policy enables it, while it cannot run it: where it does not know its own
+  interpreter (a program that embeds the host), and while keyring's own settings turn the keyring off in
+  the host's environment, whose child could not see them. `host.describe` then leaves it out of
+  `enabled_ops`.
 - A **folder alias** (`root`) is a name the host's local policy maps to a folder: 1 to 32 characters matching
   `^[a-z][a-z0-9_-]{0,31}$`. A request never carries a folder's path.
 - An argument that breaks its operation's schema (an extra key, a missing key, a wrong type, a value out of
@@ -591,7 +595,7 @@ and never followed; 2 when the credential is missing, is not bound to `api.githu
 of a GitHub token; 4 when the address check, the connection or the TLS handshake failed, so that nothing
 was sent, or when the connection broke before the response was read; 5 when the
 response's headers passed 64 KiB or its body 1 MiB, or it came compressed (any `Content-Encoding` but
-`identity`); 6 for anything unexpected in the host's own code; 1 when the interpreter could not start the
+`identity`, or any transfer coding but a plain `chunked`); 6 for anything unexpected in the host's own code; 1 when the interpreter could not start the
 host's module at all, before any credential was read, and then `stderr` is Python's own traceback. Each of 2,
 4, 5 and 6 writes one fixed line on `stderr`, never an error's text. Standard output is written once, at the
 end: 2 and 4 write none, 5 writes the part of an uncompressed body it read, and 6 writes none unless the
