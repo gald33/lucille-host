@@ -642,7 +642,12 @@ either stream.
   "attachments_truncated", "message_truncated"}`. `text` is the `text/plain` part, or, with none, the
   `text/html` part turned into text (`text_from` says which, or is null with neither), cut at 32 KiB of
   UTF-8 (`text_truncated`). `message_truncated` is true when the message passed the 4 MiB the host
-  fetches. Header values and `content_type` are cut at 1 KiB, `to` and `cc` at 4 KiB, `filename` at 255
+  fetches. A private-key block (§13) that does not end in the text takes the rest of it, and sets
+  `text_truncated`; one that begins in another field, a subject say, and does not end there takes the
+  text up to the first end of a block, or the whole text, with `text_truncated`, when it has none, so a
+  key whose header is in one field and whose body is in the text is not returned. Not caught: a block
+  whose header the redaction does not read as one (§13), and one split across messages. Header values
+  and `content_type` are cut at 1 KiB, `to` and `cc` at 4 KiB, `filename` at 255
   bytes; `attachments_truncated` is true when attachments were left out to fit, below.
 - Every document fits: its stdout's `stream-size` ([§13](#13-strings-numbers-sizes-and-output)) is at
   most 60 KiB. Past that, the child leaves out, in order: a read's last attachments while they take more

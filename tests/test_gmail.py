@@ -726,23 +726,51 @@ def test_a_password_where_the_fit_cuts_the_text_leaves_none_of_it(tmp_path: Path
     assert any(0 < n < len(gmail.TOKEN_MARK) for n in kept)
 
 
-def test_an_unterminated_key_block_in_a_message_is_redacted_within_its_string(
-    tmp_path: Path,
-) -> None:
-    # Anyone who can mail the user can put a private-key header in a subject or a text. The child
-    # takes the block to the end of that string only: the document stays JSON, every other field
-    # is whole, and the host's own pass over the stream finds nothing to run to its end.
-    begin = "-----BEGIN PRIVATE KEY-----"
-    raw = _message(subject=f"keys {begin}", text=f"Hello.\n{begin}\nMIIE\nand the rest")
+BEGIN_KEY = "-----BEGIN PRIVATE KEY-----"
+END_KEY = "-----END PRIVATE KEY-----"
+
+
+def _read_doc(tmp_path: Path, raw: bytes) -> tuple[Any, gmail.Reply]:
     reply = _run(tmp_path, "gmail.read", {"id": str(MSGID)}, _server(raw))[0]
     doc = _doc(reply)
-    assert doc["subject"] == "keys [redacted private key]"
-    assert doc["text"] == "Hello.\n[redacted private key]"
-    assert doc["from"] == "Billing <billing@example.com>" and doc["text_truncated"] is False
+    # Whatever a block took, the host's own pass finds nothing more to take: the stream is whole
+    # and parses.
     rendered, truncated = _output.render(reply.stdout, _output.STREAM_CAP)
     assert truncated is False and json.loads(rendered) == doc
-    # A search's subjects too.
-    box = [Message(1, MSGID, MSGID, _message(subject=f"x {begin} y"))]
+    return doc, reply
+
+
+def test_a_key_block_that_takes_the_end_of_the_text_is_flagged(tmp_path: Path) -> None:
+    # Anyone who can mail the user can put a private-key header in a message. The child takes the
+    # block to the end of the text, never past it, and says the text is not whole.
+    doc, _ = _read_doc(tmp_path, _message(text=f"Hello.\n{BEGIN_KEY}\nMIIE\nand the rest"))
+    assert doc["text"] == "Hello.\n[redacted private key]" and doc["text_truncated"] is True
+    assert doc["from"] == "Billing <billing@example.com>" and doc["subject"] == "Invoice"
+    whole, _ = _read_doc(tmp_path, _message(text=f"A\n{BEGIN_KEY}\nMIIE\n{END_KEY}\nB"))
+    assert whole["text"] == "A\n[redacted private key]\nB\n" and whole["text_truncated"] is False
+
+
+def test_a_key_block_begun_in_the_subject_takes_the_text_up_to_its_end(tmp_path: Path) -> None:
+    # Its header in the subject, its body and its end in the text: the text is taken up to the
+    # block's end, so the key's body is not in it.
+    raw = _message(subject=f"keys {BEGIN_KEY}", text=f"MIIEvQIB\nAAAA\n{END_KEY}\nThanks.")
+    doc, reply = _read_doc(tmp_path, raw)
+    assert doc["subject"] == "keys [redacted private key]"
+    assert doc["text"] == "[redacted private key]\nThanks.\n" and doc["text_truncated"] is False
+    assert b"MIIEvQIB" not in reply.stdout
+    # With no end in the text, the text is taken whole, and said not to be.
+    raw = _message(subject=f"keys {BEGIN_KEY}", text="MIIEvQIB\nAAAA\nmore")
+    doc, reply = _read_doc(tmp_path, raw)
+    assert doc["text"] == "[redacted private key]" and doc["text_truncated"] is True
+    assert b"MIIEvQIB" not in reply.stdout
+    # A block in an attachment's name does the same.
+    raw = _message(text="MIIEvQIB", attachments=((f"{BEGIN_KEY}.pem", "text/plain", b"x"),))
+    doc, _ = _read_doc(tmp_path, raw)
+    assert doc["text"] == "[redacted private key]" and doc["text_truncated"] is True
+
+
+def test_a_key_block_in_a_search_subject_ends_with_it(tmp_path: Path) -> None:
+    box = [Message(1, MSGID, MSGID, _message(subject=f"x {BEGIN_KEY} y"))]
     reply = _run(tmp_path, "gmail.search", {}, FakeGmail(messages={"INBOX": box}))[0]
     rendered, truncated = _output.render(reply.stdout, _output.STREAM_CAP)
     assert truncated is False

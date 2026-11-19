@@ -29,10 +29,12 @@ on standard error, holding no value and nothing Gmail wrote:
 7. It writes one JSON document on standard output on success. Every string in it has the app
    password replaced (in any case, with or without spaces or hyphens between its letters, and in
    base64 at each alignment), and the host's own redaction applied to it alone, so that no
-   private-key block runs past its string, before anything is cut; then each field is cut to its
-   limit, and the document is made to fit :data:`DOCUMENT_CAP` as rule ``stream-size`` measures it
-   (:func:`_fit`). Descriptors 1 and 2 point at the null device from its start, and it ends with
-   ``os._exit``.
+   private-key block runs past its string; a block that took the end of a read's text sets
+   ``text_truncated``, and one begun in another field takes the text up to the first end of a
+   block, or whole (:func:`_close_blocks`). All of that comes before anything is cut; then each
+   field is cut to its limit, and the document is made to fit :data:`DOCUMENT_CAP` as rule
+   ``stream-size`` measures it (:func:`_fit`). Descriptors 1 and 2 point at the null device from
+   its start, and it ends with ``os._exit``.
 """
 
 from __future__ import annotations
@@ -55,7 +57,7 @@ from pathlib import Path
 from typing import Any, Final, NoReturn
 
 from lucille_host import proxy
-from lucille_host._output import TOKEN_MARK, redact
+from lucille_host._output import PRIVATE_KEY_MARK, TOKEN_MARK, key_block_end, redact_to_end
 
 __all__ = [
     "HOST",
@@ -828,26 +830,49 @@ class _Scrub:
             "[\\s-]{0,3}".join(re.escape(letter) for letter in password), re.IGNORECASE
         )
         self.forms = [form.decode("ascii") for form in _secrets(password)]
+        # The fields where a private-key block began and did not end.
+        self.opened: set[str | None] = set()
 
-    def text(self, value: str) -> str:
+    def text(self, value: str, key: str | None = None) -> str:
         # The host's own redaction, string by string: a private-key block that does not end in
         # this string is taken to its end, never past it, so the document stays JSON and the host's
         # pass over the whole stream finds no block left to run to its end.
-        value = redact(value)
+        value, to_end = redact_to_end(value)
+        if to_end:
+            self.opened.add(key)
         value = self.pattern.sub(TOKEN_MARK, value)
         for form in self.forms:
             value = value.replace(form, TOKEN_MARK)
         # A lone surrogate (an undecodable byte) cannot be written as UTF-8.
         return _SURROGATE.sub("\ufffd", value)
 
-    def walk(self, value: Any) -> Any:
+    def walk(self, value: Any, key: str | None = None) -> Any:
         if isinstance(value, str):
-            return self.text(value)
+            return self.text(value, key)
         if isinstance(value, list):
-            return [self.walk(item) for item in value]
+            return [self.walk(item, key) for item in value]
         if isinstance(value, dict):
-            return {key: self.walk(item) for key, item in value.items()}
+            return {name: self.walk(item, name) for name, item in value.items()}
         return value
+
+
+def _close_blocks(document: dict[str, Any], opened: set[str | None]) -> None:
+    """A read's text, where a private-key block took part of it: a block that took the end of
+    the text sets ``text_truncated``; and one that began in another field (a subject, say) and did
+    not end there may go on in the text, so the text is taken up to the first end of a block, or
+    wholly when it has none, and ``text_truncated`` is set then too."""
+    text = document.get("text")
+    if not isinstance(text, str) or "text_truncated" not in document:
+        return
+    if "text" in opened:
+        document["text_truncated"] = True
+    if opened - {"text"}:
+        end = key_block_end(text)
+        if end is None:
+            document["text"] = PRIVATE_KEY_MARK
+            document["text_truncated"] = True
+        else:
+            document["text"] = PRIVATE_KEY_MARK + text[end:]
 
 
 def _cut_fields(value: Any) -> None:
@@ -870,7 +895,9 @@ def _bounded(document: dict[str, Any], password: str) -> bytes:
     """What the child writes for ``document``: scrubbed first, so no cut can leave a part of the
     password, then cut field by field, then fit to the stream, then scrubbed once more as
     bytes."""
-    cleaned = _Scrub(password).walk(document)
+    scrubber = _Scrub(password)
+    cleaned = scrubber.walk(document)
+    _close_blocks(cleaned, scrubber.opened)
     _cut_fields(cleaned)
     return scrub(_fit(cleaned).encode("utf-8"), password)
 

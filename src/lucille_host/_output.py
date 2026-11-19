@@ -29,6 +29,7 @@ __all__ = [
     "decode",
     "json_size",
     "has_key_block",
+    "key_block_end",
     "redact",
     "redact_to_end",
     "render",
@@ -72,6 +73,12 @@ def decode(raw: bytes) -> str:
 def has_key_block(text: str) -> bool:
     """Whether a private-key block begins in ``text``, as the redaction pass reads one."""
     return _PEM_BEGIN.search(text) is not None
+
+
+def key_block_end(text: str) -> int | None:
+    """Where the first end of a private-key block in ``text`` ends; None when there is none."""
+    found = _PEM_END.search(text)
+    return None if found is None else found.end()
 
 
 def redact(text: str) -> str:
