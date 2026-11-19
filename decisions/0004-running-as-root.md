@@ -37,6 +37,8 @@ and a `{"type":"error","code":"startup_refused"}` object under `--json` (`run`: 
 
 **Observed as root:** `status`, `pair status`, `credential list`, `forget` exit 1 with that sentence, `run`
 exits 24, `status --json` writes the `startup_refused` object, and `pair --store-file` is refused too.
+`run` takes no `--json`: `run --json` is a `usage` error for both uids. `run --json-events` as root writes
+`{"v":1,"type":"stopped","reason":"startup_refused"}` and exits 24.
 `--version` works. The refused verbs wrote no file: the tree left after all of them held only what `pause` made.
 
 ### 1.2 What is not refused: the verbs that never open a store
@@ -67,15 +69,18 @@ so the new file belongs to whoever ran the verb. Of the table's verbs, those tha
 they succeed.
 
 **Consequence, observed, in either order.**
-- *Root first.* After a root `pause` in a `HOME` a user also uses, the profile folder is `drwx------ root`,
-  and the user's `status` and `resume` fail with `Permission denied (.../lucille-host/default)` (exit 1).
+- *Root first.* After a root `pause` or `resume` in a `HOME` a user also uses, **every folder `ensure_dir`
+  had to create** is `drwx------ root`: on a `HOME` with no `.local` that is `.local`, `.local/state`,
+  `.local/state/lucille-host` and the profile folder (and `.config`, `.config/lucille-host` and the profile
+  folder for the config side). The user's `status` and `resume` then fail with `Permission denied
+  (.../lucille-host/default)` (exit 1). Where `~/.local` or `~/.config` was created this way, other programs
+  that use them are locked out too.
 - *Root after the user.* A root `roots add` writes `policy.toml` by renaming a new file over the user's, and
   the file is then `-rw------- root`. The user's `roots list`, `ops list` and `roots add` then fail with
-  `the policy file ... is invalid: ... cannot be read: Permission denied` (exit 1; `ops list` printed it and
-  exited 0). The folders stay the user's, since a rename needs no change of owner there.
+  `the policy file ... is invalid: ... cannot be read: Permission denied` (exit 1, `ops list` too). The folders stay the user's, since a rename needs no change of owner there.
 - *A refused root verb.* `ops enable nosuch.op` as root exits 1 ("not in this release's catalog"), yet left
-  `.config/lucille-host/default/.policy.lock` and every folder above it owned by root, in a `HOME` that had
-  none; the user's `status` then failed reading `host.json`.
+  `.config/lucille-host/default/.policy.lock` and every folder above it, `.config` included, owned by root, in
+  a `HOME` that had none; the user's `status` then failed reading `host.json`.
 - *Root reading the user's files* works without error, because root ignores the modes.
 
 So the seven verbs do not all lock the user out: `log`, `ops list`, `roots list`, `roots check` and `policy
@@ -234,9 +239,11 @@ redirect). The pages read, 2026-11-19:
 - Network: by default an internal network, with the Supervisor at `172.30.32.2` and each app reachable by
   name (communication); `host_network: true` uses the host's network instead; `ports` publishes a container
   port (configuration, `Network`).
-- Confinement: every app runs with Docker's default AppArmor profile unless it ships an `apparmor.txt`;
-  "Protection mode" is on by default and withholds `full_access`, `docker_api` and `host_pid` (security;
-  configuration, `apparmor`). The example profile allows `/data/** rw`.
+- Confinement: every app runs with Docker's default AppArmor profile, unless it ships an `apparmor.txt`,
+  which replaces that profile and raises the app's security rating, or sets `apparmor: false`, which turns
+  AppArmor off and lowers the rating (security; configuration, `apparmor`). Those are two separate
+  mechanisms. "Protection mode" is on by default and withholds `full_access`, `docker_api` and `host_pid` (security;
+  The example profile allows `/data/** rw`.
 - D-Bus: `host_dbus: true` mounts the host's **system** bus, `/run/dbus`, read-only (configuration). The
   pages describe no session bus and no Secret Service.
 
@@ -307,13 +314,13 @@ paths under `/data`, the file store, and no credential operation.
 
 ### 4.2 Recommendation: A
 
-Refuse uid 0 for every verb except `--version` and `--help` (the read-only `log`, `ops list` and `roots list`
-could stay open to root; that is for the ruling to say); give an add-on an unprivileged user in its own
+Refuse uid 0 for every verb except `--version` and `--help` (the read-only `log`, `ops list`, `roots list`,
+`roots check` and `policy previous` could stay open to root; that is for the ruling to say); give an add-on an unprivileged user in its own
 image; settle the keyring question for the add-on separately, in 0003, before any add-on claims
 credential operations.
 
 Why: the refusal already exists and is already the documented invariant; the only gap found (1.2) is that
-seven verbs skip it (`log`, `pause`, `resume`, `kill`, `ops`, `roots`, `policy`), and the ones that write (all but the read-only `log`, `ops list`, `roots list`, `policy previous`) leave root-owned files or folders that lock the real user out of their own profile; and every
+seven verbs skip it (`log`, `pause`, `resume`, `kill`, `ops`, `roots`, `policy`), and the ones that write (all but the read-only `log`, `ops list`, `roots list`, `roots check` and `policy previous`) leave root-owned files or folders that lock the real user out of their own profile; and every
 option that allows root buys the add-on convenience with code that makes the host larger and its claim
 conditional. If the ruling is that an add-on must run as root, C is the narrower of the two, and the
 conditions in B (state under `/data`, file store, no credential operation, and a privilege drop for
@@ -325,8 +332,9 @@ For A:
 - `cli.py`: run the uid check once, before dispatch, for every verb but `--version` and `--help`; keep
   `state.startup_checks`'s other half (the `SWITCHBOARD_*` check) where it is, or fold both together.
 - `state.py:205-211`, `library.py:171-182`: keep the check in the library entry point.
-- `paths.py` or the verbs' entry: the owner check and the refusal above, with tests that plant a root-owned file
-  and folder and one that a user-owned profile passes.
+- `paths.py` or the verbs' entry: the owner check and the refusal above, covering the folders from `HOME` down,
+  with tests that plant a root-owned file, a root-owned profile folder and a root-owned ancestor, and one that a
+  user-owned profile passes.
 - `runs.py:133`: becomes unreachable; keep it as a second guard or remove it.
 - `spec/CLI.md`: `startup_refused` (`:710`, `:907`), the "does not run as root" lines (`:1030`, `:1166`,
   `:1199`), the verbs table; and `spec/` fixtures if a verb's refusal is listed there.
@@ -343,19 +351,26 @@ No option here changes a profile that a root command has already touched; refusi
 as it is. Checked on cbec58f, as a user with a profile that root had written to (1.2):
 
 - *Detection.* The host does not detect it. It reports `Permission denied` or `cannot be read` with a path
-  and never says the owner is another uid (1.2). From outside, `find <config> <state> ! -user $(id -u)` lists
-  the files and folders that are not the user's (run: it listed the root-owned `policy.toml`).
+  and never says the owner is another uid (1.2). A `find` of the profile's two folders cannot see it: with
+  `.local` root-owned 0700, `find <config> <state> ! -user $(id -u)` prints `Permission denied` and lists
+  nothing (run). What works is a `find` from `HOME`, which can stat the topmost root-owned folder:
+  `find "$HOME" -maxdepth 4 -user root` listed `.local` (run, `HOME` itself the user's).
 - *A root-owned `policy.toml` in a folder the user owns.* The user's `lucille-host policy reset` works: it
   sets the file aside as `policy.invalid.toml` and starts from the fresh policy (only `host.describe` enabled,
   no folder). The set-aside file stays root-owned and unreadable, and whatever the user's own policy was is
   gone (root's rename had replaced it); `ops enable` and `roots add` must be run again.
 - *A root-owned folder* (a root `pause` or `resume` that created it): the user cannot repair it, since the
-  folder is not theirs. The fix needs root, for instance `chown -R` of the profile's two folders to the user,
-  or removing them; neither was run here.
+  folders are not theirs. The fix needs root, and **the profile folder alone is not enough**: `chown -R` of
+  `.local/state/lucille-host/default` left the user's `resume` failing with the same `Permission denied`
+  (run), because `.local` and `.local/state` above it are root-owned 0700. `chown -R` from the topmost
+  root-owned folder (`.local`) to the user made `resume` work (run, exit 0). Which folder that is depends on
+  what already existed; the `find` above names it. Removing the root-owned folders also works in principle
+  (not run).
 - *What the host says.* Today: the sentences above. Proposed, for the later code: a check, at the start of
-  every verb, that the profile's folders and files belong to the running uid, and a refusal that names the
-  path and the owner and gives the one command that fixes it (`sudo chown -R "$USER" <folder>`). That check is
-  new code (nothing compares owners today, 1.2) and is listed below. Without it, A only stops new damage.
+  every verb, that the profile's files and every folder from `HOME` down to them (not the profile folder
+  alone) belong to the running uid, and a refusal that names the topmost folder that does not and its owner,
+  and gives the one command that fixes it (`sudo chown -R "$USER" <that folder>`). That check is new code
+  (nothing compares owners today, 1.2) and is listed above. Without it, A only stops new damage.
 
 For B or C, add to the above: a privilege drop in `_exec.py:235-243` and its tests; a root-aware
 `policy.is_broad` (or a rule that a root caller's "home" is every home); the path conditions in `paths.py`;
@@ -371,12 +386,5 @@ and a new row in `CLAIMS.md` that says what the host promises when run as root.
 - How an add-on's image drops privileges for the service (A): the S6 pages read describe a oneshot setup step
   and the user bundle, and no step that starts a service as another user; whether the base images carry a
   tool for it is not checked.
-- The HA security and configuration pages were reported to give different AppArmor opt-outs. In the versions
-  read here the configuration page lists `apparmor` as a bool, default true, and the security page says
-  `apparmor: false` lowers the rating; no contradiction was found, and it is not resolved. What is certain
-  is that an app can switch its profile off, so the profile limits `files.*` only while it stays on.
 - Whether to document `sudo` use (`sudo` may keep the user's `HOME`, in which case the files would be the
   user's but made by root). Not tested.
-- Whether `run --json` as root writes the `startup_refused` object: `run --json` ended in a `usage` error in
-  these runs for both uids (the argument parser, not the uid), so only `status --json` was seen. Not checked
-  further.
