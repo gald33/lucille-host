@@ -2,8 +2,8 @@ import AppKit
 import SwiftUI
 
 /// The menu bar app that runs the host. It has no window and no Dock icon (LSUIElement);
-/// everything it does is in this menu, the pairing window, the Set Up window, the Activity window
-/// and the notes it shows. Only the copy at /Applications/<name>.app does any of it (decisions/0002 §13).
+/// everything it does is in this menu, the pairing window, the Set Up window, the Activity window,
+/// the Gmail window and the notes it shows. Only the copy at /Applications/<name>.app does any of it (decisions/0002 §13).
 @main
 struct MenuBarApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
@@ -255,6 +255,8 @@ struct HostItems: View {
             }
         }
         Button(ConnectionText.activityItem) { connection.activityChosen() }
+        // The Gmail window, connected or not, so that Gmail can be set up before pairing.
+        Button(GmailText.menuItem) { model.gmailChosen() }
         // While connected: Open at Login, whose switch shows what macOS says (decisions/0002 §9),
         // and, while the settings file can't be read, Reset Settings… (§14).
         if connection.connected {

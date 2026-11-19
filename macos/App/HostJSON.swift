@@ -126,6 +126,16 @@ struct JSONFields: Equatable, Sendable {
     }
 }
 
+/// A credential kept on this Mac, as `credential list` and `credential set` say it: its names,
+/// the hosts it may be sent to and when it was saved. The host never writes its value
+/// (spec/CLI.md §6, `credential`).
+struct SavedCredential: Equatable, Sendable {
+    let service: String
+    let name: String
+    let hosts: [String]
+    let savedAt: Date
+}
+
 /// An `error` object: what failed (`code`, which a shell branches on) and the host's sentence
 /// (`message`, which a shell shows and never branches on).
 struct HostError: Equatable, Sendable {
@@ -420,6 +430,12 @@ enum HostObject: Equatable, Sendable {
     case aliasSuggestion(String)
     /// The last policy a pairing set aside, or none (`policy previous`), which Set Up offers back.
     case previousPolicy(PreviousPolicy)
+    /// One credential kept on this Mac, never its value (`credential list`, `credential set`).
+    case credential(SavedCredential)
+    /// The credential `credential remove` deleted.
+    case credentialRemoved(service: String, name: String)
+    /// A credential that signed in to its service and out again (`credential test`).
+    case credentialTest(service: String, name: String, host: String)
     case unknown(type: String)
 
     /// The types this release reads. Every other type decodes as `unknown`.
@@ -427,6 +443,7 @@ enum HostObject: Equatable, Sendable {
         "pair_code", "policy_reset", "pair", "error", "status", "forget", "controls", "ready",
         "state", "request", "host_too_old", "stopped", "log_line", "version", "op", "op_removed",
         "root", "root_removed", "root_check", "alias_suggestion", "previous_policy",
+        "credential", "credential_removed", "credential_test",
     ]
 }
 
@@ -635,6 +652,25 @@ extension HostObject {
                 return nil
             }
             self = .previousPolicy(previous)
+        case "credential":
+            guard let service = fields.string("service"), let name = fields.string("name"),
+                  let hosts = fields.strings("hosts"), let savedAt = fields.time("saved_at")
+            else {
+                return nil
+            }
+            self = .credential(SavedCredential(service: service, name: name, hosts: hosts, savedAt: savedAt))
+        case "credential_removed":
+            guard let service = fields.string("service"), let name = fields.string("name") else {
+                return nil
+            }
+            self = .credentialRemoved(service: service, name: name)
+        case "credential_test":
+            guard let service = fields.string("service"), let name = fields.string("name"),
+                  let host = fields.string("host")
+            else {
+                return nil
+            }
+            self = .credentialTest(service: service, name: name, host: host)
         default:
             self = .unknown(type: type)
         }
@@ -1317,6 +1353,29 @@ enum VerbOutcome: Equatable, Sendable {
             }
         }
         return nil
+    }
+
+    /// The credentials `credential list --json` says are kept on this Mac, by service then name,
+    /// or the one `credential set --json` saved.
+    var credentials: [SavedCredential] {
+        guard case .done(let objects) = self else {
+            return []
+        }
+        var found: [SavedCredential] = []
+        for object in objects {
+            if case .credential(let saved) = object {
+                found.append(saved)
+            }
+        }
+        return found
+    }
+
+    /// Whether `credential test --json` signed in to `host` with that credential.
+    func signedIn(service: String, name: String, host: String) -> Bool {
+        guard case .done(let objects) = self else {
+            return false
+        }
+        return objects.contains(.credentialTest(service: service, name: name, host: host))
     }
 
     /// The policy `policy previous --json` found set aside, or that none was.

@@ -88,22 +88,26 @@ final class LiveChildren: @unchecked Sendable {
 /// Where the app's short verbs wait for the host: threads of their own, never Swift's shared
 /// threads, which a few verbs waiting on a slow hub or a Keychain question would fill.
 enum VerbQueue {
-    /// The verbs that open the store that keeps the pair, one at a time, so that two Keychain
-    /// questions never stack: `status`, `pair status`, `pair confirm`, `pair reject` and `forget`.
+    /// The verbs that open the store that keeps the pair, or the one that keeps credentials, one
+    /// at a time, so that two Keychain questions never stack: `status`, `pair status`,
+    /// `pair confirm`, `pair reject`, `forget`, and the Gmail window's `credential` verbs.
     static let store = DispatchQueue(label: "verbs.store", qos: .userInitiated)
     /// Every other short verb.
     static let other = DispatchQueue(label: "verbs.other", qos: .userInitiated, attributes: .concurrent)
 
+    /// `input`, when given, is the verb's whole standard input: the Gmail window's app password,
+    /// which goes nowhere else.
     static func run(
         _ cli: HostCLI,
         _ verb: [String],
         on queue: DispatchQueue,
+        input: Data? = nil,
         cancel: CancelToken? = nil,
         timeout: TimeInterval? = nil
     ) async -> CLIResult {
         await withCheckedContinuation { (continuation: CheckedContinuation<CLIResult, Never>) in
             queue.async {
-                continuation.resume(returning: cli.run(verb, cancel: cancel, timeout: timeout))
+                continuation.resume(returning: cli.run(verb, input: input, cancel: cancel, timeout: timeout))
             }
         }
     }

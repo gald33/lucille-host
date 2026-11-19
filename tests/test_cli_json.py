@@ -36,6 +36,7 @@ from switchboard.testing import hub
 
 from lucille_host import (
     __version__,
+    _exec,
     _switchboard,
     cli,
     gate,
@@ -335,6 +336,68 @@ def _docs_added(w: World) -> None:
     w.ok("roots", "add", "docs", w.folder("Documents"))
 
 
+# A Gmail credential's value: an address and an app password's 16 letters (decisions/0003).
+GMAIL_VALUE = "reader@example.org " + "abcd" + "efgh" + "ijkl" + "mnop"
+GMAIL_SET = ("credential", "set", "gmail", "default", "--host", "imap.gmail.com", "--value-stdin")
+
+
+def _gmail_saved(w: World) -> None:
+    w.ok(*GMAIL_SET, stdin=GMAIL_VALUE + "\n")
+
+
+def _set_gmail(w: World) -> None:
+    w.stdin = GMAIL_VALUE + "\n"
+
+
+def _replace_gmail(w: World) -> None:
+    _gmail_saved(w)
+    w.stdin = GMAIL_VALUE + "\n"
+
+
+def _two_credentials(w: World) -> None:
+    _gmail_saved(w)
+    w.ok(
+        "credential",
+        "set",
+        "github",
+        "personal",
+        "--host",
+        "api.github.com",
+        "--value-stdin",
+        stdin="x" * 40 + "\n",
+    )
+
+
+def _gmail_child(exit_code: int, stderr: str = "") -> Callable[[World], None]:
+    """gmail.check's child stubbed, for `credential test`: no test signs in to Google."""
+
+    def set_up(w: World) -> None:
+        _gmail_saved(w)
+
+        def run(command: _exec.Command, **kwargs: object) -> _exec.Result:
+            return _exec.Result(
+                ended="exited",
+                exit_code=exit_code,
+                stdout="",
+                stdout_truncated=False,
+                stderr=stderr,
+                stderr_truncated=False,
+                duration_ms=5,
+                executable_sha256="0" * 64,
+                stdout_bytes=0,
+                stderr_bytes=len(stderr),
+            )
+
+        w.monkeypatch.setattr(_exec, "run", run)
+
+    return set_up
+
+
+def _gmail_paused(w: World) -> None:
+    _gmail_saved(w)
+    w.ok("pause")
+
+
 def _cafe_notes_taken(w: World) -> None:
     w.ok("roots", "add", "cafe-notes", w.folder("Notes"))
 
@@ -442,6 +505,18 @@ SETUPS: dict[str, Callable[[World], None]] = {
     "roots-add": _documents,
     "roots-add-suggest-alias": _cafe_notes_taken,
     "roots-remove": _docs_added,
+    "credential-set": _set_gmail,
+    "credential-set-exists": _replace_gmail,
+    "credential-set-replace": _replace_gmail,
+    "credential-list": _two_credentials,
+    "credential-remove": _gmail_saved,
+    "credential-test": _gmail_child(0),
+    "credential-test-paused": _gmail_paused,
+    "credential-test-refused": _gmail_child(
+        7,
+        "lucille-host gmail: Gmail refused the app password: make a new one at Google's "
+        "app-password page and save it\n",
+    ),
     "roots-check": _roots_check,
     "resume": _paused,
     "status-unreadable": _status_unreadable,
@@ -639,7 +714,7 @@ def verb_of(argv: list[str]) -> str:
     if not words or words[0] == "--version":
         return "--version"
     verb = words[0]
-    if verb in ("ops", "roots", "policy"):
+    if verb in ("ops", "roots", "policy", "credential"):
         key = f"{verb} {words[1]}"
         if key == "roots add" and any(w.startswith("--suggest-alias") for w in words):
             key += " --suggest-alias"

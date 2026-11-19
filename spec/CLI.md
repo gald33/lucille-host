@@ -492,6 +492,30 @@ drain: a signal (`SIGTERM`, `SIGHUP` or Ctrl-C), the end of standard input, or a
 (section 13.4). `last_version` is the release recorded on this profile, which this one is older than.
 `code` is one of the codes of section 10.
 
+### `credential`: one credential kept on this computer, never its value
+
+| Field | Type | |
+|---|---|---|
+| `service` | string, `^[a-z0-9][a-z0-9._-]{0,63}$` | The service it is for, such as `gmail`. |
+| `name` | string, `^[a-z0-9][a-z0-9._-]{0,63}$` | Its name, such as `default`. |
+| `hosts` | array of strings | The hosts it may be sent to (section 15), in the order they were given; at most 16. Empty only for one saved without hosts, which nothing sends. |
+| `saved_at` | string (a time) | When it was saved. |
+
+### `credential_removed`
+
+| Field | Type |
+|---|---|
+| `service` | string |
+| `name` | string |
+
+### `credential_test`: a credential that signed in
+
+| Field | Type | |
+|---|---|---|
+| `service` | string | `gmail`, the one service with a test. |
+| `name` | string | |
+| `host` | string | The host it signed in to: `imap.gmail.com`. |
+
 ## 7. Verbs
 
 Each verb writes the objects below on success, and an `error` object (section 5) on failure, with one of
@@ -520,6 +544,10 @@ the codes listed for it, or one of the codes every verb can give: `usage` (exit 
 | `policy previous` | one `previous_policy` | `previous_invalid` |
 | `policy reset` | one `policy_reset` | `policy_lock_failed`, `not_invalid` |
 | `run --json-events [--exit-on-stdin-eof] [--allow-downgrade]` | `ready`; `state`, `request` and `host_too_old` as they come; `stopped`, last (section 13) | `usage` |
+| `credential set <service> <name> --host <host> [--host <host> ...] --value-stdin [--replace]` | the `credential` saved | `credential_exists`, `bad_credential`, `no_value`, `bad_value`, `interrupted`, `insecure_keyring`, `store_error` |
+| `credential list` | one `credential` per credential, by service then name; none when none is saved | `insecure_keyring`, `store_error` |
+| `credential remove <service> <name>` | one `credential_removed` | `no_such_credential`, `bad_credential`, `insecure_keyring`, `store_error` |
+| `credential test <service> <name>` | one `credential_test` | `no_test`, `no_such_credential`, `paused`, `bad_credential`, `unreachable`, `limit_reached`, `sign_in_refused`, `insecure_keyring`, `store_error` |
 
 Notes:
 - **`pair` with `--json`** reads the code from standard input, and only with `--code-stdin`:
@@ -574,6 +602,10 @@ Notes:
   none, it changes nothing but its line in the run record (section 16), and refuses `not_invalid`; a shell
   resetting takes that as done. It never touches
   the policy a pairing set aside.
+- **`credential` with `--json`** never asks anything: `credential set --json` reads the value from
+  standard input, and only with `--value-stdin` (without it, a usage error). No object holds a value.
+  `credential list` writes no object, and exits 0, when none is saved; standard error says so.
+  `credential test` exits 1 with an `error` whose `message` is the child's own fixed line (section 15).
 - **`run --json-events`** writes no `error` object but for a usage error. Every other way it ends is a
   `stopped` object and an exit code of section 13.3.
 
@@ -1036,9 +1068,6 @@ leaves it out of `enabled_ops` (decisions/0003, "First use").
   shell shows as it is.
 - During pairing, whether the hub could be reached and whether it refuses this computer's clock, beside
   `waiting`. They can be added to `waiting` as fields within version 1.
-- `credential set`, `list` and `remove` with `--json` (section 15). In version 1 the verb writes text
-  only, and `--json`, before the verb or after it, is a usage error. Its JSON form will come with the Mac
-  app's dialog for it. The codes its refusals carry are in section 10 already, for that form.
 - `pair` stopping on its own when its standard input closes, so that a shell that dies cannot leave a
   `pair` holding the profile's pairing lock until the code expires. Meanwhile a shell stops its `pair`
   before it exits.
@@ -1051,7 +1080,8 @@ of operation use a stored credential, each off by default, each in a separate pr
 that names it: `github.read` reads one stored under the service `github` and bound to `api.github.com`
 (decisions/0003, "First use"), and the `gmail` operations one stored under `gmail` and bound to
 `imap.gmail.com` ("Second use"). Nothing Lucille sends can list or change one, nor read one any other
-way. The verb writes text only in version 1 (section 14).
+way. With `--json`, before the verb or after an action, it writes the objects of section 7, and
+`credential set` takes the value only with `--value-stdin`.
 
 | Form | What it does |
 |---|---|
@@ -1105,7 +1135,7 @@ That use enforces exactly what is stored here:
   any usage error of a line that names the verb anywhere, before `--` or after it
   (`lucille-host -- credential list <word>`), whichever parser raised it. It is argparse's own message
   only where that names the verb's arguments and options (`the following arguments are required: name`). An unknown action is
-  `unknown credential subcommand: it is set, list or remove`, after the verb's usage. Any other says that
+  `unknown credential subcommand: it is set, list, remove or test`, after the verb's usage. Any other says that
   a value is never given on the command line, and that one typed there is now in the shell's history.
 
 **Replacing.** A credential already stored under that service and name is refused (exit 1), and nothing
@@ -1184,6 +1214,8 @@ Each line is one JSON object, of at most 1,024 bytes:
 
 ## Changes
 
-- **1.0** (no release yet): the first version, with `run`'s event stream and exit codes, and `policy reset`.
+- **1.0** (no release yet): the first version, with `run`'s event stream and exit codes, `policy reset`,
+  and `credential` with `--json` (its types `credential`, `credential_removed` and `credential_test`), for
+  the Mac app's Gmail window.
   A build of the repository's development version is not a release, and writes contract 1.0 whatever it
   holds.

@@ -1,8 +1,8 @@
 # 0003: Local credentials (draft)
 
 **Status: storage, entry from the command line, the first use, `github.read`, and the second use, Gmail
-over IMAP with an app password, built, except the second use's Capsule screen; entry at Lucille's request
-chosen, not built.** `src/lucille_host/credentials.py` can save, list, read and
+over IMAP with an app password, with Capsule's Gmail window, built; entry at Lucille's request chosen, not
+built.** `src/lucille_host/credentials.py` can save, list, read and
 remove a credential for an online service, kept only on this computer. `lucille-host credential set`,
 `list` and `remove` write to it from the command line, each credential bound to the hosts it may be
 sent to (spec/CLI.md §15). Five operations use a stored credential, each off by default: `github.read`,
@@ -289,7 +289,7 @@ that built `github.read`, and not before, since until then it stayed true:
 - This record's "Unreachable from Lucille": the credential verb and the proxy's child import
   `credentials`, and only the child reads a value, on a request for an enabled `github.read`.
 
-## Second use: Gmail over IMAP, with an app password (decided 2026-11-18, built but for Capsule's screen)
+## Second use: Gmail over IMAP, with an app password (decided 2026-11-18, built)
 
 **Built.** `src/lucille_host/gmail.py` is the child; the four catalog entries, the `{@args}` element and
 the rule `gmail-args` are in `src/lucille_host/ops/__init__.py`; `credential test` is in
@@ -304,9 +304,10 @@ the rule `gmail-args` are in `src/lucille_host/ops/__init__.py`; `credential tes
   level to 0, whatever `imaplib.Debug` says, and nothing `imaplib` writes reaches the output, since the
   child sets its standard streams aside as `github.read`'s does.
 
-Capsule's Gmail screen ("Entering the app password: Capsule", below) comes in a later change; until it
-does, the credential is saved with `lucille-host credential set gmail default --host imap.gmail.com` and
-checked with `lucille-host credential test gmail default`.
+Capsule's Gmail window ("Entering the app password: Capsule", below) came in a change of its own, with
+`credential --json` (spec/CLI.md §6 and §7), which it reads. From the command line, the credential is
+saved with `lucille-host credential set gmail default --host imap.gmail.com` and checked with
+`lucille-host credential test gmail default`.
 
 The repository owner ruled on 2026-11-18: the second use of a stored credential reads Gmail over IMAP
 with a Google app password, read-only, in four operations, `gmail.check`, `gmail.mailboxes`,
@@ -489,10 +490,18 @@ reads only what a request asks for.
 
 **Entering the app password: Capsule.**
 
-- A Gmail section in Capsule's settings: the address, the app password (a secure field), and Save, Test and
-  Remove, with a link to Google's page on app passwords and the account limits above.
+- A Gmail window in Capsule, from the menu's own Gmail… item, shown whether or not the Mac is connected
+  (not inside the Settings submenu, which shows only while connected, so that Gmail can be set up before
+  pairing): the address, the app password (a secure field), and Save, Test and Remove, with the account
+  limits above and a button, Open Google's App Passwords Page, that shows
+  `https://myaccount.google.com/apppasswords` in the web browser, through the app's one opener
+  (decisions/0002 §20, which gained it as its one web page). The window checks the value's form before it
+  sends it, as the child does, and sends nothing else, so an account's own password is never saved. The
+  repository owner chose the button over plain text, `credential --json` over the exit status, and the
+  menu's own item over Settings, on 2026-11-19.
 - Save runs `credential set gmail default --host imap.gmail.com --value-stdin --replace` with the value on
-  standard input, never in the arguments. Remove runs `credential remove gmail default`.
+  standard input, never in the arguments, with `--json`. Remove runs `credential remove gmail default`,
+  and the window reads whether one is kept from `credential list --json`.
 - Test runs a new action, `credential test <service> <name>` (spec/CLI.md §15, with the implementation):
   - It takes the service `gmail` only; any other service is refused (`no_test`, exit 1), as is a name
     with no credential stored (`no_such_credential`, exit 1).

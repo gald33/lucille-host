@@ -4807,8 +4807,10 @@ def test_no_window_is_restorable() -> None:
         assert text.count(".isRestorable = false") >= windows, path.name
         assert "isRestorable = true" not in text, path.name
         assert "frameAutosaveName" not in text and "setFrameAutosaveName" not in text, path.name
-    # The pairing window, the progress panel, the Activity panel and the Set Up window.
-    assert made == 4
+    # The pairing window, the progress panel, the Activity panel, the Set Up window and the Gmail
+    # window.
+    assert made == 5
+    assert "panel.isRestorable = false" in _swift("GmailPanel.swift")
     assert "panel.hidesOnDeactivate = false" in _swift("ActivityPanel.swift")
 
 
@@ -12923,6 +12925,7 @@ _OPEN_CALLS: dict[str, tuple[str, ...]] = {
     "Connection.swift": (r"    func showAttention\(\) \{", r"        setupPanel\.onOpenPlace = \{"),
     "HostModel.swift": (
         r"    private func showFailure\(_ explanation: Explanation, action: String\) \{",
+        r"    private func makeGmailPanel\(\) -> GmailPanel \{",
     ),
     "MenuBarApp.swift": (r"    static func show\(couldNotOpen failed: SystemPlace\? = nil\) \{",),
 }
@@ -12932,8 +12935,9 @@ _OPEN_CLOSURES: dict[str, str] = {
     r"        setupPanel\.onOpenPlace = \{": r"onOpenPlace = \{",
     r"    private func showFailure\(_ explanation: Explanation, action: String\) \{": r"done: \{",
     r"    static func show\(couldNotOpen failed: SystemPlace\? = nil\) \{": r"done: \{",
+    r"    private func makeGmailPanel\(\) -> GmailPanel \{": r"panel\.onOpenPage = \{",
 }
-_SYSTEM_PLACE_CASES = ("dateAndTime", "filesAndFolders", "applicationsFolder")
+_SYSTEM_PLACE_CASES = ("dateAndTime", "filesAndFolders", "appPasswords", "applicationsFolder")
 
 
 def test_the_opener_opens_only_its_places() -> None:
@@ -12962,6 +12966,7 @@ def test_the_opener_opens_only_its_places() -> None:
     for case, made in (
         ("dateAndTime", f'URL(string: "{check_app.DATE_AND_TIME_PANE}")'),
         ("filesAndFolders", f'URL(string: "{check_app.FILES_AND_FOLDERS_PANE}")'),
+        ("appPasswords", f'URL(string: "{macos_lint.GOOGLE_APP_PASSWORDS_PAGE}")'),
         ("applicationsFolder", 'URL(fileURLWithPath: "/Applications", isDirectory: true)'),
     ):
         assert f"        case .{case}:\n            url = {made}\n" in body, case
@@ -12971,10 +12976,12 @@ def test_the_opener_opens_only_its_places() -> None:
         macos_lint.FILES_AND_FOLDERS_PAGE,
     )
     assert set(re.findall(r'URL\(string: "([^"]+)"\)', body)) == macos_lint.OPENABLE
-    assert body.count("URL(string:") == len(macos_lint.OPENABLE) == 2
+    assert body.count("URL(string:") == len(macos_lint.OPENABLE) == 3
     assert body.count('URL(fileURLWithPath: "/Applications", isDirectory: true)') == 1
-    assert set(check_app.SETTINGS_PANES) == macos_lint.OPENABLE
-    assert len(check_app.SETTINGS_PANES) == len(macos_lint.OPENABLE)
+    # The places check opens the System Settings pages; the one web page is not System Settings'.
+    pages = macos_lint.OPENABLE - {macos_lint.GOOGLE_APP_PASSWORDS_PAGE}
+    assert set(check_app.SETTINGS_PANES) == pages
+    assert len(check_app.SETTINGS_PANES) == len(pages) == 2
     # The places: closed, and carrying no value, so nothing read at run time, and nothing Lucille
     # sends, chooses or makes where the opener goes (M19). Declared once, in a file that draws
     # nothing, and given nothing more anywhere.

@@ -145,6 +145,7 @@ them under its question. Whether it does, and whether that question names Capsul
 | Add a Folder… | See below. |
 | Folders | `roots list --json`. Each folder has a **Remove** item, which runs `roots remove <alias>` with `--json`. Removing one that is already gone shows no note. |
 | Activity… | Opens the Activity window (see [Activity](#activity)), and reads `ops list --json` for the words each request is said in. |
+| Gmail… | Opens the Gmail window (see [Gmail](#gmail)), and reads `credential list --json`. Shown whether or not this Mac is connected. |
 | Settings | Shown while this Mac is connected. **Open at Login** has a checkmark while macOS will open Capsule when you log in, read again from macOS each time the menu opens; choosing it turns that on or off (see [Open at Login](#open-at-login)). **Reset Settings…** is in it too while the host cannot read its settings file (see [Reset Settings](#reset-settings)). |
 | Connect to Lucille… | Opens the pairing window (see [Connecting to Lucille](#connecting-to-lucille)). Shown while this Mac has no connection. |
 | Finish Connecting… | Opens the pairing window again, on a connection being set up whose window was closed. |
@@ -411,6 +412,38 @@ connection's name: if that connection is forgotten and another is confirmed in T
 has said Connected, and between two of the app's `status` reads, the Set Up window opens for the other
 one, and may offer back what the policy set aside held, unchecked.
 
+## Gmail
+
+The Gmail window, from the menu's **Gmail…**, saves the app password Capsule's Gmail abilities sign in
+with (decisions/0003, "Second use"). They read Gmail over IMAP with a Google app password: no OAuth,
+no Google Cloud project. The window shows:
+
+- what Capsule does with the app password, and what Lucille gets: the app password is kept in this
+  Mac's Keychain and sent only to `imap.gmail.com`; what Lucille asks to read goes to Lucille;
+- how to make one: 2-Step Verification on, then Google's App Passwords page; work and school accounts
+  may not offer them, and Google turns them off when the account's password changes;
+- **Open Google's App Passwords Page**, which shows that page in the web browser, through the app's
+  one opener (see [The one opener](#the-one-opener));
+- whether an app password is saved, and when (`credential list --json`; the host never gives back
+  its value);
+- the Gmail address and the app password, in a field that does not show what is typed;
+- **Save**, which runs `credential set gmail default --host imap.gmail.com --value-stdin --replace`
+  with `--json`, the address, one space and the 16 letters on standard input, never in the arguments.
+  The window takes Google's four groups of four, in any case, and sends the 16 letters lowercase. It
+  sends nothing that is not an address and 16 letters, so an account's own password is never saved.
+  The field is emptied, with its undo, before the verb starts, and whenever the window closes. Saving
+  gives no warning;
+- **Test**, which runs `credential test gmail default --json`: Capsule signs in to Gmail and out
+  again, reading nothing, whether or not an ability is on. It says whether Gmail took the app
+  password, and if not, why, by the refusal's code: Gmail refused it (make a new one; Capsule then
+  waits 15 minutes before it signs in with it again), Gmail could not be reached, too many sign-ins
+  in 10 minutes, Capsule is paused, or the Keychain could not be used;
+- **Remove**, which runs `credential remove gmail default --json`.
+
+The window's verbs run one at a time with the store's other verbs, since each opens a Keychain item,
+with 2 minutes each, and 2 minutes 30 seconds for Test. The Gmail abilities themselves are in the
+Abilities menu, off until you turn them on. Lucille names the credential `default`.
+
 ## Open at Login
 
 Capsule's one login item is Capsule itself (`SMAppService.mainApp`, decisions/0002 §9): no helper, agent
@@ -447,7 +480,8 @@ the item by Capsule's bundle identifier, which a "Capsule 2" shares (not yet tes
 
 ## The one opener
 
-Three buttons show you a place in macOS, through the app's one opener (decisions/0002 §20):
+Four buttons show you a place, in macOS or on the web, through the app's one opener (decisions/0002
+§20):
 
 - **Open Date & Time Settings**, in the note behind the menu's line that says this Mac's clock is off.
   The waiting page of the pairing window says how to set the clock in words only.
@@ -456,13 +490,16 @@ Three buttons show you a place in macOS, through the app's one opener (decisions
   page.
 - **Show Applications Folder**, in the note of a copy Capsule judges not to be in Applications, which
   a renamed one there is not (see [What the app does when it opens](#what-the-app-does-when-it-opens)).
+- **Open Google's App Passwords Page**, in the Gmail window (see [Gmail](#gmail)), which shows
+  `myaccount.google.com/apppasswords` in the web browser. It is the one web address the app holds.
+  When the browser cannot open it, the window says so, with the address to type.
 
 Each opens only from your click. The places are a closed list, `SystemPlace` in
 [`App/PlaceRules.swift`](App/PlaceRules.swift), which also says which problem offers which place, from
 what the app itself sees: the problem `run` reports, macOS's refusal of a folder, where this copy is.
 No text or request from Lucille offers one, and no request the host turned away does; the clock's place
 follows the clock state `run` reports, which the hub's refusals of this Mac's writes set. Nothing read
-while the app runs can make an address: it only picks one of the three. One call in
+while the app runs can make an address: it only picks one of the four. One call in
 [`App/SystemPlaces.swift`](App/SystemPlaces.swift) opens them, with the addresses written there. When
 macOS cannot open a place, the note comes again with "Capsule couldn't open System Settings." (or "your
 Applications folder") first, and OK alone (Quit, for a copy not in Applications); it already says how
@@ -590,15 +627,15 @@ This has not been tried on a Mac: CI never makes a profile with two connections.
   - `--profile mac-app` is the app's own profile: its own folders, abilities, Keychain item, run lock and
     version record, apart from the `default` profile a command-line install uses (see [Moving from an
     earlier build](#moving-from-an-earlier-build)).
-- The arguments go as an argv array, never through a shell. A pairing code goes on standard input, never
-  on the command line, and the app writes it to no log.
+- The arguments go as an argv array, never through a shell. A pairing code, and the Gmail window's app
+  password, go on standard input, never on the command line, and the app writes neither to any log.
 - The environment is fixed. It holds `HOME`, `USER`, `LOGNAME`, `TMPDIR`, `PATH=/var/empty` and `LANG`,
   and nothing else from the app's own environment. `PATH` names an empty folder, so nothing is found
   there; the host runs its operations with a `PATH` of its own. The working folder is `/`.
 - The app reads JSON ([spec/CLI.md](../spec/CLI.md)) from every verb it runs: `--version`, `ops` and
   `roots`, `status`, the pairing verbs, `forget`, `kill`, `pause` and `resume`, `policy reset`, `run`'s
-  events, for Activity, `log --limit 200` and `ops list`, and, for Set Up, `policy previous` and
-  `roots check`. It decides only on the objects' fields,
+  events, for Activity, `log --limit 200` and `ops list`, for Set Up, `policy previous` and
+  `roots check`, and, for the Gmail window, `credential list`, `set`, `test` and `remove`. It decides only on the objects' fields,
   a refusal by its `code`, never on their words, which it shows. It shows the lines on standard error
   only as the details of a usage error and of a run that wrote no `error` object.
 - Two of its children live long: `pair --code-stdin --json`, while it waits for Lucille, and `run`. One
@@ -610,7 +647,9 @@ This has not been tried on a Mac: CI never makes a profile with two connections.
   wait on a question from macOS or on a slow drive; 10 seconds for `roots add --suggest-alias`, after
   which the name dialog starts from the app's own suggestion; 2 minutes for `status`, `pair status`,
   `pair confirm`, `pair reject` and `forget`, which may wait on Lucille's hub or on a Keychain question;
-  and 30 seconds for every other verb, `policy previous` included. The five with 2 minutes open the store
+  2 minutes for the Gmail window's `credential list`, `set` and `remove`, and 2 minutes 30 seconds for its
+  `credential test`, which open the Keychain item that keeps credentials; and 30 seconds for every other
+  verb, `policy previous` included. The five with 2 minutes open the store
   that keeps the connection, so they run one at a time. When `status` takes more than 3 seconds, a window says
   that macOS may be asking about Capsule's Keychain item, with **Cancel**. A run that passes its limit, or
   that the user cancels, gets SIGTERM, then SIGKILL 2 seconds later. A process that still has not ended 2

@@ -861,8 +861,10 @@ OPENER = "macos/App/SystemPlaces.swift"
 # holds them. Not yet seen on a Mac: check_app.py places opens each and says what it shows.
 DATE_PANE = "x-apple.systempreferences:com.apple.Date-Time-Settings.extension"
 FILES_PANE = "x-apple.systempreferences:com.apple.preference.security?Privacy_FilesAndFolders"
+# The one web page it may show, from the Gmail window's button (decisions/0003, "Second use").
+GOOGLE_PAGE = "https://myaccount.google.com/apppasswords"
 
-# The opener as designed: a closed list of three places, the URL of each written here, and one
+# The opener as designed: a closed list of four places, the URL of each written here, and one
 # call that opens it. Its comments do not name the class they call.
 SYSTEM_PLACES = textwrap.dedent(
     f"""\
@@ -879,6 +881,8 @@ SYSTEM_PLACES = textwrap.dedent(
                 url = URL(string: "{DATE_PANE}")
             case .filesAndFolders:
                 url = URL(string: "{FILES_PANE}")
+            case .appPasswords:
+                url = URL(string: "{GOOGLE_PAGE}")
             case .applicationsFolder:
                 url = URL(fileURLWithPath: "/Applications", isDirectory: true)
             }}
@@ -1172,8 +1176,8 @@ def test_the_design_is_the_opener_as_built() -> None:
     for text in (SYSTEM_PLACES, (REPO_ROOT / OPENER).read_text(encoding="utf-8")):
         code = macos_lint.swift_scan(text).code
         assert [token for _, token in macos_lint.design_tokens(code)] == designed
-    assert macos_lint.OPEN_LITERALS == (DATE_PANE, FILES_PANE, "/Applications")
-    assert set(macos_lint.OPEN_LITERALS[:2]) == macos_lint.OPENABLE
+    assert macos_lint.OPEN_LITERALS == (DATE_PANE, FILES_PANE, GOOGLE_PAGE, "/Applications")
+    assert set(macos_lint.OPEN_LITERALS[:3]) == macos_lint.OPENABLE
     # White space and a raw string are not the design's to hold: the same tokens are the same code.
     flush = "\n".join(line.strip() for line in SYSTEM_PLACES.splitlines())
     assert swift_rules(flush, OPENER) == set()
@@ -1614,10 +1618,12 @@ def test_the_opener_anywhere_else_is_reported(tmp_path: Path) -> None:
 
 
 def test_openable_is_the_list_0002_records() -> None:
-    # Two System Settings pages, by the spellings 0002 §20 records, and never Full Disk Access.
+    # Two System Settings pages, by the spellings 0002 §20 records, and never Full Disk Access;
+    # and one web page, Google's App Passwords page, over https, on Google's own account host.
     assert isinstance(macos_lint.OPENABLE, frozenset)
-    assert macos_lint.OPENABLE == frozenset({DATE_PANE, FILES_PANE})
-    for entry in macos_lint.OPENABLE:
+    assert macos_lint.OPENABLE == frozenset({DATE_PANE, FILES_PANE, GOOGLE_PAGE})
+    assert macos_lint.GOOGLE_APP_PASSWORDS_PAGE == GOOGLE_PAGE
+    for entry in macos_lint.OPENABLE - {GOOGLE_PAGE}:
         assert entry.startswith("x-apple.systempreferences:"), entry
         assert "Privacy_AllFiles" not in entry, entry
     record = (REPO_ROOT / "decisions" / "0002-macos-app.md").read_text(encoding="utf-8")
@@ -1628,6 +1634,19 @@ def test_openable_is_the_list_0002_records() -> None:
     assert "`NSWorkspace`" in section and "`Privacy_AllFiles`" in section
     # It no longer says the exception is still to come.
     assert "is not allowed yet either" not in " ".join(section.split())
+
+
+def test_the_web_page_is_allowed_only_as_that_literal_in_the_opener() -> None:
+    # [http] lets the opener hold Google's App Passwords page, as that exact literal: another
+    # address there, or that page anywhere else, is a network URL.
+    assert "http" not in swift_rules(SYSTEM_PLACES, OPENER)
+    other = _opener(f'"{GOOGLE_PAGE}"', '"https://myaccount.google.com/security"')
+    assert "http" in swift_rules(other, OPENER)
+    longer = _opener(f'"{GOOGLE_PAGE}"', f'"{GOOGLE_PAGE}?x=1"')
+    assert "http" in swift_rules(longer, OPENER)
+    for line in (f'let page = "{GOOGLE_PAGE}"', f"// {GOOGLE_PAGE}"):
+        assert "http" in swift_rules(line, APP), line
+    assert "http" in swift_rules(f"// {GOOGLE_PAGE}\n" + SYSTEM_PLACES, OPENER)
 
 
 def test_the_open_file_is_one_path() -> None:

@@ -42,6 +42,7 @@ struct SelfTest {
         checkSetup(fixtures, report)
         checkSupervisor(fixtures, report)
         checkLoginRules(fixtures, report)
+        checkGmail(fixtures, report)
         if let home = options["home"] {
             // First among the checks that start anything: until it opens the latch, nothing can.
             checkSpawnLatch(home: home, report)
@@ -1233,6 +1234,81 @@ extension SelfTest {
         let applications = PlaceText.couldNotOpen(.applicationsFolder)
         report.expect(applications == "\(HostText.appName) couldn't open your Applications folder.",
                       "when macOS could not open the Applications folder, the note says so first", applications)
+        let page = PlaceText.button(.appPasswords)
+        report.expect(page == GmailText.openPageButton && page == "Open Google's App Passwords Page",
+                      "Google's App Passwords page's button is the Gmail window's", page)
+        let browser = PlaceText.couldNotOpen(.appPasswords)
+        report.expect(browser.contains("myaccount.google.com/apppasswords") && !browser.contains("://"),
+                      "when the browser could not open the page, the window says where it is, with no link", browser)
+        // No problem offers it: only the Gmail window's button.
+        report.expect(PlaceRules.place(for: Problem.clock(skew: 120)) == .dateAndTime
+                          && PlaceRules.place(for: Problem.notResponding) == nil,
+                      "a problem offers Date & Time Settings or nothing, never Google's page")
+    }
+
+    // MARK: - checkGmail
+
+    /// The Gmail window's rules: the value it sends and in what form, the verbs it runs, and what
+    /// it reads of the host's `credential` objects (decisions/0003, "Second use").
+    static func checkGmail(_ fixtures: [String: Fixture], _ report: Report) {
+        let typed = GmailRules.value(address: "  Reader@Example.org ", password: "ABCD efgh ijkl mnop")
+        report.expect(typed == "Reader@Example.org abcdefghijklmnop",
+                      "an app password typed in Google's four groups, in any case, is sent as 16 lowercase letters", "\(String(describing: typed))")
+        for (address, password, what) in [
+            ("reader@example.org", "hunter2", "an account's own password"),
+            ("reader@example.org", "abcdefghijklmno", "15 letters"),
+            ("reader@example.org", "abcdefghijklmnopq", "17 letters"),
+            ("reader@example.org", "abcd-efgh-ijkl-mnop", "hyphens"),
+            ("reader@example.org", "abcdéfghijklmnop", "a letter outside ASCII"),
+            ("reader example.org", "abcdefghijklmnop", "no address"),
+            ("reader@localhost", "abcdefghijklmnop", "an address with one label"),
+            ("", "abcdefghijklmnop", "no address at all"),
+            (String(repeating: "a", count: 64) + "@" + String(repeating: "b", count: 190) + ".com", "abcdefghijklmnop", "an address past 254 characters"),
+        ] {
+            report.expect(GmailRules.value(address: address, password: password) == nil, "\(what) is never saved")
+        }
+        report.expect(GmailRules.input("reader@example.org abcdefghijklmnop") == Data("reader@example.org abcdefghijklmnop\n".utf8),
+                      "the value goes on standard input, with a newline")
+        let verbs = [GmailRules.listArguments, GmailRules.saveArguments, GmailRules.testArguments, GmailRules.removeArguments]
+        report.expect(verbs.allSatisfy { $0.first == "--json" && $0.dropFirst().first == "credential" },
+                      "each of the window's verbs is credential, with --json", "\(verbs)")
+        report.expect(GmailRules.saveArguments == ["--json", "credential", "set", "gmail", "default", "--host", "imap.gmail.com", "--value-stdin", "--replace"],
+                      "Save names the credential and its one host, and takes the value on standard input only", "\(GmailRules.saveArguments)")
+        report.expect(!verbs.joined().contains { $0.contains("@") || $0.count == 16 && $0.allSatisfy(\.isLowercase) },
+                      "no verb's arguments hold an address or an app password")
+
+        let listed = VerbOutcome.done(fixtures["credential-list"]?.objects ?? [])
+        let saved = GmailRules.saved(listed.credentials)
+        report.expect(fixtures.isEmpty || (saved?.hosts == ["imap.gmail.com"] && saved?.savedAt == sampleTime),
+                      "credential list's gmail/default is the one the window shows, with when it was saved", "\(listed)")
+        report.expect(listed.credentials.count == 2 || fixtures.isEmpty, "and the other credential is read too, and left alone", "\(listed)")
+        report.expect(GmailRules.saved(VerbOutcome.done(fixtures["credential-list-none"]?.objects ?? []).credentials) == nil,
+                      "with none saved, the window says so")
+        let set = VerbOutcome.done(fixtures["credential-set"]?.objects ?? [])
+        report.expect(fixtures.isEmpty || GmailRules.saved(set.credentials) != nil, "credential set's object is the one saved", "\(set)")
+        let tested = VerbOutcome.done(fixtures["credential-test"]?.objects ?? [])
+        report.expect(fixtures.isEmpty || tested.signedIn(service: "gmail", name: "default", host: "imap.gmail.com"),
+                      "credential test says it signed in to imap.gmail.com", "\(tested)")
+        report.expect(!VerbOutcome.done([]).signedIn(service: "gmail", name: "default", host: "imap.gmail.com"),
+                      "no object is not a sign-in")
+        let removed = fixtures["credential-remove"]?.objects ?? []
+        report.expect(fixtures.isEmpty || removed == [.credentialRemoved(service: "gmail", name: "default")],
+                      "credential remove's object", "\(removed)")
+        if let refused = fixtures["credential-test-refused"]?.objects.last, case .error(let error) = refused {
+            let words = GmailText.refusal(error)
+            report.expect(error.code == "sign_in_refused" && words.contains("15 minutes"),
+                          "Gmail's refusal says to make a new app password, and the wait after it", words)
+        } else {
+            report.expect(fixtures.isEmpty, "credential test's refusal is read")
+        }
+        for code in ["sign_in_refused", "bad_credential", "unreachable", "limit_reached", "paused", "no_such_credential", "insecure_keyring", "store_error"] {
+            let words = GmailText.refusal(HostError(code: code, message: "the host's words", kind: nil))
+            report.expect(words != ConnectionText.appBug && !words.contains("the host's words"),
+                          "\(code) has the window's own words, never the host's", words)
+        }
+        report.expect(GmailText.refusal(HostError(code: "no_such_code", message: "x", kind: nil)) == ConnectionText.appBug,
+                      "a code the window does not know is the app's bug")
+        report.expect(GmailText.kept(nil) == "No app password is saved.", "with none kept, the window says so")
     }
 
     // MARK: - checkJSON
