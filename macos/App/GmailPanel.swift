@@ -56,7 +56,10 @@ final class GmailPanel: NSObject, NSWindowDelegate {
     /// Show the window, at the front, its focus in the address field when it was hidden.
     func show() {
         if !panel.isVisible {
-            said.stringValue = ""
+            // Opened again while a verb runs, it keeps saying what that verb is doing.
+            if !isBusy {
+                said.stringValue = ""
+            }
             fit()
             panel.center()
             panel.initialFirstResponder = address

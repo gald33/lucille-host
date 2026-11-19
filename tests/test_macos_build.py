@@ -12947,9 +12947,19 @@ def test_the_gmail_window_keeps_the_app_password_out_of_reach_once_used() -> Non
     model = _swift("HostModel.swift")
     save = _swift_function(model, "    private func saveGmail(address: String, password: String) {")
     assert save.index("gmailPanel.clearPassword()") < save.index("VerbQueue.run(")
-    assert "input: input" in save and "GmailRules.saveArguments" in save
-    assert save.index("VerbQueue.run(") < save.index("input.resetBytes(in: 0..<input.count)")
+    assert "input: input.data" in save and "GmailRules.saveArguments" in save
+    assert save.index("VerbQueue.run(") < save.index("input.wipe()")
     assert "dropped, not zeroed" in model
+    # The bytes sent are in memory of their own, which every Data made from them points into, so
+    # they are overwritten in place however many copies of that Data are held.
+    gmail = _swift("Gmail.swift")
+    assert "static func input(_ value: String) -> SecretBytes {" in gmail
+    start = gmail.index("final class SecretBytes {")
+    secret = gmail[start : gmail.index("\n}\n", start)]
+    assert "deallocator: .none" in secret and "Data(bytesNoCopy: buffer.baseAddress!" in secret
+    assert "memset_s(buffer.baseAddress, buffer.count, 0, buffer.count)" in secret
+    assert secret.index("wipe()", secret.index("deinit {")) < secret.index("buffer.deallocate()")
+    assert "resetBytes" not in model
     panel = _swift("GmailPanel.swift")
     clear = _swift_function(panel, "    func clearPassword() {")
     assert "password.currentEditor()" in clear and 'editor.string = ""' in clear
@@ -12963,6 +12973,15 @@ def test_the_gmail_window_keeps_the_app_password_out_of_reach_once_used() -> Non
     chosen = _swift_function(model, "    func gmailChosen() {")
     assert chosen.index("let quietly = gmailPanel.isBusy") < chosen.index("gmailPanel.show()")
     assert "await readGmail(quietly: quietly)" in chosen
+    # Opened again during a Save, the window keeps saying "Saving…".
+    show = _swift_function(panel, "    func show() {")
+    assert show.index("if !isBusy {\n") < show.index('said.stringValue = ""')
+    # The words for `internal` are Test's alone; from any other verb it is the app's bug.
+    signature = "    static func refusal(_ error: HostError, testing: Bool) -> String {"
+    refusal = _swift_function(gmail, signature)
+    assert 'case "internal" where testing:' in refusal
+    make = _swift_function(model, "    private func makeGmailPanel() -> GmailPanel {")
+    assert "testing: true" in make
     readme = (build_app.MACOS_DIR / "README.md").read_text(encoding="utf-8")
     assert "dropped, not zeroed" in " ".join(readme.split())
 

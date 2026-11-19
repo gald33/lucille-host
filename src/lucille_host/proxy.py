@@ -454,41 +454,52 @@ class _Unfaithful(ValueError):
     """Two keys of one object that redaction made the same."""
 
 
-def _unique(key: str, marked: set[str]) -> str:
-    """``key``, as redaction made it, numbered from its second on so that it is not a key it
-    made before: ``[redacted private key]``, ``[redacted private key] 2``, ..."""
-    found, number = key, 1
-    while found in marked:
+def _unique(key: str, taken: set[str], counts: dict[str, int]) -> str:
+    """``key``, as redaction made it, numbered from its second on so that it is no key in
+    ``taken``: those the body holds, and those made before (``[redacted private key]``,
+    ``[redacted private key] 2``, ...). ``counts`` keeps the last number given for each key, so
+    each body costs time in proportion to its keys, however many are made alike."""
+    number = counts.get(key, 1)
+    found = key if number == 1 else f"{key} {number}"
+    while found in taken:
         number += 1
         found = f"{key} {number}"
-    marked.add(found)
+    counts[key] = number
+    taken.add(found)
     return found
 
 
 def _no_marked_twice(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     seen: set[str] = set()
     for key, _ in pairs:
-        if key in seen and PRIVATE_KEY_MARK in key:
+        if key in seen and (PRIVATE_KEY_MARK in key or TOKEN_MARK in key):
             raise _Unfaithful
         seen.add(key)
     return dict(pairs)
 
 
+def _decoded(raw: str) -> str:
+    """A JSON string token's value."""
+    value: str = raw[1:-1] if "\\" not in raw else json.loads(raw)
+    return value
+
+
 def redacted_json(body: bytes) -> bytes:
-    """GitHub's body as it came, unless it is JSON and a private-key block begins in one of its
-    strings (an escaped one too, since each string is read decoded): then each string, keys
-    included, in the order the body holds them, with the host's own redaction applied. A block
-    that a string opens and does not end takes the rest of that string and goes on into the
-    strings after it, keys and values alike, each taken whole, up to the first end of a block, as
-    the host's pass over the raw text would; so a key whose lines are strings of an array, sibling
-    fields or an object's keys is not returned. Each key redaction changes is numbered when it
-    would be one made before (``[redacted private key] 2``), so no two keys of an object become
-    the same; were they the same all the same, the body is left as it came, to the host's pass
-    over the raw text, which takes the block from its header to its end across the strings, and
-    is then not JSON. Only the strings that change are written again; everything else, numbers,
-    white space and repeated keys among it, stays as it came, and the body stays JSON
-    (spec/PROTOCOL.md section 11). A body that is not JSON, one cut at the cap among them, is left
-    to the host's pass, which sets the truncation flag when a block takes its end."""
+    """GitHub's body as it came, unless it is JSON and the host's own redaction changes one of its
+    strings: a private-key block begins in one (an escaped one too, since each string is read
+    decoded), or one holds a token. Then each string, keys included, in the order the body holds
+    them, with that redaction applied. A block that a string opens and does not end takes the
+    rest of that string and goes on into the strings after it, keys and values alike, each taken
+    whole, up to the first end of a block, as the host's pass over the raw text would; so a key
+    whose lines are strings of an array, sibling fields or an object's keys is not returned.
+    Each key redaction changes is numbered when it would be a key the body holds or one made
+    before (``[redacted private key] 2``), so no two keys of an object become the same; were
+    they the same all the same, the body is left as it came, to the host's pass over the raw
+    text, which takes the block from its header to its end across the strings, and is then not
+    JSON. Only the strings that change are written again; everything else, numbers, white space
+    and repeated keys among it, stays as it came, and the body stays JSON (spec/PROTOCOL.md
+    section 11). A body that is not JSON, one cut at the cap among them, is left to the host's
+    pass, which sets the truncation flag when a block takes its end."""
     try:
         text = body.decode("utf-8")
         json.loads(text)
@@ -497,11 +508,13 @@ def redacted_json(body: bytes) -> bytes:
     out: list[str] = []
     pos = 0
     open_block = False
-    # The keys redaction made, so that no two become the same.
-    marked: set[str] = set()
-    for token in _JSON_STRING.finditer(text):
+    tokens = list(_JSON_STRING.finditer(text))
+    # The keys the body holds and those redaction made, so that none it makes is one of them.
+    taken = {_decoded(t.group()) for t in tokens if _KEY_COLON.match(text, t.end())}
+    counts: dict[str, int] = {}
+    for token in tokens:
         raw = token.group()
-        value = raw[1:-1] if "\\" not in raw else json.loads(raw)
+        value = _decoded(raw)
         if open_block:
             end = key_block_end(value)
             if end is None:
@@ -512,7 +525,7 @@ def redacted_json(body: bytes) -> bytes:
         else:
             new, open_block = redact_to_end(value)
         if new != value and _KEY_COLON.match(text, token.end()):
-            new = _unique(new, marked)
+            new = _unique(new, taken, counts)
         if new != value:
             out += [text[pos : token.start()], json.dumps(new)]
             pos = token.end()
