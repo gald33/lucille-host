@@ -2315,7 +2315,8 @@ def test_status_json_reports_a_keyring_that_cannot_be_read(
 
 
 # Nested past the host's own limit (src/lucille_host/nesting.py), and past what Python's parsers
-# follow on 3.11 and 3.13; 3.14's parse them, and the host refuses them all the same.
+# follow: the TOML on every version, the JSON on 3.11 and 3.13. 3.14's json reads the JSON, and the
+# host refuses it all the same.
 _DEEP_TOML = "version = 1\nx = " + "[" * 5000 + "]" * 5000 + "\n"
 _DEEP_JSON = "[" * 100000 + "]" * 100000
 

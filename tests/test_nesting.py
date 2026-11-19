@@ -6,6 +6,7 @@ refusal can come only from the host's own check, and the same refusal on 3.11, 3
 
 from __future__ import annotations
 
+import base64
 import json
 import random
 import re
@@ -18,6 +19,7 @@ import pytest
 from switchboard import pairing, sharing
 
 from lucille_host import _switchboard, credentials, gmail, journal, nesting, policy, state, store
+from tests._host import HostEnv
 from tests._keyring import MemoryKeyring
 
 MOST = nesting.FILES_MOST
@@ -236,6 +238,36 @@ def _spy_on_json(monkeypatch: pytest.MonkeyPatch) -> list[str]:
 
     monkeypatch.setattr(json, "loads", spy)
     return parsed
+
+
+def test_the_file_store_link_checks_its_share_store(host_env: HostEnv) -> None:
+    # The link the host opens over the file store reads its share store through the check.
+    link = _switchboard.open_link(host_env.dirs, state.HostConfig(store="file"))
+    assert link.rooms.load() == {}
+    (host_env.dirs.store_files / "deep.json").write_text(_json(MOST + 1))
+    with pytest.raises(sharing.SharingError, match="nests too deep") as refused:
+        link.rooms.load()
+    assert refused.value.state == "store"
+
+
+@pytest.mark.parametrize("depth", [MOST + 1, 2000, 200_000])
+def test_a_pairing_code_nested_too_deep_is_no_code(depth: int) -> None:
+    # Too deep for the library's parser on some versions and not on others: never a traceback,
+    # on any, and the same refusal as any text that is not a code.
+    payload = base64.urlsafe_b64encode(_json(depth).encode()).decode().rstrip("=")
+    with pytest.raises(_switchboard.BadCode, match="not a pairing code"):
+        _switchboard.decode_code(pairing.CODE_PREFIX + payload)
+
+
+def test_a_dotted_key_past_the_parsers_limit_is_too_deep(tmp_path: Path) -> None:
+    # Dotted keys nest tables with no bracket, which the check does not count; the parser's own
+    # limit on them, 1000 parts, is the same on every version, and the policy reads its refusal
+    # as nested too deep.
+    path = tmp_path / "policy.toml"
+    path.write_text("a" + ".a" * 1999 + " = 1\n")
+    assert not nesting.toml_deeper(path.read_text(), 0)
+    with pytest.raises(policy.PolicyError, match=r"nests too deep to be read$"):
+        policy.load(path)
 
 
 def test_the_gmail_childs_arguments_past_the_limit_are_not_parsed(

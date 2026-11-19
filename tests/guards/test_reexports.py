@@ -65,8 +65,8 @@ def test_a_record_in_a_log_adds_what_it_lacked(
 ) -> None:
     record = {
         "python": "CPython 3.99.0 on linux",
-        "reexports": {"tempfile._os": "posix", "zz_new._re": "re"},
-        "submodules": ["zz_new.sub"],
+        "reexports": {"tempfile._os": "posix", "json.zz_new": "re"},
+        "submodules": ["json.zz_sub"],
     }
     log = tmp_path / "log.txt"
     log.write_text(
@@ -78,8 +78,8 @@ def test_a_record_in_a_log_adds_what_it_lacked(
     assert reexport_probe.main(["--add", str(log)]) == 0
     written = _values(table.read_text())
     assert written["REEXPORTS"]["tempfile._os"] == ("os", "posix")
-    assert written["REEXPORTS"]["zz_new._re"] == ("re",)
-    assert "zz_new.sub" in written["SUBMODULES"]
+    assert written["REEXPORTS"]["json.zz_new"] == ("re",)
+    assert "json.zz_sub" in written["SUBMODULES"]
     assert written["PROBED"] == tuple(sorted({*_reexports.PROBED, "CPython 3.99.0 on linux"}))
     # Everything the table held is kept.
     for name, targets in _reexports.REEXPORTS.items():
@@ -103,3 +103,38 @@ def test_the_table_holds_the_cases_that_matter() -> None:
     # An import path is not a re-export: os.path is reached as os.path.
     assert "os.path" not in _reexports.REEXPORTS
     assert "os.path" in _reexports.SUBMODULES
+
+
+@pytest.mark.parametrize(
+    "record",
+    [
+        "not json",
+        [],
+        {"python": "CPython 3.99.0 on linux", "reexports": {}},
+        {"python": "x", "reexports": {}, "submodules": []},
+        {"python": "CPython 3.99.0 on linux", "reexports": [], "submodules": []},
+        {"python": "CPython 3.99.0 on linux", "reexports": {"zz_none.x": "os"}, "submodules": []},
+        {"python": "CPython 3.99.0 on linux", "reexports": {"json.x": "o s"}, "submodules": []},
+        {"python": "CPython 3.99.0 on linux", "reexports": {"json.x": 1}, "submodules": []},
+        {"python": "CPython 3.99.0 on linux", "reexports": {}, "submodules": ["json"]},
+        {"python": "CPython 3.99.0 on linux", "reexports": {}, "submodules": ["zz_none.sub"]},
+        {"python": "CPython 3.99.0 on linux\n", "reexports": {}, "submodules": []},
+    ],
+)
+def test_a_record_the_probe_would_not_write_adds_nothing(
+    record: object,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    good = {"python": "CPython 3.99.0 on linux", "reexports": {}, "submodules": []}
+    text = record if isinstance(record, str) else json.dumps(record)
+    log = tmp_path / "log.txt"
+    log.write_text(
+        f"E {reexport_probe.RECORD}{json.dumps(good)}\nE {reexport_probe.RECORD}{text}\n"
+    )
+    table = tmp_path / "_reexports.py"
+    monkeypatch.setattr(reexport_probe, "TABLE", table)
+    assert reexport_probe.main(["--add", str(log)]) == 2
+    assert not table.exists()
+    assert "line 2" in capsys.readouterr().err or isinstance(record, str)

@@ -26,10 +26,11 @@ table lacks for it, so a CI run's log is enough.
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, Final
 
 if __package__ in (None, ""):  # run as a script: make ``tools.guards`` importable
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
@@ -210,13 +211,48 @@ def added(records: list[dict[str, Any]]) -> str:
     return render(reexports, submodules, interpreters)
 
 
+# What a probed interpreter calls itself (:func:`_describe`).
+_DESCRIBED: Final = re.compile(r"[A-Za-z]+ [0-9]+\.[0-9]+\.[0-9]+[A-Za-z0-9+.]* on [a-z0-9]+")
+
+
+def _dotted(name: object) -> bool:
+    return isinstance(name, str) and all(part.isidentifier() for part in name.split("."))
+
+
+def _record_problem(record: object) -> str | None:
+    """Why ``record`` is not one :func:`lacking` writes, or None. The names it holds must be
+    dotted names, each re-export and submodule under a module the table scans."""
+    if not isinstance(record, dict) or set(record) != {"python", "reexports", "submodules"}:
+        return "not an object with python, reexports and submodules"
+    if not isinstance(record["python"], str) or not _DESCRIBED.fullmatch(record["python"]):
+        return "its python is not an interpreter's description"
+    reexports, submodules = record["reexports"], record["submodules"]
+    if not isinstance(reexports, dict) or not isinstance(submodules, list):
+        return "its reexports are not an object, or its submodules not a list"
+    scanned = set(scanned_modules())
+    for name, target in reexports.items():
+        if not _dotted(name) or not _dotted(target) or name.split(".")[0] not in scanned:
+            return "a re-export is not a scanned module's attribute naming a module"
+    for name in submodules:
+        if not _dotted(name) or "." not in name or name.split(".")[0] not in scanned:
+            return "a submodule is not a dotted name under a scanned module"
+    return None
+
+
 def records_in(text: str) -> list[dict[str, Any]]:
-    """Each record in ``text``, a log: what follows :data:`RECORD` on a line, to its end."""
+    """Each record in ``text``, a log: what follows :data:`RECORD` on a line, to its end. A
+    record that is not JSON, or not one :func:`lacking` writes, raises ``ValueError``, so that a
+    log never adds what the probe would not."""
     found = []
-    for line in text.splitlines():
+    for number, line in enumerate(text.splitlines(), start=1):
         at = line.find(RECORD)
-        if at >= 0:
-            found.append(json.loads(line[at + len(RECORD) :]))
+        if at < 0:
+            continue
+        record = json.loads(line[at + len(RECORD) :])
+        problem = _record_problem(record)
+        if problem is not None:
+            raise ValueError(f"line {number}: {problem}")
+        found.append(record)
     return found
 
 
@@ -225,7 +261,11 @@ def main(argv: list[str] | None = None) -> int:
     with ``--add``, add to the table what the records in each log named say it lacked."""
     args = sys.argv[1:] if argv is None else argv
     if args[:1] == ["--add"]:
-        records = [record for log in args[1:] for record in records_in(Path(log).read_text())]
+        try:
+            records = [record for log in args[1:] for record in records_in(Path(log).read_text())]
+        except ValueError as exc:
+            print(f"a {RECORD} line is not the probe's: {exc}", file=sys.stderr)
+            return 2
         if not records:
             print(f"no {RECORD} line in {', '.join(args[1:]) or 'no log'}", file=sys.stderr)
             return 2

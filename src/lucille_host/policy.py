@@ -433,7 +433,8 @@ def _read(path: Path) -> Mapping[str, Any] | None:
     except tomllib.TOMLDecodeError as exc:
         raise PolicyError(f"{path} is not valid TOML") from exc
     except RecursionError as exc:
-        # Kept should the parser stop short of the host's own limit.
+        # The parser's own limit, on what the check above does not count: a key of more than 1000
+        # dotted parts (src/lucille_host/nesting.py).
         raise PolicyError(f"{path} nests too deep to be read") from exc
 
 

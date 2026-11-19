@@ -468,10 +468,13 @@ def _share_notes(raw: list[dict[str, Any]]) -> tuple[ShareNote, ...]:
 
 
 def decode_code(text: str) -> Code:
-    """Decode a ``swbp1_`` code. Its hub and its token are the caller's to check."""
+    """Decode a ``swbp1_`` code. Its hub and its token are the caller's to check. A payload
+    nested past what the library's parser follows is not a code either: the parser's limit
+    differs by Python version, and a payload a newer one reads at that depth is no code object,
+    so every version refuses it the same way."""
     try:
         code = pairing.PairingCode.decode(text)
-    except pairing.PairingError:
+    except (pairing.PairingError, RecursionError):
         raise BadCode("this is not a pairing code; paste the whole code Lucille shows") from None
     return Code(
         text=text,
