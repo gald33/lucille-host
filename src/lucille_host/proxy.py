@@ -444,8 +444,34 @@ def scrub(data: bytes, token: str, *, cut: bool = False) -> bytes:
 # A JSON string token, in a body json.loads has taken whole: there a quote outside a string only
 # ever opens one.
 _JSON_STRING: Final = re.compile(r'"(?:[^"\\]|\\.)*"', re.DOTALL)
+
+
 # What follows a string that is an object's key.
 _KEY_COLON: Final = re.compile(r"[ \t\r\n]*:")
+
+
+class _Unfaithful(ValueError):
+    """Two keys of one object that redaction made the same."""
+
+
+def _unique(key: str, marked: set[str]) -> str:
+    """``key``, as redaction made it, numbered from its second on so that it is not a key it
+    made before: ``[redacted private key]``, ``[redacted private key] 2``, ..."""
+    found, number = key, 1
+    while found in marked:
+        number += 1
+        found = f"{key} {number}"
+    marked.add(found)
+    return found
+
+
+def _no_marked_twice(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    seen: set[str] = set()
+    for key, _ in pairs:
+        if key in seen and PRIVATE_KEY_MARK in key:
+            raise _Unfaithful
+        seen.add(key)
+    return dict(pairs)
 
 
 def redacted_json(body: bytes) -> bytes:
@@ -453,13 +479,16 @@ def redacted_json(body: bytes) -> bytes:
     strings (an escaped one too, since each string is read decoded): then each string, keys
     included, in the order the body holds them, with the host's own redaction applied. A block
     that a string opens and does not end takes the rest of that string and goes on into the
-    values after it, each string taken whole, up to the first end of a block, as the host's pass
-    over the raw text would; so a key whose lines are strings of an array, or sibling fields, is
-    not returned. The objects' keys between keep their names, so the body keeps its shape. Only
-    the strings that change are written again; everything else, numbers, white space and repeated
-    keys among it, stays as it came, and the body stays JSON (spec/PROTOCOL.md section 11). A
-    body that is not JSON, one cut at the cap among them, is left to the host's pass, which sets
-    the truncation flag when a block takes its end."""
+    strings after it, keys and values alike, each taken whole, up to the first end of a block, as
+    the host's pass over the raw text would; so a key whose lines are strings of an array, sibling
+    fields or an object's keys is not returned. Each key redaction changes is numbered when it
+    would be one made before (``[redacted private key] 2``), so no two keys of an object become
+    the same; were they the same all the same, the body is left as it came, to the host's pass
+    over the raw text, which takes the block from its header to its end across the strings, and
+    is then not JSON. Only the strings that change are written again; everything else, numbers,
+    white space and repeated keys among it, stays as it came, and the body stays JSON
+    (spec/PROTOCOL.md section 11). A body that is not JSON, one cut at the cap among them, is left
+    to the host's pass, which sets the truncation flag when a block takes its end."""
     try:
         text = body.decode("utf-8")
         json.loads(text)
@@ -468,11 +497,11 @@ def redacted_json(body: bytes) -> bytes:
     out: list[str] = []
     pos = 0
     open_block = False
+    # The keys redaction made, so that no two become the same.
+    marked: set[str] = set()
     for token in _JSON_STRING.finditer(text):
         raw = token.group()
         value = raw[1:-1] if "\\" not in raw else json.loads(raw)
-        if open_block and _KEY_COLON.match(text, token.end()):
-            continue
         if open_block:
             end = key_block_end(value)
             if end is None:
@@ -482,13 +511,20 @@ def redacted_json(body: bytes) -> bytes:
                 new = PRIVATE_KEY_MARK + rest
         else:
             new, open_block = redact_to_end(value)
+        if new != value and _KEY_COLON.match(text, token.end()):
+            new = _unique(new, marked)
         if new != value:
             out += [text[pos : token.start()], json.dumps(new)]
             pos = token.end()
     if not out:
         return body
     out.append(text[pos:])
-    return "".join(out).encode("utf-8")
+    result = "".join(out)
+    try:
+        json.loads(result, object_pairs_hook=_no_marked_twice)
+    except ValueError:
+        return body
+    return result.encode("utf-8")
 
 
 def main(

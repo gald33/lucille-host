@@ -609,9 +609,15 @@ the host's error text.)
 `stdout` is GitHub's response body, as it came, unless it is JSON and a private-key block begins in one
 of its strings, read decoded: then the child applies §13's redaction to its strings, keys included, in
 the order the body holds them. A block a string opens and does not end takes the rest of it, and the
-string values after it, each whole, up to the first end of a block, as the redaction would over the raw
-text, so a key whose lines are separate strings is not returned. Only the strings that change are written
-again, and the body stays JSON; `stderr` is the line `HTTP <status>`, then, when GitHub sent one, its
+strings after it, keys and values alike, each whole, up to the first end of a block, as the redaction would
+over the raw text, so a key whose lines are separate strings, or an object's keys, is not returned. With no
+end, it takes every string after the header, and the reply is not flagged: the body is whole. Each key it
+changes is numbered when it would be one it made before (`[redacted private key] 2`), so an object keeps
+no two keys alike; were two alike all the same, the child leaves the body as it came, to §13's pass over
+the raw text. Only the strings that change are written again, so the body stays JSON. A string the
+redaction changes for a common key format alone (a token, §13) is written again too. The marks can make a
+body longer than it came; past the 64 KiB cap (§13) the host cuts it, sets the truncation flag, and the
+body is then not JSON; `stderr` is the line `HTTP <status>`, then, when GitHub sent one, its
 `Link` header line. The credential's value is never in either: the host removes it before writing. The exit
 code says how the call went: 0 for a 2xx status; 3 for any other status, a 3xx included, which is reported
 and never followed; 2 when the credential is missing, is not bound to `api.github.com`, or is not in the form
