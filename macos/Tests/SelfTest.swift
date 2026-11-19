@@ -1267,8 +1267,13 @@ extension SelfTest {
         ] {
             report.expect(GmailRules.value(address: address, password: password) == nil, "\(what) is never saved")
         }
-        report.expect(GmailRules.input("reader@example.org abcdefghijklmnop") == Data("reader@example.org abcdefghijklmnop\n".utf8),
+        let secret = GmailRules.input("reader@example.org abcdefghijklmnop")
+        let sent = secret.data
+        report.expect(sent == Data("reader@example.org abcdefghijklmnop\n".utf8),
                       "the value goes on standard input, with a newline")
+        secret.wipe()
+        report.expect(sent.count == 36 && sent.allSatisfy { $0 == 0 } && secret.data.allSatisfy { $0 == 0 },
+                      "once wiped, every Data made from the bytes sent reads zeros: they were overwritten in place, not copied")
         let verbs = [GmailRules.listArguments, GmailRules.saveArguments, GmailRules.testArguments, GmailRules.removeArguments]
         report.expect(verbs.allSatisfy { $0.first == "--json" && $0.dropFirst().first == "credential" },
                       "each of the window's verbs is credential, with --json", "\(verbs)")
@@ -1295,19 +1300,25 @@ extension SelfTest {
         report.expect(fixtures.isEmpty || removed == [.credentialRemoved(service: "gmail", name: "default")],
                       "credential remove's object", "\(removed)")
         if let refused = fixtures["credential-test-refused"]?.objects.last, case .error(let error) = refused {
-            let words = GmailText.refusal(error)
+            let words = GmailText.refusal(error, testing: true)
             report.expect(error.code == "sign_in_refused" && words.contains("15 minutes"),
                           "Gmail's refusal says to make a new app password, and the wait after it", words)
         } else {
             report.expect(fixtures.isEmpty, "credential test's refusal is read")
         }
         for code in ["sign_in_refused", "bad_credential", "unreachable", "limit_reached", "paused", "no_such_credential", "insecure_keyring", "store_error", "internal"] {
-            let words = GmailText.refusal(HostError(code: code, message: "the host's words", kind: nil))
+            let error = HostError(code: code, message: "the host's words", kind: nil)
+            let words = GmailText.refusal(error, testing: true)
             report.expect(words != ConnectionText.appBug && !words.contains("the host's words"),
                           "\(code) has the window's own words, never the host's", words)
+            let elsewhere = GmailText.refusal(error, testing: false)
+            report.expect(code == "internal" ? elsewhere == ConnectionText.appBug : elsewhere == words,
+                          "\(code) from Save, Remove or the list: Test's own words only for the codes all verbs share", elsewhere)
         }
-        report.expect(GmailText.refusal(HostError(code: "no_such_code", message: "x", kind: nil)) == ConnectionText.appBug,
-                      "a code the window does not know is the app's bug")
+        for testing in [true, false] {
+            report.expect(GmailText.refusal(HostError(code: "no_such_code", message: "x", kind: nil), testing: testing) == ConnectionText.appBug,
+                          "a code the window does not know is the app's bug")
+        }
         report.expect(GmailText.kept(nil) == "No app password is saved.", "with none kept, the window says so")
     }
 

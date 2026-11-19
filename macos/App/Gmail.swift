@@ -54,14 +54,46 @@ enum GmailRules {
     /// `credential remove`.
     static let removeArguments = ["--json", "credential", "remove", service, name]
 
-    /// What Save writes on standard input: the value and a newline.
-    static func input(_ value: String) -> Data {
-        Data((value + "\n").utf8)
+    /// What Save writes on standard input: the value and a newline, in memory of its own.
+    static func input(_ value: String) -> SecretBytes {
+        SecretBytes(value)
     }
 
     /// The Gmail credential among those `credential list` reports, if one is kept.
     static func saved(_ credentials: [SavedCredential]) -> SavedCredential? {
         credentials.first { $0.service == service && $0.name == name }
+    }
+}
+
+/// The bytes Save sends, in memory this object owns. `data` points into it and never copies it,
+/// so every `Data` made from it, the verb's standard input among them, reads the same bytes; and
+/// `wipe` overwrites them in place, with `memset_s`, which the compiler may not leave out. A
+/// `Data` of its own could not promise that: overwriting one whose storage another copy still
+/// shares makes a fresh copy to overwrite, and leaves the bytes sent where they were.
+final class SecretBytes {
+    private let buffer: UnsafeMutableRawBufferPointer
+
+    /// `text` and a newline.
+    init(_ text: String) {
+        let count = text.utf8.count + 1
+        buffer = UnsafeMutableRawBufferPointer.allocate(byteCount: count, alignment: 1)
+        buffer.copyBytes(from: text.utf8)
+        buffer[count - 1] = 0x0A
+    }
+
+    /// The bytes, without a copy. Read it only while this object lives.
+    var data: Data {
+        Data(bytesNoCopy: buffer.baseAddress!, count: buffer.count, deallocator: .none)
+    }
+
+    /// Overwrite the bytes with zeros, in place.
+    func wipe() {
+        _ = memset_s(buffer.baseAddress, buffer.count, 0, buffer.count)
+    }
+
+    deinit {
+        wipe()
+        buffer.deallocate()
     }
 }
 
@@ -107,8 +139,9 @@ enum GmailText {
     static let noneToTest = "Save an app password first."
 
     /// What the window says when a verb was refused, chosen by the refusal's code, never by its
-    /// words. A code this release does not know is the app's own bug.
-    static func refusal(_ error: HostError) -> String {
+    /// words. A code this release does not know is the app's own bug, and so is `internal` from
+    /// any verb but Test (`testing`), where it can be Gmail's answer.
+    static func refusal(_ error: HostError, testing: Bool) -> String {
         switch error.code {
         case "sign_in_refused":
             return "Gmail didn't accept the app password. Make a new one on Google's App Passwords page and save it here. After a refusal, \(appName) waits 15 minutes before it signs in with the same one again."
@@ -122,7 +155,7 @@ enum GmailText {
             return "\(appName) is paused, so it signs in to nothing. Resume it, then try again."
         case "no_such_credential":
             return noneToTest
-        case "internal":
+        case "internal" where testing:
             return "\(appName) couldn't finish the test: Gmail answered in a way \(appName) doesn't expect, or its helper program failed. Try again later."
         case "insecure_keyring", "store_error":
             return "\(appName) couldn't use this Mac's Keychain. Try again; if it keeps happening, restart your Mac."

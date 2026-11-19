@@ -457,7 +457,9 @@ final class HostModel: ObservableObject {
             self?.saveGmail(address: address, password: password)
         }
         panel.onTest = { [weak self] in
-            self?.gmailVerb(GmailRules.testArguments, saying: GmailText.testing, timeout: GmailRules.testTimeout) { outcome in
+            self?.gmailVerb(
+                GmailRules.testArguments, saying: GmailText.testing, timeout: GmailRules.testTimeout, testing: true
+            ) { outcome in
                 outcome.signedIn(service: GmailRules.service, name: GmailRules.name, host: GmailRules.host)
                     ? GmailText.signedIn : nil
             }
@@ -495,9 +497,10 @@ final class HostModel: ObservableObject {
     }
 
     /// Save: the value goes on the verb's standard input, and nowhere else; the field is emptied
-    /// before the verb starts. A value not in the form the host takes is never sent. Once the verb
-    /// has returned, the bytes sent are overwritten where no other copy holds them; the strings
-    /// typed and made from them are dropped, not zeroed, which Swift does not allow.
+    /// before the verb starts. A value not in the form the host takes is never sent. The bytes
+    /// sent are in memory of their own (`SecretBytes`), which the verb's input only points into;
+    /// once the verb has returned they are overwritten in place. The strings typed and made from
+    /// them are dropped, not zeroed, which Swift does not allow.
     private func saveGmail(address: String, password: String) {
         guard let value = GmailRules.value(address: address, password: password) else {
             gmailPanel.say(GmailText.notInForm)
@@ -505,12 +508,12 @@ final class HostModel: ObservableObject {
         }
         gmailPanel.clearPassword()
         Task {
-            var input = GmailRules.input(value)
+            let input = GmailRules.input(value)
             gmailPanel.setBusy(true, saying: GmailText.saving)
             let result = await VerbQueue.run(
-                cli, GmailRules.saveArguments, on: VerbQueue.store, input: input, timeout: GmailRules.keychainTimeout
+                cli, GmailRules.saveArguments, on: VerbQueue.store, input: input.data, timeout: GmailRules.keychainTimeout
             )
-            input.resetBytes(in: 0..<input.count)
+            input.wipe()
             let outcome = VerbOutcome(result)
             gmailPanel.setBusy(false)
             if case .done = outcome, let saved = GmailRules.saved(outcome.credentials) {
@@ -529,6 +532,7 @@ final class HostModel: ObservableObject {
         saying: String,
         timeout: TimeInterval? = nil,
         refusedAsDone: String? = nil,
+        testing: Bool = false,
         done: @escaping (VerbOutcome) -> String?
     ) {
         Task {
@@ -541,16 +545,17 @@ final class HostModel: ObservableObject {
             } else if case .done = outcome, let words = done(outcome) {
                 gmailPanel.say(words)
             } else {
-                gmailPanel.say(gmailWords(result))
+                gmailPanel.say(gmailWords(result, testing: testing))
             }
             await readGmail(quietly: true)
         }
     }
 
     /// Why a Gmail verb failed: the refusal's code, or what the app says of any other failure.
-    private func gmailWords(_ result: CLIResult) -> String {
+    /// `testing`: the verb was Test's.
+    private func gmailWords(_ result: CLIResult, testing: Bool = false) -> String {
         if case .refused(let error) = VerbOutcome(result) {
-            return GmailText.refusal(error)
+            return GmailText.refusal(error, testing: testing)
         }
         return HostText.explain(result, earlierRunStuck: HostCLI.stuckRuns > 0).message
     }

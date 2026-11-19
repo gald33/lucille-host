@@ -432,8 +432,9 @@ no Google Cloud project. The window shows:
   The window takes Google's four groups of four, in any case, and sends the 16 letters lowercase. It
   sends nothing that is not an address and 16 letters, so an account's own password is never saved.
   The field is emptied, with the editor that edits it and their undo, before the verb starts, and
-  whenever the window closes. Once the verb has returned, the bytes sent on standard input are
-  overwritten, where no other copy holds them. The strings typed, and the value made from them, are
+  whenever the window closes. The bytes sent on standard input are kept in memory of their own, which
+  the verb's input points into without a copy; once the verb has returned, they are overwritten in
+  place. The strings typed, and the value made from them, are
   dropped, not zeroed: Swift gives no way to overwrite a string, and copies AppKit and the pipe made
   are out of the app's reach. Saving gives no warning;
 - **Test**, which runs `credential test gmail default --json`: Capsule signs in to Gmail and out

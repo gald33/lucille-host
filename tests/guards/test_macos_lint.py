@@ -1655,6 +1655,36 @@ def test_the_web_page_is_allowed_only_as_that_literal_in_the_opener() -> None:
     assert "http" in swift_rules(trailing, OPENER)
 
 
+@pytest.mark.parametrize(
+    "line",
+    [
+        'let page = "https:" + "//example.com"',
+        'let page = "ht" + "tps://example.com"',
+        'let page = ["wss:/", "/example.com"].joined()',
+        'let page = "ftp" +\n    "://example.com"',
+        'let page = #"https:"# + "//\\u{65}xample.com"',
+        'let page = "HTTP:" + """\n    //example.com\n    """',
+    ],
+)
+def test_a_url_cut_into_literals_is_a_network_url(line: str) -> None:
+    # Each literal read on its own holds no URL; read one after another, they do.
+    assert "http" in swift_rules(line, APP), line
+    assert "http" in swift_rules(f"{line}\n", OPENER), line
+    found = [v for v in macos_lint.check_swift(line, APP, phrases()) if v.rule == "http"]
+    assert {v.line for v in found} == {1}
+
+
+def test_the_opener_s_page_hides_no_url_cut_around_it() -> None:
+    # The page's literal, where the opener may hold it, is read as nothing among the literals: it
+    # is no URL there, and the literals on each side of it join.
+    assert "http" not in swift_rules(SYSTEM_PLACES, OPENER)
+    around = SYSTEM_PLACES + f'\nlet cut = ["https:", "{GOOGLE_PAGE}", "//example.com"]\n'
+    found = [v for v in macos_lint.check_swift(around, OPENER, phrases()) if v.rule == "http"]
+    assert [v.line for v in found] == [around.count("\n")]
+    # Words that only look alike when joined are not a URL: no scheme starts mid-word.
+    assert "http" not in swift_rules('let a = "fetchhttps:"; let b = "//no"', APP)
+
+
 def test_the_open_file_is_one_path() -> None:
     # Only one path is ever allowed, as for the process file; the opener at any other is the
     # denylist's.

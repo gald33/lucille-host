@@ -14,6 +14,7 @@ import ipaddress
 import json
 import subprocess
 import sys
+import time
 from collections.abc import Callable
 from typing import Any
 
@@ -473,6 +474,68 @@ def test_an_escaped_header_is_read_and_the_rest_stays_as_it_came() -> None:
         b'{"n": 1e400, "m": -0, "k": 1, "k": 2,\n  "s": "[redacted private key]",'
         b' "[redacted private key]": 0.1000, "[redacted private key] 2": "[redacted private key]"}'
     )
+
+
+def test_a_key_the_body_holds_is_never_made_again() -> None:
+    # The body already holds keys named like the marks, ahead of an escaped header that the host's
+    # pass over the raw text would not see. The keys redaction makes are numbered past them, so
+    # the body is never left to that pass, and the key's lines are not returned.
+    raw = (
+        b'{"[redacted private key]": 0, "[redacted private key] 2": 1,'
+        b' "a": "\\u002d----BEGIN PRIVATE KEY-----", "MIIEvQIB": 2, "QUFBQUFB": 3, "b": "x"}'
+    )
+    reply, _, _ = _main(_http("200 OK", [], raw))
+    assert b"MIIE" not in reply.stdout and b"QUFB" not in reply.stdout
+    assert json.loads(reply.stdout, object_pairs_hook=list) == [
+        (KEY_MARK, 0),
+        (f"{KEY_MARK} 2", 1),
+        ("a", KEY_MARK),
+        (f"{KEY_MARK} 3", 2),
+        (f"{KEY_MARK} 4", 3),
+        (f"{KEY_MARK} 5", KEY_MARK),
+    ]
+
+
+def test_a_token_made_into_a_key_the_body_holds_is_numbered() -> None:
+    other = "ghp" + "_" + "Zz9" * 12
+    raw = json.dumps({TOKEN_MARK: 1, other: 2, "[redacted] 2": 3, f"x {other}": 4}).encode()
+    reply, _, _ = _main(_http("200 OK", [], raw))
+    assert other.encode() not in reply.stdout
+    assert json.loads(reply.stdout, object_pairs_hook=list) == [
+        (TOKEN_MARK, 1),
+        ("[redacted] 3", 2),
+        ("[redacted] 2", 3),
+        (f"x {TOKEN_MARK}", 4),
+    ]
+
+
+@pytest.mark.parametrize("mark", [KEY_MARK, TOKEN_MARK])
+def test_two_keys_made_alike_leave_the_body_to_the_hosts_pass(
+    mark: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The net under the numbering: were two keys of an object made alike all the same, of either
+    # mark, the body goes as it came, and the host's pass over the raw text takes the block.
+    monkeypatch.setattr(proxy, "_unique", lambda key, taken, counts: key)
+    other = "ghp" + "_" + "Zz9" * 12
+    document = (
+        {"a": BEGIN, "b": "MIIE", "c": "QUFB", "d": END}
+        if mark == KEY_MARK
+        else {other: 1, f"{other[:-1]}Y": 2}
+    )
+    raw = json.dumps(document).encode()
+    reply, _, _ = _main(_http("200 OK", [], raw))
+    assert reply.stdout == raw
+
+
+def test_many_keys_made_alike_are_numbered_quickly() -> None:
+    # Every key after a header that never ends is taken, and each is numbered: 22,000 of them,
+    # the same one repeated, well inside the child's time.
+    raw = ('{"a": "' + BEGIN + '", ' + ", ".join(['"k": 1'] * 22000) + "}").encode()
+    started = time.monotonic()
+    reply, _, _ = _main(_http("200 OK", [], raw))
+    assert time.monotonic() - started < 5
+    keys = [key for key, _ in json.loads(reply.stdout, object_pairs_hook=list)]
+    assert keys == ["a", KEY_MARK, *(f"{KEY_MARK} {n}" for n in range(2, 22001))]
 
 
 def test_a_body_almost_json_is_left_to_the_hosts_pass() -> None:

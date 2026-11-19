@@ -108,7 +108,11 @@ comments included; over the code with its comments blanked, so that a comment in
   Diagnostics (``clearContents()``, ``setString(``, ``writeObjects(``), is allowed.
 - [http] no ``http://``, ``https://``, ``ws://``, ``wss://`` or ``ftp://``, in any case, but for
   one string literal in :data:`OPEN_FILE` whose value is :data:`GOOGLE_APP_PASSWORDS_PAGE`, the one
-  web page the opener may show (the Gmail window's button, decisions/0003 "Second use").
+  web page the opener may show (the Gmail window's button, decisions/0003 "Second use"). It reads
+  each literal on its own and also a file's literals one after another, decoded and joined with
+  nothing between them, so that one cut in pieces (``"https:" + "//host"``, or the pieces of an
+  array joined) is a network URL too; the opener's literal is read there as nothing, so that a URL
+  cut around it is found as well.
 
 In what the app shows:
 
@@ -580,6 +584,9 @@ PASTEBOARD_READS: Final = _patterns(
     (r"\bdropDestination\s*\(", "reads what is dropped"),
 )
 HTTP: Final = _patterns((r"(?i)\b(?:https?|wss?|ftp)://", "is a network URL"))
+# HTTP's scheme without its word boundary, which the joined literals test for themselves: the
+# start of a literal is one, whatever the literal before it ends with.
+_SCHEME: Final = re.compile(r"(?i)(?:https?|wss?|ftp)://")
 URL_SCHEME: Final = _patterns(
     *((re.escape(key), "declares a URL scheme") for key in URL_SCHEME_KEYS)
 )
@@ -702,10 +709,12 @@ class SwiftSyntaxError(ValueError):
 @dataclass(frozen=True)
 class SwiftScan:
     """What :func:`swift_scan` read: each string literal, decoded, with the line it starts on,
-    and the text with every comment blanked (each of its characters but a newline a space)."""
+    and the text with every comment blanked (each of its characters but a newline a space);
+    ``in_order`` is the same literals in the order they open in the text."""
 
     literals: tuple[tuple[int, str], ...]
     code: str
+    in_order: tuple[tuple[int, str], ...] = ()
 
 
 _ESCAPES: Final = {"0": "\0", "\\": "\\", "t": "\t", "n": "\n", "r": "\r", '"': '"', "'": "'"}
@@ -718,6 +727,8 @@ class _Scanner:
         self.text = text
         self.code = list(text)
         self.literals: list[tuple[int, str]] = []
+        # Each literal with the index it opens at.
+        self.opened: list[tuple[int, int, str]] = []
         self.starts = [0, *(match.end() for match in re.finditer("\n", text))]
 
     def line(self, index: int) -> int:
@@ -791,6 +802,7 @@ class _Scanner:
         text = self.text
         n = len(text)
         line = self.line(i)
+        opened_at = i
         i += hashes
         multiline = text.startswith('"""', i)
         if multiline:
@@ -847,6 +859,7 @@ class _Scanner:
                 raise SwiftSyntaxError(self.line(i), f"an unknown escape \\{kind}")
         value = _multiline_value(lines, joined, line) if multiline else "".join(lines[0])
         self.literals.append((line, value))
+        self.opened.append((opened_at, line, value))
         return i
 
 
@@ -879,7 +892,8 @@ def swift_scan(text: str) -> SwiftScan:
     """
     scanner = _Scanner(text)
     scanner.code_until(0, interpolation=False)
-    return SwiftScan(tuple(sorted(scanner.literals)), "".join(scanner.code))
+    in_order = tuple((line, value) for _, line, value in sorted(scanner.opened))
+    return SwiftScan(tuple(sorted(scanner.literals)), "".join(scanner.code), in_order)
 
 
 def _is_test_swift(rel: str) -> bool:
@@ -1048,6 +1062,31 @@ def design_tokens(code: str) -> list[tuple[int, str]]:
     return [(flat.count("\n", 0, match.start()) + 1, match[0]) for match in _TOKEN.finditer(flat)]
 
 
+def _joined_url_findings(literals: Sequence[tuple[int, str]], rel: str) -> list[Violation]:
+    """[http] over a file's string literals, decoded and joined in order with nothing between
+    them, so that a URL cut in pieces is found; each finding is on the line of the literal it
+    starts in. The opener's one page, as that whole literal in :data:`OPEN_FILE`, is read as
+    nothing: it is no URL here, and the literals on each side of it join, so that it hides none
+    cut around it."""
+    pieces: list[str] = []
+    starts: list[tuple[int, int]] = []
+    at = 0
+    for line, value in literals:
+        piece = "" if rel == OPEN_FILE and value == GOOGLE_APP_PASSWORDS_PAGE else value
+        starts.append((at, line))
+        pieces.append(piece)
+        at += len(piece)
+    joined = "".join(pieces)
+    opening = {start for start, _ in starts}
+    found: list[Violation] = []
+    for match in _SCHEME.finditer(joined):
+        at = match.start()
+        if at in opening or at == 0 or not (joined[at - 1].isalnum() or joined[at - 1] == "_"):
+            line = next(line for start, line in reversed(starts) if start <= at)
+            found.append(Violation(rel, line, "http", HTTP[0][1]))
+    return found
+
+
 def check_swift(
     text: str, rel: str, phrases: Sequence[str], used: set[str] | None = None
 ) -> list[Violation]:
@@ -1083,6 +1122,7 @@ def check_swift(
             value = " " * len(TEST_SHEBANG) + value[len(TEST_SHEBANG) :]
         found += _swift_rule_findings(value, rel, line)
         found += _regex_findings(value, rel, "swift-denylist", MARKDOWN_LINKS, line)
+    found += _joined_url_findings(scan.in_order, rel)
     if rel == OPEN_FILE:
         found += _opener_findings(text, scan, rel)
     if rel == PROCESS_FILE:
