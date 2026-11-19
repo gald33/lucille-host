@@ -719,6 +719,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.credential_parsers = frozenset(
         {credential, credential_set, credential_list, credential_remove, credential_test}
     )
+    for each in parser.credential_parsers:
+        _json_option(each)
     return parser
 
 
@@ -740,8 +742,11 @@ def _check_usage(parser: argparse.ArgumentParser, args: argparse.Namespace) -> N
     forms = getattr(parser, "forms", {})
     if args.verb == "run" and as_json and not args.json_events:
         forms["run"].error("run writes its JSON with --json-events")
-    if args.verb == "credential" and as_json:
-        forms["credential"].error("credential has no JSON form in contract version 1")
+    if args.verb == "credential" and as_json and args.credential_verb == "set":
+        if not args.value_stdin:
+            forms["credential"].error(
+                "with --json, credential set reads the value with --value-stdin"
+            )
     if args.verb == "pair" and as_json and args.code is None and not args.code_stdin:
         forms["pair"].error("with --json, pair reads the code with --code-stdin")
     if args.verb == "roots" and args.roots_verb == "add":
@@ -1615,13 +1620,17 @@ def _credential_verb(args: argparse.Namespace, dirs: paths.Dirs, out: _Out) -> N
             for each in saved:
                 hosts = ", ".join(each.hosts) if each.hosts else "no host (saved without hosts)"
                 when = time.strftime("%Y-%m-%d %H:%M:%SZ", time.gmtime(each.saved_at))
-                out.text(f"{each.service}/{each.name}: sent only to {hosts}; saved {when}")
+                out.say(
+                    f"{each.service}/{each.name}: sent only to {hosts}; saved {when}",
+                    "credential",
+                    **_credential_fields(each),
+                )
             return
         key = f"{args.service}/{args.name}"
         if args.credential_verb == "remove":
             if not creds.remove(args.service, args.name):
                 raise _Refused("no_such_credential", f"no credential {key} is saved")
-            out.text(f"removed {key}")
+            out.say(f"removed {key}", "credential_removed", service=args.service, name=args.name)
             return
         # Every check that needs no value comes first, so nothing is typed for a refusal.
         hosts = credentials.hosts_of(args.hosts)
@@ -1641,11 +1650,13 @@ def _credential_verb(args: argparse.Namespace, dirs: paths.Dirs, out: _Out) -> N
         if any(ord(char) < 0x20 or ord(char) == 0x7F for char in value):
             raise _Refused("bad_value", "the value holds a control character; nothing was saved")
         saved = creds.save(args.service, args.name, value, hosts, replace=args.replace)
-        out.text(
+        out.say(
             f"{'replaced' if before else 'saved'} {key}, to be sent only to "
             f"{', '.join(saved.hosts)}. Only github.read and the gmail operations use saved "
             "credentials: those of the service github, bound to api.github.com, and of the "
-            "service gmail, bound to imap.gmail.com."
+            "service gmail, bound to imap.gmail.com.",
+            "credential",
+            **_credential_fields(saved),
         )
     except credentials.CredentialExists as exc:
         raise _Refused(
@@ -1655,6 +1666,17 @@ def _credential_verb(args: argparse.Namespace, dirs: paths.Dirs, out: _Out) -> N
         ) from exc
     except credentials.CredentialError as exc:
         raise _Refused("bad_credential", str(exc)) from exc
+
+
+def _credential_fields(saved: Any) -> dict[str, Any]:
+    """A ``credential`` object's fields (spec/CLI.md section 6): names, hosts and when it was
+    saved, never its value."""
+    return {
+        "service": saved.service,
+        "name": saved.name,
+        "hosts": list(saved.hosts),
+        "saved_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(saved.saved_at)),
+    }
 
 
 # What `credential test` says for each exit of gmail.check's child (decisions/0003, "Second use").
@@ -1715,7 +1737,13 @@ def _credential_test(args: argparse.Namespace, dirs: paths.Dirs, out: _Out, save
         "credential_test", service=args.service, name=args.name, code=code
     )
     if code == "ok":
-        out.text(f"{key}: signed in to imap.gmail.com")
+        out.say(
+            f"{key}: signed in to imap.gmail.com",
+            "credential_test",
+            service=args.service,
+            name=args.name,
+            host="imap.gmail.com",
+        )
         return
     line = result.stderr.strip().splitlines()
     said = line[0].removeprefix("lucille-host gmail: ") if line and exit_code != 1 else ""
@@ -1800,7 +1828,7 @@ _CREDENTIAL_ARGUMENTS: Final = frozenset({"service", "name", "--host", "ACTION"}
 _CREDENTIAL_USAGE: Final = frozenset(
     {
         "argument --host: expected one argument",
-        "credential has no JSON form in contract version 1",
+        "with --json, credential set reads the value with --value-stdin",
     }
 )
 
@@ -1822,7 +1850,7 @@ def _usage_said(
     if not ours and "credential" not in words:
         return message
     if message.startswith("argument ACTION: invalid choice:"):
-        return "unknown credential subcommand: it is set, list or remove"
+        return "unknown credential subcommand: it is set, list, remove or test"
     if message in _CREDENTIAL_USAGE or message.startswith(_CREDENTIAL_REQUIRED):
         own = message.removeprefix(_CREDENTIAL_REQUIRED)
         if all(name in _CREDENTIAL_ARGUMENTS for name in own.split(", ")) or own == message:

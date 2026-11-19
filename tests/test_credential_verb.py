@@ -1,6 +1,7 @@
 """``lucille-host credential set``, ``list`` and ``remove``: the value is typed on this computer,
 read from one line of stdin or at a prompt that does not echo it, never taken from the command
-line and never shown; each credential is bound to the hosts given; the verb has no JSON form."""
+line and never shown; each credential is bound to the hosts given; with --json, the verb writes
+the objects of spec/CLI.md."""
 
 from __future__ import annotations
 
@@ -8,6 +9,7 @@ import io
 import json
 import os
 import pty
+import re
 import select
 import subprocess
 import sys
@@ -103,23 +105,103 @@ def test_the_value_is_never_taken_from_the_command_line(
 @pytest.mark.parametrize(
     "argv",
     [
-        ["--json", "credential", "list"],
-        ["credential", "list", "--json"],
-        ["credential", "--json", "list"],
-        ["--json", "credential", "set", "gmail", "x", "--host", "a.example", "--value-stdin"],
+        ["--json", "credential", "set", "gmail", "x", "--host", "a.example.com"],
+        ["credential", "set", "gmail", "x", "--host", "a.example.com", "--json"],
+        ["credential", "--json", "set", "gmail", "x", "--host", "a.example.com"],
     ],
 )
-def test_the_verb_has_no_json_form(
+def test_with_json_set_takes_the_value_on_standard_input_only(
     host_env: HostEnv,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
     argv: list[str],
 ) -> None:
+    # Nothing asks for it: a shell writes it on standard input, with --value-stdin.
     with pytest.raises(SystemExit) as exited:
         _main(argv, monkeypatch, SECRET + "\n")
     assert exited.value.code == 2
-    assert '"code":"usage"' in capsys.readouterr().out
+    said = capsys.readouterr()
+    assert '"code":"usage"' in said.out
+    assert said.err.endswith(
+        "error: with --json, credential set reads the value with --value-stdin\n"
+    ), said.err
     assert _store(host_env).names() == []
+
+
+_SAVED_AT = r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"
+
+
+def _objects(out: str) -> list[dict[str, object]]:
+    return [json.loads(line) for line in out.splitlines()]
+
+
+@pytest.mark.parametrize("where", ["before", "after"])
+def test_the_json_form_of_set_list_and_remove(
+    host_env: HostEnv,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    where: str,
+) -> None:
+    def line(*words: str) -> list[str]:
+        return ["--json", *words] if where == "before" else [*words, "--json"]
+
+    argv = line("credential", "set", "gmail", "default", "--host", "imap.gmail.com")
+    assert _main([*argv, "--value-stdin"], monkeypatch, GMAIL_VALUE + "\n") == 0
+    said = capsys.readouterr()
+    [saved] = _objects(said.out)
+    assert re.fullmatch(_SAVED_AT, str(saved.pop("saved_at")))
+    assert saved == {
+        "v": 1,
+        "type": "credential",
+        "service": "gmail",
+        "name": "default",
+        "hosts": ["imap.gmail.com"],
+    }
+    assert said.err == "" and GMAIL_VALUE not in said.out
+    _store(host_env).save("github", "personal", "x" * 40, ["api.github.com"])
+    assert _main(line("credential", "list"), monkeypatch) == 0
+    listed = _objects(capsys.readouterr().out)
+    assert [(o["type"], o["service"], o["name"], o["hosts"]) for o in listed] == [
+        ("credential", "github", "personal", ["api.github.com"]),
+        ("credential", "gmail", "default", ["imap.gmail.com"]),
+    ]
+    assert _main(line("credential", "remove", "gmail", "default"), monkeypatch) == 0
+    assert _objects(capsys.readouterr().out) == [
+        {"v": 1, "type": "credential_removed", "service": "gmail", "name": "default"}
+    ]
+    assert _main(line("credential", "remove", "gmail", "default"), monkeypatch) == 1
+    said = capsys.readouterr()
+    [error] = _objects(said.out)
+    assert (error["type"], error["code"]) == ("error", "no_such_credential")
+    _store(host_env).remove("github", "personal")
+    # None saved: no object, a line on standard error, and exit 0.
+    assert _main(line("credential", "list"), monkeypatch) == 0
+    said = capsys.readouterr()
+    assert said.out == "" and "no credentials are saved" in said.err
+
+
+def test_the_json_form_of_test(
+    host_env: HostEnv, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _save_gmail(host_env)
+    _fake_child(monkeypatch, 0)
+    assert _main(["--json", "credential", "test", "gmail", "default"], monkeypatch) == 0
+    assert _objects(capsys.readouterr().out) == [
+        {
+            "v": 1,
+            "type": "credential_test",
+            "service": "gmail",
+            "name": "default",
+            "host": "imap.gmail.com",
+        }
+    ]
+    _fake_child(monkeypatch, 7, "lucille-host gmail: Gmail refused the app password\n")
+    assert _main(["credential", "test", "gmail", "default", "--json"], monkeypatch) == 1
+    [error] = _objects(capsys.readouterr().out)
+    assert (error["code"], error["message"]) == (
+        "sign_in_refused",
+        "Gmail refused the app password",
+    )
 
 
 def test_a_host_is_required(
@@ -435,7 +517,17 @@ _PATHS: dict[str, tuple[list[str], str, bool, str, int | None]] = {
     ),
     "set, value as --host=": (["credential", "set", "gmail", "x", f"--host={V}"], "", True, "", 1),
     "set, value as an option": ([*SET, f"--{V}"], "", False, "", 2),
-    "set with --json": (["--json", *SET, "--value-stdin"], V + "\n", False, "", 2),
+    "set with --json": (["--json", *SET, "--value-stdin"], V + "\n", False, "", 0),
+    "set with --json, no --value-stdin": (["--json", *SET], V + "\n", False, "", 2),
+    "set with --json, keyring says the item": (
+        ["--json", *SET, "--value-stdin"],
+        V + "\n",
+        False,
+        "says",
+        1,
+    ),
+    "list with --json": (["--json", "credential", "list"], "", False, "saved", 0),
+    "remove with --json": (["credential", "remove", "gmail", "x", "--json"], "", False, "saved", 0),
     "set with --store-file": ([*SET, "--value-stdin", "--store-file"], V + "\n", False, "", 2),
     "set, no terminal": (SET, V + "\n", False, "", 1),
     "set, --value-stdin at a terminal": ([*SET, "--value-stdin"], "", True, "", 1),
@@ -606,7 +698,8 @@ def test_an_unknown_action_is_named_as_such_and_not_repeated(
     err = capsys.readouterr().err
     assert err.startswith("usage: lucille-host credential "), err
     assert err.endswith(
-        "lucille-host credential: error: unknown credential subcommand: it is set, list or remove\n"
+        "lucille-host credential: error: unknown credential subcommand: "
+        "it is set, list, remove or test\n"
     ), err
     assert _shown(err) == []
 
@@ -951,7 +1044,7 @@ def test_a_usage_error_raised_by_the_credential_verbs_parsers_is_gated_by_its_pa
     said = cli._usage_said(
         parser, parser.forms["credential"], [], f"argument ACTION: invalid choice: {W!r}"
     )
-    assert said == "unknown credential subcommand: it is set, list or remove"
+    assert said == "unknown credential subcommand: it is set, list, remove or test"
 
 
 def test_a_usage_error_of_a_line_that_names_the_verb_is_gated_by_its_words() -> None:

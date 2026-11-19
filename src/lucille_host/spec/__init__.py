@@ -73,6 +73,9 @@ CLI_TYPES = (
     "request",
     "host_too_old",
     "stopped",
+    "credential",
+    "credential_removed",
+    "credential_test",
     "error",
 )
 
