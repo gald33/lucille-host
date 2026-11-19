@@ -33,8 +33,8 @@ pull request, and when started by hand. It has no path filter.
 - Jobs `macos-smoke`, on `macos-26` and on `xcode-27` (GitHub's macOS 27 image): each takes the disk image
   `macos-app` built from the Actions cache, refuses it unless its sha256 is the one `macos-app` gave, and
   runs the checks that need no build on it. They build nothing, and do not run the pairing check, which
-  needs the suite's copy of the runtime. The `xcode-27` job is `continue-on-error`: its failure does not
-  fail the workflow run (the maintainer's decision of 2026-11-02, decisions/0002 §18).
+  needs the suite's copy of the runtime. Both fail the workflow run when they fail, like every other job.
+  The `xcode-27` job did not from 2026-11-02 to 2026-11-18 (decisions/0002 §18).
 - The Mac app ships a `checked-hash` `.pyc` beside each `.py` of its runtime. `check_app.py bytecode`, in
   `macos-app` and both smoke jobs, checks that each is byte for byte what the bundled interpreter compiles
   from that `.py`. It is meant to be run on a copy you downloaded too
