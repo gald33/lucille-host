@@ -1,9 +1,12 @@
-# 0004: Running as root, uid 0 (draft)
+# 0004: Running as root, uid 0
 
-**Status: proposed — awaiting operator ruling.** Nothing in this record is enforced, and it changes no
-runtime code, test or CI job. Sections 1 to 3 say what the host does today, with the file and line of each
-claim, what was run, and what could not be checked. Section 4 proposes a rule and lists the code it would
-change later. It extends [0001](0001-host-design.md), which says the host "refuses to run as uid 0"
+**Status: decided 2026-11-20 by the repository owner: Option A (4.2)**, in
+[a comment on PR #78](https://github.com/gald33/lucille-host/pull/78#issuecomment-7032741923):
+"The host refuses uid 0 for every verb except `--version` and `--help`, and a Home Assistant add-on runs the
+host as its own unprivileged user. The items in §5 stay open." The rule is not yet enforced: this record
+changes no runtime code, test or CI job, and the code in 4.3 is written in a later change. Sections 1 to 3 say what the host does today, with the file and line of each
+claim, what was run, and what could not be checked. Section 4 weighs the options, records the rule decided and lists the code it
+changes later. It extends [0001](0001-host-design.md), which says the host "refuses to run as uid 0"
 ("Pairing", `0001-host-design.md:230`), and [0003](0003-local-credentials.md).
 
 Line numbers are those of `main` at commit cbec58f. The commands below were first run on 6d66668; the
@@ -284,7 +287,7 @@ another way to drop privileges is not checked.
    the host, would then be the limit. `homeassistant_config` holds `secrets.yaml`.
 8. **Out of scope there.** macOS, launchd and the Mac app's login item do not apply.
 
-## 4. Proposed rule
+## 4. The rule
 
 ### 4.1 Options
 
@@ -313,19 +316,17 @@ paths under `/data`, the file store, and no credential operation.
 - Against: B's code with a smaller surface; the mode is detected from a flag, not from anything the host can
   check; a second code path to review in a program whose point is that it is small.
 
-### 4.2 Recommendation: A
+### 4.2 Decision: A
 
-Refuse uid 0 for every verb except `--version` and `--help` (the read-only `log`, `ops list`, `roots list`,
-`roots check` and `policy previous` could stay open to root; that is for the ruling to say); give an add-on an unprivileged user in its own
-image; settle the keyring question for the add-on separately, in 0003, before any add-on claims
+Decided: refuse uid 0 for every verb except `--version` and `--help`, the read-only verbs included; give an
+add-on an unprivileged user in its own image; settle the keyring question for the add-on separately, in 0003, before any add-on claims
 credential operations.
 
 Why: the refusal already exists and is already the documented invariant; the only gap found (1.2) is that
 seven verbs skip it (`log`, `pause`, `resume`, `kill`, `ops`, `roots`, `policy`), and the ones that write (all but the read-only `log`, `ops list`, `roots list`, `roots check` and `policy previous`) leave root-owned files or folders that lock the real user out of their own profile; and every
 option that allows root buys the add-on convenience with code that makes the host larger and its claim
-conditional. If the ruling is that an add-on must run as root, C is the narrower of the two, and the
-conditions in B (state under `/data`, file store, no credential operation, and a privilege drop for
-children) should be its minimum.
+conditional. The ruling chose A and the add-on runs as its own unprivileged user, so B and C are not taken.
+The read-only verbs are refused too: one check before dispatch, with no list of verbs to keep true.
 
 ### 4.3 What the code would change later (not written here)
 
