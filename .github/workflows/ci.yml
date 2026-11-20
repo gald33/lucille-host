@@ -29,7 +29,12 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest]
-        python: ["3.11", "3.13"]
+        # 3.14 is pinned to one patch, so that both runners test the same one: given only "3.14",
+        # each takes a Python already on its image (Ubuntu's 3.14.4, Homebrew's 3.14.10). The pin
+        # is one uv's pinned version below can download. The maintainer moves it to uv's newest
+        # 3.14 patch in the pull request that bumps that uv version, or on its own when a 3.14
+        # patch fixes a security issue (VERIFYING.md).
+        python: ["3.11", "3.13", "3.14.6"]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

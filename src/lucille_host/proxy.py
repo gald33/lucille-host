@@ -483,7 +483,9 @@ def _no_marked_twice(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
 
 # One piece of what lies between the strings of a JSON text: white space; one punctuation mark;
 # or a number in JSON's form or a literal, ending where a word does (Python's parser reads NaN
-# and the infinities too).
+# and the infinities too). The grammar check (:func:`_shaped_like_json`) would refuse a word run
+# on into another without that ending, as two values in a row; it is kept so that each piece is
+# JSON's own token, whatever reads the pieces.
 _PIECE: Final = re.compile(
     r"[ \t\r\n]+"
     r"|(?P<mark>[\[\]{}:,])"
@@ -517,6 +519,8 @@ def _shaped_like_json(text: str, strings: Sequence[re.Match[str]]) -> bool:
     every string closed, and its pieces (:func:`_pieces`) in JSON's order, read by a state
     machine with a stack of the arrays and objects open, so that it agrees with the parser on
     every text within the parser's reach. Each string's own form is checked as it is decoded."""
+    # A deep body opens brackets before any string, and a string left open takes the rest of the
+    # text, their ends among it, so the grammar check alone would refuse it too; this says why.
     if any(match.group("end") != '"' for match in strings):
         return False
     opened: list[str] = []
