@@ -415,7 +415,10 @@ schemas needed no new name. `state.startup_checks`, and with it `library.start`,
 `runs.py:133`, kept as a second guard. Tests: `tests/test_root_refused.py`. Not built: the repair verb, the
 file-held store, add-on pairing, the privilege drop and `sudo` handling (section 5). The check reads the
 *effective* uid, `os.geteuid()`, as `state.startup_checks` does: a process whose real uid is 0 and whose effective
-uid is not is not refused (not tested).
+uid is not is not refused (not tested). That covers a setuid program and `sudo` alike: what counts is the
+effective uid the process holds when it starts, and `sudo` handling stays open (section 5). A command with no
+verb is not refused either: it only shows the version, as `--version` does, so the ruling's "every verb"
+covers it, since it runs no verb.
 
 For B or C, add to the above: a privilege drop in `_exec.py:235-243` and its tests; a root-aware
 `policy.is_broad` (or a rule that a root caller's "home" is every home); the path conditions in `paths.py`;

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import io
 import os
+import sys
 from pathlib import Path
 
 import pytest
@@ -97,6 +98,9 @@ def test_a_verb_is_refused_as_root_and_touches_nothing(
     assert said.err == f"lucille-host: {ROOT_REFUSED}\n"
     assert snapshot(as_root.home.parent) == before
     assert not (as_root.dirs.config / ".policy.lock").exists()
+    if sys.platform.startswith("linux"):
+        # The folders a verb would make above the profile, which the default layout names.
+        assert not (as_root.home / ".config").exists() and not (as_root.home / ".local").exists()
 
 
 @pytest.mark.parametrize("line", LINES.values(), ids=LINES.keys())
