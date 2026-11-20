@@ -587,27 +587,43 @@ def test_every_job_gates_the_run_the_xcode_27_leg_included() -> None:
         assert "continue-on-error" not in job, job_id
 
 
-def test_the_test_job_runs_each_python_the_package_names_and_3_14_on_one_patch() -> None:
-    # Python 3.14 joined the test job's matrix after the advisory python-next workflow passed on
-    # five pushes to main (decisions/0002 §18); that workflow is gone. 3.14 is pinned to one
-    # patch, so both runners test the same one, rather than each the Python already on its image.
+def test_the_test_job_runs_each_python_the_package_names_each_on_one_patch() -> None:
+    # The minor versions the test job runs are exactly those the package's classifiers name, each
+    # pinned to one patch, and only a Python uv downloads itself, so both runners test the same
+    # build and none takes one already on its image. The job checks the interpreter is the pin.
+    # 3.14 joined after the advisory python-next workflow passed on five pushes to main
+    # (decisions/0002 §18); that workflow is gone.
     assert not (CI.parent / "python-next.yml").exists()
-    matrix = _ci()["jobs"]["test"]["strategy"]["matrix"]
+    job = _ci()["jobs"]["test"]
+    matrix = job["strategy"]["matrix"]
     assert matrix["os"] == ["ubuntu-latest", "macos-latest"]
-    pythons = matrix["python"]
-    assert pythons[:2] == ["3.11", "3.13"] and len(pythons) == 3
-    assert re.fullmatch(r"3\.14\.[0-9]+", pythons[2]), pythons
-    # Each minor version the job tests is one the package says it supports.
+    # 3.12 runs on Ubuntu alone: macOS runners are short, and 3.11 and 3.13 there bracket it.
+    assert matrix["include"] == [{"os": "ubuntu-latest", "python": "3.12.13"}]
+    pythons = sorted(
+        [*matrix["python"], *(entry["python"] for entry in matrix["include"])],
+        key=lambda python: tuple(map(int, python.split("."))),
+    )
+    assert all(re.fullmatch(r"3\.[0-9]+\.[0-9]+", python) for python in pythons), pythons
+    minors = [".".join(python.split(".")[:2]) for python in pythons]
+    assert len(set(minors)) == len(minors)
     classifiers = tomllib.loads(
         (build_app.REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")
     )["project"]["classifiers"]
-    for python in pythons:
-        minor = ".".join(python.split(".")[:2])
-        assert f"Programming Language :: Python :: {minor}" in classifiers, minor
-    # VERIFYING.md says who moves the pin, and when.
+    named = {
+        found.group(1)
+        for classifier in classifiers
+        if (found := re.fullmatch(r"Programming Language :: Python :: (3\.[0-9]+)", classifier))
+    }
+    assert set(minors) == named
+    assert job["env"] == {"UV_PYTHON_PREFERENCE": "only-managed"}
+    (show,) = [step for step in job["steps"] if str(step.get("name", "")).startswith("Show the")]
+    assert show["env"] == {"PINNED": "${{ matrix.python }}"}
+    assert "sys.executable" in show["run"] and 'os.environ["PINNED"]' in show["run"]
+    # VERIFYING.md names each pin and says who moves them.
     verifying = " ".join((build_app.REPO_ROOT / "VERIFYING.md").read_text(encoding="utf-8").split())
-    assert f"pinned to one patch, {pythons[2]}" in verifying
-    assert "Who moves the pin, and when" in verifying
+    for python in pythons:
+        assert python in verifying, python
+    assert "Who moves the pins, and when" in verifying
 
 
 def test_the_pairing_check_runs_with_the_suites_copy_of_the_runtime() -> None:

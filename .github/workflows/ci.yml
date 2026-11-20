@@ -29,12 +29,22 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest]
-        # 3.14 is pinned to one patch, so that both runners test the same one: given only "3.14",
-        # each takes a Python already on its image (Ubuntu's 3.14.4, Homebrew's 3.14.10). The pin
-        # is one uv's pinned version below can download. The maintainer moves it to uv's newest
-        # 3.14 patch in the pull request that bumps that uv version, or on its own when a 3.14
-        # patch fixes a security issue (VERIFYING.md).
-        python: ["3.11", "3.13", "3.14.6"]
+        # Each minor version the package names is pinned to one patch, the newest that uv's pinned
+        # version below can download for both runners, so both test the same build. Given only a
+        # minor version, a runner may take a Python already on its image instead (macOS took its
+        # 3.11.9 and 3.13.17, Homebrew's 3.14.10; Ubuntu its system 3.14.4). The maintainer moves
+        # the pins to uv's newest patches in the pull request that bumps that uv version, or one
+        # on its own when its patch fixes a security issue (VERIFYING.md).
+        python: ["3.11.15", "3.13.14", "3.14.6"]
+        include:
+          # 3.12 on Ubuntu only: macOS runners are short of capacity, and 3.11 and 3.13 there
+          # bracket it.
+          - os: ubuntu-latest
+            python: "3.12.13"
+    env:
+      # Only a Python uv downloads itself, never one already on the image, whose build can differ
+      # at the same patch.
+      UV_PYTHON_PREFERENCE: only-managed
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -46,8 +56,12 @@ jobs:
           enable-cache: false
       - name: Install from the lock, with the conformance extra
         run: uv sync --locked --extra conformance
-      - name: Show the interpreter
-        run: uv run --no-sync python -VV
+      - name: Show the interpreter, and check it is the pinned one
+        env:
+          PINNED: ${{ matrix.python }}
+        run: |
+          uv run --no-sync python -VV
+          uv run --no-sync python -c 'import os, platform, sys; print(sys.executable); sys.exit(platform.python_version() != os.environ["PINNED"])'
       - name: Test
         run: uv run --no-sync pytest -q
 

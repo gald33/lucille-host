@@ -519,8 +519,9 @@ def _shaped_like_json(text: str, strings: Sequence[re.Match[str]]) -> bool:
     every string closed, and its pieces (:func:`_pieces`) in JSON's order, read by a state
     machine with a stack of the arrays and objects open, so that it agrees with the parser on
     every text within the parser's reach. Each string's own form is checked as it is decoded."""
-    # A deep body opens brackets before any string, and a string left open takes the rest of the
-    # text, their ends among it, so the grammar check alone would refuse it too; this says why.
+    # The grammar check alone would refuse this too. A deep body opens a bracket. A string left
+    # open takes the rest of the text, so every bracket would have to close before it, and the
+    # string would then be a piece after the text's end. This says why the body is refused.
     if any(match.group("end") != '"' for match in strings):
         return False
     opened: list[str] = []
