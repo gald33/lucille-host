@@ -6,6 +6,7 @@ refusal can come only from the host's own check, and the same refusal on 3.11, 3
 
 from __future__ import annotations
 
+import base64
 import json
 import random
 import re
@@ -18,6 +19,7 @@ import pytest
 from switchboard import pairing, sharing
 
 from lucille_host import _switchboard, credentials, gmail, journal, nesting, policy, state, store
+from tests._host import HostEnv
 from tests._keyring import MemoryKeyring
 
 MOST = nesting.FILES_MOST
@@ -236,6 +238,176 @@ def _spy_on_json(monkeypatch: pytest.MonkeyPatch) -> list[str]:
 
     monkeypatch.setattr(json, "loads", spy)
     return parsed
+
+
+def test_the_file_store_link_checks_its_share_store(host_env: HostEnv) -> None:
+    # The link the host opens over the file store reads its share store through the check.
+    link = _switchboard.open_link(host_env.dirs, state.HostConfig(store="file"))
+    assert link.rooms.load() == {}
+    (host_env.dirs.store_files / "deep.json").write_text(_json(MOST + 1))
+    with pytest.raises(sharing.SharingError, match="nests too deep") as refused:
+        link.rooms.load()
+    assert refused.value.state == "store"
+
+
+def _code(extra: Any) -> str:
+    """A pairing code the library reads, with a field of its own that holds ``extra``."""
+
+    def b64(raw: bytes) -> str:
+        return base64.urlsafe_b64encode(raw).decode().rstrip("=")
+
+    payload = {
+        "v": 1,
+        "u": "http://127.0.0.1:9",
+        "s": b64(bytes(32)),
+        "e": b64(bytes(32)),
+        "c": b64(bytes(16)),
+        "x": 4_000_000_000,
+        "p": 0,
+        "z": extra,
+    }
+    return _switchboard.CODE_PREFIX + b64(json.dumps(payload).encode())
+
+
+def test_a_code_s_payload_past_the_limit_is_no_code_on_every_version() -> None:
+    # A code the library reads, with a field nested deep: up to NEST_MOST levels it decodes, and
+    # past that it is refused before the library's parser reads it, which on some versions would
+    # read it and on others not.
+    assert _switchboard.CODE_PREFIX == pairing.CODE_PREFIX
+    nest = _switchboard.NEST_MOST
+    assert _switchboard.decode_code(_code(json.loads(_json(nest - 1)))).url
+    for depth in (nest, 300):
+        with pytest.raises(_switchboard.BadCode, match="not a pairing code"):
+            _switchboard.decode_code(_code(json.loads(_json(depth))))
+
+
+def _encoded_code(raw: bytes) -> str:
+    return _switchboard.CODE_PREFIX + base64.urlsafe_b64encode(raw).decode().rstrip("=")
+
+
+@pytest.mark.parametrize(
+    "encode",
+    [
+        lambda text: text.encode("utf-16"),
+        lambda text: text.encode("utf-16-le"),
+        lambda text: text.encode("utf-32"),
+        # UTF-8 with a byte-order mark, which the parser reads; and bytes that are not UTF-8,
+        # an overlong slash and a lone surrogate, with no NUL among them.
+        lambda text: b"\xef\xbb\xbf" + text.encode(),
+        lambda text: text.encode().replace(b'"u"', b'"u\xc0\xaf"'),
+        lambda text: text.encode().replace(b'"u"', b'"u\xed\xa0\x80"'),
+    ],
+)
+def test_a_code_s_payload_in_any_form_but_the_librarys_is_no_code(
+    encode: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The library writes its codes in ASCII. Its parser would read UTF-16, UTF-32 and UTF-8 with
+    # a mark too, where the depth check does not count, so a payload in any of them, or one that
+    # is not UTF-8, is refused before the library reads it, deep or not, on every version.
+    read: list[str] = []
+    monkeypatch.setattr(pairing.PairingCode, "decode", lambda text: read.append(text))
+    for extra in (None, json.loads(_json(_switchboard.NEST_MOST))):
+        payload = json.loads(base64.urlsafe_b64decode(_code(extra)[6:] + "==="))
+        code = _encoded_code(encode(json.dumps(payload)))
+        with pytest.raises(_switchboard.BadCode, match="not a pairing code"):
+            _switchboard.decode_code(code)
+    assert read == []
+
+
+def test_a_parser_that_stops_short_is_no_code(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Kept should the library's parser ever stop short of the host's own limit.
+    def too_deep(text: str) -> object:
+        raise RecursionError
+
+    monkeypatch.setattr(pairing.PairingCode, "decode", too_deep)
+    with pytest.raises(_switchboard.BadCode, match="not a pairing code"):
+        _switchboard.decode_code(_code(None))
+
+
+@pytest.mark.parametrize("depth", [MOST + 1, 2000, 200_000])
+def test_a_pairing_code_nested_too_deep_is_no_code(depth: int) -> None:
+    # Too deep for the library's parser on some versions and not on others: never a traceback,
+    # on any, and the same refusal as any text that is not a code.
+    payload = base64.urlsafe_b64encode(_json(depth).encode()).decode().rstrip("=")
+    with pytest.raises(_switchboard.BadCode, match="not a pairing code"):
+        _switchboard.decode_code(pairing.CODE_PREFIX + payload)
+
+
+def test_dotted_keys_and_headers_count_as_the_tables_they_make(tmp_path: Path) -> None:
+    # A key of n parts makes n - 1 tables; a header of n parts n; an array of tables one more.
+    # Some patch levels of tomllib refuse a key of more than 1000 parts and others read it, so a
+    # key past the host's limit is refused before the parser reads it, on every one.
+    assert not nesting.toml_deeper("a" + ".a" * MOST + " = 1\n")
+    assert nesting.toml_deeper("a" + ".a" * (MOST + 1) + " = 1\n")
+    assert not nesting.toml_deeper("[a" + ".a" * (MOST - 1) + "]\n")
+    assert nesting.toml_deeper("[a" + ".a" * MOST + "]\n")
+    assert not nesting.toml_deeper("[a.b]\nc.d = [1]\n", 4) and nesting.toml_deeper(
+        "[a.b]\nc.d = [1]\n", 3
+    )
+    assert not nesting.toml_deeper("[[a]]\n", 2) and nesting.toml_deeper("[[a]]\n", 1)
+    # Dots in values, strings and comments are not parts of a key.
+    text = 'a = 1.5\nb = "x.y.z"\nc = [1.5, 2.5] # d.e.f\n"g.h" = {i = 1.0}\n'
+    assert _depth(tomllib.loads(text)) - 1 == 1
+    assert not nesting.toml_deeper(text, 1) and nesting.toml_deeper(text, 0)
+    for parts in (MOST + 2, 2000):
+        path = tmp_path / "policy.toml"
+        path.write_text("a" + ".a" * (parts - 1) + " = 1\n")
+        with pytest.raises(policy.PolicyError, match=r"nests too deep to be read$"):
+            policy.load(path)
+
+
+def _toml_document(rng: random.Random) -> str:
+    """A TOML document of headers, dotted keys, arrays and inline tables, its keys unique."""
+
+    def fresh(prefix: str) -> str:
+        return f"{prefix}{rng.randint(0, 10**9)}"
+
+    def part() -> str:
+        return rng.choice(["a%d", "b%d", "1%d", '"x.y%d"', "'q.r%d'", '"[[%d"']) % rng.randint(0, 9)
+
+    def value(depth: int) -> str:
+        r = rng.random()
+        if depth <= 0 or r < 0.3:
+            return rng.choice(["1", "1.5", "2e3", '"a.b"', "'[.]'", "true", "1979-05-27T07:32:00Z"])
+        if r < 0.6:
+            return "[" + ", ".join(value(depth - 1) for _ in range(rng.randint(0, 3))) + "]"
+        items = [
+            f"{fresh('u')}{'.' + part() if rng.random() < 0.5 else ''} = {value(depth - 1)}"
+            for _ in range(rng.randint(0, 3))
+        ]
+        return "{" + ", ".join(items) + "}"
+
+    lines = []
+    for _ in range(rng.randint(1, 4)):
+        if rng.random() < 0.3:
+            dotted = "".join(f".s{rng.randint(0, 9)}" for _ in range(rng.randint(0, 3)))
+            lines.append(f"[{fresh('h')}{dotted}]  # [[x.y")
+        for _ in range(rng.randint(1, 3)):
+            parts = [fresh("z"), *(part() for _ in range(rng.randint(0, 3)))]
+            key = rng.choice([".", " . "]).join(parts)
+            lines.append(f"{key} = {value(rng.randint(0, 4))}")
+    return "\n".join(lines) + "\n"
+
+
+def test_the_toml_count_is_the_parsers_depth_with_headers_and_dotted_keys() -> None:
+    rng = random.Random(20261119)
+    for _ in range(1500):
+        text = _toml_document(rng)
+        depth = _depth(tomllib.loads(text)) - 1
+        assert not nesting.toml_deeper(text, depth) and nesting.toml_deeper(text, depth - 1), text
+    # With arrays of tables, a header may name the last table of one: the count is never less.
+    for _ in range(500):
+        lines = []
+        for _ in range(rng.randint(1, 4)):
+            name = ".".join(f"t{rng.randint(0, 2)}" for _ in range(rng.randint(1, 3)))
+            lines += [f"[[{name}]]" if rng.random() < 0.5 else f"[{name}]"]
+            lines += [f"x{rng.randint(0, 10**9)} = [[1]]"]
+        text = "\n".join(lines) + "\n"
+        try:
+            parsed = tomllib.loads(text)
+        except tomllib.TOMLDecodeError:
+            continue
+        assert nesting.toml_deeper(text, _depth(parsed) - 2), text
 
 
 def test_the_gmail_childs_arguments_past_the_limit_are_not_parsed(

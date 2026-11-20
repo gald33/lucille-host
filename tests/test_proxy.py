@@ -9,18 +9,20 @@ run, never written whole in this file.
 from __future__ import annotations
 
 import base64
+import contextlib
 import io
 import ipaddress
 import json
+import signal
 import subprocess
 import sys
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from typing import Any
 
 import pytest
 
-from lucille_host import _output, proxy
+from lucille_host import _output, nesting, proxy
 from lucille_host._output import TOKEN_MARK
 
 TOKEN = "ghp" + "_" + "Ab1" * 12
@@ -525,6 +527,119 @@ def test_two_keys_made_alike_leave_the_body_to_the_hosts_pass(
     raw = json.dumps(document).encode()
     reply, _, _ = _main(_http("200 OK", [], raw))
     assert reply.stdout == raw
+
+
+def _deep_body(depth: int, inner: str) -> bytes:
+    """``inner``, a JSON value, inside arrays to ``depth`` levels in all."""
+    return ("[" * (depth - 1) + inner + "]" * (depth - 1)).encode()
+
+
+@pytest.mark.parametrize("depth", [nesting.FILES_MOST, nesting.FILES_MOST + 1, 2000, 200_000])
+def test_a_body_nested_deep_is_redacted_on_every_version(depth: int) -> None:
+    # Past the host's limit the body goes to no parser, whose own limit differs by version: its
+    # shape is checked without one and its strings redacted the same way, an escaped header among
+    # them, which the host's pass over the raw text would not see.
+    inner = '{"a": "\\u002d----BEGIN PRIVATE KEY-----\\nMIIE", "MIIEkey": 1}'
+    raw = _deep_body(depth, inner)
+    reply, _, _ = _main(_http("200 OK", [], raw))
+    assert reply.code == 0 and b"MIIE" not in reply.stdout
+    expected = _deep_body(depth, f'{{"a": "{KEY_MARK}", "{KEY_MARK}": 1}}')
+    assert reply.stdout == expected
+
+
+@pytest.mark.parametrize(
+    "inner",
+    [
+        '{"a": "\\u002d----BEGIN PRIVATE KEY-----\\nMIIE", "b": "cut',
+        '{"a": "\\u002d----BEGIN PRIVATE KEY-----\\nMIIE", "b": nope}',
+        '{"a": "\\u002d----BEGIN PRIVATE KEY-----\\nMIIE", "b": "\\x"}',
+        '{"a": "\\u002d----BEGIN PRIVATE KEY-----\\nMIIE"}}',
+        # Words that are not JSON's between the strings.
+        '{"a": "\\u002d----BEGIN PRIVATE KEY-----\\nMIIE", "b": tru}',
+        '{"a": "\\u002d----BEGIN PRIVATE KEY-----\\nMIIE", "b": nulll}',
+        '{"a": "\\u002d----BEGIN PRIVATE KEY-----\\nMIIE", "b": 1true}',
+        '{"a": "\\u002d----BEGIN PRIVATE KEY-----\\nMIIE", "b": 01}',
+        '{"a": "\\u002d----BEGIN PRIVATE KEY-----\\nMIIE", "b": 1.5.3}',
+        # JSON's words, out of JSON's order; and a string holding a raw control character.
+        '{"a": "\\u002d----BEGIN PRIVATE KEY-----\\nMIIE", "b": ["x" true "y"]}',
+        '{"a": "\\u002d----BEGIN PRIVATE KEY-----\\nMIIE", "b": [1 2]}',
+        '{"a": "\\u002d----BEGIN PRIVATE KEY-----\\nMIIE" "b"}',
+        '{"a": "\\u002d----BEGIN PRIVATE KEY-----\\nMIIE", "b": [1,]}',
+        '{"a": "\\u002d----BEGIN PRIVATE KEY-----\\nMIIE", "b": 1,}',
+        '{"a": "\\u002d----BEGIN PRIVATE KEY-----\\nMIIE", "b": "x\ny"}',
+    ],
+)
+def test_a_body_nested_deep_that_is_not_json_goes_as_it_came(inner: str) -> None:
+    # Cut short, a word that is not JSON's, an escape JSON has not, brackets that do not close in
+    # order, or never close: the child leaves it to the host's pass, as any body that is not JSON.
+    raw = _deep_body(nesting.FILES_MOST + 1, inner)
+    reply, _, _ = _main(_http("200 OK", [], raw))
+    assert reply.stdout == raw
+
+
+def test_a_body_nested_deep_one_bracket_short_goes_as_it_came() -> None:
+    inner = '{"a": "\\u002d----BEGIN PRIVATE KEY-----\\nMIIE"}'
+    raw = _deep_body(nesting.FILES_MOST + 2, inner)[:-1]
+    reply, _, _ = _main(_http("200 OK", [], raw))
+    assert reply.stdout == raw
+
+
+def test_a_body_nested_deep_that_ends_in_a_string_left_open_goes_as_it_came() -> None:
+    # Every bracket closed, then a string with no end: the body is not JSON, whatever its
+    # brackets say.
+    inner = '{"a": "\\u002d----BEGIN PRIVATE KEY-----\\nMIIE"}'
+    raw = _deep_body(nesting.FILES_MOST + 1, inner) + b' "MIIE'
+    reply, _, _ = _main(_http("200 OK", [], raw))
+    assert reply.stdout == raw
+
+
+def test_a_body_nested_deep_with_python_s_own_literals_is_redacted() -> None:
+    # The parser reads NaN and the infinities, so the shape check does too.
+    inner = '{"a": "\\u002d----BEGIN PRIVATE KEY-----\\nMIIE", "n": [NaN, -Infinity, -1.5e+3]}'
+    raw = _deep_body(nesting.FILES_MOST + 1, inner)
+    reply, _, _ = _main(_http("200 OK", [], raw))
+    assert b"MIIE" not in reply.stdout and b"[NaN, -Infinity, -1.5e+3]" in reply.stdout
+
+
+@contextlib.contextmanager
+def _within(seconds: float) -> Iterator[None]:
+    """Fail, rather than wait, past ``seconds``: the alarm interrupts a long match too."""
+
+    def late(signum: int, frame: object) -> None:
+        raise AssertionError(f"took more than {seconds} s")
+
+    before = signal.signal(signal.SIGALRM, late)
+    signal.setitimer(signal.ITIMER_REAL, seconds)
+    try:
+        yield
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, before)
+
+
+@pytest.mark.parametrize("ending", ["", "\\"])
+@pytest.mark.parametrize("depth", [1, nesting.FILES_MOST + 1])
+def test_a_string_with_no_end_and_many_escaped_quotes_is_read_once(depth: int, ending: str) -> None:
+    # A body of 1 MiB that is no JSON: one string, never closed, of escaped quotes, the body's
+    # last character or a lone backslash after them. It goes as it came, read once and not again
+    # from each quote in it.
+    raw = ("[" * (depth - 1) + '{"a": "' + '\\"' * 500_000 + ending).encode()
+    with _within(1):
+        assert proxy.redacted_json(raw) == raw
+
+
+def test_a_second_parse_too_deep_leaves_the_body_as_it_came(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Should the check of the redacted body meet the parser's own limit all the same, the body
+    # goes as it came, to the host's pass: never an internal error.
+    def too_deep(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        raise RecursionError
+
+    monkeypatch.setattr(proxy, "_no_marked_twice", too_deep)
+    raw = json.dumps({"a": BEGIN, "b": "MIIE"}).encode()
+    reply, _, _ = _main(_http("200 OK", [], raw))
+    assert reply.code == 0 and reply.stdout == raw
 
 
 def test_many_keys_made_alike_are_numbered_quickly() -> None:

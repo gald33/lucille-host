@@ -66,6 +66,7 @@ out of it.
 
 from __future__ import annotations
 
+import base64
 import contextlib
 import datetime
 import math
@@ -467,11 +468,45 @@ def _share_notes(raw: list[dict[str, Any]]) -> tuple[ShareNote, ...]:
     )
 
 
+# What a pairing code starts with (sb ``pairing.CODE_PREFIX``, which the tests hold this to).
+CODE_PREFIX: Final = "swbp1_"
+
+
+def _payload_refused(text: str) -> bool:
+    """Whether a code's payload, base64 as the library reads it, is one the host refuses before
+    the library's parser reads it: one that nests more than :data:`NEST_MOST` levels, as that
+    parser's own limit differs by Python version; and one that is not UTF-8, holds a NUL or starts
+    with a byte-order mark, none of which the library writes (its codes are ASCII), and which the
+    parser would read as UTF-16, UTF-32 or UTF-8 with a mark, where this count does not. A
+    payload that is not base64 is left to the library to refuse."""
+    code = text.strip()
+    if not code.startswith(CODE_PREFIX):
+        return False
+    payload = code[len(CODE_PREFIX) :]
+    try:
+        raw = base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4))
+    except ValueError:
+        return False
+    if b"\x00" in raw or raw.startswith(b"\xef\xbb\xbf"):
+        return True
+    try:
+        decoded = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return True
+    return nesting.json_deeper(decoded, NEST_MOST)
+
+
 def decode_code(text: str) -> Code:
-    """Decode a ``swbp1_`` code. Its hub and its token are the caller's to check."""
+    """Decode a ``swbp1_`` code. Its hub and its token are the caller's to check. A code whose
+    payload nests more than :data:`NEST_MOST` levels is not one, before the library's parser
+    reads it: that parser's limit differs by Python version, so every version refuses it the same
+    way. A ``RecursionError`` is read the same, should the parser ever stop short of that, which
+    no payload the check passes makes it do."""
+    if _payload_refused(text):
+        raise BadCode("this is not a pairing code; paste the whole code Lucille shows")
     try:
         code = pairing.PairingCode.decode(text)
-    except pairing.PairingError:
+    except (pairing.PairingError, RecursionError):
         raise BadCode("this is not a pairing code; paste the whole code Lucille shows") from None
     return Code(
         text=text,

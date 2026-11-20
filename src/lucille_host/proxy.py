@@ -50,14 +50,14 @@ import re
 import socket
 import ssl
 import sys
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Final, NoReturn
 
 import certifi
 
-from lucille_host import __version__
+from lucille_host import __version__, nesting
 from lucille_host._output import PRIVATE_KEY_MARK, TOKEN_MARK, key_block_end, redact_to_end
 
 __all__ = [
@@ -443,7 +443,10 @@ def scrub(data: bytes, token: str, *, cut: bool = False) -> bytes:
 
 # A JSON string token, in a body json.loads has taken whole: there a quote outside a string only
 # ever opens one.
-_JSON_STRING: Final = re.compile(r'"(?:[^"\\]|\\.)*"', re.DOTALL)
+# Or, with no closing quote, the rest of the text, a lone backslash at its end included, so that
+# every match that starts at a quote succeeds and a body with an open string is read once, never
+# again from each quote inside it.
+_JSON_STRING: Final = re.compile(r'"(?:[^"\\]|\\.)*(?P<end>"|\\?\Z)', re.DOTALL)
 
 
 # What follows a string that is an object's key.
@@ -478,9 +481,79 @@ def _no_marked_twice(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     return dict(pairs)
 
 
+# One piece of what lies between the strings of a JSON text: white space; one punctuation mark;
+# or a number in JSON's form or a literal, ending where a word does (Python's parser reads NaN
+# and the infinities too).
+_PIECE: Final = re.compile(
+    r"[ \t\r\n]+"
+    r"|(?P<mark>[\[\]{}:,])"
+    r"|(?P<scalar>(?:-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?"
+    r"|true|false|null|NaN|-?Infinity)(?![A-Za-z0-9_.+-]))"
+)
+
+
+def _pieces(text: str, strings: Sequence[re.Match[str]]) -> Iterator[str]:
+    """Each piece of ``text`` in order: a punctuation mark as itself, a number or a literal as
+    ``v``, a string as ``s``; white space is skipped. Raises ``ValueError`` at anything else."""
+    at = 0
+    for match in (*strings, None):
+        end = len(text) if match is None else match.start()
+        while at < end:
+            piece = _PIECE.match(text, at, end)
+            if piece is None:
+                raise ValueError(at)
+            at = piece.end()
+            if piece.group("mark"):
+                yield piece.group("mark")
+            elif piece.group("scalar"):
+                yield "v"
+        if match is not None:
+            yield "s"
+            at = match.end()
+
+
+def _shaped_like_json(text: str, strings: Sequence[re.Match[str]]) -> bool:
+    """Whether ``text``, nested too deep to hand to the parser, is JSON, read without recursion:
+    every string closed, and its pieces (:func:`_pieces`) in JSON's order, read by a state
+    machine with a stack of the arrays and objects open, so that it agrees with the parser on
+    every text within the parser's reach. Each string's own form is checked as it is decoded."""
+    if any(match.group("end") != '"' for match in strings):
+        return False
+    opened: list[str] = []
+    state = "value"
+    try:
+        for piece in _pieces(text, strings):
+            if state in ("value", "value or ]") and piece in ("s", "v"):
+                state = "after" if opened else "end"
+            elif state in ("value", "value or ]") and piece in ("[", "{"):
+                opened.append(piece)
+                state = "value or ]" if piece == "[" else "key or }"
+            elif state in ("key", "key or }") and piece == "s":
+                state = ":"
+            elif state == ":" and piece == ":":
+                state = "value"
+            elif state == "after" and piece == ",":
+                state = "value" if opened[-1] == "[" else "key"
+            elif (state, piece) in (("value or ]", "]"), ("key or }", "}")) or (
+                state == "after" and piece == {"[": "]", "{": "}"}[opened[-1]]
+            ):
+                opened.pop()
+                state = "after" if opened else "end"
+            else:
+                return False
+    except ValueError:
+        return False
+    return state == "end"
+
+
+# What makes a string token one to hand to the parser: an escape, or a control character, which
+# JSON refuses in a string.
+_NOT_PLAIN: Final = re.compile(r"[\\\x00-\x1f]")
+
+
 def _decoded(raw: str) -> str:
-    """A JSON string token's value."""
-    value: str = raw[1:-1] if "\\" not in raw else json.loads(raw)
+    """A JSON string token's value. Raises ``ValueError`` when the token is no JSON string."""
+    value: str = raw[1:-1] if _NOT_PLAIN.search(raw) is None else json.loads(raw)
     return value
 
 
@@ -499,22 +572,38 @@ def redacted_json(body: bytes) -> bytes:
     JSON. Only the strings that change are written again; everything else, numbers, white space
     and repeated keys among it, stays as it came, and the body stays JSON (spec/PROTOCOL.md
     section 11). A body that is not JSON, one cut at the cap among them, is left to the host's
-    pass, which sets the truncation flag when a block takes its end."""
+    pass, which sets the truncation flag when a block takes its end. A body whose arrays and
+    objects nest past the host's own limit (:data:`nesting.FILES_MOST`) is handed to no parser,
+    whose own limit differs by version: its shape is checked without recursion
+    (:func:`_shaped_like_json`) and each string as it is decoded, and its strings are redacted the
+    same way; one not shaped like JSON is left to the host's pass."""
     try:
         text = body.decode("utf-8")
-        json.loads(text)
-    except (UnicodeDecodeError, ValueError, RecursionError):
+    except UnicodeDecodeError:
+        return body
+    deep = nesting.json_deeper(text)
+    try:
+        # Read whole before its strings are, as the parser reads it; a body too deep for it, by
+        # its shape (:func:`_shaped_like_json`).
+        if not deep:
+            json.loads(text)
+        tokens = list(_JSON_STRING.finditer(text))
+        if deep and not _shaped_like_json(text, tokens):
+            return body
+        values = [_decoded(token.group()) for token in tokens]
+    except (ValueError, RecursionError):
         return body
     out: list[str] = []
     pos = 0
     open_block = False
-    tokens = list(_JSON_STRING.finditer(text))
     # The keys the body holds and those redaction made, so that none it makes is one of them.
-    taken = {_decoded(t.group()) for t in tokens if _KEY_COLON.match(text, t.end())}
+    taken = {
+        value
+        for token, value in zip(tokens, values, strict=True)
+        if _KEY_COLON.match(text, token.end())
+    }
     counts: dict[str, int] = {}
-    for token in tokens:
-        raw = token.group()
-        value = _decoded(raw)
+    for token, value in zip(tokens, values, strict=True):
         if open_block:
             end = key_block_end(value)
             if end is None:
@@ -533,9 +622,13 @@ def redacted_json(body: bytes) -> bytes:
         return body
     out.append(text[pos:])
     result = "".join(out)
+    if deep:
+        # Only strings changed, each written as JSON, and the numbering kept every key it made
+        # apart from every other: the shape checked above still holds.
+        return result.encode("utf-8")
     try:
         json.loads(result, object_pairs_hook=_no_marked_twice)
-    except ValueError:
+    except (ValueError, RecursionError):
         return body
     return result.encode("utf-8")
 
