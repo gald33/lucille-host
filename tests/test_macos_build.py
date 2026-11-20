@@ -1458,7 +1458,7 @@ def test_an_unpinned_build_requirement_is_refused() -> None:
 
 
 def test_the_wheel_is_built_with_the_hashed_build_backend(tmp_path: Path) -> None:
-    argv = build_app.build_wheel_argv(tmp_path)
+    argv = build_app.build_wheel_argv(tmp_path, build_app.build_python())
     assert argv[:3] == ["uv", "build", "--wheel"]
     position = argv.index("--build-constraints")
     assert argv[position + 1] == str(build_app.BUILD_CONSTRAINTS)
@@ -1467,6 +1467,46 @@ def test_the_wheel_is_built_with_the_hashed_build_backend(tmp_path: Path) -> Non
     # A uv.toml could turn build isolation off, or add an index: uv reads none.
     assert "--no-config" in argv
     assert "--no-config" in build_app.export_requirements_argv()
+
+
+def test_the_wheel_is_built_with_the_python_running_the_build(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # The UV_* variables are removed, CI's only-managed among them, so uv build is told the
+    # interpreter: the one running build_app, CI's pinned build of uv's. And uv must take that
+    # one for the request, or nothing is built.
+    assert build_app.build_python() == Path(sys.executable)
+    argv = build_app.build_wheel_argv(tmp_path, Path("/x/python3"))
+    assert argv[argv.index("--python") + 1] == "/x/python3"
+    assert build_app.find_python_argv(Path("/x/python3")) == [
+        "uv",
+        "python",
+        "find",
+        "--no-config",
+        "/x/python3",
+    ]
+    answers = {"found": sys.executable}
+    built: list[list[str]] = []
+
+    def run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        if argv[:3] == ["uv", "python", "find"]:
+            return subprocess.CompletedProcess(argv, 0, stdout=answers["found"] + "\n", stderr="")
+        built.append(list(argv))
+        out = Path(argv[argv.index("--out-dir") + 1])
+        (out / payload.host_wheel_name("0.1.0")).write_bytes(b"")
+        return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+
+    monkeypatch.setattr("subprocess.run", run)
+    build_app.build_wheel(tmp_path, "0.1.0")
+    assert [argv[argv.index("--python") + 1] for argv in built] == [sys.executable]
+    assert (
+        f"build interpreter: {os.path.realpath(sys.executable)} (Python " in capsys.readouterr().out
+    )
+    answers["found"] = "/somewhere/else/python3"
+    built.clear()
+    with pytest.raises(build_app.BuildError, match="/somewhere/else/python3"):
+        build_app.build_wheel(tmp_path, "0.1.0")
+    assert built == []
 
 
 def test_uv_settings_from_the_environment_do_not_reach_the_wheel_or_the_export(
@@ -1484,12 +1524,13 @@ def test_uv_settings_from_the_environment_do_not_reach_the_wheel_or_the_export(
         if argv[:2] == ["uv", "build"]:
             out = Path(argv[argv.index("--out-dir") + 1])
             (out / payload.host_wheel_name("0.1.0")).write_bytes(b"")
-        return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+        stdout = sys.executable if argv[:3] == ["uv", "python", "find"] else ""
+        return subprocess.CompletedProcess(argv, 0, stdout=stdout, stderr="")
 
     monkeypatch.setattr("subprocess.run", run)
     build_app.build_wheel(tmp_path, "0.1.0")
     build_app.export_requirements_text()
-    assert [argv[:2] for argv, _ in calls] == [["uv", "build"], ["uv", "export"]]
+    assert [argv[:2] for argv, _ in calls] == [["uv", "python"], ["uv", "build"], ["uv", "export"]]
     for argv, env in calls:
         assert "--no-config" in argv, argv
         assert env is not None, argv

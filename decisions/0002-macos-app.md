@@ -459,6 +459,9 @@ ripgrep.
   `UV_*` variable: either could turn build isolation off, and `uv build` would then build the wheel with
   whatever build backend is installed, unpinned and never hashed, and still succeed (seen on Linux with
   uv 0.11.32, from `UV_NO_BUILD_ISOLATION=1` and from a user `uv.toml`, before the build removed both).
+  So `uv build` is told its interpreter (`--python`): the one running `build_app.py`, in CI the job's
+  pinned build of uv's, which `UV_PYTHON_PREFERENCE` would otherwise have chosen. `uv export` reads only
+  the lock and needs none.
 - **The wheels** are installed unchanged, with hashes required and binaries only: the release wheel, and the
   release lock's pins for macOS. Measured: the locked dependencies install for `aarch64-apple-darwin` on Linux,
   22 pins, 18 MB, with exactly two arm64 Mach-O extension files (`cryptography`'s Rust extension and `cffi`'s

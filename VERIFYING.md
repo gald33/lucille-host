@@ -48,8 +48,11 @@ pull request, and when started by hand. It has no path filter.
     The version alone cannot tell two builds of one patch apart; the path and uv's "Downloading" line
     in the sync step show whose build ran.
   - **The other jobs:** `guards`, `macos-app` and both smoke jobs run their tools on 3.13.14, the `test`
-    job's 3.13 pin, with the same setting, so no job takes a Python from its image. The app bundles a
-    runtime of its own, which this does not touch.
+    job's 3.13 pin, with the same setting, so no job takes a Python from its image. The uv commands the
+    build scripts run get no `UV_*` variable, that setting among them, so `build_app.py` builds the host
+    wheel with `uv build --python` and the interpreter running it, and refuses unless `uv python find`
+    takes the same one. It prints that interpreter as "build interpreter". The app bundles a runtime of
+    its own, which this does not touch.
   - **3.14** joined the matrix on 2026-11-20, after the advisory workflow `python-next`, now gone, passed
     on five pushes to `main` in a row (decisions/0002 §18).
   - **Who moves the pins, and when:** the maintainer moves each to the newest patch of its minor version

@@ -65,6 +65,14 @@ pytestmark = pytest.mark.filterwarnings(
 
 # How long a test watches for something that must not happen.
 QUIET = 1.0
+
+# SHORT_PERIOD_WAITS: under RECONCILE_EVERY shortened to 0.5 s, a wait for `ok` or for a held
+# offer to be taken uses the suite's own limit, not a few periods. A verdict counts as old after
+# one period, and main looks at its age again after it accepts: an accept that itself takes
+# that long (a loaded runner) finds its load too old, and the offer waits, `checking`, for the
+# next load. That cannot happen at the real period of 30 s. A wait for `invalid` keeps its
+# limit: no age check turns a verdict of invalid back.
+
 # `run` as a shell starts it.
 EVENTS = ("run", "--json-events", "--exit-on-stdin-eof")
 CLI_MD = Path(__file__).resolve().parents[1] / "spec" / "CLI.md"
@@ -1957,7 +1965,8 @@ def test_a_folder_turned_into_the_home_folder_is_found_within_the_period(
         assert host.reply("work-1", sleeping["job_id"])["body"]["status"] == "done"
     link.unlink()
     link.symlink_to(docs)
-    until(lambda: run.state()["policy"] == "ok", 3, what="a state saying ok")
+    # The suite's own limit, not a few periods (SHORT_PERIOD_WAITS).
+    until(lambda: run.state()["policy"] == "ok", what="a state saying ok")
     until(lambda: calls["accept_room"] == 2, what="the offer taken")
     run.close_stdin()
     assert run.wait() == 0
@@ -2050,7 +2059,8 @@ def test_a_folder_turned_into_the_home_folder_while_main_waits_on_the_hub_holds_
     assert calls["accept_room"] == 1
     docs_link.unlink()
     docs_link.symlink_to(docs)
-    until(lambda: run.state()["policy"] == "ok", 3, what="a state saying ok")
+    # The suite's own limit, not a few periods (SHORT_PERIOD_WAITS).
+    until(lambda: run.state()["policy"] == "ok", what="a state saying ok")
     until(lambda: calls["accept_room"] == 2, what="the offer taken")
     run.close_stdin()
     assert run.wait() == 0
@@ -2084,7 +2094,8 @@ def test_an_offer_held_for_an_old_load_is_taken_once_a_new_load_says_valid(
     armed.set()
     host.lucille.offer("work-2")
     assert slept.wait(20)
-    until(lambda: calls["accept_room"] == 2, 5, what="the offer taken")
+    # The suite's own limit, not a few periods (SHORT_PERIOD_WAITS).
+    until(lambda: calls["accept_room"] == 2, what="the offer taken")
 
     def read_from() -> int | None:
         states = run.objects("state")[seen:]
@@ -2097,7 +2108,7 @@ def test_an_offer_held_for_an_old_load_is_taken_once_a_new_load_says_valid(
             None,
         )
 
-    taken = until(lambda: read_from(), 5, what="a state reading the room taken")
+    taken = until(lambda: read_from(), what="a state reading the room taken")
     held = [found["policy"] for found in run.objects("state")[seen : seen + taken]]
     assert "checking" in held
     run.close_stdin()
