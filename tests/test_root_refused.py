@@ -96,7 +96,7 @@ def test_a_verb_is_refused_as_root_and_touches_nothing(
     assert said.out == ""
     assert said.err == f"lucille-host: {ROOT_REFUSED}\n"
     assert snapshot(as_root.home.parent) == before
-    assert not (as_root.home / ".config").exists() and not (as_root.home / ".local").exists()
+    assert not (as_root.dirs.config / ".policy.lock").exists()
 
 
 @pytest.mark.parametrize("line", LINES.values(), ids=LINES.keys())
@@ -190,7 +190,7 @@ def test_a_user_sees_no_change(host_env: HostEnv, capsys: pytest.CaptureFixture[
     said = capsys.readouterr()
     assert ROOT_REFUSED not in said.out + said.err
     assert "not in this release's catalog" in said.err
-    assert (host_env.home / ".config" / "lucille-host" / "default" / ".policy.lock").exists()
+    assert (host_env.dirs.config / ".policy.lock").exists()
     assert main(["--json", "status"]) == 0
     assert "startup_refused" not in capsys.readouterr().out
 
