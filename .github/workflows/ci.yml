@@ -61,13 +61,16 @@ jobs:
           PINNED: ${{ matrix.python }}
         run: |
           uv run --no-sync python -VV
-          uv run --no-sync python -c 'import os, platform, sys; print(sys.executable); sys.exit(platform.python_version() != os.environ["PINNED"])'
+          uv run --no-sync python -c 'import os, platform, sys; print(os.path.realpath(sys.executable)); print(sys.base_prefix); sys.exit(platform.python_version() != os.environ["PINNED"])'
       - name: Test
         run: uv run --no-sync pytest -q
 
   guards:
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    # The tools in this job and the Mac jobs run on the test job's 3.13 pin, uv's own build alone.
+    env:
+      UV_PYTHON_PREFERENCE: only-managed
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -75,7 +78,7 @@ jobs:
       - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
         with:
           version: "0.11.32"
-          python-version: "3.13"
+          python-version: "3.13.14"
           enable-cache: false
       - name: Install the dev tools from the lock
         run: uv sync --locked --only-group dev
@@ -124,6 +127,7 @@ jobs:
       dmg_sha256: ${{ steps.handoff.outputs.dmg_sha256 }}
       selftest_sha256: ${{ steps.handoff.outputs.selftest_sha256 }}
     env:
+      UV_PYTHON_PREFERENCE: only-managed
       RUN_NUMBER: ${{ github.run_number }}
       REF_TYPE: ${{ github.ref_type }}
       REF_NAME: ${{ github.ref_name }}
@@ -134,7 +138,7 @@ jobs:
       - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
         with:
           version: "0.11.32"
-          python-version: "3.13"
+          python-version: "3.13.14"
           enable-cache: false
       - name: Select the pinned Xcode
         run: uv run --no-project python tools/macos/build_app.py toolchain --github-env "$GITHUB_ENV"
@@ -371,6 +375,8 @@ jobs:
       fail-fast: false
       matrix:
         runner: [macos-26, xcode-27]
+    env:
+      UV_PYTHON_PREFERENCE: only-managed
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -378,7 +384,7 @@ jobs:
       - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
         with:
           version: "0.11.32"
-          python-version: "3.13"
+          python-version: "3.13.14"
           enable-cache: false
       # csrutil status is printed for System Integrity Protection's state; it gates nothing.
       - name: Show the machine

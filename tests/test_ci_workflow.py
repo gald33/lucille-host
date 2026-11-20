@@ -618,12 +618,42 @@ def test_the_test_job_runs_each_python_the_package_names_each_on_one_patch() -> 
     assert job["env"] == {"UV_PYTHON_PREFERENCE": "only-managed"}
     (show,) = [step for step in job["steps"] if str(step.get("name", "")).startswith("Show the")]
     assert show["env"] == {"PINNED": "${{ matrix.python }}"}
-    assert "sys.executable" in show["run"] and 'os.environ["PINNED"]' in show["run"]
+    # Where the interpreter came from: the venv's python links to uv's install, whose folder is
+    # its base prefix. The version check alone cannot tell two builds of one patch apart.
+    for printed in ("print(os.path.realpath(sys.executable))", "print(sys.base_prefix)"):
+        assert printed in show["run"], printed
+    assert 'os.environ["PINNED"]' in show["run"]
     # VERIFYING.md names each pin and says who moves them.
     verifying = " ".join((build_app.REPO_ROOT / "VERIFYING.md").read_text(encoding="utf-8").split())
     for python in pythons:
         assert python in verifying, python
     assert "Who moves the pins, and when" in verifying
+
+
+def test_every_other_job_runs_its_tools_on_the_test_jobs_313_pin() -> None:
+    # The guards and the Mac jobs run tools, not the suite, on the same 3.13 build the test job
+    # tests, and on uv's own build alone, so nothing in the workflow takes a Python from an image.
+    # (The app bundles a runtime of its own, which this does not touch.)
+    jobs = _ci()["jobs"]
+    (pin,) = [
+        python
+        for python in jobs["test"]["strategy"]["matrix"]["python"]
+        if python.startswith("3.13.")
+    ]
+    others = {}
+    for name, job in jobs.items():
+        setups = [
+            step
+            for step in job["steps"]
+            if str(step.get("uses", "")).startswith("astral-sh/setup-uv@")
+        ]
+        assert len(setups) == 1, name
+        if name != "test":
+            others[name] = setups[0]["with"]["python-version"]
+            assert job["env"]["UV_PYTHON_PREFERENCE"] == "only-managed", name
+    assert others == {"guards": pin, "macos-app": pin, "macos-smoke": pin}
+    verifying = " ".join((build_app.REPO_ROOT / "VERIFYING.md").read_text(encoding="utf-8").split())
+    assert f"run their tools on {pin}" in verifying
 
 
 def test_the_pairing_check_runs_with_the_suites_copy_of_the_runtime() -> None:
