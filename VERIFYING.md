@@ -18,9 +18,9 @@ release follows it once, on a clean machine, and reports each step they could no
 
 **What CI runs.** The workflow `ci` (`.github/workflows/ci.yml`) runs on every push to `main`, on every
 pull request, and when started by hand. It has no path filter.
-- Job `test`, on GitHub-hosted `ubuntu-latest` and `macos-latest`, with Python 3.11 and 3.13: it runs
-  `uv sync --locked --extra conformance`, then `pytest`. `--locked` fails if `uv.lock` does not match
-  `pyproject.toml`, so the exact pins you read are the pins that ran.
+- Job `test`, on GitHub-hosted `ubuntu-latest` and `macos-latest`, with Python 3.11.15, 3.13.14 and
+  3.14.6, and on `ubuntu-latest` with 3.12.13 too (below): it runs `uv sync --locked --extra conformance`, then `pytest`. `--locked` fails if
+  `uv.lock` does not match `pyproject.toml`, so the exact pins you read are the pins that ran.
 - Job `guards`, on `ubuntu-latest`: it runs the five guards below on the whole repository, then
   `ruff check` and `ruff format --check`.
 - Job `macos-app`, on GitHub-hosted `macos-15` (Apple silicon): it builds the Mac app, Capsule, and its
@@ -35,15 +35,22 @@ pull request, and when started by hand. It has no path filter.
   runs the checks that need no build on it. They build nothing, and do not run the pairing check, which
   needs the suite's copy of the runtime. Both fail the workflow run when they fail, like every other job.
   The `xcode-27` job did not from 2026-11-02 to 2026-11-18 (decisions/0002 §18).
-- **Python 3.14** is in the `test` job's matrix, pinned to one patch, 3.14.6, so that both runners test
-  the same one: given only "3.14", each would take a Python already on its image. It gates like every
-  other job. It joined on 2026-11-20, after the advisory workflow `python-next`, now gone, passed on five
-  pushes to `main` in a row (decisions/0002 §18).
-  - **Who moves the pin, and when:** the maintainer moves it to the newest 3.14 patch that the pinned uv
-    (`setup-uv`'s `version`) can download, in the pull request that bumps that uv version. A 3.14 patch
-    that fixes a security issue moves it on its own, in a pull request of its own.
-  - **How to find it:** `uv python list --only-downloads --all-versions --all-platforms --all-arches`, with
-    that uv, lists what it can download. The patch must be there for both `linux-x86_64-gnu` and
+- **Each Python the `test` job runs is pinned to one patch**: 3.11.15, 3.12.13, 3.13.14 and 3.14.6, one
+  for each minor version `pyproject.toml`'s classifiers name, and a test holds the two lists to each
+  other. 3.12 runs on `ubuntu-latest` only: macOS runners are short of capacity, and 3.11 and 3.13 there
+  bracket it.
+  - **Only uv's own builds:** the job sets `UV_PYTHON_PREFERENCE: only-managed`, so every run uses the
+    Python that uv downloads, never one already on the runner's image. Given only a minor version, macOS
+    had run its image's 3.11.9 and 3.13.17 and Homebrew's 3.14.10, and Ubuntu its system 3.14.4.
+  - **Proof in the log:** the step "Show the interpreter, and check it is the pinned one" prints the
+    interpreter's path and version, and fails unless the version is the pin.
+  - **3.14** joined the matrix on 2026-11-20, after the advisory workflow `python-next`, now gone, passed
+    on five pushes to `main` in a row (decisions/0002 §18).
+  - **Who moves the pins, and when:** the maintainer moves each to the newest patch of its minor version
+    that the pinned uv (`setup-uv`'s `version`) can download, in the pull request that bumps that uv
+    version. A patch that fixes a security issue moves its pin on its own, in a pull request of its own.
+  - **How to find them:** `uv python list --only-downloads --all-versions --all-platforms --all-arches`,
+    with that uv, lists what it can download. Each patch must be there for both `linux-x86_64-gnu` and
     `macos-aarch64-none`.
 - The Mac app ships a `checked-hash` `.pyc` beside each `.py` of its runtime. `check_app.py bytecode`, in
   `macos-app` and both smoke jobs, checks that each is byte for byte what the bundled interpreter compiles

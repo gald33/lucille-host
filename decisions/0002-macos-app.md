@@ -1518,9 +1518,11 @@ to `main`, with no path filter; a new push to a pull request cancels that pull r
   workflow run. It gates since 2026-11-18, after six push runs on main passed it, each with the line that
   says the control's gate was held by the run record: 44165228392 (attempt 2), 44176144359, 44290082086
   (attempt 2), 44332530002, 44355868493 and 44357737718. Every job gates now.
-- **Python 3.14** joined the `test` job's matrix on 2026-11-20, pinned to 3.14.6 (VERIFYING.md says who
-  moves the pin, and when). Before that it ran in an advisory workflow of its own, `python-next`, so that
-  every job of `ci.yml` still gated. That workflow passed on five pushes to main in a row:
+- **Python 3.14** joined the `test` job's matrix on 2026-11-20, pinned to 3.14.6. Since then every minor
+  version the job runs is pinned to one patch of uv's own build (VERIFYING.md says which, and who moves
+  them). Before that, 3.14 ran in an advisory workflow of its own, `python-next`, so that every job of
+  `ci.yml` still gated. That workflow passed on five pushes to main in a row, each on the 3.14 already on
+  the runner's image (3.14.4 on Ubuntu, 3.14.10 on macOS), not the pin:
   - 44610103643 (#75);
   - 44620689486 (#77);
   - 44662919738 (#79);
