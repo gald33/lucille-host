@@ -26,6 +26,7 @@ import stat
 import struct
 import subprocess
 import sys
+import tomllib
 import zipfile
 import zlib
 from collections.abc import Callable, Iterator
@@ -586,21 +587,27 @@ def test_every_job_gates_the_run_the_xcode_27_leg_included() -> None:
         assert "continue-on-error" not in job, job_id
 
 
-def test_the_next_python_runs_the_test_job_as_ci_does_and_gates_nothing_of_ci() -> None:
-    # python-next.yml runs ci.yml's test job, step for step, on Python 3.14 alone. It is a workflow
-    # of its own, so that ci.yml's jobs all still gate the run (decisions/0002 §18); it joins ci's
-    # matrix once it has passed on a few pushes to main.
-    nxt = yaml.safe_load((CI.parent / "python-next.yml").read_text(encoding="utf-8"))
-    ci = _ci()
-    (job,) = nxt["jobs"].values()
-    assert job["steps"] == ci["jobs"]["test"]["steps"]
-    assert job["strategy"] == {
-        "fail-fast": False,
-        "matrix": {"os": ["ubuntu-latest", "macos-latest"], "python": ["3.14"]},
-    }
-    assert "3.14" not in ci["jobs"]["test"]["strategy"]["matrix"]["python"]
-    assert nxt["permissions"] == {"contents": "read"}
-    assert "continue-on-error" not in job
+def test_the_test_job_runs_each_python_the_package_names_and_3_14_on_one_patch() -> None:
+    # Python 3.14 joined the test job's matrix after the advisory python-next workflow passed on
+    # five pushes to main (decisions/0002 §18); that workflow is gone. 3.14 is pinned to one
+    # patch, so both runners test the same one, rather than each the Python already on its image.
+    assert not (CI.parent / "python-next.yml").exists()
+    matrix = _ci()["jobs"]["test"]["strategy"]["matrix"]
+    assert matrix["os"] == ["ubuntu-latest", "macos-latest"]
+    pythons = matrix["python"]
+    assert pythons[:2] == ["3.11", "3.13"] and len(pythons) == 3
+    assert re.fullmatch(r"3\.14\.[0-9]+", pythons[2]), pythons
+    # Each minor version the job tests is one the package says it supports.
+    classifiers = tomllib.loads(
+        (build_app.REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    )["project"]["classifiers"]
+    for python in pythons:
+        minor = ".".join(python.split(".")[:2])
+        assert f"Programming Language :: Python :: {minor}" in classifiers, minor
+    # VERIFYING.md says who moves the pin, and when.
+    verifying = " ".join((build_app.REPO_ROOT / "VERIFYING.md").read_text(encoding="utf-8").split())
+    assert f"pinned to one patch, {pythons[2]}" in verifying
+    assert "Who moves the pin, and when" in verifying
 
 
 def test_the_pairing_check_runs_with_the_suites_copy_of_the_runtime() -> None:

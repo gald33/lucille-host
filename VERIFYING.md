@@ -35,10 +35,16 @@ pull request, and when started by hand. It has no path filter.
   runs the checks that need no build on it. They build nothing, and do not run the pairing check, which
   needs the suite's copy of the runtime. Both fail the workflow run when they fail, like every other job.
   The `xcode-27` job did not from 2026-11-02 to 2026-11-18 (decisions/0002 §18).
-- **The workflow `python-next`** (`.github/workflows/python-next.yml`) runs the same `test` job with
-  Python 3.14, on the same events. It gates nothing: it is a workflow of its own, so that every job of
-  `ci` still fails the run when it fails. It joins `ci`'s matrix once it has passed on a few pushes to
-  `main`, as the `xcode-27` leg did. Until then, read a failure there as a note.
+- **Python 3.14** is in the `test` job's matrix, pinned to one patch, 3.14.6, so that both runners test
+  the same one: given only "3.14", each would take a Python already on its image. It gates like every
+  other job. It joined on 2026-11-20, after the advisory workflow `python-next`, now gone, passed on five
+  pushes to `main` in a row (decisions/0002 §18).
+  - **Who moves the pin, and when:** the maintainer moves it to the newest 3.14 patch that the pinned uv
+    (`setup-uv`'s `version`) can download, in the pull request that bumps that uv version. A 3.14 patch
+    that fixes a security issue moves it on its own, in a pull request of its own.
+  - **How to find it:** `uv python list --only-downloads --all-versions --all-platforms --all-arches`, with
+    that uv, lists what it can download. The patch must be there for both `linux-x86_64-gnu` and
+    `macos-aarch64-none`.
 - The Mac app ships a `checked-hash` `.pyc` beside each `.py` of its runtime. `check_app.py bytecode`, in
   `macos-app` and both smoke jobs, checks that each is byte for byte what the bundled interpreter compiles
   from that `.py`. It is meant to be run on a copy you downloaded too
