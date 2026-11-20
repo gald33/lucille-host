@@ -1469,44 +1469,80 @@ def test_the_wheel_is_built_with_the_hashed_build_backend(tmp_path: Path) -> Non
     assert "--no-config" in build_app.export_requirements_argv()
 
 
-def test_the_wheel_is_built_with_the_python_running_the_build(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
+def test_the_wheel_is_built_with_the_python_running_the_build(tmp_path: Path) -> None:
     # The UV_* variables are removed, CI's only-managed among them, so uv build is told the
-    # interpreter: the one running build_app, CI's pinned build of uv's. And uv must take that
-    # one for the request, or nothing is built.
+    # interpreter: the one running build_app, CI's pinned build of uv's.
     assert build_app.build_python() == Path(sys.executable)
     argv = build_app.build_wheel_argv(tmp_path, Path("/x/python3"))
     assert argv[argv.index("--python") + 1] == "/x/python3"
-    assert build_app.find_python_argv(Path("/x/python3")) == [
-        "uv",
-        "python",
-        "find",
-        "--no-config",
-        "/x/python3",
-    ]
-    answers = {"found": sys.executable}
-    built: list[list[str]] = []
+    assert build_app.managed_dir_argv() == ["uv", "python", "dir", "--no-config"]
+
+
+def test_one_of_uvs_own_pythons_is_one_in_its_folder(tmp_path: Path) -> None:
+    folder = tmp_path / "uv-python-dir"
+    (folder / "cpython-3.13.14-macos-aarch64-none").mkdir(parents=True)
+    (tmp_path / "elsewhere" / "python3.13").mkdir(parents=True)
+    # A link, as uv makes for a minor version, is followed.
+    (folder / "cpython-3.13-macos-aarch64-none").symlink_to("cpython-3.13.14-macos-aarch64-none")
+    for own in ("cpython-3.13.14-macos-aarch64-none", "cpython-3.13-macos-aarch64-none"):
+        assert build_app.managed_problem(str(folder / own), str(folder)) is None
+    for other in (
+        tmp_path / "elsewhere" / "python3.13",
+        folder,
+        folder / "cpython-3.13.14-macos-aarch64-none" / "lib",
+    ):
+        assert build_app.managed_problem(str(other), str(folder)) is not None, other
+    # A link into the folder from outside is followed too: it is uv's.
+    (tmp_path / "link").symlink_to(folder / "cpython-3.13.14-macos-aarch64-none")
+    assert build_app.managed_problem(str(tmp_path / "link"), str(folder)) is None
+
+
+def test_under_only_managed_the_wheel_is_built_only_with_one_of_uvs_own_pythons(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Where the job says only-managed, as CI does, an interpreter that is not one of uv's own
+    # builds nothing. uv python dir alone is told where uv keeps them (UV_PYTHON_INSTALL_DIR),
+    # and gets no other UV_* variable.
+    folder = tmp_path / "uv-python-dir"
+    folder.mkdir()
+    answers = {"dir": str(Path(sys.base_prefix).resolve().parent)}
+    calls: list[tuple[list[str], dict[str, str]]] = []
 
     def run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
-        if argv[:3] == ["uv", "python", "find"]:
-            return subprocess.CompletedProcess(argv, 0, stdout=answers["found"] + "\n", stderr="")
-        built.append(list(argv))
+        env = kwargs.get("env")
+        assert isinstance(env, dict)
+        calls.append((list(argv), dict(env)))
+        if argv[:3] == ["uv", "python", "dir"]:
+            return subprocess.CompletedProcess(argv, 0, stdout=answers["dir"] + "\n", stderr="")
         out = Path(argv[argv.index("--out-dir") + 1])
         (out / payload.host_wheel_name("0.1.0")).write_bytes(b"")
         return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
 
     monkeypatch.setattr("subprocess.run", run)
-    build_app.build_wheel(tmp_path, "0.1.0")
-    assert [argv[argv.index("--python") + 1] for argv in built] == [sys.executable]
-    assert (
-        f"build interpreter: {os.path.realpath(sys.executable)} (Python " in capsys.readouterr().out
-    )
-    answers["found"] = "/somewhere/else/python3"
-    built.clear()
-    with pytest.raises(build_app.BuildError, match="/somewhere/else/python3"):
-        build_app.build_wheel(tmp_path, "0.1.0")
-    assert built == []
+    monkeypatch.setenv("UV_PYTHON_PREFERENCE", "only-managed")
+    monkeypatch.setenv("UV_PYTHON_INSTALL_DIR", str(folder))
+    monkeypatch.setenv("UV_INDEX_URL", "https://example.invalid/simple")
+    build_app.build_wheel(tmp_path / "out", "0.1.0")
+    assert [argv[:3] for argv, _ in calls] == [["uv", "python", "dir"], ["uv", "build", "--wheel"]]
+    (asked, asked_env), (_, build_env) = calls
+    assert [key for key in asked_env if key.startswith("UV_")] == ["UV_PYTHON_INSTALL_DIR"]
+    assert asked_env["UV_PYTHON_INSTALL_DIR"] == str(folder)
+    assert [key for key in build_env if key.startswith("UV_")] == []
+    printed = capsys.readouterr().out
+    assert f"build interpreter: {os.path.realpath(sys.executable)} (Python " in printed
+    assert ", uv's own, in " in printed
+    # Not one of uv's own: refused, and nothing built.
+    answers["dir"] = str(folder)
+    calls.clear()
+    with pytest.raises(build_app.BuildError, match="only-managed"):
+        build_app.build_wheel(tmp_path / "out", "0.1.0")
+    assert [argv[:3] for argv, _ in calls] == [["uv", "python", "dir"]]
+    # Without only-managed, as on a Mac of one's own, nothing is asked and the log says so.
+    monkeypatch.delenv("UV_PYTHON_PREFERENCE")
+    calls.clear()
+    build_app.build_wheel(tmp_path / "out", "0.1.0")
+    assert [argv[:2] for argv, _ in calls] == [["uv", "build"]]
+    assert "not checked to be uv's own (UV_PYTHON_PREFERENCE is None)" in capsys.readouterr().out
 
 
 def test_uv_settings_from_the_environment_do_not_reach_the_wheel_or_the_export(
@@ -1516,6 +1552,8 @@ def test_uv_settings_from_the_environment_do_not_reach_the_wheel_or_the_export(
     # never hashed, and still exit 0. So neither uv build nor uv export sees any UV_* variable.
     monkeypatch.setenv("UV_NO_BUILD_ISOLATION", "1")
     monkeypatch.setenv("UV_INDEX_URL", "https://example.invalid/simple")
+    # As outside CI; the test above covers only-managed.
+    monkeypatch.delenv("UV_PYTHON_PREFERENCE", raising=False)
     calls: list[tuple[list[str], dict[str, str] | None]] = []
 
     def run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
@@ -1524,13 +1562,12 @@ def test_uv_settings_from_the_environment_do_not_reach_the_wheel_or_the_export(
         if argv[:2] == ["uv", "build"]:
             out = Path(argv[argv.index("--out-dir") + 1])
             (out / payload.host_wheel_name("0.1.0")).write_bytes(b"")
-        stdout = sys.executable if argv[:3] == ["uv", "python", "find"] else ""
-        return subprocess.CompletedProcess(argv, 0, stdout=stdout, stderr="")
+        return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
 
     monkeypatch.setattr("subprocess.run", run)
     build_app.build_wheel(tmp_path, "0.1.0")
     build_app.export_requirements_text()
-    assert [argv[:2] for argv, _ in calls] == [["uv", "python"], ["uv", "build"], ["uv", "export"]]
+    assert [argv[:2] for argv, _ in calls] == [["uv", "build"], ["uv", "export"]]
     for argv, env in calls:
         assert "--no-config" in argv, argv
         assert env is not None, argv
