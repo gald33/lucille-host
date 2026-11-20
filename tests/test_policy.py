@@ -416,6 +416,10 @@ def test_a_policy_change_waits_for_the_policy_lock(home: Path) -> None:
     assert results == [0] and "host.sleep" in policy.load(_policy_file()).enabled
 
 
+@pytest.mark.skipif(
+    os.geteuid() == 0,
+    reason="the host refuses to run as root; CI runs this test as an ordinary user",
+)
 def test_policy_changes_run_at_once_all_land(home: Path, tmp_path: Path) -> None:
     folder = tmp_path / "shared"
     folder.mkdir()

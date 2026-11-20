@@ -133,7 +133,7 @@ This repository proves only the host's side. The full design is
 | [THREAT_MODEL.md](THREAT_MODEL.md) | What the host defends against, and what is left. |
 | [VERIFYING.md](VERIFYING.md) | How a third party checks the program (draft). |
 | [SECURITY.md](SECURITY.md) | How to report a vulnerability, and what a bad release means for you. |
-| [decisions/](decisions/) | Design records: [0001](decisions/0001-host-design.md), the host, [0002](decisions/0002-macos-app.md), Capsule, the Mac app, and [0004](decisions/0004-running-as-root.md), running as root (decided: refuse uid 0). |
+| [decisions/](decisions/) | Design records: [0001](decisions/0001-host-design.md), the host, [0002](decisions/0002-macos-app.md), Capsule, the Mac app, and [0004](decisions/0004-running-as-root.md), running as root (decided: refuse uid 0 for every verb but `--version` and `--help`; built). |
 
 ## Development
 

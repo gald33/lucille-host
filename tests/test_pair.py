@@ -2349,10 +2349,11 @@ def test_pairing_verbs_refuse_root_and_switchboard_settings(
     assert cli.gate() is None and not cli.dirs.host_file.exists()
     # Refused before it takes the pair lock: a refused `pair`, root's above all, makes no file.
     assert not (cli.dirs.state / PAIR_LOCK).exists()
-    # The verbs that touch no pair still run.
-    assert cli.run("policy", "previous").rc == 0
-    assert cli.run("ops", "list").rc == 0
-    assert cli.run("log").rc == 0
+    # So are the verbs that touch no pair, since the uid check stands before every verb
+    # (decisions/0004-running-as-root.md); tests/test_root_refused.py has each of them.
+    for argv in (["policy", "previous"], ["ops", "list"], ["log"]):
+        ran = cli.run(*argv, timeout=15)
+        assert ran.rc == 1 and "root" in ran.err
 
 
 # --- the pieces ----------------------------------------------------------------------------------

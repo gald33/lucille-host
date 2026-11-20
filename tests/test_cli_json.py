@@ -1903,6 +1903,10 @@ def test_json_failure_ends_with_error_object(
     assert _sampled(text.err, text_world) == _sampled(ran.err, json_world)
 
 
+@pytest.mark.skipif(
+    os.geteuid() == 0,
+    reason="the host refuses to run as root; CI runs this test as an ordinary user",
+)
 @pytest.mark.skipif(not sys.platform.startswith("linux"), reason="APFS refuses such a name")
 def test_json_strings_are_valid_unicode(
     tmp_path: Path,
@@ -2725,6 +2729,10 @@ sys.exit(main(sys.argv[2:]))
 """
 
 
+@pytest.mark.skipif(
+    os.geteuid() == 0,
+    reason="the host refuses to run as root; CI runs this test as an ordinary user",
+)
 def test_each_line_is_written_before_the_next_step(
     tmp_path: Path,
     host_env: HostEnv,
