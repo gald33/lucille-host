@@ -648,6 +648,17 @@ def test_every_other_job_runs_its_tools_on_the_test_jobs_313_pin() -> None:
             if str(step.get("uses", "")).startswith("astral-sh/setup-uv@")
         ]
         assert len(setups) == 1, name
+        # setup-uv gets the uv version, the Python and the cache setting, nothing else that could
+        # choose a Python.
+        assert set(setups[0]["with"]) <= {"version", "python-version", "enable-cache"}, name
+        # No step undoes the job's setting: no step's own env, and no script, names a uv Python
+        # setting (exported, or written to $GITHUB_ENV for the steps after it).
+        for step in job["steps"]:
+            assert not [key for key in step.get("env", {}) if key.startswith("UV_PYTHON")], (
+                name,
+                step,
+            )
+            assert "UV_PYTHON" not in str(step.get("run", "")), (name, step)
         if name != "test":
             others[name] = setups[0]["with"]["python-version"]
             assert job["env"]["UV_PYTHON_PREFERENCE"] == "only-managed", name
