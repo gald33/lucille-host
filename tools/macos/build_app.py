@@ -1141,9 +1141,17 @@ def _remove(path: Path) -> None:
         shutil.rmtree(path)
 
 
-def build_wheel_argv(out: Path) -> list[str]:
-    """``uv build`` for the host's wheel: its build backend comes only from the files
-    build-constraints.txt names by hash. No uv configuration file is read, since one could
+def build_python() -> Path:
+    """The interpreter the host's wheel is built with: the one running this script. In CI that
+    is the job's own pinned build, uv's (``UV_PYTHON_PREFERENCE: only-managed``), which the
+    ``UV_*`` variables :func:`build_wheel` removes could not otherwise tell uv about; and so the
+    build fetches no Python of its own."""
+    return Path(sys.executable)
+
+
+def build_wheel_argv(out: Path, python: Path) -> list[str]:
+    """``uv build`` for the host's wheel, with ``python``: its build backend comes only from the
+    files build-constraints.txt names by hash. No uv configuration file is read, since one could
     turn build isolation off; :func:`build_wheel` removes the ``UV_*`` variables too."""
     return [
         "uv",
@@ -1153,20 +1161,38 @@ def build_wheel_argv(out: Path) -> list[str]:
         str(BUILD_CONSTRAINTS),
         "--require-hashes",
         "--no-config",
+        "--python",
+        str(python),
         "--out-dir",
         str(out),
         str(REPO_ROOT),
     ]
 
 
+def find_python_argv(python: Path) -> list[str]:
+    """``uv python find`` for ``python``: the interpreter uv takes for that request, which is
+    the one :func:`build_wheel_argv` builds with. No uv configuration file is read."""
+    return ["uv", "python", "find", "--no-config", str(python)]
+
+
 def build_wheel(out: Path, version: str) -> Path:
-    """The host's wheel, built from this checkout into ``out``, with no uv setting from the
-    environment (:func:`payload.without_uv_settings`). Any older host wheel there is removed
-    first, so that ``out`` then holds exactly one."""
+    """The host's wheel, built from this checkout into ``out`` with :func:`build_python`, and
+    with no uv setting from the environment (:func:`payload.without_uv_settings`). It refuses to
+    build unless uv takes that interpreter for it, and prints which it is. Any older host wheel
+    there is removed first, so that ``out`` then holds exactly one."""
     out.mkdir(parents=True, exist_ok=True)
     for old in out.glob("lucille_host-*.whl"):
         old.unlink()
-    _run(build_wheel_argv(out), env=payload.without_uv_settings(os.environ))
+    env = payload.without_uv_settings(os.environ)
+    python = build_python()
+    found = _output(find_python_argv(python), env=env)
+    if os.path.realpath(found) != os.path.realpath(python):
+        raise BuildError(f"uv would build the host wheel with {found}, not {python}")
+    print(
+        f"build interpreter: {os.path.realpath(python)} (Python {platform.python_version()})",
+        flush=True,
+    )
+    _run(build_wheel_argv(out, python), env=env)
     wheels = sorted(out.glob("*.whl"))
     expected = payload.host_wheel_name(version)
     if [wheel.name for wheel in wheels] != [expected]:
