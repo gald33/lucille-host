@@ -567,6 +567,9 @@ def test_a_body_nested_deep_is_redacted_on_every_version(depth: int) -> None:
         '{"a": "\\u002d----BEGIN PRIVATE KEY-----\\nMIIE", "b": [1,]}',
         '{"a": "\\u002d----BEGIN PRIVATE KEY-----\\nMIIE", "b": 1,}',
         '{"a": "\\u002d----BEGIN PRIVATE KEY-----\\nMIIE", "b": "x\ny"}',
+        # A key that is not a string, and a closer that is not the open bracket's.
+        '{"a": "\\u002d----BEGIN PRIVATE KEY-----\\nMIIE", 1: "b"}',
+        '{"a": "\\u002d----BEGIN PRIVATE KEY-----\\nMIIE", "b": [1}}',
     ],
 )
 def test_a_body_nested_deep_that_is_not_json_goes_as_it_came(inner: str) -> None:
