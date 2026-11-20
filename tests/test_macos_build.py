@@ -4244,7 +4244,14 @@ def _spec_verb_codes(wanted: frozenset[str] = CONNECTION_VERBS) -> dict[str, set
     sentence = re.search(r"one of the codes every verb can give: (.*?)\.\n", section, re.DOTALL)
     assert sentence is not None
     every = set(re.findall(r"`([a-z_]+)`", sentence.group(1)))
-    assert every == {"usage", "internal", "bad_profile", "unsupported_platform", "os_error"}
+    assert every == {
+        "usage",
+        "internal",
+        "bad_profile",
+        "unsupported_platform",
+        "os_error",
+        "startup_refused",
+    }
     rows: dict[str, set[str]] = {}
     for line in section.splitlines():
         if not line.startswith("| `"):
@@ -4252,7 +4259,9 @@ def _spec_verb_codes(wanted: frozenset[str] = CONNECTION_VERBS) -> dict[str, set
         cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
         verb = re.match(r"`([^`]+)`", cells[0])
         assert verb is not None, line
-        rows[verb.group(1)] = set(re.findall(r"`([a-z_]+)`", cells[-1])) | every
+        # Not as root (section 10): the version, and the line with no verb, are never refused.
+        given = every - {"startup_refused"} if verb.group(1) == "--version" else every
+        rows[verb.group(1)] = set(re.findall(r"`([a-z_]+)`", cells[-1])) | given
     assert wanted <= set(rows), sorted(rows)
     return {verb: rows[verb] for verb in wanted}
 
