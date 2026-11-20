@@ -9,13 +9,15 @@ run, never written whole in this file.
 from __future__ import annotations
 
 import base64
+import contextlib
 import io
 import ipaddress
 import json
+import signal
 import subprocess
 import sys
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from typing import Any
 
 import pytest
@@ -558,6 +560,13 @@ def test_a_body_nested_deep_is_redacted_on_every_version(depth: int) -> None:
         '{"a": "\\u002d----BEGIN PRIVATE KEY-----\\nMIIE", "b": 1true}',
         '{"a": "\\u002d----BEGIN PRIVATE KEY-----\\nMIIE", "b": 01}',
         '{"a": "\\u002d----BEGIN PRIVATE KEY-----\\nMIIE", "b": 1.5.3}',
+        # JSON's words, out of JSON's order; and a string holding a raw control character.
+        '{"a": "\\u002d----BEGIN PRIVATE KEY-----\\nMIIE", "b": ["x" true "y"]}',
+        '{"a": "\\u002d----BEGIN PRIVATE KEY-----\\nMIIE", "b": [1 2]}',
+        '{"a": "\\u002d----BEGIN PRIVATE KEY-----\\nMIIE" "b"}',
+        '{"a": "\\u002d----BEGIN PRIVATE KEY-----\\nMIIE", "b": [1,]}',
+        '{"a": "\\u002d----BEGIN PRIVATE KEY-----\\nMIIE", "b": 1,}',
+        '{"a": "\\u002d----BEGIN PRIVATE KEY-----\\nMIIE", "b": "x\ny"}',
     ],
 )
 def test_a_body_nested_deep_that_is_not_json_goes_as_it_came(inner: str) -> None:
@@ -592,14 +601,31 @@ def test_a_body_nested_deep_with_python_s_own_literals_is_redacted() -> None:
     assert b"MIIE" not in reply.stdout and b"[NaN, -Infinity, -1.5e+3]" in reply.stdout
 
 
+@contextlib.contextmanager
+def _within(seconds: float) -> Iterator[None]:
+    """Fail, rather than wait, past ``seconds``: the alarm interrupts a long match too."""
+
+    def late(signum: int, frame: object) -> None:
+        raise AssertionError(f"took more than {seconds} s")
+
+    before = signal.signal(signal.SIGALRM, late)
+    signal.setitimer(signal.ITIMER_REAL, seconds)
+    try:
+        yield
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, before)
+
+
+@pytest.mark.parametrize("ending", ["", "\\"])
 @pytest.mark.parametrize("depth", [1, nesting.FILES_MOST + 1])
-def test_a_string_with_no_end_and_many_escaped_quotes_is_read_once(depth: int) -> None:
-    # A body of 1 MiB that is no JSON: one string, never closed, of escaped quotes. It goes as
-    # it came, read once and not again from each quote in it.
-    raw = _deep_body(depth, '{"a": "' + '\\"' * 500_000)
-    started = time.monotonic()
-    assert proxy.redacted_json(raw) == raw
-    assert time.monotonic() - started < 1
+def test_a_string_with_no_end_and_many_escaped_quotes_is_read_once(depth: int, ending: str) -> None:
+    # A body of 1 MiB that is no JSON: one string, never closed, of escaped quotes, the body's
+    # last character or a lone backslash after them. It goes as it came, read once and not again
+    # from each quote in it.
+    raw = ("[" * (depth - 1) + '{"a": "' + '\\"' * 500_000 + ending).encode()
+    with _within(1):
+        assert proxy.redacted_json(raw) == raw
 
 
 def test_a_second_parse_too_deep_leaves_the_body_as_it_came(

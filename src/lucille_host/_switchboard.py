@@ -475,9 +475,10 @@ CODE_PREFIX: Final = "swbp1_"
 def _payload_refused(text: str) -> bool:
     """Whether a code's payload, base64 as the library reads it, is one the host refuses before
     the library's parser reads it: one that nests more than :data:`NEST_MOST` levels, as that
-    parser's own limit differs by Python version; and one that is not UTF-8 or holds a NUL, which
-    the library never writes (its codes are ASCII) and the parser would read as UTF-16 or UTF-32,
-    where this count does not. A payload that is not base64 is left to the library to refuse."""
+    parser's own limit differs by Python version; and one that is not UTF-8, holds a NUL or starts
+    with a byte-order mark, none of which the library writes (its codes are ASCII), and which the
+    parser would read as UTF-16, UTF-32 or UTF-8 with a mark, where this count does not. A
+    payload that is not base64 is left to the library to refuse."""
     code = text.strip()
     if not code.startswith(CODE_PREFIX):
         return False
@@ -486,7 +487,7 @@ def _payload_refused(text: str) -> bool:
         raw = base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4))
     except ValueError:
         return False
-    if b"\x00" in raw:
+    if b"\x00" in raw or raw.startswith(b"\xef\xbb\xbf"):
         return True
     try:
         decoded = raw.decode("utf-8")

@@ -50,7 +50,7 @@ import re
 import socket
 import ssl
 import sys
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Final, NoReturn
@@ -443,9 +443,10 @@ def scrub(data: bytes, token: str, *, cut: bool = False) -> bytes:
 
 # A JSON string token, in a body json.loads has taken whole: there a quote outside a string only
 # ever opens one.
-# Or, with no closing quote, the rest of the text, so that a body with one is read once, never
+# Or, with no closing quote, the rest of the text, a lone backslash at its end included, so that
+# every match that starts at a quote succeeds and a body with an open string is read once, never
 # again from each quote inside it.
-_JSON_STRING: Final = re.compile(r'"(?:[^"\\]|\\.)*(?P<end>"|\Z)', re.DOTALL)
+_JSON_STRING: Final = re.compile(r'"(?:[^"\\]|\\.)*(?P<end>"|\\?\Z)', re.DOTALL)
 
 
 # What follows a string that is an object's key.
@@ -480,42 +481,79 @@ def _no_marked_twice(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     return dict(pairs)
 
 
-# What may lie between the strings of a JSON text: punctuation, white space, and numbers and
-# literals, each ending where a word does (Python's parser reads NaN and the infinities too).
-_BETWEEN_STRINGS: Final = re.compile(
-    r"(?:[\[\]{}:, \t\r\n]"
-    r"|(?:-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?"
-    r"|true|false|null|NaN|-?Infinity)"
-    r"(?![A-Za-z0-9_.+-]))*"
+# One piece of what lies between the strings of a JSON text: white space; one punctuation mark;
+# or a number in JSON's form or a literal, ending where a word does (Python's parser reads NaN
+# and the infinities too).
+_PIECE: Final = re.compile(
+    r"[ \t\r\n]+"
+    r"|(?P<mark>[\[\]{}:,])"
+    r"|(?P<scalar>(?:-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?"
+    r"|true|false|null|NaN|-?Infinity)(?![A-Za-z0-9_.+-]))"
 )
 
 
+def _pieces(text: str, strings: Sequence[re.Match[str]]) -> Iterator[str]:
+    """Each piece of ``text`` in order: a punctuation mark as itself, a number or a literal as
+    ``v``, a string as ``s``; white space is skipped. Raises ``ValueError`` at anything else."""
+    at = 0
+    for match in (*strings, None):
+        end = len(text) if match is None else match.start()
+        while at < end:
+            piece = _PIECE.match(text, at, end)
+            if piece is None:
+                raise ValueError(at)
+            at = piece.end()
+            if piece.group("mark"):
+                yield piece.group("mark")
+            elif piece.group("scalar"):
+                yield "v"
+        if match is not None:
+            yield "s"
+            at = match.end()
+
+
 def _shaped_like_json(text: str, strings: Sequence[re.Match[str]]) -> bool:
-    """Whether ``text``, nested too deep to hand to the parser, is shaped like JSON, read without
-    recursion: every string closed, and between them only :data:`_BETWEEN_STRINGS`, so no string
-    is cut off or holds an unescaped quote; and its brackets close in order, all of them. Each
-    string's own form is checked as it is decoded."""
-    pairs = {"]": "[", "}": "{"}
-    opened: list[str] = []
+    """Whether ``text``, nested too deep to hand to the parser, is JSON, read without recursion:
+    every string closed, and its pieces (:func:`_pieces`) in JSON's order, read by a state
+    machine with a stack of the arrays and objects open, so that it agrees with the parser on
+    every text within the parser's reach. Each string's own form is checked as it is decoded."""
     if any(match.group("end") != '"' for match in strings):
         return False
-    starts = [0, *(match.end() for match in strings)]
-    ends = [*(match.start() for match in strings), len(text)]
-    for start, end in zip(starts, ends, strict=True):
-        gap = text[start:end]
-        if not _BETWEEN_STRINGS.fullmatch(gap):
-            return False
-        for c in gap:
-            if c in "[{":
-                opened.append(c)
-            elif c in "]}" and (not opened or opened.pop() != pairs[c]):
+    opened: list[str] = []
+    state = "value"
+    try:
+        for piece in _pieces(text, strings):
+            if state in ("value", "value or ]") and piece in ("s", "v"):
+                state = "after" if opened else "end"
+            elif state in ("value", "value or ]") and piece in ("[", "{"):
+                opened.append(piece)
+                state = "value or ]" if piece == "[" else "key or }"
+            elif state in ("key", "key or }") and piece == "s":
+                state = ":"
+            elif state == ":" and piece == ":":
+                state = "value"
+            elif state == "after" and piece == ",":
+                state = "value" if opened[-1] == "[" else "key"
+            elif (state, piece) in (("value or ]", "]"), ("key or }", "}")) or (
+                state == "after" and piece == {"[": "]", "{": "}"}[opened[-1]]
+            ):
+                opened.pop()
+                state = "after" if opened else "end"
+            else:
                 return False
-    return not opened
+    except ValueError:
+        return False
+    return state == "end"
+
+
+# What makes a string token one to hand to the parser: an escape, or a control character, which
+# JSON refuses in a string.
+_NOT_PLAIN: Final = re.compile(r"[\\\x00-\x1f]")
 
 
 def _decoded(raw: str) -> str:
-    """A JSON string token's value."""
-    value: str = raw[1:-1] if "\\" not in raw else json.loads(raw)
+    """A JSON string token's value. Raises ``ValueError`` when the token is no JSON string."""
+    value: str = raw[1:-1] if _NOT_PLAIN.search(raw) is None else json.loads(raw)
     return value
 
 

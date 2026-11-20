@@ -281,17 +281,37 @@ def test_a_code_s_payload_past_the_limit_is_no_code_on_every_version() -> None:
             _switchboard.decode_code(_code(json.loads(_json(depth))))
 
 
-@pytest.mark.parametrize("encoding", ["utf-16", "utf-16-le", "utf-32"])
-def test_a_code_s_payload_in_another_encoding_is_no_code(encoding: str) -> None:
-    # The library writes its codes in ASCII; its parser would read UTF-16 and UTF-32 too, where
-    # the depth check does not count, so a payload in them is refused before it is read, deep or
-    # not, on every version.
+def _encoded_code(raw: bytes) -> str:
+    return _switchboard.CODE_PREFIX + base64.urlsafe_b64encode(raw).decode().rstrip("=")
+
+
+@pytest.mark.parametrize(
+    "encode",
+    [
+        lambda text: text.encode("utf-16"),
+        lambda text: text.encode("utf-16-le"),
+        lambda text: text.encode("utf-32"),
+        # UTF-8 with a byte-order mark, which the parser reads; and bytes that are not UTF-8,
+        # an overlong slash and a lone surrogate, with no NUL among them.
+        lambda text: b"\xef\xbb\xbf" + text.encode(),
+        lambda text: text.encode().replace(b'"u"', b'"u\xc0\xaf"'),
+        lambda text: text.encode().replace(b'"u"', b'"u\xed\xa0\x80"'),
+    ],
+)
+def test_a_code_s_payload_in_any_form_but_the_librarys_is_no_code(
+    encode: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The library writes its codes in ASCII. Its parser would read UTF-16, UTF-32 and UTF-8 with
+    # a mark too, where the depth check does not count, so a payload in any of them, or one that
+    # is not UTF-8, is refused before the library reads it, deep or not, on every version.
+    read: list[str] = []
+    monkeypatch.setattr(pairing.PairingCode, "decode", lambda text: read.append(text))
     for extra in (None, json.loads(_json(_switchboard.NEST_MOST))):
         payload = json.loads(base64.urlsafe_b64decode(_code(extra)[6:] + "==="))
-        raw = json.dumps(payload).encode(encoding)
-        code = _switchboard.CODE_PREFIX + base64.urlsafe_b64encode(raw).decode().rstrip("=")
+        code = _encoded_code(encode(json.dumps(payload)))
         with pytest.raises(_switchboard.BadCode, match="not a pairing code"):
             _switchboard.decode_code(code)
+    assert read == []
 
 
 def test_a_parser_that_stops_short_is_no_code(monkeypatch: pytest.MonkeyPatch) -> None:

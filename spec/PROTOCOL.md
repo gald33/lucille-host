@@ -616,9 +616,9 @@ changes is numbered when it would be a key the body holds or one it made before 
 2`), so an object keeps no two keys alike; were two alike all the same, the child leaves the body as it came, to §13's pass over
 the raw text. Only the strings that change are written again, so the body stays JSON. A body whose arrays
 and objects nest past 128 levels is handed to no parser, whose own limit differs by version: the child
-checks its shape without one (between its strings only JSON's punctuation, numbers and literals, its
-brackets closing in order, each string a JSON string), redacts it the same way, and leaves one of another
-shape to §13's pass. The marks can make a
+reads it as JSON without one (each string closed and a JSON string, and between them only JSON's
+punctuation, numbers and literals, in JSON's order), redacts it the same way, and leaves any other to §13's
+pass. The marks can make a
 body longer than it came; past the 64 KiB cap (§13) the host cuts it, sets the truncation flag, and the
 body is then not JSON; `stderr` is the line `HTTP <status>`, then, when GitHub sent one, its
 `Link` header line. The credential's value is never in either: the host removes it before writing. The exit
