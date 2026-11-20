@@ -43,7 +43,13 @@ pull request, and when started by hand. It has no path filter.
     Python that uv downloads, never one already on the runner's image. Given only a minor version, macOS
     had run its image's 3.11.9 and 3.13.17 and Homebrew's 3.14.10, and Ubuntu its system 3.14.4.
   - **Proof in the log:** the step "Show the interpreter, and check it is the pinned one" prints the
-    interpreter's path and version, and fails unless the version is the pin.
+    version and build (`python -VV`), the real path of the interpreter the project's virtual environment
+    links to, and its base prefix, the folder uv installed it in. It fails unless the version is the pin.
+    The version alone cannot tell two builds of one patch apart; the path and uv's "Downloading" line
+    in the sync step show whose build ran.
+  - **The other jobs:** `guards`, `macos-app` and both smoke jobs run their tools on 3.13.14, the `test`
+    job's 3.13 pin, with the same setting, so no job takes a Python from its image. The app bundles a
+    runtime of its own, which this does not touch.
   - **3.14** joined the matrix on 2026-11-20, after the advisory workflow `python-next`, now gone, passed
     on five pushes to `main` in a row (decisions/0002 §18).
   - **Who moves the pins, and when:** the maintainer moves each to the newest patch of its minor version
