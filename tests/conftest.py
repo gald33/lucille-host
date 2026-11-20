@@ -120,6 +120,14 @@ def make_context(tmp_path: Path, state_dir: Path) -> MakeContext:
     return make
 
 
+@pytest.fixture(autouse=True)
+def _not_root(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The host refuses uid 0 for every verb (decisions/0004-running-as-root.md), so a test that
+    runs one as a user must not depend on the uid of whoever runs the suite. A test of the refusal
+    sets uid 0 itself."""
+    monkeypatch.setattr("os.geteuid", lambda: TEST_UID)
+
+
 @pytest.fixture
 def host_env(home: Path, memory_keyring: MemoryKeyring, monkeypatch: pytest.MonkeyPatch) -> HostEnv:
     """What the host needs to start in-process: a private home, a keyring in memory, no

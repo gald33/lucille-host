@@ -3,8 +3,9 @@
 **Status: decided 2026-11-20 by the repository owner: Option A (4.2)**, in
 [a comment on PR #78](https://github.com/gald33/lucille-host/pull/78#issuecomment-7032741923):
 "The host refuses uid 0 for every verb except `--version` and `--help`, and a Home Assistant add-on runs the
-host as its own unprivileged user. The items in §5 stay open." The rule is not yet enforced: this record
-changes no runtime code, test or CI job, and the code in 4.3 is written in a later change. Sections 1 to 3 say what the host does today, with the file and line of each
+host as its own unprivileged user. The items in §5 stay open." **Built:** the refusal is in
+`cli.main`, before the profile's paths are resolved (see "How it was built", the end of 4.3). Sections 1 to 3 describe the host
+as it was before that change, on `main` at the commit named below. Sections 1 to 3 say what the host does today, with the file and line of each
 claim, what was run, and what could not be checked. Section 4 weighs the options, records the rule decided and lists the code it
 changes later. It extends [0001](0001-host-design.md), which says the host "refuses to run as uid 0"
 ("Pairing", `0001-host-design.md:230`), and [0003](0003-local-credentials.md).
@@ -403,6 +404,16 @@ no `XDG_*_HOME` set).
   that verb, or, until it exists, to the default-layout advice above. That verb is new code, built and
   tested in the implementation change (nothing compares owners today, 1.2). Without it, A only stops new
   damage.
+
+**How it was built** (the implementation change, after the ruling): `cli.main` refuses uid 0 for every verb
+but `--version`, `--help` and a command with no verb, after the command line parses and before `_dirs`;
+`run` refuses at the top of `_serve`'s caller (`cli._run`), before a lifeline, a signal handler, the
+profile or a lock. The message is `cli.ROOT_REFUSED`: the sentence of `state.startup_checks`, with a pointer
+to the default-layout advice above (the repair verb of section 5 is not built). The code is `startup_refused`
+(exit 1, 24 for `run`; an `error` object, or `stopped` under `--json-events`), so spec section 10 and the
+schemas needed no new name. `state.startup_checks`, and with it `library.start`, is unchanged, and so is
+`runs.py:133`, kept as a second guard. Tests: `tests/test_root_refused.py`. Not built: the repair verb, the
+file-held store, add-on pairing, the privilege drop and `sudo` handling (section 5).
 
 For B or C, add to the above: a privilege drop in `_exec.py:235-243` and its tests; a root-aware
 `policy.is_broad` (or a rule that a root caller's "home" is every home); the path conditions in `paths.py`;

@@ -91,11 +91,13 @@ import os
 import sys
 
 sys.path.insert(0, sys.argv[1])
-from lucille_host import state
+from lucille_host import cli, state
 from lucille_host.cli import main
 
 if os.geteuid() == 0:
+    # Not os.geteuid: the D-Bus sign-in under test reads it too.
     state.startup_checks = lambda environ=None: None
+    cli._is_root = lambda: False
 sys.exit(main(sys.argv[2:]))
 """
 

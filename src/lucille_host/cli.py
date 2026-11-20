@@ -122,6 +122,20 @@ USAGE_MESSAGE: Final = "the command line could not be parsed; standard error say
 INTERNAL_MESSAGE: Final = "an unexpected error; standard error holds its traceback"
 # Unpaired surrogates, as a file name that is not UTF-8 reaches the host: written as U+FFFD.
 _SURROGATES: Final = re.compile("[\ud800-\udfff]")
+# What every verb but `--version` and `--help` says as uid 0 (decisions/0004-running-as-root.md,
+# 4.2). It names the repair that record gives for a profile a root run has already touched.
+ROOT_REFUSED: Final = (
+    "lucille-host does not run as root (uid 0); run it as the user whose files it may read. "
+    "If an earlier run as root left files or folders in your profile that you cannot read, "
+    "see decisions/0004-running-as-root.md, section 4.3, 'Profiles that are already root-owned'"
+)
+
+
+def _is_root() -> bool:
+    """Whether this process is uid 0 (read at each call, so that a test may inject another)."""
+    return os.geteuid() == 0
+
+
 # `run`'s exit codes, by the reason its `stopped` object gives (spec/CLI.md section 13.3). Each
 # reason has one exit code. 22 is not used.
 RUN_EXITS: Final = MappingProxyType(
@@ -1386,7 +1400,8 @@ def _run(args: argparse.Namespace) -> int:
     restores: list[Callable[[], None]] = []
     try:
         lifeline = None
-        if args.exit_on_stdin_eof:
+        root = _is_root()
+        if args.exit_on_stdin_eof and not root:
             lifeline = loop.Lifeline(_stdin_fd())
             if events is not None:
                 cut = lifeline.cut
@@ -1394,6 +1409,9 @@ def _run(args: argparse.Namespace) -> int:
             lifeline.start()
         made: list[loop.Runner] = []
         try:
+            if root:
+                # Before the profile is resolved, a handler installed or a file opened.
+                raise host_state.Refused(ROOT_REFUSED)
             reason, fields, said = _serve(args, events, lifeline, made, restores)
             line = None
         except Exception as exc:  # noqa: BLE001 - every end of run is reported, then judged
@@ -1892,6 +1910,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
     if args.verb == "run":
         return _run(args)
+    if _is_root():
+        # Before the profile's paths are resolved, a folder made or a lock taken: a refused
+        # root run leaves nothing behind (decisions/0004-running-as-root.md, 4.2).
+        said, code, message, extra = _failure(host_state.Refused(ROOT_REFUSED))
+        print(said, file=sys.stderr)
+        out.error(code, message, **extra)
+        return 1
     try:
         dirs = _dirs(args.profile)
         verb = VERBS.get(args.verb)

@@ -707,7 +707,7 @@ limit, as it runs every verb, and stops it when the limit passes.
 | `bad_profile` | A `--profile` name is lowercase letters, digits, `-` and `_`, starting with a letter, at most 32. |
 | `unsupported_platform` | This is not Linux or macOS. |
 | `os_error` | A file the host needed could not be read or written; the message names it. |
-| `startup_refused` | The host does not start here: it runs as root, or `SWITCHBOARD_*` variables are set. |
+| `startup_refused` | The host does not start here: it runs as root (every verb but `--version`, `--help` and a command with no verb), or `SWITCHBOARD_*` variables are set. |
 | `insecure_keyring` | The keyring backend the host keeps the pair in cannot be used here, and the message says it has no keyring to store in: keyring's Secret Service backend on Linux (no session bus, or no Secret Service on it), its Keychain backend on macOS. The host builds that backend itself and takes no other, so a Linux desktop whose only keyring is KWallet, with no Secret Service on the session bus, now sees that it has no keyring to store in, and one that runs both KWallet and a Secret Service gets the Secret Service. Or the session bus did not answer the Secret Service's check within 5 s (it took the connection and never replied), and the message says it has no keyring to store in: the session bus did not answer within 5 s; the check is not asked again in that process. Or keyring's own off switch is set, and the message says the keyring backend stores nothing: `PYTHON_KEYRING_BACKEND`, or the `default-keyring` of keyring's `keyringrc.cfg`, names keyring's null backend, `keyring.backends.null.Keyring` (what `keyring --disable` writes), or its fail backend, `keyring.backends.fail.Keyring`. Both messages point to `--store-file`. Any other value of either is not consulted, and nothing either names is imported. |
 | `store_error` | The store that keeps the pair could not be used. On Linux that includes a read or a write of the keyring item that the Secret Service did not answer within 60 s, and the message says so: the keyring did not answer a read (or a write) within 60 s. For a write it also says that whether it was saved is not known: it may still land before the process exits, so the host removes or rewrites none of its own files on the assumption that it failed, and the next start reads the item again. That process then asks the keyring nothing more, and every later read and write in it fails at once, with a message that says to try again in a new process. It also includes a read or a write that the Secret Service's own libraries fail, past keyring: a service the session bus lists as one it can start, which then fails to start, or a bus that went away. The message names the error's class and, for a D-Bus error, its name, and below a keyring error the Secret Service error it was raised from, for example: the keyring could not be read (DBusErrorResponse: org.freedesktop.DBus.Error.Spawn.ChildExited), or (InitError, from DBusErrorResponse: org.freedesktop.DBus.Error.Spawn.ExecFailed). |
 | `runtime_folder` | The host's private runtime folder is missing, or is not private. |
@@ -764,6 +764,17 @@ limit, as it runs every verb, and stops it when the limit passes.
 | `sign_in_refused` | `credential test`: Gmail refused the app password (wrong or revoked), or did within the last 15 minutes and was not asked again. |
 | `unreachable` | `credential test`: `imap.gmail.com` did not resolve, resolved to an address the host does not allow, could not be connected to, or the connection broke. |
 | `limit_reached` | `credential test`: the credential was used for more than 60 sign-ins in 10 minutes, or Gmail sent more than the host reads. |
+
+**As root.** Every verb but `--version`, `--help` and a command with no verb (which shows the version) is
+refused when the effective user id is 0: first thing after the command line parses, before the profile's
+paths are resolved, so a profile name that is not valid is not looked at either. The refused command
+creates nothing: no folder, no lock file, no run record. It writes the line `lucille-host: <message>` on
+standard error and exits 1 (24 for `run`); `--json` writes one `error` object with the code
+`startup_refused` and that message, and `run --json-events` writes one `stopped` object with the reason
+`startup_refused`. The message says the host does not run as root (uid 0), and points to the repair advice
+for a profile an earlier run as root left unreadable (`decisions/0004-running-as-root.md`, section 4.3). A
+command line that does not parse is a `usage` error first, as for any user. The library's own refusal
+(`lucille_host.library.start`) is unchanged.
 
 ## 11. Golden fixtures
 
@@ -904,7 +915,7 @@ lucille-host --profile <name> run --json-events --exit-on-stdin-eof
 | 20 | `leaked`, `expired` | The pairing ended early, or its SAS was not confirmed by its deadline, while `run` waited: the pair is forgotten. Pair again. |
 | 21 | `already_running` | Another `run` of this profile runs. Nothing was changed. |
 | 23 | `insecure_keyring`, `store_error` | The keyring backend the host keeps the pair in cannot be used here, or keyring's own off switch is set, or the store cannot be used. |
-| 24 | `startup_refused` | The host does not start here: it runs as root, or a `SWITCHBOARD_*` variable is set. |
+| 24 | `startup_refused` | The host does not start here: it runs as root, or a `SWITCHBOARD_*` variable is set. As root, `run` gives 24 before it resolves the profile, installs a handler or opens a file. |
 | 25 | `downgrade` | This release is older than one that started `run` on this profile before (13.6). |
 | 1 | `failed` | Anything else `run` met and stopped for; `code` says what, and standard error says why. An unexpected error (`internal`, which is also any failure `run` has no other code for) writes its traceback in place of that line. |
 | 2 | | Usage: the command line could not be parsed. With `--json` or `--json-events`, one `error` object with `code` `usage`. |
@@ -915,7 +926,7 @@ lucille-host --profile <name> run --json-events --exit-on-stdin-eof
   damaged file makes `failed` `state_invalid` (1); the policy digest key, which a damaged file makes
   `failed` `state_invalid` rather than an invalid policy (1); the pair, its record in the store and its gate
   record, read on this computer (20, or 23 for a record the store cannot read); then `ready`, and the first
-  hub call. So root writes nothing, a second `run` writes nothing but its line in the run record (section
+  hub call. The uid check comes before all of them, before the profile's paths are resolved (as it does for every verb, section 10). So root writes nothing, a second `run` writes nothing but its line in the run record (section
   16), and an older release reads no secret.
 - A pair whose SAS is not confirmed yet is not refused at start: `run` serves it, and waits for `pair
   confirm` (section 13.1). Of the gate, only a pair with no gate record, which can never be confirmed here,
@@ -1027,7 +1038,7 @@ lucille-host --profile <name> run --json-events --exit-on-stdin-eof
 `lucille_host.library` serves a profile from inside another program, on a thread of its own, with no
 command line: `start(dirs, store, ...)` returns a `Host` that is running, and `Host.stop()` drains it
 as the first SIGTERM does (cause `stop`) and waits. It is not a verb and adds no field to the contract.
-It keeps `run`'s files, its start checks (not as root, no `SWITCHBOARD_*` variable: refused before
+It keeps `run`'s files, its start checks (not as root, no `SWITCHBOARD_*` variable; both refused before
 anything is written) and its one-run lock, but it installs no signal handler, and it writes no line to
 the run record (section 16), which has one line per command of the CLI. Its environment check comes
 before the host-config read, the reverse of `run` (both only read).
@@ -1163,7 +1174,7 @@ Keychain on macOS, the Secret Service on Linux.
 - An item whose service, credential names or hosts this version would not write (a newline at the end
   of one, `a.example.com/x`) is not read, and is left as it is (`store_error`).
 - There is no file fallback, as there is for the pair (`pair --store-file`), and `--store-file` is a usage
-  error. The verb refuses to run as root.
+  error. The verb refuses to run as root, as every verb does (section 10).
 
 ## 16. The run record
 
@@ -1196,7 +1207,7 @@ Each line is one JSON object, of at most 1,024 bytes:
   nothing is said: a full disk, a folder where the file goes, or a symbolic link in its place, which is
   not followed. The record is only ever a regular file with one name: a FIFO, a device or a file with
   another name linked to it is left alone, and opening it never waits for a reader. Nothing is written
-  as root, or for a profile name that is not valid. The file is not synced to disk.
+  as root (every verb is refused there first, section 10), or for a profile name that is not valid. The file is not synced to disk.
 - **One line at a time.** Each line is appended under the record's lock (a POSIX lock on the whole file),
   which a command holds for one short write. While another command holds it, a command waits for it at
   most 0.2 s, then skips its line.
