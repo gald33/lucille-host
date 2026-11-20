@@ -405,7 +405,7 @@ no `XDG_*_HOME` set).
   tested in the implementation change (nothing compares owners today, 1.2). Without it, A only stops new
   damage.
 
-**How it was built** (the implementation change, after the ruling): `cli.main` refuses uid 0 for every verb
+**How it was built** (the implementation change, [PR #80](https://github.com/gald33/lucille-host/pull/80), after the ruling): `cli.main` refuses uid 0 for every verb
 but `--version`, `--help` and a command with no verb, after the command line parses and before `_dirs`;
 `run` refuses at the top of `_serve`'s caller (`cli._run`), before a lifeline, a signal handler, the
 profile or a lock. The message is `cli.ROOT_REFUSED`: the sentence of `state.startup_checks`, with a pointer
