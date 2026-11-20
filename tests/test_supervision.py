@@ -1988,8 +1988,18 @@ def test_a_file_changed_while_main_waits_on_the_hub_holds_the_offer(
     run.ready()
     run.offer("work-1")
     real = _switchboard.Link.touch
+    real_notes = _switchboard.Link.notes
     armed = threading.Event()
     changed = threading.Event()
+
+    def held_back(opened: _switchboard.Link) -> tuple[_switchboard.ShareNote, ...]:
+        # A touch main began before this one was armed can still be reading the hub when work-2
+        # is offered: it would bring the offer under the file as it was, and the slowed touch
+        # after it would change the file too late. Until the file has changed, main is handed no
+        # notes; they wait in the share store, and the slowed touch hands the offer over.
+        if armed.is_set() and not changed.is_set():
+            return ()
+        return real_notes(opened)
 
     def slow(opened: _switchboard.Link, *args: Any, **options: Any) -> Any:
         if armed.is_set() and threading.current_thread() is not threading.main_thread():
@@ -2004,6 +2014,7 @@ def test_a_file_changed_while_main_waits_on_the_hub_holds_the_offer(
         return real(opened, *args, **options)
 
     monkeypatch.setattr(_switchboard.Link, "touch", slow)
+    monkeypatch.setattr(_switchboard.Link, "notes", held_back)
     armed.set()
     host.lucille.offer("work-2")
     assert changed.wait(20)
