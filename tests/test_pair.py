@@ -2354,6 +2354,7 @@ def test_pairing_verbs_refuse_root_and_switchboard_settings(
     for argv in (["policy", "previous"], ["ops", "list"], ["log"]):
         ran = cli.run(*argv, timeout=15)
         assert ran.rc == 1 and "root" in ran.err
+    assert not cli.dirs.config.exists()
 
 
 # --- the pieces ----------------------------------------------------------------------------------

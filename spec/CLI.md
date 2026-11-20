@@ -520,8 +520,8 @@ drain: a signal (`SIGTERM`, `SIGHUP` or Ctrl-C), the end of standard input, or a
 
 Each verb writes the objects below on success, and an `error` object (section 5) on failure, with one of
 the codes listed for it, or one of the codes every verb can give: `usage` (exit 2), `internal`,
-`bad_profile`, `unsupported_platform`, `os_error` and, as root, `startup_refused` (section 10; `--version` and a line with
-no verb never give it).
+`bad_profile`, `unsupported_platform`, `os_error` and, as root, `startup_refused` (section 10; `--version`, `--help` and a
+line with no verb never give it).
 
 | Verb | On success | Codes |
 |---|---|---|
