@@ -309,14 +309,16 @@ The app is done when:
    shows a picture of that dialog beforehand. They click **Open**.
 4. **Welcome**: what the app does, in the claim's own terms, and "Nothing runs until you connect and
    confirm." One button: **Connect this Mac to Lucille**.
-5. The app shows a connect code and "Send this to Lucille in your chat: connect 7KQ4M-X2D9P. It works once,
-   within 20 minutes." It names the chat accounts that are Lucille's. The user sends it, from the phone or
-   the Mac, and the app waits for Lucille (§11.4).
-6. Lucille answers in the chat and shows its 8-digit number there (Lucille policy, not proven by this
-   repository). The app: "Lucille got this code from Telegram user 123456789 (@ada). Is that you?" (§11.5;
-   **No** runs `pair reject`) Then it shows the number with the last four digits hidden, `4071-••••`, and asks
-   once for those four from Lucille's number; after a wrong entry, it asks for all eight. The user types them,
-   and the app answers at once: "Matches." (§11.2)
+5. The app asks which chat the user talks to Lucille in (Telegram, today the only one) and their own username
+   there: "Your Telegram username, as in @ada." It needs a public username, and says how to set one if the
+   user has none (§11.5).
+6. The app shows a connect code and "Send this to Lucille in your chat: connect 7KQ4M-X2D9P. It works once,
+   within 20 minutes." It names the chat accounts that are Lucille's. The user sends it, from the phone or the
+   Mac, and the app waits for Lucille (§11.4). Lucille answers in the chat and shows its 8-digit number there
+   (Lucille policy, not proven by this repository). The app checks that the code came from the username the
+   user typed, then says "Connecting as @ada on Telegram" (§11.5), shows the number with the last four digits
+   hidden, `4071-••••`, and asks once for those four from Lucille's number; after a wrong entry, it asks for
+   all eight. The user types them, and the app answers at once: "Matches." (§11.2)
 7. The app shows **Connected** once Lucille's work room arrives.
 8. **Folders**: **Choose a Folder…** opens the standard Open panel. The app suggests a short name, which the
    user may change (§12).
@@ -357,6 +359,7 @@ never published, because anyone can make a code that passes the host's code chec
 | Opened the app from the disk image, Downloads, or anywhere but Applications | "Capsule needs to be in your Applications folder" | Drag it there; **Show Applications Folder** opens the Finder (§6) |
 | Sent the connect code with a typo | Lucille, in the chat: "No Capsule is waiting with that code" (Lucille policy, not proven by this repository) | Send it again; the Connect request lives 20 minutes |
 | Never sent the code, or sent it too late | App: "Waiting for Lucille…", then "The code expired", with **Start Over** | A new Connect |
+| Typed a username that is not the account the code was sent from, or sent it from another account | "Lucille got this code from another Telegram account, @mallory, not @ada. Nothing was connected. If that isn't you, someone else has your code." | **Start Over** |
 | Typed the wrong digits | "That doesn't match. Type Lucille's whole number, all eight digits." After three wrong entries in all: "Nothing was connected. Start again from Capsule." | **Start Over** |
 | Clicked **Don't Allow** on a folder prompt | "macOS is blocking Capsule from this folder" | **Open Privacy Settings** (§12) |
 | Chose a folder that is too broad | A second sheet, safe choice as default (§12) | **Choose a Smaller Folder** |
@@ -1238,7 +1241,8 @@ The host still redeems only a pairing that answers a Connect request it made. Th
 command line and any future shell get it.
 
 **What the user does.**
-1. In Capsule, **Connect to Lucille**. Capsule shows a connect code, such as `7KQ4M-X2D9P`, and "Send this
+1. In Capsule, **Connect to Lucille**. Capsule asks for the user's own chat username first (§11.5). Then it
+   shows a connect code, such as `7KQ4M-X2D9P`, and "Send this
    to Lucille in your chat: connect 7KQ4M-X2D9P. It works once, within 20 minutes." It names the chat
    accounts that are Lucille's (§11.7).
 2. The user sends it, from the phone or from the Mac. Lucille reaches the computer through the hub by
@@ -1247,11 +1251,12 @@ command line and any future shell get it.
    same number with four digits hidden, and the user types those four into Capsule (§11.2).
 
 **The protocol.**
-1. `lucille-host pair begin` draws the connect code `C`: ten symbols of Crockford's base32 from `secrets`, 50
-   bits, shown as two groups of five. Case, spaces and `-` are ignored, and `I`, `L` and `O` read as `1`,
-   `1` and `0`, as Crockford's alphabet has it. Any other character outside the alphabet, `U` among them,
-   makes the text not a connect code. There is no check symbol (Not decided yet), so a typo shows only as no
-   Capsule waiting.
+1. `lucille-host pair begin` reads the chat service and the user's username on standard input, and refuses one
+   outside its grammar (§11.5). It draws the connect code `C`: ten symbols of Crockford's base32 from
+   `secrets`, 50 bits, shown as two groups of five. Case, spaces and `-` are ignored, and `I`, `L` and `O`
+   read as `1`, `1` and `0`, as Crockford's alphabet has it. Any other character outside the alphabet, `U`
+   among them, makes the text not a connect code. There is no check symbol (Not decided yet), so a typo shows
+   only as no Capsule waiting.
 2. It stretches `C` into a 32-byte key, `K = scrypt(C, salt "lucille-host/connect/v1/<E>", N = 2^17, r = 8,
    p = 1)`, with Python's own `hashlib.scrypt`, its memory cap raised to fit. `E` is the 20-minute epoch,
    the computer's clock at `begin` divided by 1,200 s and rounded down, written in decimal. The epoch keeps a
@@ -1261,9 +1266,9 @@ command line and any future shell get it.
      that takes any 32-byte secret. Its name, its write key and the key that seals its posts all come from
      `K` (`:403-422`). No pairing code's secret is ever `K`.
    - **The nonce `N`**, 16 bytes of HKDF over `K` with the label `lucille-host/connect/nonce`.
-3. It keeps `C`, `E`, an expiry and an unused flag in the state folder (0600, written atomically).
-   `pair status` can then show the code again while it is good. One request is outstanding at a time, and a
-   new `begin` replaces it.
+3. It keeps `C`, `E`, the service and the normalized username, an expiry and an unused flag in the state
+   folder (0600, written atomically). `pair status` can then show the code again while it is good. One request
+   is outstanding at a time, and a new `begin` replaces it.
 4. It posts a hello into the drop room, sealed like every post there. The request expires 20 minutes after
    the earlier of the hub's time of that post and the computer's own clock when it posted. The library reads
    the hub's time unchecked (`:351-358`, `:1435-1448`), so the host refuses a hub time more than 300 s
@@ -1298,6 +1303,9 @@ command line and any future shell get it.
      Lucille's key.
    - If the room holds more than one delivery when the host reads it, the host refuses them all, and the
      request is spent. Since only deliveries that verify count, that takes Lucille's key, misused (§11.5).
+   - The signed `"from"` and `"handle"` must name the service and the username the user typed (§11.5).
+     Otherwise the Connect ends: the request is spent, nothing is redeemed, and only then does the app show
+     which account the code came from.
    - Otherwise `pair` runs today's hub and token checks on the delivered code, then parses its note against a
      strict grammar. It refuses unless the nonce matches the stored request's (in constant time), and the
      request is unexpired and unused.
@@ -1305,8 +1313,8 @@ command line and any future shell get it.
    connection wasn't started on this Mac. Nothing was connected", with no store write and no spawn. The
    host's answer carries no note (the library writes one only when given one, `:1606-1608`), so whoever
    holds the drop room learns nothing of the computer from it.
-9. The app shows the chat account the code came from, as Lucille signed it, and asks "Is that you?"; **No**
-   runs `pair reject`. Then it shows the number with four digits hidden (§11.2).
+9. The app shows the account the code came from, as Lucille signed it, "Connecting as @ada on Telegram", then
+   the number with four digits hidden (§11.2).
 10. **`pair` refuses while a pair is held.** The user disconnects first.
 
 From the release that adds `pair begin`, the core refuses every code without its own nonce, in every shell.
@@ -1412,12 +1420,37 @@ closes ambiguity, not a forgery.
   It names no link: anyone who holds `C` can cause this message, so it must never point to a link from the
   chat.
 
-**What the host keeps, and what the app shows.** The host keeps the key id, `"from"` and `"handle"` in its
-pair record. The app shows them where it showed the masked account: "Lucille got this code from Telegram
-user 123456789 (@ada). Is that you?" **No** runs `pair reject`. Many chat users have no handle, or do not know
-their id, so this question is a weak check on its own (§11.7). From the release that adds `pair begin`, the
-core refuses every unsigned code, in every shell. The end-to-end tests and the conformance suite's fake
-Lucille sign with a test key, which they name through a flag the app never passes, as `--hub` is today.
+**The user's own username, typed first.** The maintainer decided on 2026-11-21 that, before connecting, the
+user types their own chat username into Capsule, and the host refuses a delivery whose signed `"from"` and
+`"handle"` do not name it. This replaces an "Is that you?" question about the sender; showing the sender
+stays.
+- **What the user gives:** the chat service, from the services the core lists (Telegram today, chosen for
+  them), and their username there. The app asks for both before it shows the connect code, so the account
+  the code came from is never on screen before the user has said which it should be.
+- **Normalizing:** on both sides, the host drops spaces around the name, one leading `@`, and a leading
+  `<service>:` (which must then name the chosen service), and lowers ASCII case, as Telegram usernames
+  ignore case. The result must be 1 to 64 of `a-z`, `0-9` and `_`. So `telegram:@Ada`, `@ada` and `ADA` are
+  one name. The service is compared too: the same name on another chat service is another account, and a
+  name free there could be taken by anyone. The comparison runs in constant time; nothing in it is secret,
+  but nothing is lost by it.
+- **An account with no public username cannot connect.** Lucille signs `"handle"` as `""` for it, which
+  matches no typed name, and Lucille tells such a user in the chat to set a username first (Lucille policy,
+  not proven by this repository). The alternatives were a value the user learns from the chat, such as their
+  numeric id, which a look-alike could hand them as easily as Lucille, and so would prove nothing.
+- **A mismatch ends the Connect; it is not a wrong entry.** The request is spent and nothing is redeemed. A
+  mismatch means the code reached Lucille from another account, which is the relay this check is for, or
+  the user mistyped their own name. A retry against the same delivery would show the other account's name
+  and invite the user to type it. So the user starts again, and the app shows the other account only as a
+  warning, after the Connect has ended: "Lucille got this code from another Telegram account, @mallory, not
+  @ada. Nothing was connected. If that isn't you, someone else has your code."
+- **Privacy:** the typed username is checked on the computer and sent nowhere. The host keeps it, normalized,
+  with the request in the state folder, and deletes it when the request ends. After a pairing, the pair
+  record keeps the key id and the signed `"from"` and `"handle"`, which the app shows as "Connected as @ada on
+  Telegram". Nothing leaves the computer that did not already.
+
+From the release that adds `pair begin`, the core refuses every unsigned code, in every shell. The end-to-end
+tests and the conformance suite's fake Lucille sign with a test key, which they name through a flag the app
+never passes, as `--hub` is today.
 
 **Rotation.**
 - **A new key comes only in a new host release.**
@@ -1477,23 +1510,21 @@ every way a pair ends: Disconnect, removal on Lucille's side, rejection, the dea
   looks like Lucille's, a bot with a near name in Telegram say, and is sent the code, holds the drop room.
   Before §11.5 it could deliver its own code, be honestly the other end, and show a number that matched. Now
   the host refuses its code before any number exists, since it cannot sign as Lucille.
-- **A look-alike that passes the code on to the real Lucille: not closed.** It sends `connect` from an account
-  of its own, and so does anyone else who learns the code first: a chat reader, someone looking over the
-  user's shoulder, a hub that finds it. Lucille signs, and the computer pairs with Lucille on behalf of that
-  account, which can then send work against the user's folders. The typed digits do not help: Lucille shows
-  the matching number in that account's chat, and it passes the four digits on. What bounds it:
-  - **the signed `from`**, canonical and in ASCII only (§11.5), which the app shows before the digits:
-    "Lucille got this code from Telegram user 4482019 (@mallory). Is that you?" **No** runs `pair reject`. An
-    ASCII grammar leaves no mixed scripts, but ASCII look-alikes (`l` and `1`) stay;
-  - **Lucille binding the pair to exactly that account**, so the account that sent the code is the only one
-    that can send work (Lucille policy, not proven by this repository). Without that, the check is
-    decoration;
+- **A look-alike that passes the code on to the real Lucille: closed by the typed username.** It sends
+  `connect` from an account of its own, and so does anyone else who learns the code first: a chat reader,
+  someone looking over the user's shoulder, a hub that finds it. Lucille signs, but for that account, and the
+  host refuses a delivery whose signed account is not the username the user typed before connecting
+  (§11.5). The typed digits would not have helped: Lucille shows the matching number in that account's chat,
+  and it passes the four digits on. Also in place:
+  - **Lucille binding the pair to exactly the signed account** (Lucille policy, not proven by this
+    repository);
   - **Lucille refusing a second delivery into a room**, and telling the later sender that the code was already
     used from another account (Lucille policy, not proven by this repository);
   - the chat accounts that Capsule names as Lucille's, from a list in the core.
 
-  What is left: a user who does not read the account, or does not know their own id or handle, which many
-  chat users do not. So "Is that you?" is a weak check on its own.
+  What is left: a user talked into typing the attacker's username, which the app never shows before the check;
+  and an attacker who holds the user's own chat account, who is then the user as far as any check here can
+  tell.
 - **What stays open on Lucille's side: a code holder that redeems Lucille's code first.** Whoever holds the
   connect code can read Lucille's signed code in the drop room and redeem it before the computer does. The
   computer's own redemption is then refused, and it says the code may have been used by someone else, but
@@ -1550,6 +1581,11 @@ every way a pair ends: Disconnect, removal on Lucille's side, rejection, the dea
 - **Leaving codes unsigned.** It left the look-alike account open, with only a masked account against it. The
   maintainer chose the pinned key on 2026-11-21 (§11.5). It adds an Ed25519 signature and its check, from a
   package the library already depends on, and a key to keep.
+- **Asking "Is that you?" about the signed sender**, this record's previous draft. Many chat users do not know
+  their own id or handle, and a question with the answer on screen is answered yes. The maintainer chose the
+  typed username on 2026-11-21 (§11.5).
+- **Counting a username mismatch as a wrong entry**, with retries. A retry after the other account is shown
+  invites the user to type it; the Connect ends instead (§11.5).
 - **Showing the masked account** (first character, `•••`, domain), this record's earlier check. It carried
   almost nothing; the signed `from` replaces it.
 - **A QR code.** It does not suit a single computer whose screen shows both ends.
@@ -2273,9 +2309,10 @@ in 10 minutes or less.
   another developer's notarized app cannot be told apart by someone who checks nothing. The README and the About
   window name the Team ID.
 - **PRIVACY.md** gains two sentences: "The Capsule app connects to nothing itself; only the host inside it
-  connects, and only to Lucille's hub, the one its pairing code names. To connect, you send a short code from
-  Capsule to Lucille in your chat with it." and "macOS may contact Apple to check the app's signature and
-  notarization; that is Apple's behaviour, not this project's."
+  connects, and only to Lucille's hub, the one its pairing code names. To connect, you type your chat username
+  into Capsule, which checks it on your computer, and send a short code from Capsule to Lucille in your chat
+  with it." and "macOS may contact Apple to check the app's signature and notarization; that is Apple's
+  behaviour, not this project's."
 - **PRIVACY.md's controls sentences** name both shells, since About shows the claim verbatim, for example
   "a log on your computer (`lucille-host log`; Activity in Capsule shows the latest entries)", "Pause
   in Capsule, or `lucille-host pause`", "Stop What's Running, or `lucille-host kill`", "Disconnect in
@@ -2314,7 +2351,7 @@ These join 0001's "Host invariants and their tests".
 | M1 | No listener: neither the app nor the host opens a listening socket, a Mach service or an XPC listener | `lsof` on the end-to-end run; `macos_lint` |
 | M2 | The app makes no network connection; the host connects only to its hub | `lsof` sampling against a loopback hub; `macos_lint` |
 | M3 | Nothing from outside the keyboard changes policy: no link reaches the app, and a pairing delivered in the drop room reaches only `pair`, whose fresh policy (§11.6) is the one change it makes | `macos_lint`: no URL scheme, no handler for a URL; core tests: refused deliveries leave the policy digest unchanged |
-| M4 | From the Connect release, the host redeems only a code answering its own pending request, and signed with a key the release pins | core tests: no nonce, wrong, reused, expired, two deliveries at once; no signature, an unknown key id, another key, a signature over another code, another nonce or another `from`; each refused before `pairing.accept`, with no store write and no spawn; a pair made under a revoked key id ends at start |
+| M4 | From the Connect release, the host redeems only a code answering its own pending request, and signed with a key the release pins | core tests: no nonce, wrong, reused, expired, two deliveries at once; no signature, an unknown key id, another key, a signature over another code, another nonce or another `from`; a signed account that is not the typed username, which ends the Connect; each refused before `pairing.accept`, with no store write and no spawn; a pair made under a revoked key id ends at start |
 | M5 | The host's gate opens only on Lucille's number, typed: the first entry is its last four digits, once; every entry after a wrong one is all eight. It never shows its own last four before | core tests: a wrong entry, then only the whole number taken, four digits then refused without counting, three wrong entries forget, the right entry opens; `pair status` carries the first four digits only, and none after a wrong entry |
 | M6 | Nothing in the environment changes what the bundled runtime loads | `check_app.py environment`: with `PYTHONPATH`, `PYTHONHOME`, `PYTHONSTARTUP`, a user site, `PYTHONUSERBASE` and the working folder each set to load a planted module, the runtime run with the app's flags loads none; for each, a control run without `-I` must load it, or the check fails. `PYTHONSTARTUP` is read only by an interactive interpreter, so no run the app makes (`-m lucille_host`) could load it even without `-I`; its control runs `-i`. With `PYTHONPYCACHEPREFIX` set, the runtime run with the app's flags reads `.pyc` files from no other tree; its control, without `-I`, names the prefix. No `.pth` file ships beyond the installed `RECORD` files, which `check_app.py record` compares with the wheels'. On the ad-hoc bundle (signed without the hardened runtime, §7) on macOS 15, 26 and 27, and again on every signed build in `macos-verify`. That covers the Python variables and files above only: no check plants a `DYLD_*` variable, and without the hardened runtime dyld may honour one in the interpreter (from memory of Apple's hardened runtime documentation; not read in a source here and not tested). The runs the app starts get only `HOME`, `PATH`, `LANG`, `USER`, `LOGNAME` and `TMPDIR` (`HostCLI.swift`, `environment()`) |
 | M7 | Developer ID builds: hardened runtime, no entitlements, every Mach-O signed by the team | signing-job checks, on signed builds only: an ad-hoc build has neither the hardened runtime nor a Team ID (§7), so library validation against a Team ID is checked only on signed builds |
@@ -2357,7 +2394,7 @@ those writes itself first (`pause`, then `resume`).
 | A scam that hands the user a code made with the public library | the paste form is never published; from the Connect release, the nonce refuses it in every shell | a user talked into reading out codes |
 | A connect code or a pairing code intercepted, in the chat or the drop room | Lucille's signature, which only a holder of the pinned key can make (§11.5): the interceptor cannot deliver a code the computer takes, and the commitment's collision gives it no lever; the typed digits against a key holder in the middle of the user's chat with the real Lucille (§11.2) | spending the request; redeeming Lucille's code first, which exposes Lucille's side, not the computer (§11.7); with Lucille's key too, 1 in 10,000 per Connect, or 2 in 10,000 with a collision |
 | A look-alike chat account is sent the connect code, and delivers its own | the pinned key: the host refuses a code Lucille did not sign, before any number (§11.5) | none from the look-alike itself |
-| A look-alike, or anyone who learns the code, sends it to the real Lucille from its own account | the signed, canonical `from`, shown before the digits, whose **No** runs `pair reject`; Lucille binding the pair to that account and refusing a second delivery (Lucille policy); Capsule naming Lucille's chat accounts (§11.7) | a user who does not read the account or know their own; ASCII look-alikes in a handle; the typed digits do not help here |
+| A look-alike, or anyone who learns the code, sends it to the real Lucille from its own account | the username the user types before connecting, which the signed `from` and `handle` must name, or the Connect ends (§11.5); Lucille binding the pair to that account and refusing a second delivery (Lucille policy); Capsule naming Lucille's chat accounts (§11.7) | a user talked into typing the attacker's username; an attacker who holds the user's own chat account |
 | Lucille's signing key stolen or misused | a separate signing service (Lucille policy); revocation in the next release, kept in every later one, which ends the pairs made under it (§11.5); the typed digits, only against a key holder in the middle of the user's chat with the real Lucille | a key holder with its own channel to the user, against which the gate opens for certain; hosts not updated, since there is no auto-update |
 | A connect code from someone else's Capsule, sent to the user's Lucille | Lucille's `connect` command says what connecting does, and asks (a recommendation to Lucille, §11.7) | Lucille's side: the job arguments it sends and the results it trusts, not the user's files |
 | A compromised hub | the drop room is named and sealed from a 50-bit code stretched with a salt bound to the epoch; the expiry bounded by the computer's clock (§11.4); the typed digits | delaying or withholding posts; the request's note and timing, to an offline search after the window |
