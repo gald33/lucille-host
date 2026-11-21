@@ -1255,17 +1255,19 @@ command line and any future shell get it.
 **The protocol.**
 1. `lucille-host pair begin` reads the chat service and the user's username on standard input, and refuses one
    outside its grammar (§11.5). It draws the connect code `C`: ten symbols of Crockford's base32 from
-   `secrets`, 50 bits, shown as two groups of five. Case, spaces and `-` are ignored, and `I`, `L` and `O`
-   read as `1`, `1` and `0`, as Crockford's alphabet has it. Any other character outside the alphabet, `U`
-   among them, makes the text not a connect code. There is no check symbol (Not decided yet), so a typo shows
-   only as no Capsule waiting.
+   `secrets`, 50 bits, shown as two groups of five. Any character outside ASCII is refused first (Python's
+   `upper()` would turn the dotless `ı` into `I`). Then ASCII case, the space (U+0020) and `-` are ignored,
+   and `I`, `L` and `O` read as `1`, `1` and `0`, as Crockford's alphabet has it. Any other character outside
+   the alphabet, `U` among them, makes the text not a connect code. There is no check symbol (Not decided
+   yet), so a typo shows only as no Capsule waiting.
 2. It stretches `C` into a 32-byte key with Python's own `hashlib.scrypt`, its memory cap raised to fit:
    `K = scrypt(C, salt, n = 2^17, r = 8, p = 1, dklen = 32)`.
    - **The password** is the code's 10 canonical symbols as ASCII bytes: upper case, from Crockford's alphabet
      `0123456789ABCDEFGHJKMNPQRSTVWXYZ`, after `I` and `L` become `1` and `O` becomes `0`, with no `-` and no
      space.
-   - **The salt** is the ASCII bytes of `lucille-host/connect/v1/<E>`. `E` is the 20-minute epoch, the
-     computer's clock at `begin` divided by 1,200 s and rounded down, written in decimal. The epoch keeps a
+   - **The salt** is the ASCII bytes of `lucille-host/connect/v1/<E>`. `E` is the 20-minute epoch: the
+     computer's clock at `begin` in Unix seconds (since 1970-01-01T00:00:00Z), floor-divided by 1,200, written
+     in ASCII decimal with no sign and no leading zeros. The epoch keeps a
      table built in advance to one epoch: a fixed salt would let anyone who sees room names stretch all 2^50
      codes once and look up every later request in minutes.
 
@@ -1294,10 +1296,12 @@ command line and any future shell get it.
 6. **Lucille's side** (Lucille policy, not proven by this repository):
    - The chat command is `connect <code>`. Lucille stretches the code the same way and reads the drop room,
      for its own clock's epoch and the ones beside it that a request up to 20 minutes old could have used,
-     allowing for clocks 300 s apart: from one epoch ahead to two behind, stopping at the first room with a
-     hello. A code is no use to Lucille after that, whatever the hub's clock says.
+     allowing for clocks 300 s apart: from one epoch ahead to two behind, tried in the order `E`, `E-1`,
+     `E+1`, `E-2` of its own clock, stopping at the first room with a hello. A code is no use to Lucille after
+     that, whatever the hub's clock says.
    - It answers in the chat "No Capsule is waiting with that code" when it finds no hello, and "That code
-     expired" past its expiry.
+     expired" when the hello is more than 20 minutes old by the hub's time of it, checked against Lucille's
+     own clock as well, or past its expiry.
    - Otherwise it starts a pairing (`pairing.start`), with the code's note set to `lucille-host/2 n=<N>`,
      `<N>` as 32 lowercase hex digits (the note must match `^lucille-host/2 n=[0-9a-f]{32}$` exactly), and
      posts the code into the drop room with its signature and `from` (§11.5).
@@ -1314,8 +1318,8 @@ command line and any future shell get it.
    - If the room holds more than one delivery when the host reads it, the host refuses them all, and the
      request is spent. Since only deliveries that verify count, that takes Lucille's key, misused (§11.5).
    - The signed `"from"` and `"handle"` must name the service and the username the user typed (§11.5).
-     Otherwise the Connect ends: the request is spent, nothing is redeemed, and only then does the app show
-     which account the code came from.
+     Otherwise the Connect ends: the request is spent, nothing is redeemed, and the app names no account
+     (§11.5).
    - Otherwise `pair` runs today's hub and token checks on the delivered code, then parses its note against a
      strict grammar. It refuses unless the nonce matches the stored request's (in constant time), and the
      request is unexpired and unused.
@@ -1433,8 +1437,9 @@ closes ambiguity, not a forgery.
   account first: Lucille signs for that account, and the username check below ends the Connect. That is a
   denial of service, which the user is told of; it cannot make the computer pair.
 - **What is logged:** for an ignored post, only that one was ignored and why, nothing from the post; for a
-  mismatch, the signed `"from"` and `"handle"` of the other account, as evidence for the user, and never the
-  typed username.
+  mismatch, the signed `"from"` of the other account, its service and numeric id, and never its `"handle"` or
+  the typed username. The app shows the host's log (Activity › Show the Host's Log, §2) and Copy Diagnostics
+  carries it (§15), so a handle the attacker chose must not be in it.
 - **A key id the release does not know** is ignored like a bad signature. If the request expires with only
   such posts in the room, the app says "Lucille may need a newer Capsule. Get it from where you got this one."
   It names no link: anyone who holds `C` can cause this message, so it must never point to a link from the
@@ -1447,15 +1452,15 @@ stays.
 - **What the user gives:** the chat service, from the services the core lists (Telegram today, chosen for
   them), and their username there. The app asks for both before it shows the connect code, so the account
   the code came from is never on screen before the user has said which it should be.
-- **Normalizing,** on both sides and in this order: refuse any character outside ASCII; drop the spaces around
-  the name; drop a leading `<service>:`, which must then name the chosen service; drop one leading `@`; lower
-  ASCII letters only (never a Unicode lowering, which maps the Kelvin sign to `k`), as Telegram usernames
-  ignore case. The result must be 1 to 64 of `a-z`, `0-9` and `_`. So `telegram:@Ada`, `@ada` and `ADA` are
-  one name, and `@telegram:ada` is refused. The service is compared too: the same name on another chat service
-  is another account, and a name free there could be taken by anyone. Confusable letters do not matter to the
-  check: the typed name must equal the signed one exactly, and a service keeps its usernames unique, so a
-  look-alike name is simply another name; they matter only to the warning that shows the other account, which
-  shows it in ASCII. The comparison runs in constant time; nothing in it is secret, but nothing is lost by it.
+- **Normalizing,** on both sides and in this order: refuse any character outside ASCII; drop the spaces
+  (U+0020) around the name; drop a leading `<service>:`, matched without regard to ASCII case, which must then
+  name the chosen service; drop one leading `@`; lower ASCII letters only (never a Unicode lowering, which
+  maps the Kelvin sign to `k`), as Telegram usernames ignore case. The result must be 1 to 64 of `a-z`, `0-9`
+  and `_`. So `telegram:@Ada`, `@ada` and `ADA` are one name, and `@telegram:ada` is refused. The service is
+  compared too: the same name on another chat service is another account, and a name free there could be taken
+  by anyone. Confusable letters do not matter to the check: the typed name must equal the signed one exactly,
+  and a service keeps its usernames unique, so a look-alike name is simply another name, and no screen shows
+  the other account. The comparison runs in constant time; nothing in it is secret, but nothing is lost by it.
 - **An account with no public username cannot connect.** Lucille signs `"handle"` as `""` for it, which
   matches no typed name, and Lucille tells such a user in the chat to set a username first (Lucille policy,
   not proven by this repository). The alternatives were a value the user learns from the chat, such as their
@@ -1468,11 +1473,12 @@ stays.
   `@Lucille_support`), and the same screen follows a relay and a slip of the user's own. So no screen shows
   it, and none offers a name to type: "This code was sent to Lucille from a different account. Nothing was
   connected. Check that you sent it to the official Lucille account, then start again." The host's log keeps
-  the signed `"from"` and `"handle"`, for a user who looks for them on purpose.
+  only the signed `"from"`, a service and a numeric id, never the handle, since the app shows the log.
 - **Privacy:** the typed username is checked on the computer and sent nowhere. The host keeps it, normalized,
-  with the request in the state folder, and deletes it when the request ends. After a pairing, the pair
-  record keeps the key id and the signed `"from"` and `"handle"`, which the app shows as "Connected as @ada on
-  Telegram". Nothing leaves the computer that did not already.
+  with the request in the state folder, and deletes it when the request ends. After a pairing, the pair record
+  keeps the key id and the signed `"from"` and `"handle"`, which the app shows as "Connected as @ada on
+  Telegram", the handle as it was signed when the pair was made; a later change of username is not seen there.
+  Nothing leaves the computer that did not already.
 - **The handle at pairing, the stable id after.** The handle is checked once, when the pair is made. From then
   on, the pair record keeps the signed `"from"`, and Lucille binds the pair to that stable id, so a later
   change of username changes nothing. A user who changes their username between typing it and sending the code
@@ -1553,9 +1559,9 @@ every way a pair ends: Disconnect, removal on Lucille's side, rejection, the dea
     used from another account (Lucille policy, not proven by this repository);
   - the chat accounts that Capsule names as Lucille's, from a list in the core.
 
-  What is left: a user talked into typing the attacker's username, by the attacker, or after reading it in the
-  host's log, which keeps it as evidence; no screen shows it (§11.5). And an attacker who holds the user's own
-  chat account, who is then the user as far as any check here can tell.
+  What is left: a user talked into typing the attacker's username by the attacker, since neither a screen nor
+  the host's log shows it (§11.5); and an attacker who holds the user's own chat account, who is then the user
+  as far as any check here can tell.
 - **What stays open on Lucille's side: a code holder that redeems Lucille's code first.** Whoever holds the
   connect code can read Lucille's signed code in the drop room and redeem it before the computer does. The
   computer's own redemption is then refused, and it says the code may have been used by someone else, but
@@ -2426,7 +2432,7 @@ those writes itself first (`pause`, then `resume`).
 | A scam that hands the user a code made with the public library | the paste form is never published; from the Connect release, the nonce refuses it in every shell | a user talked into reading out codes |
 | A connect code or a pairing code intercepted, in the chat or the drop room | Lucille's signature, which only a holder of the pinned key can make (§11.5): the interceptor cannot deliver a code the computer takes, and the commitment's collision gives it no lever; the typed digits against a key holder in the middle of the user's chat with the real Lucille (§11.2) | spending the request; redeeming Lucille's code first, which exposes Lucille's side, not the computer (§11.7); with Lucille's key too, 1 in 10,000 per Connect, or 2 in 10,000 with a collision |
 | A look-alike chat account is sent the connect code, and delivers its own | the pinned key: the host refuses a code Lucille did not sign, before any number (§11.5) | none from the look-alike itself |
-| A look-alike, or anyone who learns the code, sends it to the real Lucille from its own account | the username the user types before connecting, which the signed `from` and `handle` must name, or the Connect ends (§11.5); Lucille binding the pair to that account and refusing a second delivery (Lucille policy); Capsule naming Lucille's chat accounts (§11.7) | a user talked into typing the attacker's username, by the attacker or from the host's log, since no screen shows it (§11.5); an attacker who holds the user's own chat account |
+| A look-alike, or anyone who learns the code, sends it to the real Lucille from its own account | the username the user types before connecting, which the signed `from` and `handle` must name, or the Connect ends (§11.5); Lucille binding the pair to that account and refusing a second delivery (Lucille policy); Capsule naming Lucille's chat accounts (§11.7) | a user talked into typing the attacker's username by the attacker, since neither a screen nor the host's log shows it (§11.5); an attacker who holds the user's own chat account |
 | Lucille's signing key stolen or misused | a separate signing service (Lucille policy); revocation in the next release, kept in every later one, which ends the pairs made under it (§11.5); the typed digits, only against a key holder in the middle of the user's chat with the real Lucille | a key holder with its own channel to the user, against which the gate opens for certain and the typed username does not help; hosts not updated, since there is no auto-update |
 | A connect code from someone else's Capsule, sent to the user's Lucille | Lucille's `connect` command says what connecting does, and asks (a recommendation to Lucille, §11.7) | Lucille's side: the job arguments it sends and the results it trusts, not the user's files |
 | A compromised hub | the drop room is named and sealed from a 50-bit code stretched with a salt bound to the epoch; the expiry bounded by the computer's clock (§11.4); the typed digits | delaying or withholding posts; the request's note and timing, to an offline search after the window |
@@ -2502,6 +2508,15 @@ those writes itself first (`pause`, then `resume`).
   waiting, at one more symbol to type (§11.4). A review recommends keeping ten symbols for the code and
   spending an eleventh, if any, on this.
 - The canonical `from` for each chat service beyond its grammar: which stable id each service gives (§11.5).
+  For Telegram it is `telegram:` and the user's numeric id in decimal, and `"handle"` is the user's primary
+  username as Telegram reports it (`User.username`), kept in Telegram's case.
+- Details left to Lucille's side, each Lucille policy and not proven by this repository (§11.4, §11.5): how
+  the `connect` command is parsed (the keyword's case, whitespace, and which messages count: a private chat
+  only, not a group, an edited message, a channel's `sender_chat` or a forwarded message); the arguments of
+  `pairing.start` (Lucille's hub, no token travelling, a hello, the code's lifetime); the rate limit's value;
+  and the chat's words when a second delivery is refused.
+- Which library call the host and Lucille use to post into the drop room, and the envelope that tells the
+  host's own hello, `{"t": "lucille-host/hello/1"}`, from a delivery (§11.4).
 - How long a new key is out before Lucille signs with it, and the format of the list of revoked key ids
   (§11.5).
 - A full 32-byte commitment in the library, which would take the collision out of §11.2's bound against a
