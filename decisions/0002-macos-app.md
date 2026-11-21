@@ -1197,15 +1197,16 @@ line, against an attacker who also holds Lucille's key, stolen or misused, **and
 user's chat with the real Lucille**. The odds above are for that attacker. A key holder with a channel of its
 own to the user, a look-alike account or a page that says "send your code here", is the only Lucille the user
 talks to. It signs its own code, with any `from` it likes, and shows its own number, which is the computer's;
-the gate opens for certain. Against that attacker the defences are the key's custody, the chat accounts
-Capsule names as Lucille's, and revocation reaching hosts that update. Suppose it can read the chat, or learn
-the connect code another way. From the code it works out the drop room and the nonce (§11.4). It posts its own
-pairing code there, with that nonce, before Lucille's arrives: computer ↔ attacker. It redeems Lucille's code
-from the same room: Lucille ↔ attacker. The two numbers now differ. If the computer's gate were a click, the
-user could open it toward the attacker, and Lucille's later mismatch could not reach the computer over a pair
-the attacker holds. With Lucille's digits typed into the computer, the computer's gate stays shut, except at
-the odds above. Lucille's side is then exposed at most (job arguments and forged results), never the user's
-files.
+the gate opens for certain. Against that attacker the digits give no protection, and neither does the typed
+username (§11.5): it can sign any account, the user's own included, and its look-alike sees the user's
+username in the chat. The defences are the key's custody, the chat accounts Capsule names as Lucille's, and
+revocation reaching hosts that update. Suppose it can read the chat, or learn the connect code another way.
+From the code it works out the drop room and the nonce (§11.4). It posts its own pairing code there, with that
+nonce, before Lucille's arrives: computer ↔ attacker. It redeems Lucille's code from the same room: Lucille ↔
+attacker. The two numbers now differ. If the computer's gate were a click, the user could open it toward the
+attacker, and Lucille's later mismatch could not reach the computer over a pair the attacker holds. With
+Lucille's digits typed into the computer, the computer's gate stays shut, except at the odds above. Lucille's
+side is then exposed at most (job arguments and forged results), never the user's files.
 
 ### 11.3 The first form: paste
 
@@ -1428,11 +1429,13 @@ stays.
   them), and their username there. The app asks for both before it shows the connect code, so the account
   the code came from is never on screen before the user has said which it should be.
 - **Normalizing:** on both sides, the host drops spaces around the name, one leading `@`, and a leading
-  `<service>:` (which must then name the chosen service), and lowers ASCII case, as Telegram usernames
-  ignore case. The result must be 1 to 64 of `a-z`, `0-9` and `_`. So `telegram:@Ada`, `@ada` and `ADA` are
-  one name. The service is compared too: the same name on another chat service is another account, and a
-  name free there could be taken by anyone. The comparison runs in constant time; nothing in it is secret,
-  but nothing is lost by it.
+  `<service>:` (which must then name the chosen service), and lowers ASCII case, as Telegram usernames ignore
+  case. The result must be 1 to 64 of `a-z`, `0-9` and `_`. So `telegram:@Ada`, `@ada` and `ADA` are one name.
+  The service is compared too: the same name on another chat service is another account, and a name free there
+  could be taken by anyone. Confusable letters do not matter to the check: the typed name must equal the
+  signed one exactly, and a service keeps its usernames unique, so a look-alike name is simply another name;
+  they matter only to the warning that shows the other account, which shows it in ASCII. The comparison runs
+  in constant time; nothing in it is secret, but nothing is lost by it.
 - **An account with no public username cannot connect.** Lucille signs `"handle"` as `""` for it, which
   matches no typed name, and Lucille tells such a user in the chat to set a username first (Lucille policy,
   not proven by this repository). The alternatives were a value the user learns from the chat, such as their
@@ -1534,9 +1537,10 @@ every way a pair ends: Disconnect, removal on Lucille's side, rejection, the dea
   signed `from` names, that Capsule said "Matches". It should tell the user in the chat when its delivered
   code was redeemed by a computer that never reached "Matches", so the user removes that computer (both a
   recommendation to Lucille; Lucille policy, not proven by this repository).
-- **Lucille's key, stolen or misused.** Whoever holds it can sign. The typed digits (§11.2) bound it only when
-  it sits in the middle of the user's chat with the real Lucille. With a channel of its own to the user, a
-  look-alike account or a page, it signs its own code with any `from`, and the gate opens for certain. The
+- **Lucille's key, stolen or misused.** Whoever holds it can sign. The typed digits (§11.2) bound it only
+  when it sits in the middle of the user's chat with the real Lucille. With a channel of its own to the user,
+  a look-alike account or a page, it signs its own code, the gate opens for certain, and the typed username
+  does not help either: it signs whatever account the user typed, which its look-alike sees in the chat. The
   defences are then the key's custody, the chat accounts Capsule names as Lucille's, and revocation. A key
   that leaks is revoked in the next release, and the pairs made under it end (§11.5). A host that is not
   updated keeps trusting it, since there is no auto-update.
@@ -2395,7 +2399,7 @@ those writes itself first (`pause`, then `resume`).
 | A connect code or a pairing code intercepted, in the chat or the drop room | Lucille's signature, which only a holder of the pinned key can make (§11.5): the interceptor cannot deliver a code the computer takes, and the commitment's collision gives it no lever; the typed digits against a key holder in the middle of the user's chat with the real Lucille (§11.2) | spending the request; redeeming Lucille's code first, which exposes Lucille's side, not the computer (§11.7); with Lucille's key too, 1 in 10,000 per Connect, or 2 in 10,000 with a collision |
 | A look-alike chat account is sent the connect code, and delivers its own | the pinned key: the host refuses a code Lucille did not sign, before any number (§11.5) | none from the look-alike itself |
 | A look-alike, or anyone who learns the code, sends it to the real Lucille from its own account | the username the user types before connecting, which the signed `from` and `handle` must name, or the Connect ends (§11.5); Lucille binding the pair to that account and refusing a second delivery (Lucille policy); Capsule naming Lucille's chat accounts (§11.7) | a user talked into typing the attacker's username; an attacker who holds the user's own chat account |
-| Lucille's signing key stolen or misused | a separate signing service (Lucille policy); revocation in the next release, kept in every later one, which ends the pairs made under it (§11.5); the typed digits, only against a key holder in the middle of the user's chat with the real Lucille | a key holder with its own channel to the user, against which the gate opens for certain; hosts not updated, since there is no auto-update |
+| Lucille's signing key stolen or misused | a separate signing service (Lucille policy); revocation in the next release, kept in every later one, which ends the pairs made under it (§11.5); the typed digits, only against a key holder in the middle of the user's chat with the real Lucille | a key holder with its own channel to the user, against which the gate opens for certain and the typed username does not help; hosts not updated, since there is no auto-update |
 | A connect code from someone else's Capsule, sent to the user's Lucille | Lucille's `connect` command says what connecting does, and asks (a recommendation to Lucille, §11.7) | Lucille's side: the job arguments it sends and the results it trusts, not the user's files |
 | A compromised hub | the drop room is named and sealed from a 50-bit code stretched with a salt bound to the epoch; the expiry bounded by the computer's clock (§11.4); the typed digits | delaying or withholding posts; the request's note and timing, to an offline search after the window |
 | Compromised build or signing path (runner image, action, dependency, runtime tarball) | hosted runners; SHA-pinned actions; sha256-pinned runtime, wheels and ripgrep; a signing job that runs only Apple's tools and one reviewed script; the owner's approval | a malicious runner image or Xcode; provenance is SLSA build level 2 |
