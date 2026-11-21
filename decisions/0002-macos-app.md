@@ -359,7 +359,7 @@ never published, because anyone can make a code that passes the host's code chec
 | Opened the app from the disk image, Downloads, or anywhere but Applications | "Capsule needs to be in your Applications folder" | Drag it there; **Show Applications Folder** opens the Finder (§6) |
 | Sent the connect code with a typo | Lucille, in the chat: "No Capsule is waiting with that code" (Lucille policy, not proven by this repository) | Send it again; the Connect request lives 20 minutes |
 | Never sent the code, or sent it too late | App: "Waiting for Lucille…", then "The code expired", with **Start Over** | A new Connect |
-| Typed a username that is not the account the code was sent from, or sent it from another account | "This code reached Lucille from a different Telegram account than the one you typed. Nothing was connected. Check your username in Telegram's settings, then start again. If it was right, someone else has your code." The other account only under **Details** (§11.5) | **Start Over** |
+| Typed a username that is not the account the code was sent from, or sent it from another account | "This code was sent to Lucille from a different account. Nothing was connected. Check that you sent it to the official Lucille account, then start again." No screen names the other account (§11.5) | **Start Over** |
 | Has no Telegram username | "Capsule needs your Telegram username. Set one in Telegram's settings, under Username, then come back." Lucille says the same in the chat (Lucille policy, not proven by this repository) | Set a username, then **Connect** |
 | Typed the wrong digits | "That doesn't match. Type Lucille's whole number, all eight digits." After three wrong entries in all: "Nothing was connected. Start again from Capsule." | **Start Over** |
 | Clicked **Don't Allow** on a folder prompt | "macOS is blocking Capsule from this folder" | **Open Privacy Settings** (§12) |
@@ -1464,17 +1464,13 @@ stays.
   mismatch means the code reached Lucille from another account, which is the relay this check is for, or
   the user mistyped their own name. A retry against the same delivery would show the other account's name
   and invite the user to type it. So the user starts again.
-- **The warning does not invite copying.** The other account's handle is the attacker's to choose (it could
-  read `@Lucille_support`), and the same screen follows a relay and a slip of the user's own. So the warning's
-  text never names it, and never offers it as a fix: "This code reached Lucille from a different Telegram
-  account than the one you typed. Nothing was connected. Check your username in Telegram's settings, then
-  start again. If it was right, someone else has your code." The other account appears only under **Details**,
-  labelled "Not your account". If the user then types, on a later Connect, the very name the last warning
-  held, the app stops before it shows a code: "Last time, the code reached Lucille from this account, not from
-  the one you typed then. Use it only if Telegram's settings show it as yours."
+- **The warning names no account.** The other account's handle is the attacker's to choose (it could read
+  `@Lucille_support`), and the same screen follows a relay and a slip of the user's own. So no screen shows
+  it, and none offers a name to type: "This code was sent to Lucille from a different account. Nothing was
+  connected. Check that you sent it to the official Lucille account, then start again." The host's log keeps
+  the signed `"from"` and `"handle"`, for a user who looks for them on purpose.
 - **Privacy:** the typed username is checked on the computer and sent nowhere. The host keeps it, normalized,
-  with the request in the state folder, and deletes it when the request ends. It keeps the last warning's
-  other handle until the next Connect, for the check above, and nothing else of it. After a pairing, the pair
+  with the request in the state folder, and deletes it when the request ends. After a pairing, the pair
   record keeps the key id and the signed `"from"` and `"handle"`, which the app shows as "Connected as @ada on
   Telegram". Nothing leaves the computer that did not already.
 - **The handle at pairing, the stable id after.** The handle is checked once, when the pair is made. From then
@@ -1557,10 +1553,9 @@ every way a pair ends: Disconnect, removal on Lucille's side, rejection, the dea
     used from another account (Lucille policy, not proven by this repository);
   - the chat accounts that Capsule names as Lucille's, from a list in the core.
 
-  What is left: a user talked into typing the attacker's username, by the attacker or by the app's own
-  warning after a mismatch, which is why the warning never names it in its text and the app asks again when
-  the user types that name (§11.5); and an attacker who holds the user's own chat account, who is then the
-  user as far as any check here can tell.
+  What is left: a user talked into typing the attacker's username, by the attacker, or after reading it in the
+  host's log, which keeps it as evidence; no screen shows it (§11.5). And an attacker who holds the user's own
+  chat account, who is then the user as far as any check here can tell.
 - **What stays open on Lucille's side: a code holder that redeems Lucille's code first.** Whoever holds the
   connect code can read Lucille's signed code in the drop room and redeem it before the computer does. The
   computer's own redemption is then refused, and it says the code may have been used by someone else, but
@@ -2431,7 +2426,7 @@ those writes itself first (`pause`, then `resume`).
 | A scam that hands the user a code made with the public library | the paste form is never published; from the Connect release, the nonce refuses it in every shell | a user talked into reading out codes |
 | A connect code or a pairing code intercepted, in the chat or the drop room | Lucille's signature, which only a holder of the pinned key can make (§11.5): the interceptor cannot deliver a code the computer takes, and the commitment's collision gives it no lever; the typed digits against a key holder in the middle of the user's chat with the real Lucille (§11.2) | spending the request; redeeming Lucille's code first, which exposes Lucille's side, not the computer (§11.7); with Lucille's key too, 1 in 10,000 per Connect, or 2 in 10,000 with a collision |
 | A look-alike chat account is sent the connect code, and delivers its own | the pinned key: the host refuses a code Lucille did not sign, before any number (§11.5) | none from the look-alike itself |
-| A look-alike, or anyone who learns the code, sends it to the real Lucille from its own account | the username the user types before connecting, which the signed `from` and `handle` must name, or the Connect ends (§11.5); Lucille binding the pair to that account and refusing a second delivery (Lucille policy); Capsule naming Lucille's chat accounts (§11.7) | a user talked into typing the attacker's username, by the attacker or by the app's own warning after a mismatch, which never names it in its text and asks again when it is typed (§11.5); an attacker who holds the user's own chat account |
+| A look-alike, or anyone who learns the code, sends it to the real Lucille from its own account | the username the user types before connecting, which the signed `from` and `handle` must name, or the Connect ends (§11.5); Lucille binding the pair to that account and refusing a second delivery (Lucille policy); Capsule naming Lucille's chat accounts (§11.7) | a user talked into typing the attacker's username, by the attacker or from the host's log, since no screen shows it (§11.5); an attacker who holds the user's own chat account |
 | Lucille's signing key stolen or misused | a separate signing service (Lucille policy); revocation in the next release, kept in every later one, which ends the pairs made under it (§11.5); the typed digits, only against a key holder in the middle of the user's chat with the real Lucille | a key holder with its own channel to the user, against which the gate opens for certain and the typed username does not help; hosts not updated, since there is no auto-update |
 | A connect code from someone else's Capsule, sent to the user's Lucille | Lucille's `connect` command says what connecting does, and asks (a recommendation to Lucille, §11.7) | Lucille's side: the job arguments it sends and the results it trusts, not the user's files |
 | A compromised hub | the drop room is named and sealed from a 50-bit code stretched with a salt bound to the epoch; the expiry bounded by the computer's clock (§11.4); the typed digits | delaying or withholding posts; the request's note and timing, to an offline search after the window |
