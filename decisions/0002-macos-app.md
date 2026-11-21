@@ -1131,11 +1131,12 @@ This changes 0001's "The host's gate", for every shell, the command line include
   reads digits, and a user who does not want the pair runs `pair reject`. `pair reject`, three wrong entries,
   and the deadline passing each forget the pair. Until the gate opens, the host posts nothing, touches
   nothing, accepts nothing and runs nothing (spec/PROTOCOL.md §16, unchanged).
-- **Lucille's side** shows its whole number in the chat, once it has collected the computer's answer. Whether
-  Lucille also asks for a reply there is Lucille's to decide (Lucille policy, not proven by this repository;
-  §11.4). The computer takes no work before its own gate opens (spec/PROTOCOL.md §16).
+- **Lucille's side** shows its whole number in the chat, once it has collected the computer's answer, and
+  whether it also asks for a reply there is Lucille's to decide (both Lucille policy, not proven by this
+  repository; §11.4). The computer takes no work before its own gate opens (spec/PROTOCOL.md §16).
 
-**Neither side can choose or grind the number.** From Switchboard's source:
+**The responder cannot choose or grind the number, and the initiator only within a collision.** From
+Switchboard's source (agent-switchboard 2.6.0):
 - The number is `NNNN-NNNN`: the first 32 bits of an HMAC-SHA256, keyed with the pair secret, over the
   transcript and the initiator's `reveal`, reduced modulo 10^8 (sb `pairing.py:486-498`). The transcript
   binds both public keys and the commitment (`:464-467`).
@@ -1147,12 +1148,17 @@ This changes 0001's "The host's gate", for every shell, the command line include
   (`:2006-2009`). The responder takes `reveal` only if it matches the commitment (`:1732-1737`), and only
   then works out the number (`:1740-1743`).
 
-So the responder cannot grind its key toward a number: the number depends on 128 bits it cannot see. The
-initiator cannot change the number once the answer is in, since every input is fixed by then, and another
-`reveal` would need a second preimage of the 128-bit commitment. Before the answer, the initiator does not
-know the responder's key.
+So the responder cannot grind its key toward a number: the number depends on 128 bits it cannot see. A resend
+reuses the stored answer rather than drawing a new key (`:1591-1592`), and two answers abort the initiator's
+side (`:1898-1901`), so neither gives a lever. Before the answer, the initiator does not know the responder's
+key. After it, every input is fixed but `reveal`, and the commitment is SHA-256 cut to 16 bytes, over a
+`reveal` the initiator chooses. **A collision is enough**: two reveals with one commitment, found once in
+about 2^64 work and reusable for every pairing. An initiator holding one computes both numbers after the
+answer, and publishes the reveal that matches. The responder checks only the commitment, so it takes either. A
+k-way collision gives k numbers, at about 2^(128(k-1)/k) work. A full 32-byte commitment would close this; it
+is the library's to change (Not decided yet).
 
-**The odds, 1 in 10,000 per Connect.**
+**The odds: 1 in 10,000 per Connect, or 2 in 10,000 against an attacker who holds a collision.**
 - An attacker in the middle holds two pairings: Lucille ↔ attacker, with Lucille's number, and
   attacker ↔ computer, with the computer's. The user types the last four digits of Lucille's number, and
   the computer's gate opens only if its own last four are the same.
@@ -1164,13 +1170,16 @@ know the responder's key.
   number already. The bound does not count on the user comparing them.
 - 0001's gate, and this record's earlier typed form, compared all eight digits: about 1 in 10^8. Four
   digits are what typing four costs.
-- **The one lever.** As the computer's initiator, the attacker learns the computer's number before it
-  publishes `reveal`, so it can withhold `reveal` whenever the digits would not match. The computer then
+- **The collision** (above) doubles the attacker's chance per Connect, for one 2^64 computation made once.
+- **The one lever beyond it.** As the computer's initiator, the attacker learns the computer's number before
+  it publishes `reveal`, so it can withhold `reveal` whenever the digits would not match. The computer then
   gets no number, and the pairing never finishes. The attacker cannot try again on the same request: the
   request is single-use, and spent before a code is redeemed (§11.4, step 8). Each new try needs a new
   Connect, which only the user starts, on the computer. So the bound is 1 in 10,000 per Connect the user
-  starts. The app says when a Connect never reached a number: "Lucille didn't finish connecting. Start
-  again from Capsule."
+  starts, or 2 in 10,000 with a collision. The app says when a Connect never reached a number: "Lucille didn't
+  finish connecting. Start again from Capsule." The core counts Connects that end so, and from the second in
+  a row the app says more: "Two connections in a row didn't finish. Someone may be able to see your connect
+  code, in your chat or on your screen. Check before you try again."
 
 **Why typed on the computer.** Suppose an attacker can read the chat, or learn the connect code another way.
 From the code it works out the drop room and the nonce (§11.4). It posts its own pairing code there, with that
@@ -1218,33 +1227,44 @@ command line and any future shell get it.
    to Lucille in your chat: connect 7KQ4M-X2D9P. It works once, within 20 minutes." It names the chat
    accounts that are Lucille's (§11.7).
 2. The user sends it, from the phone or from the Mac. Lucille reaches the computer through the hub by
-   itself, and the user pastes nothing into the Mac.
-3. Lucille shows its number in the chat, Capsule shows the same number with four digits hidden, and the user
-   types those four into Capsule (§11.2).
+   itself (Lucille policy, not proven by this repository), and the user pastes nothing into the Mac.
+3. Lucille shows its number in the chat (Lucille policy, not proven by this repository), Capsule shows the
+   same number with four digits hidden, and the user types those four into Capsule (§11.2).
 
 **The protocol.**
 1. `lucille-host pair begin` draws the connect code `C`: ten symbols of Crockford's base32 from `secrets`, 50
    bits, shown as two groups of five. Case, spaces and `-` are ignored, and `I`, `L` and `O` read as `1`,
-   `1` and `0`, as Crockford's alphabet has it.
-2. It stretches `C` into a 32-byte key, `K = scrypt(C, salt "lucille-host/connect/v1", N = 2^17, r = 8,
-   p = 1)`, with Python's own `hashlib.scrypt`, its memory cap raised to fit. Two things come from `K`:
+   `1` and `0`, as Crockford's alphabet has it. Any other character outside the alphabet, `U` among them,
+   makes the text not a connect code. There is no check symbol (Not decided yet), so a typo shows only as no
+   Capsule waiting.
+2. It stretches `C` into a 32-byte key, `K = scrypt(C, salt "lucille-host/connect/v1/<E>", N = 2^17, r = 8,
+   p = 1)`, with Python's own `hashlib.scrypt`, its memory cap raised to fit. `E` is the 20-minute epoch,
+   the computer's clock at `begin` divided by 1,200 s and rounded down, written in decimal. The epoch keeps a
+   table built in advance to one epoch: a fixed salt would let anyone who sees room names stretch all 2^50
+   codes once and look up every later request in minutes. Two things come from `K`:
    - **The drop room** is the library's handshake room for `K` (sb `pairing.py:425-428`), a public function
      that takes any 32-byte secret. Its name, its write key and the key that seals its posts all come from
      `K` (`:403-422`). No pairing code's secret is ever `K`.
    - **The nonce `N`**, 16 bytes of HKDF over `K` with the label `lucille-host/connect/nonce`.
-3. It keeps `C`, an expiry and an unused flag in the state folder (0600, written atomically). `pair status`
-   can then show the code again while it is good. One request is outstanding at a time, and a new `begin`
-   replaces it.
+3. It keeps `C`, `E`, an expiry and an unused flag in the state folder (0600, written atomically).
+   `pair status` can then show the code again while it is good. One request is outstanding at a time, and a
+   new `begin` replaces it.
 4. It posts a hello into the drop room, sealed like every post there. The request expires 20 minutes after
-   the hub's time of that post, as the library anchors a code's expiry on its hello (`:1435-1448`). If the
-   hub cannot be reached, `begin` says so and keeps no request.
+   the earlier of the hub's time of that post and the computer's own clock when it posted. The library reads
+   the hub's time unchecked (`:351-358`, `:1435-1448`), so the host refuses a hub time more than 300 s
+   ahead of its own clock, and checks the expiry against its own clock at every read and before it
+   redeems. A hub can shorten the window, then, but not stretch it. If the hub cannot be reached, `begin` says
+   so and keeps no request.
 5. **The host then waits for Lucille's pairing, with no code pasted.** `pair begin --json` stays running and
    reads the drop room every 5 s, as `pair --code-stdin --json` waits today (§11.3). It stops when a
    delivery arrives, the request expires, or the user cancels. If the app is relaunched, `pair status --json`
    takes up the wait from the stored request. On the command line, `lucille-host pair` with no code runs
    `begin`, prints the code, and waits.
 6. **Lucille's side** (Lucille policy, not proven by this repository):
-   - The chat command is `connect <code>`. Lucille stretches the code the same way and reads the drop room.
+   - The chat command is `connect <code>`. Lucille stretches the code the same way and reads the drop room,
+     for its own clock's epoch and the ones beside it that a request up to 20 minutes old could have used,
+     allowing for clocks 300 s apart: from one epoch ahead to two behind, stopping at the first room with a
+     hello. A code is no use to Lucille after that, whatever the hub's clock says.
    - It answers in the chat "No Capsule is waiting with that code" when it finds no hello, and "That code
      expired" past its expiry.
    - Otherwise it starts a pairing (`pairing.start`), with the code's note set to
@@ -1253,14 +1273,20 @@ command line and any future shell get it.
    - The note stays in both sides' pair records, as before (sb `pairing.py:1451-1462`, `:1604-1605`). That is
      harmless, since `N` is single-use and already spent on the host.
 7. **The host's checks on a delivery.**
+   - **A delivery** is a post in the drop room, other than the host's own hello, that opens under the room's
+     key and holds one pairing code (`swbp1_…`). A post that holds anything else is ignored and logged. The
+     same code posted twice counts once.
    - A post opens only under the room's key, so a delivery shows that its writer held `C`, or `K`.
    - If the room holds more than one delivery when the host reads it, the host refuses them all, and the
-     request is spent: someone else has the code.
+     request is spent: someone else has the code. Anyone who holds `C` can spend a request this way: a denial
+     of service, nothing more.
    - Otherwise `pair` runs today's hub and token checks on the delivered code, then parses its note
      against a strict grammar. It refuses unless the nonce matches the stored request's (in constant time),
      and the request is unexpired and unused.
 8. It marks the request used, and fsyncs, **before** `pairing.accept`. Otherwise it refuses with "This
-   connection wasn't started on this Mac. Nothing was connected", with no store write and no spawn.
+   connection wasn't started on this Mac. Nothing was connected", with no store write and no spawn. The
+   host's answer carries no note (the library writes one only when given one, `:1606-1608`), so whoever
+   holds the drop room learns nothing of the computer from it.
 9. The app shows the masked account and asks "Is this your account?", then shows the number with four
    digits hidden (§11.2). The mask is a weak check (§11.7).
 10. **`pair` refuses while a pair is held.** The user disconnects first.
@@ -1278,14 +1304,23 @@ code from `pair begin`, and deliver into the drop room a code whose note holds t
   live at once, multiply by their number.
 - **The hub sees the drop room's name, not `C`.** To read the delivered code, and with it the handshake
   secret (§11.1), or to post a code of its own, the hub must find `C` from the room's name: up to 2^50
-  stretches. At a quarter of a second each, a million cores cover about 1 in 230,000 of them in 20 minutes.
-  If the room were named from `C` directly, without the stretch, or the code were shorter, the hub would read
-  every delivered code. Against a hub in the middle, only the four digits (1 in 10,000) would then stand.
+  stretches.
+  - **Started cold**, at a quarter of a second each, a million cores cover about 1 in 230,000 of them in 20
+    minutes.
+  - **Built in advance**, a table over the codes is good for one epoch only (step 2). Each 20-minute epoch
+    costs the whole 2^50 stretches again: about 9.5 million core-years, at the 0.27 s per stretch a review
+    measured on one x86 core. Aiming one at a user means knowing in advance when they will Connect.
+  - Without the stretch or the epoch, or with a shorter code, the hub would read every delivered code, and
+    against a hub in the middle only the four digits would stand.
+- **What the hub does see:** the drop room's name, when the hello and each post arrive, and their sizes.
+  Their contents are sealed. Nothing about the room expires from the hub's view, so a code found offline
+  after its window still shows that request's note (`n=`, `who=`) and its timing. That is a privacy cost
+  only: the nonce is spent, and the handshake secret by then opens nothing.
 - **A guess or a crack that lands still meets the typed digits** (§11.2).
-- **A mistyped code** finds no hello, and Lucille says so. It reaches another computer's request only at the
-  guessing odds above.
-- **The stretch has a cost on Lucille's side too**: one per `connect` command. Lucille limits how often a
-  chat account may send one (Lucille policy, not proven by this repository).
+- **A mistyped code** finds no hello, and Lucille says so (Lucille policy, not proven by this repository). It
+  does not spend the request, and it reaches another computer's request only at the guessing odds above.
+- **The stretch has a cost on Lucille's side too**: up to four per `connect` command, one per epoch tried.
+  Lucille limits how often a chat account may send one (Lucille policy, not proven by this repository).
 
 ### 11.5 No URL scheme
 
@@ -1339,10 +1374,16 @@ every way a pair ends: Disconnect, removal on Lucille's side, rejection, the dea
   readable by whoever holds the drop room, and in the computer's pair record. Not decided yet.
 - **A compromised Lucille** receives the nonce and can make any code. It is the intended peer anyway, and the
   local policy bounds it, as before.
-- **A compromised hub** sees the drop room's name and must find the code within its 20 minutes (§11.4).
-  Failing that, it can only withhold posts, which leaves the request to expire.
+- **A compromised hub** sees the drop room's name and must find the code within its 20 minutes (§11.4),
+  against a salt bound to the epoch. It cannot stretch the window (§11.4, step 4). Failing that, it can only
+  delay, reorder or withhold posts, which spends the request or leaves it to expire. It cannot forge one:
+  posts are sealed and signed under keys from `K`.
+- **A code seen over the user's shoulder, or in a screenshot**, is the case of a chat reader (§11.2, "Why
+  typed on the computer"), and the race favours the watcher, since the user still has to send the code. The
+  typed digits bound it, and the warning after repeated unfinished Connects (§11.2) names it.
 - **The chat keeps the connect code** in its history. The code works once, for 20 minutes, and is worthless
-  once used.
+  once used. **It keeps Lucille's whole number too**, which is harmless once the pairing is done or forgotten:
+  a number proves nothing outside its own pairing.
 
 ### 11.8 What we did not choose, and why
 
@@ -2164,10 +2205,10 @@ those writes itself first (`pause`, then `resume`).
 |---|---|---|
 | A website or another app hands the app a code | the app registers no URL scheme and never reads the pasteboard itself (§11.3, §11.5); the core refuses a code without its own nonce | none known beyond §11.7 |
 | A scam that hands the user a code made with the public library | the paste form is never published; from the Connect release, the nonce refuses it in every shell | a user talked into reading out codes |
-| A connect code or a pairing code intercepted, in the chat or the drop room | the computer's gate types four digits of Lucille's number (§11.2) | 1 in 10,000 per Connect; beyond that, Lucille's side, not files |
+| A connect code or a pairing code intercepted, in the chat or the drop room | the computer's gate types four digits of Lucille's number (§11.2) | 1 in 10,000 per Connect, or 2 in 10,000 with a 2^64 collision of the commitment (§11.2); beyond that, Lucille's side, not files |
 | A look-alike chat account is sent the connect code | Capsule names the chat accounts that are Lucille's; the masked account before the digits (§11.7) | a user who sends the code to the wrong account and does not read the hint; open until a Lucille signing key (§11.8) |
 | A connect code from someone else's Capsule, sent to the user's Lucille | Lucille's `connect` command says what connecting does, and asks (a recommendation to Lucille, §11.7) | Lucille's side: the job arguments it sends and the results it trusts, not the user's files |
-| A compromised hub | the drop room is named and sealed from a stretched 50-bit code (§11.4); the typed digits | withholding posts |
+| A compromised hub | the drop room is named and sealed from a 50-bit code stretched with a salt bound to the epoch; the expiry bounded by the computer's clock (§11.4); the typed digits | delaying or withholding posts; the request's note and timing, to an offline search after the window |
 | Compromised build or signing path (runner image, action, dependency, runtime tarball) | hosted runners; SHA-pinned actions; sha256-pinned runtime, wheels and ripgrep; a signing job that runs only Apple's tools and one reviewed script; the owner's approval | a malicious runner image or Xcode; provenance is SLSA build level 2 |
 | A leaked Developer ID key or API key | environment secrets, used only in the signing job, deleted at its end; certificate revocation; notarization's audit trail | software signed under this project's name until revocation |
 | A Lucille page that links a different app | the link targets this repository's releases; README and About name the Team ID | a user who checks nothing |
@@ -2236,6 +2277,10 @@ those writes itself first (`pause`, then `resume`).
 - The chat accounts that are Lucille's, which the core lists and the app names (§11.4, §11.7).
 - What the connect code's stretch costs on a Mac and on Lucille's side (§11.4); the parameters stand until
   it is measured.
+- A check symbol in the connect code (Crockford's mod-37 symbol), which would tell a typo from no Capsule
+  waiting, at one more symbol to type (§11.4).
+- A full 32-byte commitment in the library, which would take the collision out of §11.2's bound; it is the
+  library's to change.
 - Intel Macs (§5).
 - An updater (§16).
 - A launcher embedding Python in place of the renamed interpreter (§6).
