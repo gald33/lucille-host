@@ -1149,6 +1149,12 @@ def build_python() -> Path:
     return Path(sys.executable)
 
 
+def build_prefix() -> str:
+    """The ``sys.base_prefix`` of :func:`build_python`: the folder of the Python it runs on, a
+    virtual environment's own Python where it runs in one."""
+    return sys.base_prefix
+
+
 def build_wheel_argv(out: Path, python: Path) -> list[str]:
     """``uv build`` for the host's wheel, with ``python``: its build backend comes only from the
     files build-constraints.txt names by hash. No uv configuration file is read, since one could
@@ -1185,23 +1191,58 @@ def managed_dir_env(environ: Mapping[str, str]) -> dict[str, str]:
     return env
 
 
-def managed_problem(base_prefix: str, managed_dir: str) -> str | None:
-    """Why the interpreter whose ``sys.base_prefix`` is ``base_prefix`` is not one of uv's own
-    Pythons in ``managed_dir``, or None when it is: its folder, with any link followed, is one of
-    that folder's own."""
+def managed_name(version: str) -> str:
+    """The pattern of the folder uv installs its own CPython ``version`` in:
+    ``cpython-<version>[+<variant>...]-<os>-<arch>-<libc>``, as in
+    ``cpython-3.13.14-macos-aarch64-none``."""
+    return rf"cpython-{re.escape(version)}(?:\+[a-z]+)*-[a-z0-9_]+-[a-z0-9_]+-[a-z0-9_]+"
+
+
+def managed_problem(base_prefix: str, managed_dir: str, version: str) -> str | None:
+    """Why the interpreter whose ``sys.base_prefix`` is ``base_prefix``, and which says it is
+    Python ``version``, is not one of uv's own Pythons in ``managed_dir``, or None when it is: its
+    folder, with any link followed, is one of that folder's own, and is named as uv names its own
+    install of that version (:func:`managed_name`). The name is what tells uv's install from any
+    other Python in a folder that ``UV_PYTHON_INSTALL_DIR`` names: ``/usr``, say, holds the
+    system's ``/usr/local``."""
     found, folder = Path(os.path.realpath(base_prefix)), Path(os.path.realpath(managed_dir))
-    if found.parent == folder:
-        return None
-    return f"{found} is not one of uv's own Pythons in {folder}"
+    if found.parent != folder:
+        return f"{found} is not in {folder}, where uv keeps its own Pythons"
+    if re.fullmatch(managed_name(version), found.name) is None:
+        return (
+            f"{found} is not named as uv names its own Python {version}"
+            f" (cpython-{version}-<os>-<arch>-<libc>)"
+        )
+    return None
+
+
+def uv_managed_dir(environ: Mapping[str, str]) -> str:
+    """The folder uv keeps its own Pythons in, as ``uv python dir`` says
+    (:func:`managed_dir_argv`, :func:`managed_dir_env`). A failure to ask is a
+    :class:`BuildError` saying so."""
+    try:
+        return _output(managed_dir_argv(), env=managed_dir_env(environ))
+    except subprocess.CalledProcessError as exc:
+        said = exc.stderr.strip() if isinstance(exc.stderr, str) else ""
+        raise BuildError(
+            "UV_PYTHON_PREFERENCE is only-managed, but `uv python dir` exited with"
+            f" {exc.returncode}, so where uv keeps its own Pythons is not known"
+            + (f": {said}" if said else "")
+        ) from None
+    except OSError as exc:
+        raise BuildError(
+            "UV_PYTHON_PREFERENCE is only-managed, but `uv python dir` could not be run, so where"
+            f" uv keeps its own Pythons is not known: {exc.strerror or exc}"
+        ) from None
 
 
 def build_wheel(out: Path, version: str) -> Path:
     """The host's wheel, built from this checkout into ``out`` with :func:`build_python`, and
     with no uv setting from the environment (:func:`payload.without_uv_settings`). It prints that
     interpreter. Where ``UV_PYTHON_PREFERENCE`` is ``only-managed``, as in CI, it refuses to build
-    unless the interpreter is one of uv's own Pythons (:func:`managed_problem`); elsewhere it says
-    it did not look. Any older host wheel there is removed first, so that ``out`` then holds
-    exactly one."""
+    unless the interpreter is one of uv's own Pythons (:func:`managed_problem`), and says which
+    folder those are in and what named it; elsewhere it says it did not look. Any older host wheel
+    there is removed first, so that ``out`` then holds exactly one."""
     out.mkdir(parents=True, exist_ok=True)
     for old in out.glob("lucille_host-*.whl"):
         old.unlink()
@@ -1210,11 +1251,16 @@ def build_wheel(out: Path, version: str) -> Path:
     said = f"build interpreter: {os.path.realpath(python)} (Python {platform.python_version()})"
     preference = os.environ.get("UV_PYTHON_PREFERENCE")
     if preference == "only-managed":
-        managed = _output(managed_dir_argv(), env=managed_dir_env(os.environ))
-        problem = managed_problem(sys.base_prefix, managed)
+        managed = uv_managed_dir(os.environ)
+        problem = managed_problem(build_prefix(), managed, platform.python_version())
         if problem is not None:
             raise BuildError(f"UV_PYTHON_PREFERENCE is only-managed, but {problem}")
-        print(f"{said}, uv's own, in {os.path.realpath(managed)}", flush=True)
+        source = (
+            "named by UV_PYTHON_INSTALL_DIR"
+            if "UV_PYTHON_INSTALL_DIR" in os.environ
+            else "uv's default"
+        )
+        print(f"{said}, uv's own, in {os.path.realpath(managed)} ({source})", flush=True)
     else:
         print(
             f"{said}; not checked to be uv's own (UV_PYTHON_PREFERENCE is {preference})", flush=True
