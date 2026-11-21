@@ -52,8 +52,11 @@ pull request, and when started by hand. It has no path filter.
     build scripts run get no `UV_*` variable, that setting among them, so `build_app.py` builds the host
     wheel with `uv build --python` and the interpreter running it, and prints that interpreter as "build
     interpreter". Where the setting is `only-managed`, as in CI, it refuses to build unless that
-    interpreter is one of uv's own, in the folder `uv python dir` names; elsewhere the line says it was not
-    checked. The app bundles a runtime of its own, which this does not touch.
+    interpreter is one of uv's own: in the folder `uv python dir` names, and named as uv names its install
+    of that version (`cpython-<version>-<os>-<arch>-<libc>`), so a folder such as `/usr` named by
+    `UV_PYTHON_INSTALL_DIR` does not pass the system's Python. The line says which folder, and whether that
+    variable named it. Elsewhere the line says the interpreter was not checked. The app bundles a runtime
+    of its own, which this does not touch.
   - **3.14** joined the matrix on 2026-11-20, after the advisory workflow `python-next`, now gone, passed
     on five pushes to `main` in a row (decisions/0002 §18).
   - **Who moves the pins, and when:** the maintainer moves each to the newest patch of its minor version

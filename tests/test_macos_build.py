@@ -14,6 +14,7 @@ import errno
 import hashlib
 import json
 import os
+import platform
 import plistlib
 import random
 import re
@@ -1481,20 +1482,67 @@ def test_the_wheel_is_built_with_the_python_running_the_build(tmp_path: Path) ->
 def test_one_of_uvs_own_pythons_is_one_in_its_folder(tmp_path: Path) -> None:
     folder = tmp_path / "uv-python-dir"
     (folder / "cpython-3.13.14-macos-aarch64-none").mkdir(parents=True)
+    (folder / "cpython-3.13.14+freethreaded-macos-aarch64-none").mkdir()
     (tmp_path / "elsewhere" / "python3.13").mkdir(parents=True)
     # A link, as uv makes for a minor version, is followed.
     (folder / "cpython-3.13-macos-aarch64-none").symlink_to("cpython-3.13.14-macos-aarch64-none")
-    for own in ("cpython-3.13.14-macos-aarch64-none", "cpython-3.13-macos-aarch64-none"):
-        assert build_app.managed_problem(str(folder / own), str(folder)) is None
+    for own in (
+        "cpython-3.13.14-macos-aarch64-none",
+        "cpython-3.13-macos-aarch64-none",
+        "cpython-3.13.14+freethreaded-macos-aarch64-none",
+    ):
+        assert build_app.managed_problem(str(folder / own), str(folder), "3.13.14") is None, own
     for other in (
         tmp_path / "elsewhere" / "python3.13",
         folder,
         folder / "cpython-3.13.14-macos-aarch64-none" / "lib",
     ):
-        assert build_app.managed_problem(str(other), str(folder)) is not None, other
+        problem = build_app.managed_problem(str(other), str(folder), "3.13.14")
+        assert problem is not None and "is not in" in problem, other
     # A link into the folder from outside is followed too: it is uv's.
     (tmp_path / "link").symlink_to(folder / "cpython-3.13.14-macos-aarch64-none")
-    assert build_app.managed_problem(str(tmp_path / "link"), str(folder)) is None
+    assert build_app.managed_problem(str(tmp_path / "link"), str(folder), "3.13.14") is None
+
+
+def test_the_python_checked_is_the_one_a_virtual_environment_runs_on() -> None:
+    # In a virtual environment sys.prefix is the environment; the Python it runs on, the one
+    # checked to be uv's own, is sys.base_prefix.
+    assert build_app.build_prefix() == sys.base_prefix
+
+
+def test_a_python_in_the_folder_is_uvs_only_when_named_as_uv_names_that_version(
+    tmp_path: Path,
+) -> None:
+    # UV_PYTHON_INSTALL_DIR can name any folder: /usr holds the system's /usr/local. What tells
+    # uv's own install apart is its name, cpython-<version>-<os>-<arch>-<libc>, and the version
+    # in it is the one the interpreter says it is.
+    usr = tmp_path / "usr"
+    for name in (
+        "local",
+        "python3.13",
+        "cpython-3.13.13-macos-aarch64-none",
+        "cpython-3.13.140-macos-aarch64-none",
+        "cpython-3.13-macos-aarch64-none",
+        "cpython-3.13.14-macos-aarch64",
+        "cpython-3.13.14-macos-aarch64-none-extra",
+        "pypy-3.13.14-macos-aarch64-none",
+        "cpython-3.13.14-MACOS-aarch64-none",
+    ):
+        (usr / name).mkdir(parents=True)
+        problem = build_app.managed_problem(str(usr / name), str(usr), "3.13.14")
+        assert problem is not None and "not named as uv names its own Python 3.13.14" in problem
+    (usr / "cpython-3.13.14-linux-x86_64-gnu").mkdir()
+    assert (
+        build_app.managed_problem(
+            str(usr / "cpython-3.13.14-linux-x86_64-gnu"), str(usr), "3.13.14"
+        )
+        is None
+    )
+    # A version's dots are dots: 3.13.14 is not 3x13x14.
+    (usr / "cpython-3x13x14-linux-x86_64-gnu").mkdir()
+    assert build_app.managed_problem(
+        str(usr / "cpython-3x13x14-linux-x86_64-gnu"), str(usr), "3.13.14"
+    )
 
 
 def test_under_only_managed_the_wheel_is_built_only_with_one_of_uvs_own_pythons(
@@ -1504,8 +1552,10 @@ def test_under_only_managed_the_wheel_is_built_only_with_one_of_uvs_own_pythons(
     # builds nothing. uv python dir alone is told where uv keeps them (UV_PYTHON_INSTALL_DIR),
     # and gets no other UV_* variable.
     folder = tmp_path / "uv-python-dir"
-    folder.mkdir()
-    answers = {"dir": str(Path(sys.base_prefix).resolve().parent)}
+    own = folder / f"cpython-{platform.python_version()}-macos-aarch64-none"
+    own.mkdir(parents=True)
+    monkeypatch.setattr(build_app, "build_prefix", lambda: str(own))
+    answers = {"dir": str(folder)}
     calls: list[tuple[list[str], dict[str, str]]] = []
 
     def run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
@@ -1513,6 +1563,10 @@ def test_under_only_managed_the_wheel_is_built_only_with_one_of_uvs_own_pythons(
         assert isinstance(env, dict)
         calls.append((list(argv), dict(env)))
         if argv[:3] == ["uv", "python", "dir"]:
+            if answers["dir"] == "fails":
+                raise subprocess.CalledProcessError(2, argv, "", "error: no home folder\n")
+            if answers["dir"] == "missing":
+                raise FileNotFoundError(2, "No such file or directory", "uv")
             return subprocess.CompletedProcess(argv, 0, stdout=answers["dir"] + "\n", stderr="")
         out = Path(argv[argv.index("--out-dir") + 1])
         (out / payload.host_wheel_name("0.1.0")).write_bytes(b"")
@@ -1530,13 +1584,37 @@ def test_under_only_managed_the_wheel_is_built_only_with_one_of_uvs_own_pythons(
     assert [key for key in build_env if key.startswith("UV_")] == []
     printed = capsys.readouterr().out
     assert f"build interpreter: {os.path.realpath(sys.executable)} (Python " in printed
-    assert ", uv's own, in " in printed
-    # Not one of uv's own: refused, and nothing built.
-    answers["dir"] = str(folder)
+    assert f", uv's own, in {os.path.realpath(folder)} (named by UV_PYTHON_INSTALL_DIR)" in printed
+    # Without UV_PYTHON_INSTALL_DIR, the line says the folder is uv's default.
+    monkeypatch.delenv("UV_PYTHON_INSTALL_DIR")
     calls.clear()
-    with pytest.raises(build_app.BuildError, match="only-managed"):
-        build_app.build_wheel(tmp_path / "out", "0.1.0")
-    assert [argv[:3] for argv, _ in calls] == [["uv", "python", "dir"]]
+    build_app.build_wheel(tmp_path / "out", "0.1.0")
+    assert [key for key in calls[0][1] if key.startswith("UV_")] == []
+    assert f"in {os.path.realpath(folder)} (uv's default)" in capsys.readouterr().out
+    monkeypatch.setenv("UV_PYTHON_INSTALL_DIR", str(folder))
+    # Not in uv's folder, or not named as uv names it: refused, and nothing built.
+    other = tmp_path / "other"
+    (other / "local").mkdir(parents=True)
+    for prefix, said in ((str(other / "local"), "is not in"), (str(folder / "local"), "not named")):
+        (folder / "local").mkdir(exist_ok=True)
+        monkeypatch.setattr(build_app, "build_prefix", lambda prefix=prefix: prefix)
+        calls.clear()
+        with pytest.raises(build_app.BuildError, match=f"only-managed, but .*{said}"):
+            build_app.build_wheel(tmp_path / "out", "0.1.0")
+        assert [argv[:3] for argv, _ in calls] == [["uv", "python", "dir"]]
+    monkeypatch.setattr(build_app, "build_prefix", lambda: str(own))
+    # uv python dir failing, or uv not found: a BuildError that says so, and nothing built.
+    for answer, said in (
+        ("fails", "`uv python dir` exited with 2, .*: error: no home folder$"),
+        ("missing", "`uv python dir` could not be run, .*: No such file or directory$"),
+    ):
+        answers["dir"] = answer
+        calls.clear()
+        with pytest.raises(build_app.BuildError, match=said) as raised:
+            build_app.build_wheel(tmp_path / "out", "0.1.0")
+        assert raised.value.__cause__ is None and raised.value.__suppress_context__
+        assert [argv[:3] for argv, _ in calls] == [["uv", "python", "dir"]]
+    answers["dir"] = str(folder)
     # Without only-managed, as on a Mac of one's own, nothing is asked and the log says so.
     monkeypatch.delenv("UV_PYTHON_PREFERENCE")
     calls.clear()
