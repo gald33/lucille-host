@@ -358,7 +358,7 @@ never published, because anyone can make a code that passes the host's code chec
 |---|---|---|
 | Opened the app from the disk image, Downloads, or anywhere but Applications | "Capsule needs to be in your Applications folder" | Drag it there; **Show Applications Folder** opens the Finder (§6) |
 | Sent the connect code with a typo | Lucille, in the chat: "No Capsule is waiting with that code" (Lucille policy, not proven by this repository) | Send it again; the Connect request lives 20 minutes |
-| Never sent the code, or sent it too late | App: "Waiting for Lucille…", then "The code expired", with **Start Over**; if the last read before the expiry failed at the hub, the interference warning instead (§11.4, step 5) | A new Connect |
+| Never sent the code, or sent it too late | App: "Waiting for Lucille…", then "The code expired", with **Start Over**; if the last read before the expiry failed at the hub, or the hub lost the room's posts, the interference warning instead (§11.4, step 5) | A new Connect |
 | Typed a username that is not the account the code was sent from, or sent it from another account | "This code was sent to Lucille from a different account. Nothing was connected. Check that you sent it to the official Lucille account, then start again." No screen names the other account (§11.5) | **Start Over** |
 | Has no Telegram username | "Capsule needs your Telegram username. Set one in Telegram's settings, under Username, then come back." Lucille says the same in the chat (Lucille policy, not proven by this repository) | Set a username, then **Connect** |
 | Typed the wrong digits | "That doesn't match. Type Lucille's whole number, all eight digits." After three wrong entries in all: "Nothing was connected. Start again from Capsule." | **Start Over** |
@@ -1290,20 +1290,35 @@ command line and any future shell get it.
    so and keeps no request.
 5. **The host then waits for Lucille's pairing, with no code pasted.** `pair begin --json` stays running and
    reads the drop room every 5 s, as `pair --code-stdin --json` waits today (§11.3). It stops when a
-   delivery arrives, the request expires, or the user cancels. A request whose last read before the expiry
-   failed with a hub error ends with the interference warning, "Capsule couldn't read Lucille's answer, and
-   the code may be known to someone else. Start again.", not with plain "The code expired": a holder of `C`
-   can redeem Lucille's code first and then make every read of the room fail at the hub (§11.7). That last
-   read is enough to catch it. A delivery outlives the request (`ttl=1500`), so any read that succeeds after
-   it finds it, and hiding it takes every read from then on to fail, the last one too. A network blip that
-   ends before the expiry then raises no warning; one still going at the expiry does, a false alarm that
-   costs the user one more Connect. Two limits remain:
+   delivery arrives, the request expires, or the user cancels. Three rules end it with the interference
+   warning, "Capsule couldn't read Lucille's answer, and the code may be known to someone else. Start
+   again.", and not with plain "The code expired":
+   - **A read that succeeds but holds no hello is interference** (§11.4, "The wire"), and ends the request
+     at once. The host's hello outlives the request (`ttl=1500`), so while the request is live a room without
+     it has lost posts, which an honest hub that keeps its posts does not do.
+   - **A request whose last read before the expiry failed with a hub error** ends with the warning at the
+     expiry.
+   - **A delivery read while the request is live, with the expiry passing before the host redeems it**,
+     ends with the warning too. The host does not redeem after the expiry (step 4), and a delivery it saw
+     and could not use is no plain expiry.
+
+   Together they catch a holder of `C`, working alone, who redeems Lucille's code first and then hides the
+   delivery from the host (§11.7). A delivery outlives the request too, so a read that succeeds after it
+   either finds it or finds the room emptied of its hello. To hide it otherwise, every read from then on must
+   fail at the hub, the last one too; a hub that drops the room's posts after the code holder has read the
+   delivery fails the hello check. A network blip that ends before the expiry raises no warning. One still
+   going at the expiry, or an honest hub restarted onto an empty database, shows the warning where the truth
+   was plain expiry: a false alarm, whose cost is a wrong message, since the user starts again either way.
+   Three limits remain:
+   - **A hub that keeps the hello and hides only the delivery** is not caught: the request ends with plain
+     "The code expired". The hub cannot open the room's posts, so this takes a hub working with a holder of
+     `C`, and no rule on the host can tell a hidden post from one never sent (§11.7).
    - **A cancel shows no warning**, whatever the reads before it ended in: the user asked to stop, and the
      app says nothing more.
-   - **The warning can come up to 20 minutes late**: the host learns of the hidden delivery only at the
-     expiry, and Lucille may have delivered near the request's start. Lucille's side is exposed from the
-     code holder's redemption on, so what protects it is the recommendations to Lucille in §11.7, not this
-     warning.
+   - **The warning can come up to 20 minutes late**: where the reads fail at the hub, the host learns of the
+     hidden delivery only at the expiry, and Lucille may have delivered near the request's start. Lucille's
+     side is exposed from the code holder's redemption on, so what protects it is the recommendations to
+     Lucille in §11.7, not this warning.
 
    If the app is relaunched, `pair status --json`
    takes up the wait from the stored request. On the command line, `lucille-host pair` with no code runs
@@ -1375,7 +1390,8 @@ command line and any future shell get it.
   `pairing.hub_errors()`, public in agent-switchboard 2.6.0 and there `SwitchboardError`, `OSError` and
   `httpx.HTTPError`. The host tries it again at its next poll; Lucille delivers nothing, and answers in the
   chat that it could not reach the computer, and to send the code again. **Any other exception from a read is
-  interference**, whatever its class, and so is a read that returns 50 or more posts. In 2.6.0,
+  interference**, whatever its class, and so is a read that returns 50 or more posts. For the host, so is a
+  read that succeeds and holds no hello (§11.4, step 5). In 2.6.0,
   `Client.history` raises `DecryptionError`, a `CryptoError`, when a post does not open under the room's key;
   it raises `json.JSONDecodeError`, a `ValueError` and no `CryptoError`, when a post opens but its plaintext
   is not JSON, which anyone who holds `C` can seal; and it never returns more than `limit` posts. The rule
@@ -1683,8 +1699,10 @@ every way a pair ends: Disconnect, removal on Lucille's side, rejection, the dea
 - **What stays open on Lucille's side: a code holder that redeems Lucille's code first.** Whoever holds the
   connect code can read Lucille's signed code in the drop room and redeem it before the computer does. The
   computer's own redemption is then refused, and it says the code may have been used by someone else; or the
-  code holder makes every later read of the room fail at the hub, and the request ends with the same warning,
-  at the expiry and so up to 20 minutes late (§11.4, step 5). Either way
+  code holder makes every later read of the room fail at the hub, or a hub working with the code holder
+  drops the room's posts, and the request ends with the same warning, up to 20 minutes late (§11.4,
+  step 5). A hub working with the code holder can instead keep the hello and hide only the delivery, and
+  the request then ends with plain "The code expired": the host cannot see it. Either way
   Lucille holds a pair with the code holder. A decoy hello in another epoch's room cannot draw Lucille's code
   away from the computer's room unseen: Lucille reads all four rooms and refuses when more than one holds a
   hello (§11.4, step 6). The signature protects the computer, not Lucille: Lucille's side
