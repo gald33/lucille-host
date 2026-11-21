@@ -622,10 +622,11 @@ when the text shows it. The program that reads it shows it to the user, and the 
 must come after that (section 2). `lucille-host status` never reports the SAS, in JSON too: its `pair`
 object has no field that could hold it, and it starts no deadline.
 
-[decisions/0002-macos-app.md](../decisions/0002-macos-app.md) §11.2 proposes a gate in which the user
-types Lucille's number into the computer, and the computer never shows its own SAS before the gate opens.
-It is a proposal, pending the maintainer's decision, and is not built. If it is built, `sas_pending` loses
-its `sas` field, and that is a new major version of this contract (section 12).
+[decisions/0002-macos-app.md](../decisions/0002-macos-app.md) §11.2 records a gate, decided on 2026-11-21
+and not built, in which the computer shows its SAS with the last four digits hidden, and the user types
+those four from Lucille's number, or the whole number after a wrong entry. When it is built, `sas_pending`
+carries the first four digits only, in place of its `sas` field, and that is a new major version of this
+contract (section 12).
 
 ## 8. The catalog's words
 
@@ -1075,7 +1076,8 @@ leaves it out of `enabled_ops` (decisions/0003, "First use").
 
 - `diagnostics` and removing the host's data ([decisions/0002-macos-app.md](../decisions/0002-macos-app.md)
   §8).
-- The typed pairing gate and the Connect flow (decisions/0002 §11.2 and §11.4): proposals, not built.
+- The typed pairing gate and Connect from Lucille's chat (decisions/0002 §11.2 and §11.4): decided on
+  2026-11-21, not built.
 - A typed history of what the host did, for a shell to show in words. `log_line` carries text only, which a
   shell shows as it is.
 - During pairing, whether the hub could be reached and whether it refuses this computer's clock, beside

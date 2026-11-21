@@ -28,9 +28,10 @@ Python, and without Homebrew. Mac first; nothing here may block a Windows or Lin
   says "the app". Only what a user sees and the app's identifiers carry the name: the package, the command
   (`lucille-host`), its folders and profiles, and this repository keep theirs.
 - **"Proposed, pending the maintainer's decision"** marks a part of this design that is not decided. Nothing
-  builds on it until it is decided. Two parts carry it: the typed gate (§11.2) and the Connect flow (§11.4).
-  Until they are decided, 0001's pairing gate stands: the host shows the SAS, and the user types `y` if it
-  matches Lucille's page. The app built today pairs on that gate: it shows the SAS, and the user clicks
+  builds on it until it is decided. Two parts carried it, the typed gate (§11.2) and the Connect flow (§11.4),
+  until the maintainer decided both on 2026-11-21, in the forms §11 records. Neither is built yet, and until
+  they are, 0001's pairing gate stands: the host shows the SAS, and the user types `y` if it matches Lucille's
+  page. The app built today pairs on that gate: it shows the SAS, and the user clicks
   **They Match** ("What is built today").
 
 ## What is built today
@@ -62,8 +63,8 @@ developing the app. Its builds stay ad hoc signed, for the repository owner's ow
   [0001](0001-host-design.md)'s gate, not the typed one. The user pastes the code; the app passes it to
   `pair --code-stdin --json` on standard input, shows the SAS from `sas_pending`, and the user clicks
   **They Match** (`pair confirm --json`) only if Lucille's page shows the same number, or **They Differ**
-  (`pair reject --json`). The typed gate (§11.2) and the Connect flow (§11.4) stay proposed, and are not
-  built.
+  (`pair reject --json`). The typed gate (§11.2) and the Connect flow (§11.4), decided on 2026-11-21, are
+  not built yet.
 - **Supervision of `run`** (§9): `run --json-events --exit-on-stdin-eof` as the app's child, with the
   lifeline; the exit table; restarts with back-off, and the stop after five crashes in ten minutes; Quit and
   logout with the drain ladder and **Stop now**; paused at the next launch after a `kill`, and never resumed
@@ -176,7 +177,7 @@ developing the app. Its builds stay ad hoc signed, for the repository owner's ow
   on macOS 26 and 27, without the end-to-end check (§18, §19). Logs and UI snapshots are uploaded on every
   run. The disk image is uploaded only by a manual run whose every check passed, and kept 3 days.
 
-Not built yet: the typed gate and the Connect flow (§11.2, §11.4; proposed), the check
+Not built yet: the typed gate and the Connect flow (§11.2, §11.4; decided on 2026-11-21), the check
 after a folder is added from the menu, and at launch (`roots check`, §12; Set Up's Folders page runs it),
 the Welcome and main windows, updates, **Remove Capsule…** (section 17), Copy
 Diagnostics (§15), Developer ID signing and notarization, ripgrep (`Helpers/rg`; the pins hold an empty
@@ -194,14 +195,14 @@ made for the first build", says why for most of them:
   plans (§12; whether macOS shows either is not yet tested on a Mac);
 - the app refuses outright, besides `/` and the Data volume, the two folders between them, `/System` and
   `/System/Volumes`, which hold the Data volume (§12). Here the first build allows less than this record;
-- the computer's gate is 0001's click, not the typed number of §11.2, which is proposed (above). The buttons
-  count only once the number is drawn in a window not wholly hidden, and **They Match** runs `pair confirm`
-  only after a `status` read shows the same pair and deadline still pending. `pair confirm` names no pair,
-  so a command run on profile `mac-app` from Terminal between that read and the confirm is not excluded;
-  the app's own store verbs run one at a time. After **They Differ**, They Match stays off for that pair
-  only while the app stays open: it keeps no memory of its own. A click gate does not protect the
-  computer's side against an attacker who can rewrite Lucille's page, which §11.2 is for: one more reason
-  the paste form stays on the owner's Mac (§11.1);
+- the computer's gate is 0001's click, not the typed digits of §11.2, decided but not built (above). The
+  buttons count only once the number is drawn in a window not wholly hidden, and **They Match** runs
+  `pair confirm` only after a `status` read shows the same pair and deadline still pending. `pair confirm` names no
+  pair, so a command run on profile `mac-app` from Terminal between that read and the confirm is not excluded;
+  the app's own store verbs run one at a time. After **They Differ**, They Match stays off for that pair only
+  while the app stays open: it keeps no memory of its own. A click gate does not protect the computer's side
+  against an attacker who can rewrite Lucille's page, which §11.2 is for: one more reason the paste form stays
+  on the owner's Mac (§11.1);
 - a profile that holds more than one pair (`several_pairs`) gets no Disconnect: `forget` refuses it too.
   The app says it cannot end them, and `macos/README.md` gives the repair by hand (§9);
 - the app reads `pair status --json` only while its pairing window is open (§11.3);
@@ -307,18 +308,15 @@ The app is done when:
 3. They open Capsule. macOS asks once whether to open an app downloaded from the internet; Lucille's page
    shows a picture of that dialog beforehand. They click **Open**.
 4. **Welcome**: what the app does, in the claim's own terms, and "Nothing runs until you connect and
-   confirm." One button: **Connect this Mac to Lucille**. The app says: "Your browser will open Lucille. If it
-   asks to open Capsule, click Open."
-5. Lucille's connect page, signed in: "Connect a computer to your Lucille account (a•••@example.com)? Only
-   continue if you just clicked Connect in Capsule on this Mac." The page never submits on its own. The
-   user clicks **Connect**; the browser asks "Open Capsule?"; they click **Open** (Lucille policy as of
-   2026-10-29 for the page; not proven by this repository).
-6. The app: "Connecting to the Lucille account a•••@example.com. Is this your account?" Then: "Type the
-   8-digit number shown on Lucille's page." The user types it. The app answers at once: "Matches. Now click
-   **They match** on Lucille's page." (§11.2; that Lucille's page shows the number and a **They match** button
-   is Lucille policy as of 2026-10-29; not proven by this repository.)
-7. The user clicks **They match** on Lucille's page (Lucille policy as of 2026-10-29; not proven by this
-   repository). The app shows **Connected** once Lucille's work room arrives.
+   confirm." One button: **Connect this Mac to Lucille**.
+5. The app shows a connect code and "Send this to Lucille in your chat: connect 7KQ4M-X2D9P. It works once,
+   within 20 minutes." It names the chat accounts that are Lucille's. The user sends it, from the phone or
+   the Mac, and the app waits for Lucille (§11.4).
+6. Lucille answers in the chat and shows its 8-digit number there (Lucille policy, not proven by this
+   repository). The app: "Connecting to the Lucille account a•••@example.com. Is this your account?" Then it
+   shows the number with the last four digits hidden, `4071-••••`, and asks for those four from Lucille's
+   number. The user types them, and the app answers at once: "Matches." (§11.2)
+7. The app shows **Connected** once Lucille's work room arrives.
 8. **Folders**: **Choose a Folder…** opens the standard Open panel. The app suggests a short name, which the
    user may change (§12).
 9. **What Lucille may do**: one switch per operation, all off (§13).
@@ -356,9 +354,9 @@ never published, because anyone can make a code that passes the host's code chec
 | Mistake | What the user sees | Fix, with no Terminal |
 |---|---|---|
 | Opened the app from the disk image, Downloads, or anywhere but Applications | "Capsule needs to be in your Applications folder" | Drag it there; **Show Applications Folder** opens the Finder (§6) |
-| Cancelled the browser's "Open Capsule?" | Lucille's page: "Didn't open? Try again" (Lucille policy as of 2026-10-29; not proven by this repository) | Re-sends the link; the Connect request lives 20 minutes |
-| Closed the browser tab mid-connect | App: "Waiting for Lucille…" with **Start Over** | A new Connect |
-| Typed the wrong number | "That doesn't match. Type the number Lucille's page shows." After 3 tries: "Nothing was connected. In Lucille, click They differ, then start again." | **Start Over** |
+| Sent the connect code with a typo | Lucille, in the chat: "No Capsule is waiting with that code" (Lucille policy, not proven by this repository) | Send it again; the Connect request lives 20 minutes |
+| Never sent the code, or sent it too late | App: "Waiting for Lucille…", then "The code expired", with **Start Over** | A new Connect |
+| Typed the wrong digits | "That doesn't match. Type Lucille's whole number." After 3 tries: "Nothing was connected. Start again from Capsule." | **Start Over** |
 | Clicked **Don't Allow** on a folder prompt | "macOS is blocking Capsule from this folder" | **Open Privacy Settings** (§12) |
 | Chose a folder that is too broad | A second sheet, safe choice as default (§12) | **Choose a Smaller Folder** |
 | Moved, renamed or unplugged a chosen folder | "The folder documents can't be found" (from `roots check`, at launch and in Folders) | **Choose Again**, which removes the alias and adds the folder from the Open panel. A different folder later created at the old path is not detected (not decided yet, §12) |
@@ -886,11 +884,11 @@ ripgrep.
   object.
 - **Secrets never go on a command line.** A pairing code goes to `pair --code-stdin` on standard input,
   and the Gmail window's app password to `credential set --value-stdin` on standard input. With the typed gate
-  (§11.2, proposed, pending the maintainer's decision), the typed number goes to `pair confirm` on standard
-  input.
-- **URLs come from the core.** Lucille's web origin, the releases page and the hub are constants in the core,
-  beside the hub's. The Swift source holds one `https://` literal, Google's App Passwords page, in the
-  app's one opener, for the Gmail window's button (§20); no other.
+  (§11.2), the typed digits go to `pair confirm` on standard input.
+- **URLs come from the core.** The releases page and the hub are constants in the core. So is the list of chat
+  accounts that are Lucille's, which the app names beside a connect code (§11.4). The Swift source holds one
+  `https://` literal, Google's App Passwords page, in the app's one opener, for the Gmail window's button
+  (§20); no other.
 - **Copy that every shell needs comes from the core:** each operation's plain-language summary and what it
   sends (§13), alias suggestions (§12), the claim text, and the uninstall steps (section 17).
 - **The app decides nothing from prose.** Where it must branch on the core's answer (which switch is on,
@@ -908,7 +906,7 @@ ripgrep.
 | `policy reset` | moves an invalid policy file aside and writes the fresh policy (§10) |
 | `policy previous` | lists, read only, the folders and operations of the last policy a pairing set aside (§11.6) |
 | `pair --code-stdin`, `pair status`, `pair confirm`, `pair reject` | non-interactive pairing (§11) |
-| `pair begin` | the Connect request (§11.4) |
+| `pair begin` | the Connect request: a connect code, then the wait for Lucille's pairing (§11.4) |
 | `run --json-events --exit-on-stdin-eof` | supervision (§9) |
 | `status`, `log --limit N`, `forget` | as 0001 lists them, with JSON |
 | `uninstall-data --yes`, `diagnostics` | section 17, §15 |
@@ -1106,40 +1104,81 @@ This changes 0001's "Local policy and upgrades", and is built (spec/CLI.md §13.
 
 So a "paste a code" app, published, would be a ready-made tool for a scam: a page makes a code, tells the user
 to paste it, and shows the matching number. The design answers that in three parts: the computer's gate is
-typed (§11.2), the final form redeems only a code the computer asked for (§11.4), and the paste form is never
-published (§3.2, §18). §11.2 and §11.4 are proposed, pending the maintainer's decision.
+typed (§11.2), the final form redeems only a pairing that answers a request the computer made (§11.4), and
+the paste form is never published (§3.2, §18). The maintainer decided §11.2 and §11.4 on 2026-11-21, in the
+forms below. Neither is built yet.
 
-### 11.2 The computer's gate is the typed one
+### 11.2 The computer's gate: four digits of Lucille's number, typed
 
-**Proposed, pending the maintainer's decision.** Nothing builds on this until it is decided; 0001's gate stands
-meanwhile.
+**Decided by the maintainer on 2026-11-21, in a changed form, not built yet.** Until it is built, 0001's gate
+stands, and the app built today pairs on it (§11.3, "What is built today").
 
 This changes 0001's "The host's gate", for every shell, the command line included.
-- **The user types Lucille's number into the computer.** The host never shows its own SAS before its gate
-  opens. `pair confirm` reads the digits on standard input (spaces and `-` ignored) and compares them in
-  constant time.
-- A wrong entry leaves the gate shut. **Three wrong entries forget the pair**, and the host says to start
-  again in Lucille.
+- **The computer shows its number with the last four digits hidden**, as `4071-••••`, and the user types
+  those four digits from Lucille's number. `pair confirm` reads them on standard input (spaces and `-`
+  ignored) and compares them in constant time. `sas_pending` and `pair status` carry the first four digits
+  only.
+- **After one wrong entry, the computer asks for the whole number.** From then on it shows no digits, and
+  takes all eight; four digits are refused, and do not count as an entry. **Three wrong entries forget the
+  pair**, and the host says to start again from Capsule.
 - **Digits typed before the host has the SAS** (the pair still `waiting`, before a resolve has returned the
-  SAS) are refused with "Not ready yet: wait until Lucille's page shows the number", and **do not count** as
-  a wrong entry.
+  SAS) are refused with "Not ready yet: wait until Lucille shows its number in your chat", and **do not
+  count** as a wrong entry.
 - **The deadline** is still about 24 h, but 0001 counts it "from when the SAS is first shown on the host",
-  which no longer happens. It now counts from the first resolve that returns the SAS to the host.
-- **0001's other gate lines change too.** "`pair status` shows the SAS again" is struck: `pair status`
-  shows no digits before the gate opens. The interactive `n` answer is struck: the prompt reads digits, and
-  a user who does not want the pair runs `pair reject`. `pair reject`, three wrong entries, and the deadline
-  passing each forget the pair. Until the gate opens, the host posts nothing, touches nothing, accepts
-  nothing and runs nothing (spec/PROTOCOL.md §16, unchanged).
-- Lucille's own gate keeps its form: Lucille's page shows the number, and the user clicks **They match** there
-  (Lucille policy as of 2026-10-29; not proven by this repository).
+  which no longer happens in full. It now counts from the first resolve that returns the SAS to the host.
+- **0001's other gate lines change too.** "`pair status` shows the SAS again" becomes: `pair status` shows the
+  first four digits, until a wrong entry, and none after it. The interactive `n` answer is struck: the prompt
+  reads digits, and a user who does not want the pair runs `pair reject`. `pair reject`, three wrong entries,
+  and the deadline passing each forget the pair. Until the gate opens, the host posts nothing, touches
+  nothing, accepts nothing and runs nothing (spec/PROTOCOL.md §16, unchanged).
+- **Lucille's side** shows its whole number in the chat, once it has collected the computer's answer. Whether
+  Lucille also asks for a reply there is Lucille's to decide (Lucille policy, not proven by this repository;
+  §11.4). The computer takes no work before its own gate opens (spec/PROTOCOL.md §16).
 
-**Why typed on the computer.** Suppose an attacker can read the page or the hand-off (a malicious browser
-extension, say). It takes Lucille's code, learns its note, and redeems it itself: Lucille ↔ attacker. It makes
-its own code with the same note and hands it to the computer: computer ↔ attacker. The two numbers now differ.
-If the computer's gate were a click, the user could open it toward the attacker, and Lucille's later mismatch
-could not reach the computer over a pair the attacker holds. With the number typed into the computer, the
-computer's gate stays shut. A careless **They match** on Lucille then exposes only Lucille's side (job
-arguments and forged results), never the user's files.
+**Neither side can choose or grind the number.** From Switchboard's source:
+- The number is `NNNN-NNNN`: the first 32 bits of an HMAC-SHA256, keyed with the pair secret, over the
+  transcript and the initiator's `reveal`, reduced modulo 10^8 (sb `pairing.py:486-498`). The transcript
+  binds both public keys and the commitment (`:464-467`).
+- The initiator, Lucille, draws its key and `reveal`, 16 random bytes, when it starts the pairing
+  (`:1427-1429`). The code carries only a 16-byte commitment to `reveal` (`:459-461`, `:1469-1470`).
+- The responder, the computer, makes a fresh key for each code it redeems (`:1594-1595`). Its key is fixed,
+  and its answer sent, before it can know `reveal`.
+- The initiator reads the answer (`:1902-1920`) and only then publishes `reveal`, in its consumed marker
+  (`:2006-2009`). The responder takes `reveal` only if it matches the commitment (`:1732-1737`), and only
+  then works out the number (`:1740-1743`).
+
+So the responder cannot grind its key toward a number: the number depends on 128 bits it cannot see. The
+initiator cannot change the number once the answer is in, since every input is fixed by then, and another
+`reveal` would need a second preimage of the 128-bit commitment. Before the answer, the initiator does not
+know the responder's key.
+
+**The odds, 1 in 10,000 per Connect.**
+- An attacker in the middle holds two pairings: Lucille ↔ attacker, with Lucille's number, and
+  attacker ↔ computer, with the computer's. The user types the last four digits of Lucille's number, and
+  the computer's gate opens only if its own last four are the same.
+- Those four digits are the HMAC's first 32 bits modulo 10^4, so no value comes up more than 429,497 times
+  in 2^32: **1 in 10,000 per attempt** (1 in 9,999.994).
+- The entries after a wrong one compare the same two numbers, so against an attacker they add nothing:
+  they are there for a user's slip.
+- The four digits the computer shows give nothing away: an attacker in the middle knows the computer's whole
+  number already. The bound does not count on the user comparing them.
+- 0001's gate, and this record's earlier typed form, compared all eight digits: about 1 in 10^8. Four
+  digits are what typing four costs.
+- **The one lever.** As the computer's initiator, the attacker learns the computer's number before it
+  publishes `reveal`, so it can withhold `reveal` whenever the digits would not match. The computer then
+  gets no number, and the pairing never finishes. The attacker cannot try again on the same request: the
+  request is single-use, and spent before a code is redeemed (§11.4, step 8). Each new try needs a new
+  Connect, which only the user starts, on the computer. So the bound is 1 in 10,000 per Connect the user
+  starts. The app says when a Connect never reached a number: "Lucille didn't finish connecting. Start
+  again from Capsule."
+
+**Why typed on the computer.** Suppose an attacker can read the chat, or learn the connect code another way.
+From the code it works out the drop room and the nonce (§11.4). It posts its own pairing code there, with that
+nonce, before Lucille's arrives: computer ↔ attacker. It redeems Lucille's code from the same room: Lucille ↔
+attacker. The two numbers now differ. If the computer's gate were a click, the user could open it toward the
+attacker, and Lucille's later mismatch could not reach the computer over a pair the attacker holds. With
+Lucille's digits typed into the computer, the computer's gate stays shut, except at the odds above. Lucille's
+side is then exposed at most (job arguments and forged results), never the user's files.
 
 ### 11.3 The first form: paste
 
@@ -1164,52 +1203,95 @@ runs `pair reject --json`. The app reads `pair status --json` only while its pai
 5 s while the pair is `waiting`, and at the deadline. `macos/README.md`, "Connecting to Lucille", says
 what each screen does.
 
-### 11.4 The final form: Connect from the computer
+### 11.4 The final form: Connect from Lucille's chat
 
-**Proposed, pending the maintainer's decision.** Nothing builds on this until it is decided. It also needs a
-connect page on Lucille's side.
+**Decided by the maintainer on 2026-11-21, not built yet.** It replaces this record's earlier proposal, a
+connect page on Lucille's website reached through a URL scheme: there is no website step. The two ends are
+Lucille's chat (for example in Telegram) and Capsule.
 
-The host redeems only a code that answers a Connect request it made. That is OAuth's `state` rule (RFC 8252
-§8.9) applied to a pairing code, and it lives in the Python core, so the command line and any future shell get
-it.
-1. `lucille-host pair begin` makes a 128-bit nonce `N`, keeps only its sha256, a 20-minute expiry and an
-   unused flag in the state folder (0600, written atomically), and prints the connect URL: Lucille's web origin
-   (a core constant), path `/computers/connect`, with `N`, a format version and the kind of shell asking
-   (`c=app` or `c=cli`) in the fragment. One request is outstanding at a time; a new `begin` replaces it.
-   **No computer name is sent**: the Mac's name is often the person's own, and `PRIVACY.md` does not list
-   it. The user names the computer on Lucille's page.
-2. The app opens that URL in the default browser. That is the user's browser, not a connection of the app.
-3. Lucille's page (signed in) starts the pairing with the code's note set to
-   `lucille-host/1 n=<N> who=<masked account>`. For `c=app` it hands the code back through the URL scheme
-   (§11.5) and shows no copyable code unless the user asks for it under "Having trouble?", with a warning.
-   For `c=cli` it fires no link and shows the code with plain instructions: paste it into the terminal where
-   `lucille-host pair` is waiting (Lucille policy as of 2026-10-29; not proven by this repository). The note
-   stays in both sides' pair records: Lucille's library saves it with the pending pairing and the host's
-   saves it as the peer's note (sb `pairing.py:1451-1462`, `:1604-1605`). That is harmless: `N` is single-use
-   and already burned on the host, and the account is masked.
-4. `pair` runs today's hub and token checks, then parses the note against a strict grammar, and refuses unless
-   the nonce's hash matches the stored one (constant time), is unexpired and unused. It marks the request used,
-   and fsyncs, **before** `pairing.accept`. Otherwise it refuses with "This connection wasn't started on this
-   Mac. Nothing was connected", with no store write and no spawn.
-5. The app shows the masked account and asks "Is this your account?", then asks for the typed number (§11.2).
-   The mask is a weak check (§11.7).
-6. **`pair` refuses while a pair is held.** The user disconnects first.
+The host still redeems only a pairing that answers a Connect request it made. That is OAuth's `state` rule
+(RFC 8252 §8.9) applied to a pairing, kept from the earlier proposal, and it lives in the Python core, so the
+command line and any future shell get it.
+
+**What the user does.**
+1. In Capsule, **Connect to Lucille**. Capsule shows a connect code, such as `7KQ4M-X2D9P`, and "Send this
+   to Lucille in your chat: connect 7KQ4M-X2D9P. It works once, within 20 minutes." It names the chat
+   accounts that are Lucille's (§11.7).
+2. The user sends it, from the phone or from the Mac. Lucille reaches the computer through the hub by
+   itself, and the user pastes nothing into the Mac.
+3. Lucille shows its number in the chat, Capsule shows the same number with four digits hidden, and the user
+   types those four into Capsule (§11.2).
+
+**The protocol.**
+1. `lucille-host pair begin` draws the connect code `C`: ten symbols of Crockford's base32 from `secrets`, 50
+   bits, shown as two groups of five. Case, spaces and `-` are ignored, and `I`, `L` and `O` read as `1`,
+   `1` and `0`, as Crockford's alphabet has it.
+2. It stretches `C` into a 32-byte key, `K = scrypt(C, salt "lucille-host/connect/v1", N = 2^17, r = 8,
+   p = 1)`, with Python's own `hashlib.scrypt`, its memory cap raised to fit. Two things come from `K`:
+   - **The drop room** is the library's handshake room for `K` (sb `pairing.py:425-428`), a public function
+     that takes any 32-byte secret. Its name, its write key and the key that seals its posts all come from
+     `K` (`:403-422`). No pairing code's secret is ever `K`.
+   - **The nonce `N`**, 16 bytes of HKDF over `K` with the label `lucille-host/connect/nonce`.
+3. It keeps `C`, an expiry and an unused flag in the state folder (0600, written atomically). `pair status`
+   can then show the code again while it is good. One request is outstanding at a time, and a new `begin`
+   replaces it.
+4. It posts a hello into the drop room, sealed like every post there. The request expires 20 minutes after
+   the hub's time of that post, as the library anchors a code's expiry on its hello (`:1435-1448`). If the
+   hub cannot be reached, `begin` says so and keeps no request.
+5. **The host then waits for Lucille's pairing, with no code pasted.** `pair begin --json` stays running and
+   reads the drop room every 5 s, as `pair --code-stdin --json` waits today (§11.3). It stops when a
+   delivery arrives, the request expires, or the user cancels. If the app is relaunched, `pair status --json`
+   takes up the wait from the stored request. On the command line, `lucille-host pair` with no code runs
+   `begin`, prints the code, and waits.
+6. **Lucille's side** (Lucille policy, not proven by this repository):
+   - The chat command is `connect <code>`. Lucille stretches the code the same way and reads the drop room.
+   - It answers in the chat "No Capsule is waiting with that code" when it finds no hello, and "That code
+     expired" past its expiry.
+   - Otherwise it starts a pairing (`pairing.start`), with the code's note set to
+     `lucille-host/2 n=<N> who=<masked account>`, and posts the code into the drop room.
+   - It shows its number in the chat once it has collected the computer's answer.
+   - The note stays in both sides' pair records, as before (sb `pairing.py:1451-1462`, `:1604-1605`). That is
+     harmless, since `N` is single-use and already spent on the host.
+7. **The host's checks on a delivery.**
+   - A post opens only under the room's key, so a delivery shows that its writer held `C`, or `K`.
+   - If the room holds more than one delivery when the host reads it, the host refuses them all, and the
+     request is spent: someone else has the code.
+   - Otherwise `pair` runs today's hub and token checks on the delivered code, then parses its note
+     against a strict grammar. It refuses unless the nonce matches the stored request's (in constant time),
+     and the request is unexpired and unused.
+8. It marks the request used, and fsyncs, **before** `pairing.accept`. Otherwise it refuses with "This
+   connection wasn't started on this Mac. Nothing was connected", with no store write and no spawn.
+9. The app shows the masked account and asks "Is this your account?", then shows the number with four
+   digits hidden (§11.2). The mask is a weak check (§11.7).
+10. **`pair` refuses while a pair is held.** The user disconnects first.
 
 From the release that adds `pair begin`, the core refuses every code without its own nonce, in every shell.
-`lucille-host pair` with no code runs `begin` with `c=cli`, prints the connect URL, and reads the code the
-page shows on standard input. The conformance suite's and the end-to-end tests' fake Lucille must do what
-Lucille does: read the nonce from `pair begin` and put it in the note.
+The conformance suite's and the end-to-end tests' fake Lucille must do what Lucille does: read the connect
+code from `pair begin`, and deliver into the drop room a code whose note holds the nonce.
 
-### 11.5 The URL scheme
+**What the connect code carries, and why ten symbols.**
+- **It carries 50 random bits, and nothing else.** The hub is Lucille's, a core constant, and the format is
+  the salt's version. It names no computer and no account, neither of which `PRIVACY.md` lists.
+- **It must not be guessed within its 20 minutes** by anyone who does not see the chat. Each guess costs a
+  stretch (128 MiB, and about a quarter of a second, not yet measured on a Mac) and a read on the hub. A
+  million guesses at one request succeed with probability 10^6 / 2^50, about 1 in 10^9. Against requests
+  live at once, multiply by their number.
+- **The hub sees the drop room's name, not `C`.** To read the delivered code, and with it the handshake
+  secret (§11.1), or to post a code of its own, the hub must find `C` from the room's name: up to 2^50
+  stretches. At a quarter of a second each, a million cores cover about 1 in 230,000 of them in 20 minutes.
+  If the room were named from `C` directly, without the stretch, or the code were shorter, the hub would read
+  every delivered code. Against a hub in the middle, only the four digits (1 in 10,000) would then stand.
+- **A guess or a crack that lands still meets the typed digits** (§11.2).
+- **A mistyped code** finds no hello, and Lucille says so. It reaches another computer's request only at the
+  guessing odds above.
+- **The stretch has a cost on Lucille's side too**: one per `connect` command. Lucille limits how often a
+  chat account may send one (Lucille policy, not proven by this repository).
 
-- **Scheme `com.lucille-ai.capsule:`** (reverse-DNS, private-use), path `/pair?code=<code>`. It is registered only
-  in builds whose core has the nonce check.
-- **The handler acts only while a Connect is pending** (`pair status` reports one). Any other link is ignored,
-  and the app's window shows "A website tried to connect this Mac to Lucille. Nothing was connected." The app
-  sends no notification, which would need a permission prompt.
-- **A link can only deliver a code to `pair`.** No URL can start a Connect, add a folder, turn on an operation or
-  change a setting. The handler's type has no reference to the folder or operation runners (§20, M3).
-- The code goes to the core on standard input, capped at 2 KiB.
+### 11.5 No URL scheme
+
+**Struck on 2026-11-21.** With Connect in Lucille's chat (§11.4), nothing outside the app hands it a code.
+The app registers no URL scheme, and Lucille needs no connect page. The Mac lint keeps refusing a URL scheme
+and a handler for a URL (§20), with no exception for a later release.
 
 ### 11.6 Every new pair starts from the fresh policy
 
@@ -1229,32 +1311,57 @@ every way a pair ends: Disconnect, removal on Lucille's side, rejection, the dea
 
 ### 11.7 What is left
 
-- **Live social engineering** that gets a user to read out a code or a number.
-- **A login forgery** that signs the user's browser into an attacker's Lucille account before they click
-  Connect. The nonce cannot catch it, because the code is genuinely Lucille's. The masked account (§11.4 step 5)
-  catches only a careless forger: the mask (first character, `•••`, domain) carries almost nothing, so an
-  attacker who signs up with an address of the same first letter at the same common domain shows the same
-  hint, for free. Showing the full address on the user's own Mac would close that, at the cost of the address
-  sitting in the code's note (readable by whoever intercepts the code), the browser's history and the
-  computer's pair record; a Lucille signing key in the release (§11.8) would close it too. Both are not
-  decided yet. Until then, this residual is open, and Lucille's own sign-in protection is Lucille's to keep.
-- **Another app on the Mac claiming the scheme.** Which app macOS picks is undefined. That is same-user code,
-  out of scope. If it redeems the code, the real app has no number to type, and Lucille's gate catches it.
-- **Browser history** may keep the scheme URL with the code (not yet tested on a Mac). A code is good for 15
-  minutes and is worthless once collected.
+- **Live social engineering** that gets a user to read out a connect code or a number.
+- **A look-alike chat account.** The chat is now where the user meets Lucille.
+  - Someone who runs an account that looks like Lucille's, a bot with a near name in Telegram say, and is
+    sent the code, holds the drop room. It delivers its own code with the right nonce.
+  - It is then honestly the other end of the pairing, and the number it shows matches. Neither the nonce
+    nor the digits can catch it (§11.1).
+  - **What bounds it:** Capsule names the chat accounts that are Lucille's, from a list in the core, and
+    shows the masked account before the digits.
+  - It takes the place of the earlier browser flow's residual, a login forgery that signed the user's
+    browser into an attacker's Lucille account. It is easier: a look-alike chat account costs less.
+  - A Lucille signing key in the release (§11.8) would close it. That is not decided yet, and until it is,
+    this residual is open.
+- **A connect code from someone else's Capsule, sent to the user's own Lucille.** This is the shape §11.8
+  names.
+  - A scammer runs Capsule, and talks the user into sending its code to their Lucille. Lucille then pairs with
+    the scammer's computer, whose gate the scammer opens itself.
+  - The user's files are not at risk, but Lucille's side is: the job arguments it sends, and the results it
+    trusts.
+  - Before it delivers, Lucille's `connect` command should say what connecting does, and ask whether the
+    computer is in front of the user. That is a recommendation to Lucille (Lucille policy, not proven by this
+    repository).
+- **The masked account carries almost nothing.** It is the first character, `•••`, and the domain. A
+  look-alike account puts there whatever it likes, and a real Lucille account that an attacker signs up with
+  an address of the same first letter at the same common domain shows the same hint, for free. Showing the
+  full address on the user's own Mac would do better. It would cost the address sitting in the code's note,
+  readable by whoever holds the drop room, and in the computer's pair record. Not decided yet.
 - **A compromised Lucille** receives the nonce and can make any code. It is the intended peer anyway, and the
   local policy bounds it, as before.
+- **A compromised hub** sees the drop room's name and must find the code within its 20 minutes (§11.4).
+  Failing that, it can only withhold posts, which leaves the request to expire.
+- **The chat keeps the connect code** in its history. The code works once, for 20 minutes, and is worthless
+  once used.
 
 ### 11.8 What we did not choose, and why
 
-- **The computer starts the pairing and the user enters a code on Lucille.** That direction is the classic
-  device-code phishing shape, and it reverses who starts a pairing.
+- **A connect page on Lucille's website, opened through a URL scheme**, this record's earlier §11.4 and
+  §11.5. The maintainer chose the chat instead on 2026-11-21. The page bound the request to Lucille's web
+  origin over TLS, which a chat account cannot do. §11.7's look-alike account is the price.
+- **The computer starts the pairing, and the user enters a code on Lucille.** This record first set that
+  aside as the classic device-code phishing shape, which reverses who starts a pairing. The maintainer
+  chose the chat flow on 2026-11-21, and for the person it has that shape: the code goes from the computer to
+  Lucille. Lucille still starts the pairing itself, as the library's initiator, so the library's roles do not
+  change. The shape's own risk is §11.7's code from someone else's Capsule.
+- **Typing the whole number**, this record's earlier §11.2: about 1 in 10^8 rather than 1 in 10,000. The
+  maintainer chose four digits, for the user's sake.
+- **A shorter connect code, such as six digits.** That is 20 bits: a hub finds it from the room's name within
+  the 20 minutes, even stretched, and outsiders' guesses add up across users.
 - **Signing in to Lucille from the app.** It would put a Lucille credential on the computer; the pair is meant
   to be the only one.
-- **A Lucille signing key pinned in each release, signing codes.** New cryptography; it would close the login
-  forgery above. Not decided yet.
-- **Universal links.** They stop another app claiming the link, not a drive-by link, so the nonce stays the
-  mechanism. They could come later.
+- **A Lucille signing key pinned in each release, signing codes.** New cryptography. It would close the
+  look-alike account. Not decided yet.
 - **A QR code.** It does not suit a single computer whose screen shows both ends.
 
 ### 11.9 The accept order in the spec
@@ -1774,13 +1881,13 @@ and the test suite. So on those jobs M6's `.pth` half reads the installed `RECOR
 
 Planned:
 - the conformance suite against the bundled host (a `--host-command` option names it);
-- end to end through the bundle with the typed number (§11.2), once it is decided, and with the app's own
+- end to end through the bundle with the typed digits (§11.2), once they are built, and with the app's own
   `pair --code-stdin` reaching the SAS (the built check pairs through the command line, with `--hub` and
   `--store-file`, which the app never passes);
 - the Keychain for real, through a temporary default keychain;
 - `lsof` sampling: no listener anywhere, no connection from the app, only the hub from the host;
-- crafted scheme URLs (option-shaped codes, a 1 MiB string, paths shaped like folder or operation commands): the
-  policy digest is unchanged and no verb but `pair` ran;
+- crafted deliveries in the drop room (no nonce, a wrong one, two at once, an option-shaped code, a 1 MiB
+  post): the policy digest is unchanged and no verb but `pair` ran;
 - UI snapshots: each screen state rendered to PNG in light and dark, kept as CI artifacts for review. The
   first build's screenshots show only the states the `ui` check drives to, in whatever appearance the
   runner has.
@@ -1926,8 +2033,7 @@ in 10 minutes or less.
     `Info.plist` must never carry, and no handler for a URL in Swift (`onOpenURL`, `kAEGetURL`, an
     `open` parameter of type `[URL]` or `Array<URL>`, whatever its name). In the build tools, string
     constants joined with `+`, and an f-string whose every part is constant, are read as the one string
-    they make. The release that adds the core's nonce check (§11.4, §11.5) changes this
-    rule to allow them only together with that check;
+    they make. No release relaxes this rule: there is no URL scheme (§11.5);
   - no daemon (`LaunchDaemon`, `SMAppService.daemon`, `SMJobBless`, `launchctl` and the like), and no
     installer package (a `*.pkg` file, or `.pkg`, `pkgbuild`, `productbuild`, `productsign` or
     `installer` with `-pkg` later on its line, in Swift, the build tools or a workflow);
@@ -1957,16 +2063,17 @@ in 10 minutes or less.
 
 ## 21. What changes in existing documents
 
-- **0001 "Pairing"**: if decided, the host's gate is the typed number (§11.2, proposed); `pair` reads the code on standard input,
-  refuses while a pair is held, and, from the Connect release, refuses a code without its own nonce (§11.4); a
-  new pair starts from the fresh policy (§11.6).
+- **0001 "Pairing"**: the host's gate is four typed digits of Lucille's number, and the whole number after a
+  wrong entry (§11.2, decided on 2026-11-21); `pair` reads the code on standard input, refuses while a pair is
+  held, and, from the Connect release, refuses a code without its own nonce, which only a pairing delivered
+  for its own connect code carries (§11.4); a new pair starts from the fresh policy (§11.6).
 - **0001 "Local policy and upgrades"**: reload on change, and idle instead of exit (§10).
 - **0001 "CLI verbs"**: the verbs and flags of §8.
 - **0001 "Packaging, releases and verification"**: the Mac app as a second channel beside PyPI, built from the
   same wheel. "There is no auto-update" stays.
 - **0001 and THREAT_MODEL.md, the pairing-code threats**: against a code an attacker made, the SAS agrees and
   does not help. Until the Connect release, the bound is that the paste form is not published. From it, the
-  nonce refuses such a code in every shell, and the residual is the login forgery of §11.7.
+  nonce refuses such a code in every shell, and the residual is §11.7's look-alike chat account.
 - **THREAT_MODEL.md, who the host trusts**: adds the embedded runtime (pinned by sha256), ripgrep (pinned
   commit), and Apple's notarization as a second trust root for a first install. The malicious-release threat adds
   the Developer ID key and the `macos-release` environment. The question of how a release carries exact
@@ -1975,9 +2082,9 @@ in 10 minutes or less.
   another developer's notarized app cannot be told apart by someone who checks nothing. The README and the About
   window name the Team ID.
 - **PRIVACY.md** gains two sentences: "The Capsule app connects to nothing itself; only the host inside it
-  connects, and only to the hub its pairing code named. Lucille's connect page opens in your browser when you
-  click Connect." and "macOS may contact Apple to check the app's signature and notarization; that is Apple's
-  behaviour, not this project's."
+  connects, and only to Lucille's hub, the one its pairing code names. To connect, you send a short code from
+  Capsule to Lucille in your chat with it." and "macOS may contact Apple to check the app's signature and
+  notarization; that is Apple's behaviour, not this project's."
 - **PRIVACY.md's controls sentences** name both shells, since About shows the claim verbatim, for example
   "a log on your computer (`lucille-host log`; Activity in Capsule shows the latest entries)", "Pause
   in Capsule, or `lucille-host pause`", "Stop What's Running, or `lucille-host kill`", "Disconnect in
@@ -2015,9 +2122,9 @@ These join 0001's "Host invariants and their tests".
 |---|---|---|
 | M1 | No listener: neither the app nor the host opens a listening socket, a Mach service or an XPC listener | `lsof` on the end-to-end run; `macos_lint` |
 | M2 | The app makes no network connection; the host connects only to its hub | `lsof` sampling against a loopback hub; `macos_lint` |
-| M3 | Nothing from outside the keyboard changes policy: a link can only deliver a code to `pair`, only while a Connect is pending | a Swift unit test on the handler's type; crafted URLs leave the policy digest unchanged |
-| M4 | From the Connect release, the host redeems only a code answering its own pending request | core tests: no nonce, wrong, reused, expired; each refused before `pairing.accept`, with no store write and no spawn |
-| M5 | The host's gate opens only on Lucille's number, typed; it never shows its own before | core tests: wrong entry, three wrong entries forget, right entry opens; `pair status` carries no digits before the gate opens |
+| M3 | Nothing from outside the keyboard changes policy: no link reaches the app, and a pairing delivered in the drop room reaches only `pair`, whose fresh policy (§11.6) is the one change it makes | `macos_lint`: no URL scheme, no handler for a URL; core tests: refused deliveries leave the policy digest unchanged |
+| M4 | From the Connect release, the host redeems only a code answering its own pending request | core tests: no nonce, wrong, reused, expired, two deliveries at once; each refused before `pairing.accept`, with no store write and no spawn |
+| M5 | The host's gate opens only on Lucille's number, typed: its last four digits, or the whole number after a wrong entry. It never shows its own last four before | core tests: a wrong entry, then only the whole number taken, four digits then refused without counting, three wrong entries forget, the right entry opens; `pair status` carries the first four digits only, and none after a wrong entry |
 | M6 | Nothing in the environment changes what the bundled runtime loads | `check_app.py environment`: with `PYTHONPATH`, `PYTHONHOME`, `PYTHONSTARTUP`, a user site, `PYTHONUSERBASE` and the working folder each set to load a planted module, the runtime run with the app's flags loads none; for each, a control run without `-I` must load it, or the check fails. `PYTHONSTARTUP` is read only by an interactive interpreter, so no run the app makes (`-m lucille_host`) could load it even without `-I`; its control runs `-i`. With `PYTHONPYCACHEPREFIX` set, the runtime run with the app's flags reads `.pyc` files from no other tree; its control, without `-I`, names the prefix. No `.pth` file ships beyond the installed `RECORD` files, which `check_app.py record` compares with the wheels'. On the ad-hoc bundle (signed without the hardened runtime, §7) on macOS 15, 26 and 27, and again on every signed build in `macos-verify`. That covers the Python variables and files above only: no check plants a `DYLD_*` variable, and without the hardened runtime dyld may honour one in the interpreter (from memory of Apple's hardened runtime documentation; not read in a source here and not tested). The runs the app starts get only `HOME`, `PATH`, `LANG`, `USER`, `LOGNAME` and `TMPDIR` (`HostCLI.swift`, `environment()`) |
 | M7 | Developer ID builds: hardened runtime, no entitlements, every Mach-O signed by the team | signing-job checks, on signed builds only: an ad-hoc build has neither the hardened runtime nor a Team ID (§7), so library validation against a Team ID is checked only on signed builds |
 | M8 | The bundle is never written at run time | `check_app.py readonly`, after `chmod -R a-w`: the host runs, nothing in the bundle changes, no `.pyc` appears or changes, and `codesign --verify --strict` passes after; the signature is checked again after every other check; the read-only end-to-end run once it exists. On the ad-hoc bundle on macOS 15, 26 and 27, and on every signed build |
@@ -2055,10 +2162,12 @@ those writes itself first (`pause`, then `resume`).
 
 | Threat | What bounds it | What is left |
 |---|---|---|
-| A website fires the app's link | the handler acts only while a Connect is pending; the core refuses a code without its own nonce | none known beyond §11.7 |
+| A website or another app hands the app a code | the app registers no URL scheme and never reads the pasteboard itself (§11.3, §11.5); the core refuses a code without its own nonce | none known beyond §11.7 |
 | A scam that hands the user a code made with the public library | the paste form is never published; from the Connect release, the nonce refuses it in every shell | a user talked into reading out codes |
-| A code intercepted on its way to the app | the computer's gate is typed (§11.2) | a careless **They match** on Lucille exposes Lucille's side, not files |
-| A login forgery into an attacker's Lucille account | the masked account before the typed number, which catches only a careless forger (§11.7) | any attacker who signs up with an address of the same first letter at the same common domain; a user who does not read the hint |
+| A connect code or a pairing code intercepted, in the chat or the drop room | the computer's gate types four digits of Lucille's number (§11.2) | 1 in 10,000 per Connect; beyond that, Lucille's side, not files |
+| A look-alike chat account is sent the connect code | Capsule names the chat accounts that are Lucille's; the masked account before the digits (§11.7) | a user who sends the code to the wrong account and does not read the hint; open until a Lucille signing key (§11.8) |
+| A connect code from someone else's Capsule, sent to the user's Lucille | Lucille's `connect` command says what connecting does, and asks (a recommendation to Lucille, §11.7) | Lucille's side: the job arguments it sends and the results it trusts, not the user's files |
+| A compromised hub | the drop room is named and sealed from a stretched 50-bit code (§11.4); the typed digits | withholding posts |
 | Compromised build or signing path (runner image, action, dependency, runtime tarball) | hosted runners; SHA-pinned actions; sha256-pinned runtime, wheels and ripgrep; a signing job that runs only Apple's tools and one reviewed script; the owner's approval | a malicious runner image or Xcode; provenance is SLSA build level 2 |
 | A leaked Developer ID key or API key | environment secrets, used only in the signing job, deleted at its end; certificate revocation; notarization's audit trail | software signed under this project's name until revocation |
 | A Lucille page that links a different app | the link targets this repository's releases; README and About name the Team ID | a user who checks nothing |
@@ -2080,8 +2189,8 @@ those writes itself first (`pause`, then `resume`).
   POSIX, and `os_family: windows` is a protocol change Lucille must accept first. A Windows shell would be a
   signed per-user installer with a per-user startup entry and keyring's Windows backend. Not designed here.
 - **Linux** users are mostly served by `pipx`, plus a `systemd --user` unit the core could write later. From
-  the Connect release, a command-line user pairs through the same connect page: `lucille-host pair` asks with
-  `c=cli`, and the page shows the code with plain instructions instead of firing a link (§11.4).
+  the Connect release, a command-line user pairs the same way: `lucille-host pair` prints a connect code to
+  send to Lucille in the chat, waits for Lucille's pairing, and reads the four digits (§11.4).
 - **Not reused:** the Swift code. It is small on purpose.
 
 ## 25. Delivery order
@@ -2095,7 +2204,7 @@ those writes itself first (`pause`, then `resume`).
 2. **The repository owner's Mac.** With the release that adds pairing: the paste form, the typed gate,
    supervision, open at login, Activity, Quit, Disconnect, the fresh policy. Ad-hoc builds on the owner's Mac
    until the project's Apple Developer membership exists (§3.2), then candidates only.
-3. **The first public disk image.** Connect from the computer, the URL scheme, Remove, Copy Diagnostics,
+3. **The first public disk image.** Connect from Lucille's chat, Remove, Copy Diagnostics,
    bundled ripgrep, the Mac jobs in `release.yml`, `verify_app.py`, the reproducibility job. Gated on the test
    with three people (§19) and on the rebuild job and `lucille-host verify` (0001).
 4. **Later.** An updater, if ever decided; Windows; a Linux tray shell.
@@ -2124,11 +2233,12 @@ those writes itself first (`pause`, then `resume`).
 - Whether the Keychain's delete-then-add on each save, about 288 times a day from the 5-minute touch, ever
   prompts under the signed interpreter, and what it costs.
 - macOS 27's treatment of a menu-bar app whose icon the user hides (§9).
-- Whether each browser passes the scheme URL's query intact, and whether it keeps the URL in history (§11.7).
-- Lucille's web origin for the connect page, which becomes a core constant.
+- The chat accounts that are Lucille's, which the core lists and the app names (§11.4, §11.7).
+- What the connect code's stretch costs on a Mac and on Lucille's side (§11.4); the parameters stand until
+  it is measured.
 - Intel Macs (§5).
 - An updater (§16).
 - A launcher embedding Python in place of the renamed interpreter (§6).
-- A Lucille signing key in the release, or the full account address shown on the Mac, against the login
-  forgery the mask does not stop (§11.7, §11.8).
+- A Lucille signing key in the release, or the full account address shown on the Mac, against the look-alike
+  chat account the mask does not stop (§11.7, §11.8).
 - The exact wording of each macOS dialog, which the app's announcements quote.

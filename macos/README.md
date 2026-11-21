@@ -296,8 +296,8 @@ read again each time it is shown.
 
 The app connects on [decisions/0001](../decisions/0001-host-design.md)'s gate: the Mac shows the
 number, and you confirm only if Lucille's page shows the same number. The maintainer decided on
-2026-11-02 to build this now. The typed number and the Connect flow of decisions/0002 (§11.2 and §11.4)
-are proposals, and are not built.
+2026-11-02 to build this now. The typed digits and Connect from Lucille's chat of decisions/0002 (§11.2
+and §11.4) were decided on 2026-11-21, and are not built.
 
 1. **Connect to Lucille…** opens the pairing window. It says: "In Lucille, open Computers and add this
    computer. Copy the code Lucille shows, then paste it below." You paste with Command-V, or Control-click
@@ -1216,9 +1216,9 @@ a downloaded, quarantined copy run from Terminal is not yet tested on a Mac.
   relaxed for exactly those links. Moving the whole runtime would not do: those folders are for code
   only, and Apple's signing tools take a folder with a dot in its name, such as `python3.13` or a
   `.dist-info`, for a bundle.
-- **Connecting for anyone but the owner.** The typed number (decisions/0002 §11.2) and Connect from
-  the computer (§11.4) are proposals. Until one is decided and built, connecting by pasting a code is for
-  the owner's own Mac only.
+- **Connecting for anyone but the owner.** The typed digits (decisions/0002 §11.2) and Connect from
+  Lucille's chat (§11.4) are decided but not built. Until they are built, connecting by pasting a code is
+  for the owner's own Mac only.
 - **What comes after connecting**: About, Copy Diagnostics, and a check of each folder at launch and
   after Add a Folder… in the menu (Set Up's Folders page checks them).
 - **Set Up's rough edges** (see [Set Up](#set-up)): its pages do not scroll; the next row it adds back
@@ -1309,8 +1309,8 @@ build; the design may change it.
   Keep It Off takes the item away, so the app need keep nothing to stop asking (that taking it away
   ends macOS's wait for your OK is not yet tested on a Mac).
 - **The Mac's gate is a click, as decisions/0001 has it.** The app shows the number, and you click They
-  Match or They Differ. The design's typed number (§11.2) is a proposal; the maintainer decided on
-  2026-11-02 to build 0001's gate now.
+  Match or They Differ. The design's typed digits (§11.2), decided on 2026-11-21, are not built;
+  the maintainer decided on 2026-11-02 to build 0001's gate now.
 - **The note about a pause at launch names every cause**: "You paused Capsule or chose Stop What's
   Running, or a task was stopped when Capsule quit or you logged out." The pause flag holds only a time,
   and the app keeps nothing of its own, so it cannot tell which.
