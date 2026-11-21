@@ -1290,7 +1290,10 @@ command line and any future shell get it.
    so and keeps no request.
 5. **The host then waits for Lucille's pairing, with no code pasted.** `pair begin --json` stays running and
    reads the drop room every 5 s, as `pair --code-stdin --json` waits today (§11.3). It stops when a
-   delivery arrives, the request expires, or the user cancels. If the app is relaunched, `pair status --json`
+   delivery arrives, the request expires, or the user cancels. A request that expires after any of its reads
+   failed with a hub error ends with the interference warning, "Capsule couldn't read Lucille's answer, and
+   the code may be known to someone else. Start again.", not with plain "The code expired": a holder of `C`
+   can make every read of the room fail at the hub (§11.7). If the app is relaunched, `pair status --json`
    takes up the wait from the stored request. On the command line, `lucille-host pair` with no code runs
    `begin`, prints the code, and waits.
 6. **Lucille's side** (Lucille policy, not proven by this repository):
@@ -1299,17 +1302,15 @@ command line and any future shell get it.
      `E-1`, `E+1` and `E-2` of its own clock. It reads all four, and does not stop at the first with a hello:
      a holder of `C` could otherwise plant a decoy hello in one room while the computer waits in another. A
      code is no use to Lucille past those four, whatever the hub's clock says.
-   - It handles one `connect` at a time per code, so that two commands for one code cannot both pass the
-     checks below before either delivers.
-   - It answers in the chat by the wire rules below (§11.4, "The wire"): "No Capsule is waiting with that
-     code" when no room holds a hello; "That code expired" by the expiry rule there; and "That code can't be
-     used. Start again in Capsule" when a read is interference, when more than one room holds a hello, when
-     the room already holds anything but its hello, or when `pairing.start` returns a code that is not
-     anchored on the hub (`Started.verifiable` false, `p` 0). Each of these checks comes before
-     `pairing.start`, except the last, after which Lucille forgets that pairing and delivers nothing.
-   - Otherwise it starts a pairing (`pairing.start`), with the code's note set to `lucille-host/2 n=<N>`,
-     `<N>` as 32 lowercase hex digits (the note must match `^lucille-host/2 n=[0-9a-f]{32}$` exactly), and
-     posts the code into the drop room with its signature and `from` (§11.5).
+   - It handles one `connect` at a time per drop room, keyed on `K`, so that two commands for one code, typed
+     in any of its accepted spellings, cannot both pass the checks below before either delivers.
+   - It answers in the chat by the table of answers in the wire rules below (§11.4, "The wire"), which gives
+     every case exactly one answer. All of its checks but one come before `pairing.start`; the last, on
+     `Started.verifiable`, comes after it, and Lucille then forgets that pairing and delivers nothing.
+   - When the table says to deliver, it starts a pairing (`pairing.start`), with the code's note set to
+     `lucille-host/2 n=<N>`, `<N>` as 32 lowercase hex digits, and posts the code into the drop room with its
+     signature and `from` (§11.5). The note must match this exactly:
+     `^lucille-host/2 n=[0-9a-f]{32}$`.
    - It shows its number in the chat once it has collected the computer's answer.
    - The note stays in both sides' pair records, as before (sb `pairing.py:1451-1462`, `:1604-1605`). That is
      harmless, since `N` is single-use and already spent on the host.
@@ -1362,17 +1363,28 @@ command line and any future shell get it.
   `pairing.hub_errors()`, public in agent-switchboard 2.6.0 and there `SwitchboardError`, `OSError` and
   `httpx.HTTPError`. The host tries it again at its next poll; Lucille delivers nothing, and answers in the
   chat that it could not reach the computer, and to send the code again. **Any other exception from a read is
-  interference**, whatever its class, and so is a read that returns 50 posts. In 2.6.0, `Client.history`
-  raises `DecryptionError`, a `CryptoError`, when a post does not open under the room's key; it raises
-  `json.JSONDecodeError`, a `ValueError` and no `CryptoError`, when a post opens but its plaintext is not
-  JSON, which anyone who holds `C` can seal; and it never returns more than `limit` posts. The rule names what
-  is retried, not what is interference, so that an exception no one listed is interference too. On
+  interference**, whatever its class, and so is a read that returns 50 or more posts. In 2.6.0,
+  `Client.history` raises `DecryptionError`, a `CryptoError`, when a post does not open under the room's key;
+  it raises `json.JSONDecodeError`, a `ValueError` and no `CryptoError`, when a post opens but its plaintext
+  is not JSON, which anyone who holds `C` can seal; and it never returns more than `limit` posts. The rule
+  names what is retried, not what is interference, so that an exception no one listed is interference too. On
   interference the host ends the request, spent, and the app says the code may be known to someone else.
   Anyone who holds `C`, and the hub, can cause it: a denial of service, nothing more.
-- **When Lucille delivers.** Lucille delivers only when all four of its reads (step 6) returned without an
-  exception and with fewer than 50 posts, exactly one room among them holds a hello, exactly one hello, that
-  room holds nothing else, and its hello has not expired (below). In every other case it delivers nothing:
-  "That code can't be used. Start again in Capsule", or the hub-failure answer above.
+- **Lucille's answers, in order.** Lucille takes the first row that applies to its four reads and answers
+  with it, so that every combination of cases has exactly one answer, and it delivers in the last row only:
+
+  | # | When | Lucille's answer in the chat | Delivers |
+  |---|---|---|---|
+  | 1 | a room holds a delivery that Lucille signed | "That code was already used from another account. Start again in Capsule." | no |
+  | 2 | any read is interference (an exception not of `pairing.hub_errors()`, or 50 or more posts); or more than one hello among the four rooms, in one room or several; or the hello's room holds any other post | "That code can't be used. Start again in Capsule." | no |
+  | 3 | any read failed with a hub error | "Lucille couldn't reach your computer just now. Send the code again in a minute." | no |
+  | 4 | no room holds a hello (a hello whose `created_at` does not parse, has no offset, or is more than 300 s ahead of Lucille's clock is no hello) | "No Capsule is waiting with that code. Check it in Capsule." | no |
+  | 5 | the one hello is more than 1,200 s old by Lucille's clock | "That code expired. Start again in Capsule." | no |
+  | 6 | `pairing.start` returns `Started.verifiable` false | as row 3 | no; it forgets the pairing |
+  | 7 | none of the above | its number, once the computer answers | yes |
+
+  The rows' words are Lucille's to change (Lucille policy, not proven by this repository); their order and
+  which ones deliver are not.
 - **The hello** is the post whose body is the object `{"t": "lucille-host/hello/1"}` and nothing else. Its
   `created_at` is the hub's time of it, an ISO 8601 string ending in `Z` as the hub writes it, read as UTC by
   `datetime.fromisoformat` after a final `Z` is replaced by `+00:00`. One that does not parse, or that parses
@@ -1655,7 +1667,9 @@ every way a pair ends: Disconnect, removal on Lucille's side, rejection, the dea
   as far as any check here can tell.
 - **What stays open on Lucille's side: a code holder that redeems Lucille's code first.** Whoever holds the
   connect code can read Lucille's signed code in the drop room and redeem it before the computer does. The
-  computer's own redemption is then refused, and it says the code may have been used by someone else, but
+  computer's own redemption is then refused, and it says the code may have been used by someone else; or the
+  code holder makes every later read of the room fail at the hub, and the request ends with the same warning
+  (§11.4, step 5). Either way
   Lucille holds a pair with the code holder. A decoy hello in another epoch's room cannot draw Lucille's code
   away from the computer's room unseen: Lucille reads all four rooms and refuses when more than one holds a
   hello (§11.4, step 6). The signature protects the computer, not Lucille: Lucille's side
@@ -2606,6 +2620,10 @@ those writes itself first (`pause`, then `resume`).
   (§11.5).
 - A full 32-byte commitment in the library, which would take the collision out of §11.2's bound against a
   holder of Lucille's key; it is the library's to change.
+- Two hub changes, also the library's: refusing at post time a body the hub cannot serve back (a 2.6.0 hub
+  stores an unsealed body nested about 300 lists deep, then fails every read of its room with a 500, which
+  the client reports as a hub error), and capping a post's size (a 2.6.0 hub accepted one of 64 MB). Until
+  then the host's warning on an expiry after hub-failed reads (§11.4, step 5) stands in for them.
 - Intel Macs (§5).
 - An updater (§16).
 - A launcher embedding Python in place of the renamed interpreter (§6).
