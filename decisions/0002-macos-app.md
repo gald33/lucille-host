@@ -1294,14 +1294,17 @@ command line and any future shell get it.
    takes up the wait from the stored request. On the command line, `lucille-host pair` with no code runs
    `begin`, prints the code, and waits.
 6. **Lucille's side** (Lucille policy, not proven by this repository):
-   - The chat command is `connect <code>`. Lucille stretches the code the same way and reads the drop room,
-     for its own clock's epoch and the ones beside it that a request up to 20 minutes old could have used,
-     allowing for clocks 300 s apart: from one epoch ahead to two behind, tried in the order `E`, `E-1`,
-     `E+1`, `E-2` of its own clock, stopping at the first room with a hello. A code is no use to Lucille after
-     that, whatever the hub's clock says.
-   - It answers in the chat "No Capsule is waiting with that code" when it finds no hello, and "That code
-     expired" when the hello is more than 20 minutes old by the hub's time of it, checked against Lucille's
-     own clock as well, or past its expiry.
+   - The chat command is `connect <code>`. Lucille stretches the code the same way and reads the drop rooms
+     of all four epochs a request up to 20 minutes old could have used, allowing for clocks 300 s apart: `E`,
+     `E-1`, `E+1` and `E-2` of its own clock. It reads all four, and does not stop at the first with a hello:
+     a holder of `C` could otherwise plant a decoy hello in one room while the computer waits in another. A
+     code is no use to Lucille past those four, whatever the hub's clock says.
+   - It answers in the chat by the wire rules below (§11.4, "The wire"): "No Capsule is waiting with that
+     code" when no room holds a hello; "That code expired" by the expiry rule there; and "That code can't be
+     used. Start again in Capsule" when a read is interference, when more than one room holds a hello, when
+     the room already holds anything but its hello, or when `pairing.start` returns a code that is not
+     anchored on the hub (`Started.verifiable` false, `p` 0). Each of these checks comes before
+     `pairing.start`, except the last, after which Lucille forgets that pairing and delivers nothing.
    - Otherwise it starts a pairing (`pairing.start`), with the code's note set to `lucille-host/2 n=<N>`,
      `<N>` as 32 lowercase hex digits (the note must match `^lucille-host/2 n=[0-9a-f]{32}$` exactly), and
      posts the code into the drop room with its signature and `from` (§11.5).
@@ -1311,8 +1314,9 @@ command line and any future shell get it.
 7. **The host's checks on a delivery.**
    - **A delivery** is a post in the drop room, other than the host's own hello, that opens under the room's
      key and holds the JSON object of §11.5, in its form, with a signature that verifies (§11.5). Any other
-     post is ignored and logged, and neither spends the request nor ends the wait. The same code, byte for
-     byte, posted twice counts once.
+     post that opens is ignored and logged, and neither spends the request nor ends the wait. A post that does
+     not open makes the read fail, which is interference (§11.4, "The wire"), and ends the request. The same
+     code, byte for byte, posted twice counts once.
    - A post opens only under the room's key, so a delivery shows that its writer held `C`, or `K`, as well as
      Lucille's key.
    - If the room holds more than one delivery when the host reads it, the host refuses them all, and the
@@ -1351,16 +1355,28 @@ command line and any future shell get it.
 
   `LUCILLE_HUB` is the URL in the host's core constant, and Lucille uses the same one.
 - **The channel** is `lucille-host/connect`. Every post goes there through `Client.post`, with `ttl=1500`:
-  the 20 minutes and the 300 s of skew. Both sides read it through `Client.history`, with `limit=50`. More
-  than 50 posts in the room is interference, and the host then refuses the request, as the library refuses a
-  handshake room it cannot read whole.
+  the 20 minutes and the 300 s of skew. Both sides read it through `Client.history`, with `limit=50`.
+- **Interference.** In agent-switchboard 2.6.0, `Client.history` raises `DecryptionError` when any post in the
+  channel does not open under the room's key, and it never returns more than `limit` posts. So a read that
+  raises the library's `CryptoError` (of which `DecryptionError` is one), or that returns 50 posts, is
+  interference: someone who is not the host or Lucille wrote in the room, or wrote too much to read whole. The
+  library's own handshake treats a room it cannot read whole the same way. On interference the host ends the
+  request, spent, and the app says the code may be known to someone else; Lucille delivers nothing into that
+  room and answers that the code can't be used. Anyone who holds `C`, and the hub, can cause it: a denial of
+  service, nothing more. A read that fails for any other reason, the hub out of reach say, is tried again at
+  the next poll, as a read of the hub is today.
 - **The hello** is the post whose body is the object `{"t": "lucille-host/hello/1"}` and nothing else. Its
-  `created_at` is the hub's time of it. The host tells its own hello by that body, and posts one only.
+  `created_at` is the hub's time of it, an ISO 8601 string ending in `Z` as the hub writes it, read as UTC by
+  `datetime.fromisoformat` after a final `Z` is replaced by `+00:00`; one that does not parse makes it no
+  hello. The host tells its own hello by that body, and posts one only. A room holds exactly one: a second
+  hello in a room is interference.
 - **A delivery** is a post whose body is a string: the text of the JSON object of §11.5, at most 4,096 bytes
   in UTF-8. The host parses that string itself, so that it can refuse duplicate keys and check sizes before it
   parses.
-- **"That code expired"**: Lucille says so when its own clock is more than 1,200 s past the hello's
-  `created_at`. It treats a `created_at` more than 300 s ahead of its own clock as no hello.
+- **"That code expired"**: Lucille says so when its own clock is more than 1,200 s past the `created_at` of
+  the room's one hello. It treats a `created_at` more than 300 s ahead of its own clock as no hello.
+- **"A room already holding a delivery"**: a room that holds any post besides its one hello, whatever that
+  post is. Lucille checks this before `pairing.start`, and then delivers nothing.
 - **`pairing.start`'s arguments**, on Lucille's side, with no `name`:
 
   ```python
@@ -1373,7 +1389,8 @@ command line and any future shell get it.
   )
   ```
 
-  The code then names Lucille's hub, carries no token, and has the library's hello (`p` is 1).
+  The code then names Lucille's hub, carries no token, and has the library's hello (`p` is 1). Lucille checks
+  `Started.verifiable` before it delivers, and delivers nothing when it is false.
   The host refuses a delivered code whose `p` is 0, as well as one that carries a token or names another hub.
 - **Telegram's `from` and `handle`.** `"from"` is `telegram:` followed by the sender's `User.id` in ASCII
   decimal, with no sign and no leading zeros. `"handle"` is `@` followed by the sender's `User.username` on
@@ -1485,8 +1502,10 @@ closes ambiguity, not a forgery.
 - the signature verifies under that key, over the bytes above, with this request's `N`.
 
 **What a refused post does.**
-- A post that fails any of these checks is not a delivery. It is ignored and logged. It does not spend the
-  request, and the wait goes on, so anyone who holds `C` can no longer spend a request with junk.
+- A post that opens but fails any of these checks is not a delivery. It is ignored and logged. It does not
+  spend the request, and the wait goes on, so anyone who holds `C` can no longer spend a request with junk
+  that opens. A post that does not open is interference (§11.4, "The wire"), which ends the request: a denial
+  of service, which the hub or a holder of `C` can cause.
 - Only posts that pass count for the more-than-one rule. Two of them would need Lucille to deliver twice into
   one room, which it does not (below), so two that pass mean the key is misused. The host then refuses both
   and spends the request.
@@ -1495,9 +1514,12 @@ closes ambiguity, not a forgery.
   denial of service, which the user is told of; it cannot make the computer pair.
 - **What is logged:** for an ignored post, only that one was ignored and why, nothing from the post; for a
   mismatch, the signed `"from"` of the other account, its service and numeric id, and never its `"handle"` or
-  the typed username. The app shows the host's log (Activity › Show the Host's Log, §2), its standard error
-  under Details, and Copy Diagnostics carries the log (§15), so nothing the host writes, to its log, its
-  standard error, `status` or `diagnostics`, carries the other account's handle.
+  the typed username. The numeric id is safe to show: a Telegram username starts with a letter, so an id can
+  never read as one, and no one can choose theirs. Whether each other chat service's id is as safe to log is
+  decided with that service's `from` (Not decided yet). The app shows the host's log (Activity › Show the
+  Host's Log, §2), its standard error under Details, and Copy Diagnostics carries the log (§15), so nothing
+  the host writes, to its log, its standard error, `status` or `diagnostics`, carries the other account's
+  handle.
 - **A key id the release does not know** is ignored like a bad signature. If the request expires with only
   such posts in the room, the app says "Lucille may need a newer Capsule. Get it from where you got this one."
   It names no link: anyone who holds `C` can cause this message, so it must never point to a link from the
@@ -1513,12 +1535,13 @@ stays.
 - **Normalizing,** on both sides and in this order: refuse any character outside ASCII; drop the spaces
   (U+0020) around the name; drop a leading `<service>:`, matched without regard to ASCII case, which must then
   name the chosen service; drop one leading `@`; lower ASCII letters only (never a Unicode lowering, which
-  maps the Kelvin sign to `k`), as Telegram usernames ignore case. The result must be 1 to 64 of `a-z`, `0-9`
-  and `_`. So `telegram:@Ada`, `@ada` and `ADA` are one name, and `@telegram:ada` is refused. The service is
-  compared too: the same name on another chat service is another account, and a name free there could be taken
-  by anyone. Confusable letters do not matter to the check: the typed name must equal the signed one exactly,
-  and a service keeps its usernames unique, so a look-alike name is simply another name, and no screen shows
-  the other account. The comparison runs in constant time; nothing in it is secret, but nothing is lost by it.
+  maps the Kelvin sign to `k`), as Telegram usernames ignore case. The result must start with a letter, as
+  Telegram usernames do, and be 1 to 64 of `a-z`, `0-9` and `_`. So `telegram:@Ada`, `@ada` and `ADA` are one
+  name, and `@telegram:ada` is refused. The service is compared too: the same name on another chat service is
+  another account, and a name free there could be taken by anyone. Confusable letters do not matter to the
+  check: the typed name must equal the signed one exactly, and a service keeps its usernames unique, so a
+  look-alike name is simply another name, and no screen shows the other account. The comparison runs in
+  constant time; nothing in it is secret, but nothing is lost by it.
 - **An account with no public username cannot connect.** Lucille signs `"handle"` as `""` for it, which
   matches no typed name, and Lucille tells such a user in the chat to set a username first (Lucille policy,
   not proven by this repository). The alternatives were a value the user learns from the chat, such as their
@@ -1623,7 +1646,9 @@ every way a pair ends: Disconnect, removal on Lucille's side, rejection, the dea
 - **What stays open on Lucille's side: a code holder that redeems Lucille's code first.** Whoever holds the
   connect code can read Lucille's signed code in the drop room and redeem it before the computer does. The
   computer's own redemption is then refused, and it says the code may have been used by someone else, but
-  Lucille holds a pair with the code holder. The signature protects the computer, not Lucille: Lucille's side
+  Lucille holds a pair with the code holder. A decoy hello in another epoch's room cannot draw Lucille's code
+  away from the computer's room unseen: Lucille reads all four rooms and refuses when more than one holds a
+  hello (§11.4, step 6). The signature protects the computer, not Lucille: Lucille's side
   is exposed (the job arguments it sends, the results it trusts) until the user removes that computer in
   Lucille. Lucille should send no work to a pair until the user confirms in the chat, from the account the
   signed `from` names, that Capsule said "Matches". It should tell the user in the chat when its delivered
