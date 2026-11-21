@@ -1338,8 +1338,14 @@ command line and any future shell get it.
 
   ```python
   room = pairing.handshake_room(K)
-  config = ClientConfig(url=LUCILLE_HUB, workspace=room.workspace, key=room.key,
-                        write_key=room.write_key, peer_log="", stash_db="")
+  config = ClientConfig(
+      url=LUCILLE_HUB,
+      workspace=room.workspace,
+      key=room.key,
+      write_key=room.write_key,
+      peer_log="",
+      stash_db="",
+  )
   client = Client(config, agent_id=pairing.throwaway_agent("connect"))
   ```
 
@@ -1358,8 +1364,13 @@ command line and any future shell get it.
 - **`pairing.start`'s arguments**, on Lucille's side, with no `name`:
 
   ```python
-  pairing.start(ClientConfig(url=LUCILLE_HUB), store=lucille_store,
-                note=f"lucille-host/2 n={nonce.hex()}", ttl=900, with_token=False)
+  pairing.start(
+      ClientConfig(url=LUCILLE_HUB),
+      store=lucille_store,
+      note=f"lucille-host/2 n={nonce.hex()}",
+      ttl=900,
+      with_token=False,
+  )
   ```
 
   The code then names Lucille's hub, carries no token, and has the library's hello (`p` is 1).
