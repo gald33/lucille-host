@@ -634,7 +634,10 @@ def test_every_other_job_runs_its_tools_on_the_test_jobs_313_pin() -> None:
     # The guards and the Mac jobs run tools, not the suite, on the same 3.13 build the test job
     # tests, and on uv's own build alone, so nothing in the workflow takes a Python from an image.
     # (The app bundles a runtime of its own, which this does not touch.)
-    jobs = _ci()["jobs"]
+    doc = _ci()
+    # Nor does the workflow's own env, which every job would inherit.
+    assert not [key for key in doc.get("env", {}) if key.startswith("UV_PYTHON")], doc["env"]
+    jobs = doc["jobs"]
     (pin,) = [
         python
         for python in jobs["test"]["strategy"]["matrix"]["python"]

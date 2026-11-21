@@ -1169,29 +1169,56 @@ def build_wheel_argv(out: Path, python: Path) -> list[str]:
     ]
 
 
-def find_python_argv(python: Path) -> list[str]:
-    """``uv python find`` for ``python``: the interpreter uv takes for that request, which is
-    the one :func:`build_wheel_argv` builds with. No uv configuration file is read."""
-    return ["uv", "python", "find", "--no-config", str(python)]
+def managed_dir_argv() -> list[str]:
+    """``uv python dir``: the folder uv installs its own Pythons in. No uv configuration file is
+    read."""
+    return ["uv", "python", "dir", "--no-config"]
+
+
+def managed_dir_env(environ: Mapping[str, str]) -> dict[str, str]:
+    """The environment for :func:`managed_dir_argv`: :func:`payload.without_uv_settings`, but for
+    ``UV_PYTHON_INSTALL_DIR``, which says where that folder is (CI's ``setup-uv`` sets it). It
+    names a folder and nothing else, and the command installs and builds nothing."""
+    env = payload.without_uv_settings(environ)
+    if "UV_PYTHON_INSTALL_DIR" in environ:
+        env["UV_PYTHON_INSTALL_DIR"] = environ["UV_PYTHON_INSTALL_DIR"]
+    return env
+
+
+def managed_problem(base_prefix: str, managed_dir: str) -> str | None:
+    """Why the interpreter whose ``sys.base_prefix`` is ``base_prefix`` is not one of uv's own
+    Pythons in ``managed_dir``, or None when it is: its folder, with any link followed, is one of
+    that folder's own."""
+    found, folder = Path(os.path.realpath(base_prefix)), Path(os.path.realpath(managed_dir))
+    if found.parent == folder:
+        return None
+    return f"{found} is not one of uv's own Pythons in {folder}"
 
 
 def build_wheel(out: Path, version: str) -> Path:
     """The host's wheel, built from this checkout into ``out`` with :func:`build_python`, and
-    with no uv setting from the environment (:func:`payload.without_uv_settings`). It refuses to
-    build unless uv takes that interpreter for it, and prints which it is. Any older host wheel
-    there is removed first, so that ``out`` then holds exactly one."""
+    with no uv setting from the environment (:func:`payload.without_uv_settings`). It prints that
+    interpreter. Where ``UV_PYTHON_PREFERENCE`` is ``only-managed``, as in CI, it refuses to build
+    unless the interpreter is one of uv's own Pythons (:func:`managed_problem`); elsewhere it says
+    it did not look. Any older host wheel there is removed first, so that ``out`` then holds
+    exactly one."""
     out.mkdir(parents=True, exist_ok=True)
     for old in out.glob("lucille_host-*.whl"):
         old.unlink()
     env = payload.without_uv_settings(os.environ)
     python = build_python()
-    found = _output(find_python_argv(python), env=env)
-    if os.path.realpath(found) != os.path.realpath(python):
-        raise BuildError(f"uv would build the host wheel with {found}, not {python}")
-    print(
-        f"build interpreter: {os.path.realpath(python)} (Python {platform.python_version()})",
-        flush=True,
-    )
+    said = f"build interpreter: {os.path.realpath(python)} (Python {platform.python_version()})"
+    preference = os.environ.get("UV_PYTHON_PREFERENCE")
+    if preference == "only-managed":
+        managed = _output(managed_dir_argv(), env=managed_dir_env(os.environ))
+        problem = managed_problem(sys.base_prefix, managed)
+        if problem is not None:
+            raise BuildError(f"UV_PYTHON_PREFERENCE is only-managed, but {problem}")
+        print(f"{said}, uv's own, in {os.path.realpath(managed)}", flush=True)
+    else:
+        print(
+            f"{said}; not checked to be uv's own (UV_PYTHON_PREFERENCE is {preference})", flush=True
+        )
     _run(build_wheel_argv(out, python), env=env)
     wheels = sorted(out.glob("*.whl"))
     expected = payload.host_wheel_name(version)
