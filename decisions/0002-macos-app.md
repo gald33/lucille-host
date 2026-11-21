@@ -1331,6 +1331,52 @@ command line and any future shell get it.
    the number with four digits hidden (§11.2).
 10. **`pair` refuses while a pair is held.** The user disconnects first.
 
+**The wire, which both sides must build alike.** Each item below is decided, not left to either builder:
+- **The room and the client.** Both sides open the drop room with the library's public API, with the room's
+  three values from `pairing.handshake_room(K)` and no token of their own, so that the managed hub's published
+  one applies (`ClientConfig.effective_token`):
+
+  ```python
+  room = pairing.handshake_room(K)
+  config = ClientConfig(url=LUCILLE_HUB, workspace=room.workspace, key=room.key,
+                        write_key=room.write_key, peer_log="", stash_db="")
+  client = Client(config, agent_id=pairing.throwaway_agent("connect"))
+  ```
+
+  `LUCILLE_HUB` is the URL in the host's core constant, and Lucille uses the same one.
+- **The channel** is `lucille-host/connect`. Every post goes there through `Client.post`, with `ttl=1500`:
+  the 20 minutes and the 300 s of skew. Both sides read it through `Client.history`, with `limit=50`. More
+  than 50 posts in the room is interference, and the host then refuses the request, as the library refuses a
+  handshake room it cannot read whole.
+- **The hello** is the post whose body is the object `{"t": "lucille-host/hello/1"}` and nothing else. Its
+  `created_at` is the hub's time of it. The host tells its own hello by that body, and posts one only.
+- **A delivery** is a post whose body is a string: the text of the JSON object of §11.5, at most 4,096 bytes
+  in UTF-8. The host parses that string itself, so that it can refuse duplicate keys and check sizes before it
+  parses.
+- **"That code expired"**: Lucille says so when its own clock is more than 1,200 s past the hello's
+  `created_at`. It treats a `created_at` more than 300 s ahead of its own clock as no hello.
+- **`pairing.start`'s arguments**, on Lucille's side, with no `name`:
+
+  ```python
+  pairing.start(ClientConfig(url=LUCILLE_HUB), store=lucille_store,
+                note=f"lucille-host/2 n={nonce.hex()}", ttl=900, with_token=False)
+  ```
+
+  The code then names Lucille's hub, carries no token, and has the library's hello (`p` is 1).
+  The host refuses a delivered code whose `p` is 0, as well as one that carries a token or names another hub.
+- **Telegram's `from` and `handle`.** `"from"` is `telegram:` followed by the sender's `User.id` in ASCII
+  decimal, with no sign and no leading zeros. `"handle"` is `@` followed by the sender's `User.username` on
+  that very `connect` message, in the case Telegram gives it, or `""` when it has none. `User.username` is the
+  account's primary username; an account's other, collectible usernames are not signed. The host lowers ASCII
+  case on both sides (§11.5), so Telegram's case does not matter to the check.
+
+**Lucille policy, for its builder to fix and document** (not proven by this repository):
+- how the `connect` command is parsed: the keyword's case, the whitespace around the code, and which Telegram
+  updates count. A private chat with the user only: not a group, an edited message, a message with a
+  `sender_chat`, or a forwarded one, so that `from` is always the person who typed the command;
+- the rate limit on `connect`, and its value;
+- the chat's words when a second delivery is refused, and when an account has no username.
+
 From the release that adds `pair begin`, the core refuses every code without its own nonce, in every shell.
 The conformance suite's and the end-to-end tests' fake Lucille must do what Lucille does: read the connect
 code from `pair begin`, and deliver into the drop room a code whose note holds the nonce.
@@ -1438,8 +1484,9 @@ closes ambiguity, not a forgery.
   denial of service, which the user is told of; it cannot make the computer pair.
 - **What is logged:** for an ignored post, only that one was ignored and why, nothing from the post; for a
   mismatch, the signed `"from"` of the other account, its service and numeric id, and never its `"handle"` or
-  the typed username. The app shows the host's log (Activity › Show the Host's Log, §2) and Copy Diagnostics
-  carries it (§15), so a handle the attacker chose must not be in it.
+  the typed username. The app shows the host's log (Activity › Show the Host's Log, §2), its standard error
+  under Details, and Copy Diagnostics carries the log (§15), so nothing the host writes, to its log, its
+  standard error, `status` or `diagnostics`, carries the other account's handle.
 - **A key id the release does not know** is ignored like a bad signature. If the request expires with only
   such posts in the room, the app says "Lucille may need a newer Capsule. Get it from where you got this one."
   It names no link: anyone who holds `C` can cause this message, so it must never point to a link from the
@@ -2507,16 +2554,7 @@ those writes itself first (`pause`, then `resume`).
 - A check symbol in the connect code (Crockford's mod-37 symbol), which would tell a typo from no Capsule
   waiting, at one more symbol to type (§11.4). A review recommends keeping ten symbols for the code and
   spending an eleventh, if any, on this.
-- The canonical `from` for each chat service beyond its grammar: which stable id each service gives (§11.5).
-  For Telegram it is `telegram:` and the user's numeric id in decimal, and `"handle"` is the user's primary
-  username as Telegram reports it (`User.username`), kept in Telegram's case.
-- Details left to Lucille's side, each Lucille policy and not proven by this repository (§11.4, §11.5): how
-  the `connect` command is parsed (the keyword's case, whitespace, and which messages count: a private chat
-  only, not a group, an edited message, a channel's `sender_chat` or a forwarded message); the arguments of
-  `pairing.start` (Lucille's hub, no token travelling, a hello, the code's lifetime); the rate limit's value;
-  and the chat's words when a second delivery is refused.
-- Which library call the host and Lucille use to post into the drop room, and the envelope that tells the
-  host's own hello, `{"t": "lucille-host/hello/1"}`, from a delivery (§11.4).
+- The canonical `from` for chat services other than Telegram, whose form §11.4 fixes.
 - How long a new key is out before Lucille signs with it, and the format of the list of revoked key ids
   (§11.5).
 - A full 32-byte commitment in the library, which would take the collision out of §11.2's bound against a
