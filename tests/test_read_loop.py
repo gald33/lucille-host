@@ -1109,7 +1109,13 @@ def test_planted_signer_socket_never_connected(
             expected = short
         else:
             monkeypatch.delenv("XDG_RUNTIME_DIR", raising=False)
-            expected = Path(tempfile.gettempdir())
+            # The system's temporary folder, which the library takes from tempfile, is this
+            # test's own, as tempfile allows: suites run at once on one machine would otherwise
+            # each plant their socket at the same path there.
+            monkeypatch.setenv("TMPDIR", str(short))
+            monkeypatch.setattr(tempfile, "tempdir", str(short))
+            assert tempfile.gettempdir() == str(short)
+            expected = short
         # Where Switchboard's client looks for a signer for the host's agent id.
         planted = Path(signing.socket_path("lucille-host"))
         assert planted.parent == expected / "switchboard"
