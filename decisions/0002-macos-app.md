@@ -1299,6 +1299,8 @@ command line and any future shell get it.
      `E-1`, `E+1` and `E-2` of its own clock. It reads all four, and does not stop at the first with a hello:
      a holder of `C` could otherwise plant a decoy hello in one room while the computer waits in another. A
      code is no use to Lucille past those four, whatever the hub's clock says.
+   - It handles one `connect` at a time per code, so that two commands for one code cannot both pass the
+     checks below before either delivers.
    - It answers in the chat by the wire rules below (§11.4, "The wire"): "No Capsule is waiting with that
      code" when no room holds a hello; "That code expired" by the expiry rule there; and "That code can't be
      used. Start again in Capsule" when a read is interference, when more than one room holds a hello, when
@@ -1314,9 +1316,9 @@ command line and any future shell get it.
 7. **The host's checks on a delivery.**
    - **A delivery** is a post in the drop room, other than the host's own hello, that opens under the room's
      key and holds the JSON object of §11.5, in its form, with a signature that verifies (§11.5). Any other
-     post that opens is ignored and logged, and neither spends the request nor ends the wait. A post that does
-     not open makes the read fail, which is interference (§11.4, "The wire"), and ends the request. The same
-     code, byte for byte, posted twice counts once.
+     post that opens is ignored and logged, and neither spends the request nor ends the wait. A post that
+     makes the read fail other than by a hub failure is interference (§11.4, "The wire"), and ends the
+     request. The same code, byte for byte, posted twice counts once.
    - A post opens only under the room's key, so a delivery shows that its writer held `C`, or `K`, as well as
      Lucille's key.
    - If the room holds more than one delivery when the host reads it, the host refuses them all, and the
@@ -1356,20 +1358,27 @@ command line and any future shell get it.
   `LUCILLE_HUB` is the URL in the host's core constant, and Lucille uses the same one.
 - **The channel** is `lucille-host/connect`. Every post goes there through `Client.post`, with `ttl=1500`:
   the 20 minutes and the 300 s of skew. Both sides read it through `Client.history`, with `limit=50`.
-- **Interference.** In agent-switchboard 2.6.0, `Client.history` raises `DecryptionError` when any post in the
-  channel does not open under the room's key, and it never returns more than `limit` posts. So a read that
-  raises the library's `CryptoError` (of which `DecryptionError` is one), or that returns 50 posts, is
-  interference: someone who is not the host or Lucille wrote in the room, or wrote too much to read whole. The
-  library's own handshake treats a room it cannot read whole the same way. On interference the host ends the
-  request, spent, and the app says the code may be known to someone else; Lucille delivers nothing into that
-  room and answers that the code can't be used. Anyone who holds `C`, and the hub, can cause it: a denial of
-  service, nothing more. A read that fails for any other reason, the hub out of reach say, is tried again at
-  the next poll, as a read of the hub is today.
+- **What a read may end in.** Only a hub failure is tried again: an exception of a class in
+  `pairing.hub_errors()`, public in agent-switchboard 2.6.0 and there `SwitchboardError`, `OSError` and
+  `httpx.HTTPError`. The host tries it again at its next poll; Lucille delivers nothing, and answers in the
+  chat that it could not reach the computer, and to send the code again. **Any other exception from a read is
+  interference**, whatever its class, and so is a read that returns 50 posts. In 2.6.0, `Client.history`
+  raises `DecryptionError`, a `CryptoError`, when a post does not open under the room's key; it raises
+  `json.JSONDecodeError`, a `ValueError` and no `CryptoError`, when a post opens but its plaintext is not
+  JSON, which anyone who holds `C` can seal; and it never returns more than `limit` posts. The rule names what
+  is retried, not what is interference, so that an exception no one listed is interference too. On
+  interference the host ends the request, spent, and the app says the code may be known to someone else.
+  Anyone who holds `C`, and the hub, can cause it: a denial of service, nothing more.
+- **When Lucille delivers.** Lucille delivers only when all four of its reads (step 6) returned without an
+  exception and with fewer than 50 posts, exactly one room among them holds a hello, exactly one hello, that
+  room holds nothing else, and its hello has not expired (below). In every other case it delivers nothing:
+  "That code can't be used. Start again in Capsule", or the hub-failure answer above.
 - **The hello** is the post whose body is the object `{"t": "lucille-host/hello/1"}` and nothing else. Its
   `created_at` is the hub's time of it, an ISO 8601 string ending in `Z` as the hub writes it, read as UTC by
-  `datetime.fromisoformat` after a final `Z` is replaced by `+00:00`; one that does not parse makes it no
-  hello. The host tells its own hello by that body, and posts one only. A room holds exactly one: a second
-  hello in a room is interference.
+  `datetime.fromisoformat` after a final `Z` is replaced by `+00:00`. One that does not parse, or that parses
+  with no offset (a naive time, which cannot be compared with an aware one), makes it no hello. The host tells
+  its own hello by that body, and posts one only. A room holds exactly one: a second hello in a room is
+  interference.
 - **A delivery** is a post whose body is a string: the text of the JSON object of §11.5, at most 4,096 bytes
   in UTF-8. The host parses that string itself, so that it can refuse duplicate keys and check sizes before it
   parses.
@@ -1458,7 +1467,8 @@ string:
 - `"from"`: the chat account that sent the `connect` command, in a canonical form of ASCII only,
   `<service>:<id>`. Here `<service>` is 1 to 16 of `a-z`, and `<id>` is 1 to 64 of `0-9`, `A-Z`, `a-z`, `_`
   and `-`: the service's stable identifier, for Telegram the numeric user id, never a display name;
-- `"handle"`: what the app shows beside it, `""` or `@` followed by 1 to 64 of `A-Z`, `a-z`, `0-9` and `_`;
+- `"handle"`: what the app shows beside it, `""` or `@` followed by a letter and then up to 63 of `A-Z`,
+  `a-z`, `0-9` and `_`, the typed username's grammar (below);
 - `"sig"`: the Ed25519 signature, 64 bytes in unpadded base64url, matching `^[A-Za-z0-9_-]{86}$` and equal to
   its own re-encoding, since base64url decoding drops characters outside its alphabet and accepts more than
   one last character for the same bytes.
@@ -1504,8 +1514,8 @@ closes ambiguity, not a forgery.
 **What a refused post does.**
 - A post that opens but fails any of these checks is not a delivery. It is ignored and logged. It does not
   spend the request, and the wait goes on, so anyone who holds `C` can no longer spend a request with junk
-  that opens. A post that does not open is interference (§11.4, "The wire"), which ends the request: a denial
-  of service, which the hub or a holder of `C` can cause.
+  that opens. A post that makes the read fail other than by a hub failure is interference (§11.4, "The wire"),
+  which ends the request: a denial of service, which the hub or a holder of `C` can cause.
 - Only posts that pass count for the more-than-one rule. Two of them would need Lucille to deliver twice into
   one room, which it does not (below), so two that pass mean the key is misused. The host then refuses both
   and spends the request.
@@ -2590,7 +2600,8 @@ those writes itself first (`pause`, then `resume`).
 - A check symbol in the connect code (Crockford's mod-37 symbol), which would tell a typo from no Capsule
   waiting, at one more symbol to type (§11.4). A review recommends keeping ten symbols for the code and
   spending an eleventh, if any, on this.
-- The canonical `from` for chat services other than Telegram, whose form §11.4 fixes.
+- The canonical `from` for chat services other than Telegram, whose form §11.5 fixes, and whether each such
+  service's id may be logged.
 - How long a new key is out before Lucille signs with it, and the format of the list of revoked key ids
   (§11.5).
 - A full 32-byte commitment in the library, which would take the collision out of §11.2's bound against a
