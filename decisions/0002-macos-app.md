@@ -313,9 +313,10 @@ The app is done when:
    within 20 minutes." It names the chat accounts that are Lucille's. The user sends it, from the phone or
    the Mac, and the app waits for Lucille (§11.4).
 6. Lucille answers in the chat and shows its 8-digit number there (Lucille policy, not proven by this
-   repository). The app: "Lucille got this code from telegram:@ada. Is that you?" (§11.5) Then it
-   shows the number with the last four digits hidden, `4071-••••`, and asks for those four from Lucille's
-   number. The user types them, and the app answers at once: "Matches." (§11.2)
+   repository). The app: "Lucille got this code from telegram:@ada. Is that you?" (§11.5) Then it shows the
+   number with the last four digits hidden, `4071-••••`, and asks once for those four from Lucille's number;
+   after a wrong entry, it asks for all eight. The user types them, and the app answers at once: "Matches."
+   (§11.2)
 7. The app shows **Connected** once Lucille's work room arrives.
 8. **Folders**: **Choose a Folder…** opens the standard Open panel. The app suggests a short name, which the
    user may change (§12).
@@ -356,7 +357,7 @@ never published, because anyone can make a code that passes the host's code chec
 | Opened the app from the disk image, Downloads, or anywhere but Applications | "Capsule needs to be in your Applications folder" | Drag it there; **Show Applications Folder** opens the Finder (§6) |
 | Sent the connect code with a typo | Lucille, in the chat: "No Capsule is waiting with that code" (Lucille policy, not proven by this repository) | Send it again; the Connect request lives 20 minutes |
 | Never sent the code, or sent it too late | App: "Waiting for Lucille…", then "The code expired", with **Start Over** | A new Connect |
-| Typed the wrong digits | "That doesn't match. Type Lucille's whole number." After 3 tries: "Nothing was connected. Start again from Capsule." | **Start Over** |
+| Typed the wrong digits | "That doesn't match. Type Lucille's whole number, all eight digits." After three wrong entries in all: "Nothing was connected. Start again from Capsule." | **Start Over** |
 | Clicked **Don't Allow** on a folder prompt | "macOS is blocking Capsule from this folder" | **Open Privacy Settings** (§12) |
 | Chose a folder that is too broad | A second sheet, safe choice as default (§12) | **Choose a Smaller Folder** |
 | Moved, renamed or unplugged a chosen folder | "The folder documents can't be found" (from `roots check`, at launch and in Folders) | **Choose Again**, which removes the alias and adds the folder from the Open panel. A different folder later created at the old path is not detected (not decided yet, §12) |
@@ -1114,13 +1115,14 @@ The maintainer decided §11.2, §11.4 and §11.5 on 2026-11-21, in the forms bel
 stands, and the app built today pairs on it (§11.3, "What is built today").
 
 This changes 0001's "The host's gate", for every shell, the command line included.
-- **The computer shows its number with the last four digits hidden**, as `4071-••••`, and the user types
-  those four digits from Lucille's number. `pair confirm` reads them on standard input (spaces and `-`
-  ignored) and compares them in constant time. `sas_pending` and `pair status` carry the first four digits
+- **The computer shows its number with the last four digits hidden**, as `4071-••••`. The number is eight
+  digits, `NNNN-NNNN` (sb `pairing.py:486-498`). `sas_pending` and `pair status` carry the first four digits
   only.
-- **After one wrong entry, the computer asks for the whole number.** From then on it shows no digits, and
-  takes all eight; four digits are refused, and do not count as an entry. **Three wrong entries forget the
-  pair**, and the host says to start again from Capsule.
+- **The first entry is the four hidden digits, once.** The user types them from Lucille's number.
+- **Every entry after a wrong one is all eight digits.** After a wrong entry the computer shows no digits, and
+  four digits are refused there without counting as an entry.
+- **Three wrong entries in all forget the pair**, and the host says to start again from Capsule.
+- `pair confirm` reads each entry on standard input (spaces and `-` ignored) and compares it in constant time.
 - **Digits typed before the host has the SAS** (the pair still `waiting`, before a resolve has returned the
   SAS) are refused with "Not ready yet: wait until Lucille shows its number in your chat", and **do not
   count** as a wrong entry.
@@ -1158,11 +1160,14 @@ answer, and publishes the reveal that matches. The responder checks only the com
 k-way collision gives k numbers, at about 2^(128(k-1)/k) work. A full 32-byte commitment would close this; it
 is the library's to change (Not decided yet).
 
-**The odds: 1 in 10,000 per Connect, or 2 in 10,000 against an attacker who holds a collision.**
-- An attacker in the middle, which since §11.5 must also hold Lucille's key, holds two pairings: Lucille ↔
-  attacker, with Lucille's number, and
-  attacker ↔ computer, with the computer's. The user types the last four digits of Lucille's number, and
-  the computer's gate opens only if its own last four are the same.
+**The odds, against an attacker who holds Lucille's key: 1 in 10,000 per Connect, or 2 in 10,000 with a
+collision.** Without the key, neither the digits nor the collision come into play: the computer refuses the
+attacker's code before it has a number (§11.5). The collision is a lever only for the computer's initiator,
+and since §11.5 only a holder of Lucille's key can be one. So it no longer exposes the computer to anyone
+else.
+- An attacker in the middle, holding Lucille's key, holds two pairings: Lucille ↔ attacker, with Lucille's
+  number, and attacker ↔ computer, with the computer's. The user types the last four digits of Lucille's
+  number, and the computer's gate opens only if its own last four are the same.
 - Those four digits are the HMAC's first 32 bits modulo 10^4, so no value comes up more than 429,497 times
   in 2^32: **1 in 10,000 per attempt** (1 in 9,999.994).
 - The entries after a wrong one compare the same two numbers, so against an attacker they add nothing:
@@ -1428,6 +1433,13 @@ every way a pair ends: Disconnect, removal on Lucille's side, rejection, the dea
   telegram:@mallory. Is that you?"). What is left: a user who does not read it, or an attacker whose account
   name passes for the user's at a glance. Capsule also names the chat accounts that are Lucille's, from a list
   in the core.
+- **What stays open on Lucille's side: a code holder that redeems Lucille's code first.** Whoever holds the
+  connect code can read Lucille's signed code in the drop room and redeem it before the computer does. The
+  computer's own redemption is then refused, and it says the code may have been used by someone else, but
+  Lucille holds a pair with the code holder. The signature protects the computer, not Lucille: Lucille's side
+  is exposed (the job arguments it sends, the results it trusts) until the user removes that computer in
+  Lucille. Lucille should send no work to a pair until the user confirms in the chat that Capsule said
+  "Matches" (a recommendation to Lucille; Lucille policy, not proven by this repository).
 - **Lucille's key, stolen or misused.** Whoever holds it can sign, and the typed digits (§11.2) are then the
   line. A key that leaks is revoked in the next release, and the pairs made under it end (§11.5). A host that
   is not updated keeps trusting it, since there is no auto-update.
@@ -2237,7 +2249,7 @@ These join 0001's "Host invariants and their tests".
 | M2 | The app makes no network connection; the host connects only to its hub | `lsof` sampling against a loopback hub; `macos_lint` |
 | M3 | Nothing from outside the keyboard changes policy: no link reaches the app, and a pairing delivered in the drop room reaches only `pair`, whose fresh policy (§11.6) is the one change it makes | `macos_lint`: no URL scheme, no handler for a URL; core tests: refused deliveries leave the policy digest unchanged |
 | M4 | From the Connect release, the host redeems only a code answering its own pending request, and signed with a key the release pins | core tests: no nonce, wrong, reused, expired, two deliveries at once; no signature, an unknown key id, another key, a signature over another code, another nonce or another `from`; each refused before `pairing.accept`, with no store write and no spawn; a pair made under a revoked key id ends at start |
-| M5 | The host's gate opens only on Lucille's number, typed: its last four digits, or the whole number after a wrong entry. It never shows its own last four before | core tests: a wrong entry, then only the whole number taken, four digits then refused without counting, three wrong entries forget, the right entry opens; `pair status` carries the first four digits only, and none after a wrong entry |
+| M5 | The host's gate opens only on Lucille's number, typed: the first entry is its last four digits, once; every entry after a wrong one is all eight. It never shows its own last four before | core tests: a wrong entry, then only the whole number taken, four digits then refused without counting, three wrong entries forget, the right entry opens; `pair status` carries the first four digits only, and none after a wrong entry |
 | M6 | Nothing in the environment changes what the bundled runtime loads | `check_app.py environment`: with `PYTHONPATH`, `PYTHONHOME`, `PYTHONSTARTUP`, a user site, `PYTHONUSERBASE` and the working folder each set to load a planted module, the runtime run with the app's flags loads none; for each, a control run without `-I` must load it, or the check fails. `PYTHONSTARTUP` is read only by an interactive interpreter, so no run the app makes (`-m lucille_host`) could load it even without `-I`; its control runs `-i`. With `PYTHONPYCACHEPREFIX` set, the runtime run with the app's flags reads `.pyc` files from no other tree; its control, without `-I`, names the prefix. No `.pth` file ships beyond the installed `RECORD` files, which `check_app.py record` compares with the wheels'. On the ad-hoc bundle (signed without the hardened runtime, §7) on macOS 15, 26 and 27, and again on every signed build in `macos-verify`. That covers the Python variables and files above only: no check plants a `DYLD_*` variable, and without the hardened runtime dyld may honour one in the interpreter (from memory of Apple's hardened runtime documentation; not read in a source here and not tested). The runs the app starts get only `HOME`, `PATH`, `LANG`, `USER`, `LOGNAME` and `TMPDIR` (`HostCLI.swift`, `environment()`) |
 | M7 | Developer ID builds: hardened runtime, no entitlements, every Mach-O signed by the team | signing-job checks, on signed builds only: an ad-hoc build has neither the hardened runtime nor a Team ID (§7), so library validation against a Team ID is checked only on signed builds |
 | M8 | The bundle is never written at run time | `check_app.py readonly`, after `chmod -R a-w`: the host runs, nothing in the bundle changes, no `.pyc` appears or changes, and `codesign --verify --strict` passes after; the signature is checked again after every other check; the read-only end-to-end run once it exists. On the ad-hoc bundle on macOS 15, 26 and 27, and on every signed build |
@@ -2277,7 +2289,7 @@ those writes itself first (`pause`, then `resume`).
 |---|---|---|
 | A website or another app hands the app a code | the app registers no URL scheme and never reads the pasteboard itself (§11.3, §11.5); the core refuses a code without its own nonce | none known beyond §11.7 |
 | A scam that hands the user a code made with the public library | the paste form is never published; from the Connect release, the nonce refuses it in every shell | a user talked into reading out codes |
-| A connect code or a pairing code intercepted, in the chat or the drop room | Lucille's signature, which only a holder of the pinned key can make (§11.5); the computer's gate types four digits of Lucille's number (§11.2) | spending the request; with Lucille's key too, 1 in 10,000 per Connect, or 2 in 10,000 with a 2^64 collision of the commitment (§11.2); beyond that, Lucille's side, not files |
+| A connect code or a pairing code intercepted, in the chat or the drop room | Lucille's signature, which only a holder of the pinned key can make (§11.5): the interceptor cannot deliver a code the computer takes, and the commitment's collision gives it no lever; the typed digits against a key holder (§11.2) | spending the request; redeeming Lucille's code first, which exposes Lucille's side, not the computer (§11.7); with Lucille's key too, 1 in 10,000 per Connect, or 2 in 10,000 with a collision |
 | A look-alike chat account is sent the connect code | the pinned key: the host refuses a code Lucille did not sign, before any number (§11.5) | none from the look-alike itself |
 | A look-alike that passes the code on to the real Lucille from its own account | Lucille signs the account the command came from, and the app shows it before the digits; Capsule names Lucille's chat accounts (§11.7) | a user who does not read the account, or an attacker's account name that passes for theirs |
 | Lucille's signing key stolen or misused | a separate signing service (Lucille policy); revocation in the next release, which ends the pairs made under it (§11.5); the typed digits | hosts not updated, since there is no auto-update |
@@ -2353,8 +2365,8 @@ those writes itself first (`pause`, then `resume`).
   it is measured.
 - A check symbol in the connect code (Crockford's mod-37 symbol), which would tell a typo from no Capsule
   waiting, at one more symbol to type (§11.4).
-- A full 32-byte commitment in the library, which would take the collision out of §11.2's bound; it is the
-  library's to change.
+- A full 32-byte commitment in the library, which would take the collision out of §11.2's bound against a
+  holder of Lucille's key; it is the library's to change.
 - Intel Macs (§5).
 - An updater (§16).
 - A launcher embedding Python in place of the renamed interpreter (§6).

@@ -623,8 +623,9 @@ must come after that (section 2). `lucille-host status` never reports the SAS, i
 object has no field that could hold it, and it starts no deadline.
 
 [decisions/0002-macos-app.md](../decisions/0002-macos-app.md) §11.2 records a gate, decided on 2026-11-21
-and not built, in which the computer shows its SAS with the last four digits hidden, and the user types
-those four from Lucille's number, or the whole number after a wrong entry. When it is built, `sas_pending`
+and not built, in which the computer shows its SAS with the last four digits hidden. The first entry is
+those four digits, once, from Lucille's number; every entry after a wrong one is all eight digits; three wrong
+entries in all forget the pair. When it is built, `sas_pending`
 carries the first four digits only, in place of its `sas` field, `pair status` shows those four until a wrong
 entry and none after it, and that is a new major version of this contract (section 12).
 
