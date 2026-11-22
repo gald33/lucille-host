@@ -1497,7 +1497,11 @@ shown.
 
 **The key.** Each host release carries Lucille's public signing key as a core constant: an Ed25519 key, with a
 short key id. Ed25519 is in the `cryptography` package the library already uses for room write keys
-(sb `writekey.py:60-61`), so this adds no dependency.
+(sb `writekey.py:60-61`), so this adds no dependency. The constant is `LUCILLE_SIGNING_KEYS` in
+`lucille_host._switchboard`, a read-only map from each key id to its 32 raw bytes, with at most two entries
+(rotation, below). The key pinned first has id `491e2cd6f9c3555d`. A test recomputes each id from its key's
+bytes, and checks that each key is a point of Ed25519's prime-order group. Nothing reads the constant until
+the host's checks on a delivery (below) are built.
 
 **The delivery, byte for byte.** A delivery is one sealed post in the drop room (§11.4, step 7), of at most
 4 KiB, holding this JSON object, and no other key. The host checks the size before it parses, refuses a

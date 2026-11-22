@@ -74,6 +74,7 @@ import time
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any, Final
 
 from switchboard import client, crypto, pairing, sharing, signing
@@ -87,6 +88,17 @@ __all__: list[str] = []
 # The hub the host talks to. A pairing code naming any other hub is refused (a loopback hub is
 # accepted only when the local configuration names it, for the conformance suite).
 LUCILLE_HUB: Final = "https://switchboard.lucille-ai.com"
+
+# Lucille's Ed25519 public signing keys, by key id (decisions/0002 §11.5). A key is its 32 raw
+# bytes; its id is the first 8 bytes of their SHA-256, in lowercase hex. A release pins at most
+# two: the old and the new, during a changeover. A new key comes only in a new release.
+LUCILLE_SIGNING_KEYS: Final = MappingProxyType(
+    {
+        "491e2cd6f9c3555d": bytes.fromhex(
+            "313256717cac6cae3f4f7f0c5e20ea4ae3f0c30d267b223d52ffcd40d422e326"
+        ),
+    }
+)
 
 # A long-poll holds for up to 25 s; the client waits longer than that for an answer.
 CLIENT_TIMEOUT: Final = 40.0
