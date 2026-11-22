@@ -1284,10 +1284,11 @@ command line and any future shell get it.
    the earlier of the hub's time of that post and the computer's own clock when it posted. The library reads
    the hub's time unchecked (`:351-358`, `:1435-1448`), so the host refuses a hub time more than 300 s
    ahead of its own clock, and checks the expiry against its own clock at every read and before it
-   redeems. A hub can shorten the window, then, but not stretch it. A computer clock stepped back lengthens
-   it, a matter of local trust; one more than about 20 minutes off makes Lucille miss the epoch, and answer
-   that no Capsule is waiting, a matter of availability. If the hub cannot be reached, `begin` says
-   so and keeps no request.
+   redeems. A hub can shorten the window, then, but not stretch it. A computer clock stepped back during the
+   wait lengthens it, a matter of local trust, but by about 300 s at most: past that the hello's `ttl` has run
+   out on the hub, and the next read ends the request with the interference warning (step 5). A computer
+   clock more than about 20 minutes off makes Lucille miss the epoch, and answer that no Capsule is waiting,
+   a matter of availability. If the hub cannot be reached, `begin` says so and keeps no request.
 5. **The host then waits for Lucille's pairing, with no code pasted.** `pair begin --json` stays running and
    reads the drop room every 5 s, as `pair --code-stdin --json` waits today (§11.3). It stops when a
    delivery arrives, the request expires, or the user cancels. Three rules end it with the interference
@@ -1302,13 +1303,17 @@ command line and any future shell get it.
      ends with the warning too. The host does not redeem after the expiry (step 4), and a delivery it saw
      and could not use is no plain expiry.
 
+   A read's instant, for all three, is when it completed, by the computer's own clock. A read that completes
+   after the expiry counts for none of them, so a Mac that sleeps with a read in flight raises no false alarm.
+
    Together they catch a holder of `C`, working alone, who redeems Lucille's code first and then hides the
    delivery from the host (§11.7). A delivery outlives the request too, so a read that succeeds after it
    either finds it or finds the room emptied of its hello. To hide it otherwise, every read from then on must
    fail at the hub, the last one too; a hub that drops the room's posts after the code holder has read the
    delivery fails the hello check. A network blip that ends before the expiry raises no warning. One still
-   going at the expiry, or an honest hub restarted onto an empty database, shows the warning where the truth
-   was plain expiry: a false alarm, whose cost is a wrong message, since the user starts again either way.
+   going at the expiry, an honest hub restarted onto an empty database, or a clock stepped during the wait by
+   more than about 300 s, the computer's back or the hub's forward, shows the warning where the truth was
+   plain expiry: a false alarm, whose cost is a wrong message, since the user starts again either way.
    Three limits remain:
    - **A hub that keeps the hello and hides only the delivery** is not caught: the request ends with plain
      "The code expired". The hub cannot open the room's posts, so this takes a hub working with a holder of
