@@ -531,3 +531,184 @@ def test_a_revoked_id_out_of_its_form_is_refused(revoked: str) -> None:
 
 def test_the_release_revokes_no_key_yet() -> None:
     assert frozenset() == _switchboard.LUCILLE_REVOKED_KEY_IDS
+
+
+# --- The order of the checks (decisions/0002 §11.5) ---------------------------------------------
+
+# The checks on a parsed body, in the order verify makes them. A post that fails two of them is
+# refused for the earlier one: the key checks come after every form check, and the revoked list
+# before the pinned keys, so that an unknown key id (which the app reads as Lucille perhaps
+# needing a newer Capsule) is reported only for a post that is otherwise in form and not revoked.
+ORDER = (
+    delivery.WRONG_KEYS,
+    delivery.NOT_STRING,
+    delivery.WRONG_TYPE,
+    delivery.BAD_KID,
+    delivery.BAD_FROM,
+    delivery.BAD_HANDLE,
+    delivery.BAD_SIG,
+    delivery.BAD_CODE,
+    delivery.REVOKED_KEY,
+    delivery.UNKNOWN_KEY,
+    delivery.FORGED,
+)
+
+
+class Case:
+    """One post, and the keys and revoked ids it is checked against."""
+
+    def __init__(self, signer: Signer) -> None:
+        self.signer = signer
+        self.fields: dict[str, object] = dict(signer.fields())
+        self.keys: dict[str, bytes] = signer.keys
+        self.revoked: frozenset[str] = frozenset()
+
+    def breaks(self, reason: str) -> None:
+        """Make the post fail the check ``reason`` names, and only that one by itself."""
+        fields = self.fields
+        if reason == delivery.WRONG_KEYS:
+            fields["extra"] = ""
+        elif reason == delivery.NOT_STRING:
+            fields["from"] = 1
+        elif reason == delivery.WRONG_TYPE:
+            fields["t"] = "lucille-host/hello/1"
+        elif reason == delivery.BAD_KID:
+            fields["kid"] = str(fields["kid"]).upper()
+        elif reason == delivery.BAD_FROM:
+            fields["from"] = "Telegram:123456789"
+        elif reason == delivery.BAD_HANDLE:
+            fields["handle"] = "ada"
+        elif reason == delivery.BAD_SIG:
+            fields["sig"] = str(fields["sig"]) + "="
+        elif reason == delivery.BAD_CODE:
+            fields["code"] = str(fields["code"]) + "\n"
+        elif reason == delivery.REVOKED_KEY:
+            self.revoked = frozenset({self.signer.kid})
+        elif reason == delivery.UNKNOWN_KEY:
+            self.keys = {}
+        elif reason == delivery.FORGED:
+            code = str(fields["code"])
+            fields["sig"] = self.signer.fields(code=code, nonce=bytes(16))["sig"]
+        else:  # pragma: no cover - a reason the table does not know
+            raise AssertionError(reason)
+
+    def refusal(self) -> delivery.Refused:
+        with pytest.raises(delivery.Refused) as caught:
+            delivery.verify(json.dumps(self.fields), NONCE, keys=self.keys, revoked=self.revoked)
+        return caught.value
+
+
+@pytest.mark.parametrize("reason", ORDER)
+def test_each_breaker_fails_only_its_own_check(signer: Signer, reason: str) -> None:
+    case = Case(signer)
+    case.breaks(reason)
+    assert case.refusal().reason == reason
+
+
+PAIRS = [(ORDER[i], ORDER[j]) for i in range(len(ORDER)) for j in range(i + 1, len(ORDER))]
+
+
+@pytest.mark.parametrize(("earlier", "later"), PAIRS)
+def test_a_post_failing_two_checks_is_refused_for_the_earlier(
+    signer: Signer, earlier: str, later: str
+) -> None:
+    case = Case(signer)
+    case.breaks(later)
+    case.breaks(earlier)
+    refusal = case.refusal()
+    assert refusal.reason == earlier
+    assert refusal.unknown_key is (earlier == delivery.UNKNOWN_KEY)
+
+
+def test_a_revoked_and_unknown_key_id_is_reported_revoked_not_unknown(signer: Signer) -> None:
+    case = Case(signer)
+    case.breaks(delivery.UNKNOWN_KEY)
+    case.breaks(delivery.REVOKED_KEY)
+    refusal = case.refusal()
+    assert refusal.reason == delivery.REVOKED_KEY
+    assert not refusal.unknown_key
+
+
+@pytest.mark.parametrize(
+    ("body", "reason"),
+    [
+        (b"\xff" * (delivery.MOST_BYTES + 1), delivery.NOT_TEXT),
+        ("\ud800" + "[" * delivery.MOST_BYTES, delivery.NOT_UTF8),
+        ("[" * (delivery.MOST_BYTES + 1), delivery.TOO_LARGE),
+        ('{"a": [', delivery.TOO_DEEP),
+        ('{"t": 1, "t": 2', delivery.NOT_JSON),
+        ('{"t": 1, "t": 2}', delivery.KEY_TWICE),
+        ('["t"]', delivery.NOT_OBJECT),
+        ('{"t": 1}', delivery.WRONG_KEYS),
+    ],
+)
+def test_the_body_checks_come_in_order(signer: Signer, body: object, reason: str) -> None:
+    # Each body fails the check named and the ones after it that it can reach.
+    assert _refused(body, signer) == reason
+
+
+# --- What a refusal keeps -------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("body", "reason"),
+    [
+        ('{"secret": "\ud800"}', delivery.NOT_UTF8),
+        ('{"secret": "x"', delivery.NOT_JSON),
+        ('{"secret": 1, "secret": 2}', delivery.KEY_TWICE),
+    ],
+)
+def test_a_refusal_has_no_context_that_holds_the_body(
+    signer: Signer, body: str, reason: str
+) -> None:
+    with pytest.raises(delivery.Refused) as caught:
+        delivery.verify(body, NONCE, keys=signer.keys)
+    assert caught.value.reason == reason
+    assert caught.value.__context__ is None
+    assert caught.value.__cause__ is None
+
+
+# --- The pinned keys cannot change after load ---------------------------------------------------
+
+
+def test_the_pinned_keys_are_a_read_only_copy() -> None:
+    raw = os.urandom(32)
+    given = {_id(raw): raw}
+    pinned = _switchboard._pinned(given, frozenset())
+    with pytest.raises(TypeError):
+        pinned[_id(raw)] = bytes(32)  # type: ignore[index]
+    other = os.urandom(32)
+    given[_id(other)] = other
+    assert _id(other) not in pinned
+    assert len(pinned) == 1
+
+
+def test_the_release_keys_and_revoked_ids_cannot_be_changed() -> None:
+    with pytest.raises(TypeError):
+        _switchboard.LUCILLE_SIGNING_KEYS["0" * 16] = bytes(32)  # type: ignore[index]
+    assert isinstance(_switchboard.LUCILLE_REVOKED_KEY_IDS, frozenset)
+    assert not hasattr(_switchboard.LUCILLE_REVOKED_KEY_IDS, "add")
+
+
+def test_a_key_id_matching_only_a_prefix_of_its_bytes_id_is_refused() -> None:
+    raw = os.urandom(32)
+    real = _id(raw)
+    for kept in (8, 15):
+        wrong = real[:kept] + "".join("0" if c != "0" else "1" for c in real[kept:])
+        with pytest.raises(ValueError, match="id its bytes do not give"):
+            _switchboard._pinned({wrong: raw}, frozenset())
+
+
+# --- The length guard in signature_valid --------------------------------------------------------
+
+
+def test_signature_valid_refuses_wrong_lengths_before_the_library(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # With the library answering yes to everything, only the guard stands.
+    monkeypatch.setattr("lucille_host._switchboard.signing.verify", lambda *args: True)
+    assert _switchboard.signature_valid(RFC_KEY, b"", RFC_SIG)
+    assert not _switchboard.signature_valid(RFC_KEY[:31], b"", RFC_SIG)
+    assert not _switchboard.signature_valid(RFC_KEY + b"\x00", b"", RFC_SIG)
+    assert not _switchboard.signature_valid(RFC_KEY, b"", RFC_SIG[:63])
+    assert not _switchboard.signature_valid(RFC_KEY, b"", RFC_SIG + b"\x00")

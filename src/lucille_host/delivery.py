@@ -155,22 +155,34 @@ def _no_key_twice(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     return seen
 
 
+# What the parse gave when the body is not JSON.
+_NOT_JSON: Final = object()
+
+
 def _parsed(body: object) -> dict[str, str]:
     """The body as a delivery's object of strings, or :class:`Refused`."""
+    # Each refusal is raised outside the ``except`` that saw the error, so that it has no
+    # ``__context__``: the codec's and the parser's errors both hold the body.
     if not isinstance(body, str):
         raise Refused(NOT_TEXT)
+    size: int | None
     try:
         size = len(body.encode("utf-8"))
     except UnicodeEncodeError:
-        raise Refused(NOT_UTF8) from None
+        size = None
+    if size is None:
+        raise Refused(NOT_UTF8)
     if size > MOST_BYTES:
         raise Refused(TOO_LARGE)
     if nesting.json_deeper(body, 1):
         raise Refused(TOO_DEEP)
+    doc: object
     try:
         doc = json.loads(body, object_pairs_hook=_no_key_twice)
     except ValueError:
-        raise Refused(NOT_JSON) from None
+        doc = _NOT_JSON
+    if doc is _NOT_JSON:
+        raise Refused(NOT_JSON)
     if not isinstance(doc, dict):
         raise Refused(NOT_OBJECT)
     if set(doc) != _KEYS:
