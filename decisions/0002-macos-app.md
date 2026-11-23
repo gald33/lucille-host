@@ -1496,7 +1496,8 @@ code from `pair begin`, and deliver into the drop room a code whose note holds t
 
 ### 11.5 Lucille's signing key, pinned; no URL scheme
 
-**Decided by the maintainer on 2026-11-21, not built yet.** The host refuses any peer that cannot prove it
+**Decided by the maintainer on 2026-11-21. The host's checks on a delivery are built (`delivery.py`); nothing
+calls them until `pair begin` is built.** The host refuses any peer that cannot prove it
 holds Lucille's signing key, before it redeems a code, and so before its gate exists and before any number is
 shown.
 
@@ -1504,9 +1505,10 @@ shown.
 short key id. Ed25519 is in the `cryptography` package the library already uses for room write keys
 (sb `writekey.py:60-61`), so this adds no dependency. The constant is `LUCILLE_SIGNING_KEYS` in
 `lucille_host._switchboard`, a read-only map from each key id to its 32 raw bytes, with at most two entries
-(rotation, below). The key pinned first has id `491e2cd6f9c3555d`. A test recomputes each id from its key's
-bytes, and checks that each key is a point of Ed25519's prime-order group. Nothing reads the constant until
-the host's checks on a delivery (below) are built.
+(rotation, below). The key pinned first has id `491e2cd6f9c3555d`. When the host loads, it checks that a
+release pins one or two keys, each 32 raw bytes under the id its bytes give, none of them revoked; a release
+that breaks one of these does not start. A test recomputes each id from its key's bytes, and checks that each
+key is a point of Ed25519's prime-order group.
 
 **The delivery, byte for byte.** A delivery is one sealed post in the drop room (§11.4, step 7), of at most
 4 KiB, holding this JSON object, and no other key. The host checks the size before it parses, refuses a
@@ -1531,7 +1533,8 @@ byte; the 8 raw bytes of the key id; the 16 raw bytes of `N`; the 32-byte SHA-25
 by its ASCII bytes. Every field before `"from"` has a fixed length, and the two that follow are each prefixed
 with theirs, so the bytes split one way only. The host verifies with the `cryptography` package's
 `Ed25519PublicKey.verify` (RFC 8032, which refuses a non-canonical signature), over a 32-byte key and a
-64-byte signature.
+64-byte signature. It reaches it through the library's `signing.verify`, which calls exactly that, so that
+the host's own code imports no `cryptography` (the Switchboard-surface lint names it).
 
 **The code is taken only in its one encoding.** The library's decoder strips whitespace, and its base64
 reading drops characters outside the alphabet (sb `pairing.py:293-294`, `:550`), so many strings decode to
@@ -1642,8 +1645,9 @@ never passes, as `--hub` is today.
 - **A host not updated in time** cannot make a new pair once Lucille stops using its key. It says "Lucille
   needs a newer Capsule to connect", and the existing pair is unaffected.
 - **A key that leaks** is dropped in the next release at once, and listed there as revoked. A revoked key id
-  stays listed in every later release, so a pair made under it never outlives an update. The list's format,
-  and the time a new key is out before Lucille uses it, are not decided yet.
+  stays listed in every later release, so a pair made under it never outlives an update. The list is
+  `LUCILLE_REVOKED_KEY_IDS` beside the keys, a set of key ids, empty so far; a delivery under one is refused
+  before its key is looked up. The time a new key is out before Lucille uses it is not decided yet.
 
 **Existing pairs when the key changes.**
 - **A rotation leaves them alone.** The key is checked when a pair is made; after that, the pair secret

@@ -61,7 +61,8 @@ included, and in ``tools/``):
   library's notes and the hub's errors apart without a hub call; never ``start``, ``collect``,
   ``heal``, ``export`` or ``from_secret``),
   ``client`` (``Client`` and its errors), ``sharing`` (above), ``signing``
-  (``SigningIdentity``), ``crypto`` (its errors) and ``config`` (``ClientConfig``). The CLI, the
+  (``SigningIdentity``, and ``verify``, which checks Lucille's signature on a connect delivery),
+  ``crypto`` (its errors) and ``config`` (``ClientConfig``). The CLI, the
   MCP bridge, invites, rendezvous, the hub server and every other submodule are refused. No
   submodule, nor the package, may be used as a value.
 
@@ -181,7 +182,7 @@ SURFACE: Mapping[str, frozenset[str]] = {
             "SharedRoom",
         }
     ),
-    "signing": frozenset({"SigningIdentity"}),
+    "signing": frozenset({"SigningIdentity", "verify"}),
     "crypto": frozenset({"CryptoError", "DecryptionError"}),
     "config": frozenset({"ClientConfig"}),
 }
