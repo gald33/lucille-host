@@ -1078,8 +1078,9 @@ leaves it out of `enabled_ops` (decisions/0003, "First use").
 - `diagnostics` and removing the host's data ([decisions/0002-macos-app.md](../decisions/0002-macos-app.md)
   §8).
 - The typed pairing gate and Connect from Lucille's chat (decisions/0002 §11.2, §11.4 and §11.5): decided on
-  2026-11-21, not built. When built, `pair begin` reads the chat service and the user's own username on
-  standard input, a change to this contract.
+  2026-11-21. Only the host's checks on Lucille's signed delivery are built, and no command uses them yet.
+  When built, `pair begin` reads the chat service and the user's own username on standard input, a change to
+  this contract.
 - A typed history of what the host did, for a shell to show in words. `log_line` carries text only, which a
   shell shows as it is.
 - During pairing, whether the hub could be reached and whether it refuses this computer's clock, beside

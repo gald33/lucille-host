@@ -532,7 +532,7 @@ PINNED_SURFACE = {
         "Left",
         "SharedRoom",
     },
-    "signing": {"SigningIdentity"},
+    "signing": {"SigningIdentity", "verify"},
     "crypto": {"CryptoError", "DecryptionError"},
     "config": {"ClientConfig"},
 }

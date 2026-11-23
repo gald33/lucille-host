@@ -9,12 +9,15 @@ that reaches it through this module.
 The surface is the plain synchronous library. The calls the design names are:
 
 - ``switchboard.pairing``: ``PairingCode.decode``, ``accept``, ``resolve`` and ``forget``, with
-  ``PairStore`` for ``--store-file``. Not ``pairing.status``, which resolves each pair over the
-  hub: ``lucille-host status`` makes no hub call, and reads the pair as the host's own store keeps
-  it (:meth:`Link.kept`);
+  ``PairStore`` for ``--store-file``; and ``PairingCode.encode`` on a code it decoded, to tell a
+  code in its one encoding (:func:`code_in_one_encoding`). Not ``pairing.status``, which resolves
+  each pair over the hub: ``lucille-host status`` makes no hub call, and reads the pair as the
+  host's own store keeps it (:meth:`Link.kept`);
 - ``switchboard.client.Client``: ``post``, ``inbox`` with a ``since`` cursor, and
   ``read_channels``, on clients built from the ``config`` of a pairing ``Resolution`` or a sharing
   ``SharedRoom``, each given a fresh ``switchboard.signing.SigningIdentity.generate()``;
+- ``switchboard.signing.verify``, to check Lucille's Ed25519 signature on a connect delivery
+  (:func:`signature_valid`, for ``delivery.py``);
 - ``switchboard.sharing``: ``touch``, ``accept``, ``resolve_room`` and ``leave``, the calls that
   read and take a room Lucille offers over the pair, with the host's own share store. Never
   ``share_new``: the host offers no room of its own.
@@ -69,7 +72,9 @@ from __future__ import annotations
 import base64
 import contextlib
 import datetime
+import hashlib
 import math
+import re
 import time
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
@@ -89,15 +94,43 @@ __all__: list[str] = []
 # accepted only when the local configuration names it, for the conformance suite).
 LUCILLE_HUB: Final = "https://switchboard.lucille-ai.com"
 
+
+def _pinned(keys: dict[str, bytes], revoked: frozenset[str]) -> MappingProxyType[str, bytes]:
+    """Lucille's keys as a release pins them, checked when the host loads (decisions/0002 §11.5):
+    one or two keys, each 32 raw bytes under the id its bytes give, none of them revoked, and each
+    revoked id an id in its form. A release that breaks one of these does not start."""
+    if not 1 <= len(keys) <= 2:
+        raise ValueError(f"a release pins one or two of Lucille's keys, not {len(keys)}")
+    for kid in revoked:
+        if not isinstance(kid, str) or not _KEY_ID.fullmatch(kid):
+            raise ValueError("a revoked key id is not 16 lowercase hex digits")
+    for kid, raw in keys.items():
+        if not isinstance(raw, bytes) or len(raw) != 32:
+            raise ValueError(f"Lucille's key {kid!r} is not 32 raw bytes")
+        if kid != hashlib.sha256(raw).digest()[:8].hex():
+            raise ValueError(f"Lucille's key {kid!r} is pinned under an id its bytes do not give")
+        if kid in revoked:
+            raise ValueError(f"Lucille's key {kid!r} is pinned and revoked")
+    return MappingProxyType(dict(keys))
+
+
+# A key id: the first 8 bytes of the SHA-256 of a key's 32 raw bytes, in lowercase hex.
+_KEY_ID: Final = re.compile(r"[0-9a-f]{16}")
+
+# The ids of Lucille's keys that have leaked. One stays listed in every later release, so that a
+# pair made under it never outlives an update (decisions/0002 §11.5, "Rotation"). None so far.
+LUCILLE_REVOKED_KEY_IDS: Final = frozenset[str]()
+
 # Lucille's Ed25519 public signing keys, by key id (decisions/0002 §11.5). A key is its 32 raw
 # bytes; its id is the first 8 bytes of their SHA-256, in lowercase hex. A release pins at most
 # two: the old and the new, during a changeover. A new key comes only in a new release.
-LUCILLE_SIGNING_KEYS: Final = MappingProxyType(
+LUCILLE_SIGNING_KEYS: Final = _pinned(
     {
         "491e2cd6f9c3555d": bytes.fromhex(
             "313256717cac6cae3f4f7f0c5e20ea4ae3f0c30d267b223d52ffcd40d422e326"
         ),
-    }
+    },
+    LUCILLE_REVOKED_KEY_IDS,
 )
 
 # A long-poll holds for up to 25 s; the client waits longer than that for an answer.
@@ -527,6 +560,37 @@ def decode_code(text: str) -> Code:
         note=code.note,
         name=code.pair_name,
     )
+
+
+def code_in_one_encoding(text: str) -> bool:
+    """Whether ``text`` is a pairing code in its one encoding (decisions/0002 §11.5): one the
+    library decodes and encodes back to exactly ``text``, byte for byte, as every code it makes
+    does. The library's decoder strips whitespace and its base64 reading drops characters outside
+    the alphabet, so many strings decode to one code; only this one is taken. A payload the host
+    refuses before the library's parser reads it (:func:`decode_code`) is not one either."""
+    if _payload_refused(text):
+        return False
+    try:
+        code = pairing.PairingCode.decode(text)
+    except (pairing.PairingError, RecursionError):
+        return False
+    return code.encode() == text
+
+
+def signature_valid(key: bytes, message: bytes, signature: bytes) -> bool:
+    """Whether ``signature`` is an Ed25519 signature by the 32-byte public ``key`` over
+    ``message``. The library's ``signing.verify`` checks it with the ``cryptography`` package's
+    ``Ed25519PublicKey.verify`` (RFC 8032, which refuses a non-canonical signature), and answers
+    false, never raising, for a bad signature or a key that is not one. A key that is not 32 bytes,
+    or a signature that is not 64, is false here before the library sees it."""
+    if len(key) != 32 or len(signature) != 64:
+        return False
+    return signing.verify(_b64(key), message, _b64(signature))
+
+
+def _b64(raw: bytes) -> str:
+    """Bytes in unpadded base64url, as the library writes keys and signatures."""
+    return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
 
 
 class KeyringPairs:
