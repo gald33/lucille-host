@@ -572,7 +572,10 @@ def test_the_core_answers_no_code_but_one_for_its_own_request(cli: HostCli, note
     # request's nonce: a code someone was handed, with any other note or none, is refused before
     # anything is written, and Lucille has nothing to collect.
     nonce = os.urandom(connect.NONCE_BYTES)
-    upper = nonce.hex().upper() if nonce.hex().upper() != nonce.hex() else nonce.hex()[:-1] + "A"
+    # One with a letter in it, so that its upper case is the same nonce in another case.
+    while nonce.hex() == nonce.hex().upper():
+        nonce = os.urandom(connect.NONCE_BYTES)
+    upper = nonce.hex().upper()
     other = os.urandom(connect.NONCE_BYTES).hex()
     lucille = cli.lucille()
     text = lucille.start(note=note.format(nonce=nonce.hex(), NONCE=upper, other=other))
