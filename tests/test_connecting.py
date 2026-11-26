@@ -568,7 +568,9 @@ def test_a_note_that_does_not_name_this_request_is_not_this_macs(
     live = _begin(cli, clock)
     lucille = cli.lucille()
     nonce = live.nonce.hex()
-    lucille.deliver(_shown(live), signer, note=note.format(nonce=nonce, NONCE=nonce.upper()))
+    # The nonce in upper case; one of digits only has none, so its last digit becomes a capital.
+    upper = nonce.upper() if nonce.upper() != nonce else nonce[:-1] + "A"
+    lucille.deliver(_shown(live), signer, note=note.format(nonce=nonce, NONCE=upper))
     step = _poll(cli, live, clock)
     assert step.found is not None
     code = _switchboard.decode_code(step.found.code)
