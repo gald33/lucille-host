@@ -634,7 +634,9 @@ Notes:
   hub and sign with a key of their own: 32 bytes in unpadded base64url. `pair begin` takes it only with
   `--hub`, and saves it for the profile, as it saves `--hub`. An answer to a request on that loopback hub may
   then be signed with it, as well as with the release's own keys; a request on Lucille's hub takes the
-  release's keys only. The app never passes it. Any other use is `bad_options`.
+  release's keys only. The app never passes it. Any other use is `bad_options`. A key is base64url, so it
+  may start with `-`: a harness writes it joined to the flag, `--test-key=KEY`, as it writes a path that
+  starts with `-` to `--suggest-alias`.
 - **`pair resume`** takes up the request `pair begin` kept, as `begin` would have gone on. A shell that was
   relaunched calls `pair status`, then `pair resume` if it reports a `connect`.
 - **`pair cancel`** drops the request. It refuses `busy` while `begin` or `resume` waits on it: the shell

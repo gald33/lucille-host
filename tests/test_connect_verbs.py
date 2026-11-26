@@ -458,7 +458,7 @@ def test_begin_with_a_test_key_takes_answers_signed_with_it(cli: HostCli) -> Non
     made = Signer()
     raw = next(iter(made.keys.values()))
     running = cli.start(
-        "pair", "begin", "--json", "--hub", LOOPBACK, "--test-key", _b64(raw), stdin=STDIN
+        "pair", "begin", "--json", "--hub", LOOPBACK, f"--test-key={_b64(raw)}", stdin=STDIN
     )
     request = _waiting(cli)
     assert request.hub == LOOPBACK
@@ -504,6 +504,20 @@ def test_the_test_key_is_taken_by_begin_with_a_loopback_hub_only(
     assert ran.rc == 1
     assert _objects(ran)[-1]["code"] == "bad_options"
     assert not cli.dirs.connect_file.exists()
+
+
+def test_a_test_key_that_starts_with_a_dash_is_taken_in_its_joined_form(cli: HostCli) -> None:
+    # A key is base64url, so one in 64 starts with `-`, which a separate word would make read as
+    # an option: the joined form, `--test-key=KEY`, is how a harness passes it.
+    raw = bytes([0xF8]) + bytes(31)
+    assert _b64(raw).startswith("-")
+    running = cli.start(
+        "pair", "begin", "--json", "--hub", LOOPBACK, f"--test-key={_b64(raw)}", stdin=STDIN
+    )
+    assert _waiting(cli).hub == LOOPBACK
+    assert state.load_host_config(cli.dirs).test_key == _b64(raw)
+    cli.stopping.set()
+    assert running.wait().rc == 1
 
 
 def test_trusted_keys_add_the_test_key_for_its_own_hub_only() -> None:

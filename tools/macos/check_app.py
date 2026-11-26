@@ -7772,7 +7772,8 @@ class _PairingCheck:
         signer = self.h.signer()
         raw = next(iter(signer.keys.values()))
         key = base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
-        argv = ["pair", "begin", "--json", "--hub", self.url, "--store-file", "--test-key", key]
+        # Joined to its flag: a key that starts with `-` would read as an option on its own.
+        argv = ["pair", "begin", "--json", "--hub", self.url, "--store-file", f"--test-key={key}"]
         pair = self.start(self.host_argv(*argv), env=self.host_env, piped=True)
         pair.write(b"telegram\nada\n")
 

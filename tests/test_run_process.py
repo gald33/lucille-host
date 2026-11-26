@@ -107,7 +107,7 @@ def test_run_as_separate_processes(tmp_path: Path, monkeypatch: pytest.MonkeyPat
         raw = next(iter(signer.keys.values()))
         key = base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
         pair = start(
-            [*host, "pair", "begin", "--json", "--hub", url, "--store-file", "--test-key", key]
+            [*host, "pair", "begin", "--json", "--hub", url, "--store-file", f"--test-key={key}"]
         )
         pair.write(b"telegram\nada\n")
 
