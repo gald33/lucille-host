@@ -417,7 +417,11 @@ final class Connection: ObservableObject {
     }
 
     private static let runVerb = ["run", "--json-events", "--exit-on-stdin-eof"]
-    private static let pairVerb = ["pair", "--code-stdin", "--json"]
+    /// Connect from Lucille's chat (spec/CLI.md §7): `pair begin` reads the service and the
+    /// username on standard input; `pair resume` takes up the request the host kept. The app no
+    /// longer pastes a code (`pair --code-stdin`).
+    private static let beginVerb = ["pair", "begin", "--json"]
+    private static let resumeVerb = ["pair", "resume", "--json"]
     private static let statusVerb = ["--json", "status"]
     /// `status` opens the Keychain, where macOS may first ask the user: two minutes, and after
     /// 3 s a window that says so, with Cancel.
@@ -646,6 +650,11 @@ final class Connection: ObservableObject {
             return
         }
         guard let pair = status?.pair else {
+            return
+        }
+        if flow.requestKept, case .noPair = pair {
+            // A Connect request: `pair status` first, then `pair resume`.
+            feedFlow(.startConnecting)
             return
         }
         feedFlow(.resume(pair))
@@ -1362,18 +1371,21 @@ final class Connection: ObservableObject {
                 poll.cancel()
             case .cancelDeadline:
                 deadline.cancel()
-            case .clearCodeField:
-                panel.clearCode()
             default:
                 break
             }
             return
         }
         switch effect {
-        case .startPair(let code):
-            startPair(code: code, epoch: epoch)
+        case .startConnect(let service, let username):
+            startPair(
+                verb: Connection.beginVerb, input: Connect.beginInput(service: service, username: username),
+                limit: Connect.childTimeLimit, epoch: epoch
+            )
+        case .resumeConnect:
+            startPair(verb: Connection.resumeVerb, input: "", limit: Connect.childTimeLimit, epoch: epoch)
         case .interruptPair:
-            if flow.screen == .busy(.rejecting) {
+            if flow.screen == .busy(.rejecting) || flow.screen == .busy(.cancelling) {
                 // Stop Connecting: `pair reject` waits for this child to end, so it does not wait
                 // on SIGINT alone. SIGTERM and SIGKILL follow, as at a quit.
                 stopPair(waits: Connection.pairStopWaits)
@@ -1394,8 +1406,8 @@ final class Connection: ObservableObject {
             }
         case .cancelDeadline:
             deadline.cancel()
-        case .clearCodeField:
-            panel.clearCode()
+        case .say(.connectEnded(let code, let message)):
+            showConnectEnded(ConnectionText.note(.connectEnded(code: code, message: message)))
         case .say(let note):
             Alerts.shared.note(ConnectionText.note(note), warning: Connection.isWarning(note))
             if note == .confirmed {
@@ -1424,14 +1436,34 @@ final class Connection: ObservableObject {
         switch note {
         case .confirmed, .rejected:
             return false
-        case .refused, .confirmedAnother, .notConfirmed, .confirmUnknown, .rejectFailed, .notStarted:
+        case .refused, .confirmedAnother, .notConfirmed, .confirmUnknown, .rejectFailed, .notStarted,
+             .connectEnded, .cancelFailed:
             return true
         }
     }
 
-    /// Start `pair --code-stdin --json` with the code on its standard input, which nothing logs.
-    private func startPair(code: String, epoch: Int) {
-        let child = HostChild(cli: cli, verb: Connection.pairVerb, input: .code(code), deliverOn: .main)
+    /// A Connect request ended: why, with Start Over, which opens the window again, and Not Now.
+    private func showConnectEnded(_ note: ConnectionNote) {
+        Alerts.shared.show({
+            let alert = NSAlert()
+            alert.alertStyle = .warning
+            alert.messageText = note.title
+            alert.informativeText = note.text + (note.detail.map { "\n\nDetails: \($0)" } ?? "")
+            alert.addButton(withTitle: ConnectionText.startOverButton)
+            alert.addButton(withTitle: ConnectionText.notNowButton)
+            return alert
+        }, done: { [weak self] response in
+            if response == .alertFirstButtonReturn {
+                self?.connectChosen()
+            }
+        })
+    }
+
+    /// Start a pairing child: `pair begin --json` with the service and the username on its standard
+    /// input, or `pair resume --json`. Nothing logs what it reads. It is interrupted after `limit`,
+    /// which keeps the pair or the request.
+    private func startPair(verb: [String], input: String, limit: TimeInterval, epoch: Int) {
+        let child = HostChild(cli: cli, verb: verb, input: .code(input), deliverOn: .main)
         child.onObject = { [weak self, weak child] object in
             onMain {
                 guard let self, let child, child === self.pairChild else {
@@ -1485,7 +1517,7 @@ final class Connection: ObservableObject {
             guardTermination()
             return
         }
-        childLimit.schedule(after: Pairing.childTimeLimit) { [weak self] in
+        childLimit.schedule(after: limit) { [weak self] in
             self?.feedFlow(.childTimeLimit, epoch: epoch)
         }
         guardTermination()
@@ -1517,6 +1549,8 @@ final class Connection: ObservableObject {
                 outcome = await self.hubVerb(["--json", "pair", "confirm"], cancel: token)
             case .pairReject:
                 outcome = await self.hubVerb(["--json", "pair", "reject"], cancel: token)
+            case .pairCancel:
+                outcome = await self.hubVerb(["--json", "pair", "cancel"], cancel: token)
             }
             if self.flowToken === token {
                 self.flowToken = nil
@@ -1536,8 +1570,8 @@ final class Connection: ObservableObject {
         activityPanel.onShowLog = { [weak self] in
             self?.readLog()
         }
-        panel.onSubmit = { [weak self] text in
-            self?.feedFlow(.submit(text))
+        panel.onSubmitAccount = { [weak self] service, typed in
+            self?.feedFlow(.submitAccount(service: service, typed: typed))
         }
         panel.onClose = { [weak self] in
             self?.feedFlow(.windowClosed)
@@ -1605,23 +1639,38 @@ final class Connection: ObservableObject {
     private func askStopConnecting() -> Bool {
         let alert = NSAlert()
         alert.messageText = ConnectionText.stopQuestionTitle
-        alert.informativeText = ConnectionText.stopQuestionText
+        alert.informativeText = flow.signedAccount == nil && (flow.requestKept || Connection.showsRequest(flow.screen))
+            ? ConnectionText.stopCodeText : ConnectionText.stopQuestionText
         alert.addButton(withTitle: ConnectionText.stopConnectingButton)
         alert.addButton(withTitle: ConnectionText.keepWaitingButton)
         NSApp.activate()
         return alert.runModal() == .alertFirstButtonReturn
     }
 
+    /// Whether the window shows a Connect request, before Lucille's answer.
+    private static func showsRequest(_ screen: PairingFlow.Screen) -> Bool {
+        switch screen {
+        case .starting, .connectCode:
+            return true
+        default:
+            return false
+        }
+    }
+
     private func renderPanel() {
         switch flow.screen {
         case .closed:
             panel.hide()
-        case .enterCode:
-            panel.showCode(setAside: settingsWouldBeSetAside())
+        case .account:
+            panel.showAccount(setAside: settingsWouldBeSetAside())
+        case .starting:
+            panel.showStarting()
+        case .connectCode(let request):
+            panel.showConnectCode(request)
         case .waiting(let skewed):
-            panel.showWaiting(clockSkewed: skewed)
+            panel.showWaiting(clockSkewed: skewed, account: flow.signedAccount)
         case .compare(let comparison):
-            panel.showCompare(comparison)
+            panel.showCompare(comparison, account: flow.signedAccount)
         case .busy(let busy):
             panel.showBusy(busy)
         }
@@ -2066,7 +2115,13 @@ final class Connection: ObservableObject {
         }
         switch status?.pair {
         case nil, .noPair?, .other?:
-            break
+            // `status` knows nothing of a Connect request: the flow says whether one it saw is
+            // kept. After a relaunch, Connect to Lucille… finds it with `pair status`.
+            if flow.requestKept {
+                shown.connect = false
+                shown.finish = !flow.windowOpen
+                shown.stopConnecting = true
+            }
         case .waiting?, .sasReady?, .sasPending?:
             shown.connect = false
             shown.finish = !flow.windowOpen

@@ -70,25 +70,72 @@ enum ConnectionText {
         }
     }
 
-    // MARK: The code window
+    // MARK: The pairing window
 
     static let codeTitle = "Connect to Lucille"
-    static let codeSteps = "In Lucille, open Computers and add this computer. Copy the code Lucille shows, then paste it below."
-    static let codePasteHow = "To paste, press Command-V, or Control-click the box and choose Paste."
-    static let codeWarning = "Paste only a code you copied from Lucille's page yourself. Never paste one someone sent you."
-    static let codePlaceholder = "Code from Lucille"
-    static let codeHint = "That doesn't look like a code from Lucille. Copy it again from Lucille's page."
     /// Shown when folders were added or an ability other than `host.describe` is on: pairing sets
     /// the policy aside (spec/CLI.md §6, `policy_reset`).
     static let settingsSetAside = "Connecting starts \(appName)'s settings afresh: the folders you added and the abilities you turned on are set aside. You can add them again once connected."
-    static let connectButton = "Connect"
     static let cancelButton = "Cancel"
+
+    // MARK: Connect from Lucille's chat (decisions/0002 §3.1 steps 5 and 6, §11.4, §11.5)
+
+    static let accountIntro = "Which chat do you talk to Lucille in?"
+    static let serviceLabel = "Chat:"
+    /// The username field's prompt, from decisions/0002 §3.1 step 5.
+    static func usernamePrompt(service: String) -> String {
+        let name = Connect.serviceName(service)
+        return "Your \(name) username, as in @ada."
+    }
+    /// For a user with no public username, from decisions/0002 §3.3.
+    static func usernameNeeded(service: String) -> String {
+        let name = Connect.serviceName(service)
+        return "\(appName) needs your \(name) username. Set one in \(name)'s settings, under Username, then come back."
+    }
+    static let usernamePlaceholder = "@username"
+    /// Under a typed text that names no username.
+    static func usernameHint(service: String) -> String {
+        "That isn't a \(Connect.serviceName(service)) username. It starts with a letter, and has only letters, digits and _."
+    }
+    static let continueButton = "Continue"
+    static let gettingCode = "Getting a code…"
+    /// The code page, from decisions/0002 §3.1 step 6; with the accounts the host names in
+    /// `send_to`, the handles as they are, and with none, no handle at all.
+    static func sendThis(code: String, to accounts: [LucilleAccount] = []) -> String {
+        let handles = accounts.map(\.handle)
+        guard let last = handles.last else {
+            return "Send this to Lucille in your chat: connect \(code). It works once, within 20 minutes."
+        }
+        let named = handles.count == 1 ? last : handles.dropLast().joined(separator: ", ") + " or " + last
+        return "Send this to Lucille in your chat, to \(named): connect \(code). It works once, within 20 minutes."
+    }
+    static func sendLine(code: String) -> String {
+        "connect \(code)"
+    }
+    static func codeExpires(_ when: Date) -> String {
+        "It stops working at \(localTime(when))."
+    }
+    /// Names no account: the handles, when the host gives them, are in `sendThis` (decisions/0002
+    /// §11.7).
+    static let sendOnlyToLucille = "Send it only to the official Lucille account, in your own chat with it. Never send it to anyone else."
+    static func waitingFor(username: String, service: String) -> String {
+        "Waiting for Lucille to answer @\(username) on \(Connect.serviceName(service))…"
+    }
+    /// Once Lucille's answer has passed, with the account Lucille signed (decisions/0002 §11.4,
+    /// step 9).
+    static func connectingAs(_ account: SignedAccount) -> String {
+        "Connecting as \(account.handle) on \(Connect.serviceName(account.service))"
+    }
+    static let stopCodeText = "Nothing is connected yet. The code stops working."
+    static let cancelling = "Stopping…"
+    static let startOverButton = "Start Over"
+    static let cancelUnknown = "\(appName) couldn't tell whether the code stopped working. Choose Stop Connecting… to try again."
 
     // MARK: The waiting page
 
     static let waitingTitle = "Waiting for Lucille…"
-    static let waitingKeepOpen = "Keep Lucille's page open."
     static let waitingClockWrong = "Your Mac's clock is wrong, so Lucille turned away this Mac's answer. Set the clock right in System Settings, General, Date & Time; \(appName) keeps trying."
+    static let waitingNumberInChat = "Lucille shows its number in your chat once it has this Mac's answer."
     static let stopQuestionTitle = "Stop connecting?"
     static let stopQuestionText = "Nothing is connected yet."
     static let stopConnectingButton = "Stop Connecting"
@@ -97,8 +144,9 @@ enum ConnectionText {
     // MARK: The compare page
 
     static let compareTitle = "Compare the numbers"
-    static let compareQuestion = "Does Lucille's page show this number?"
-    static let compareRule = "Click They Match only if Lucille's page shows exactly the same number. If the numbers differ, this Mac may be connecting to someone else."
+    /// Until the typed digits of decisions/0002 §11.2 are built, the whole number is compared.
+    static let compareQuestion = "Does Lucille's number in your chat match this one?"
+    static let compareRule = "Click They Match only if the number Lucille shows in your chat is exactly the same. If the numbers differ, this Mac may be connecting to someone else."
     /// On the compare page of a pair the user already said differs.
     static let compareDiffered = "You said these numbers differ, so \(appName) won't confirm them. Click They Differ to stop connecting."
     static let theyMatch = "They Match"
@@ -109,19 +157,19 @@ enum ConnectionText {
 
     /// When the SAS must be confirmed by, in local time.
     static func answerBy(_ deadline: Date) -> String {
-        "Answer by \(localTime(deadline)). After that, nothing is connected, and you start again in Lucille."
+        "Answer by \(localTime(deadline)). After that, nothing is connected, and you start again from \(appName)."
     }
 
     // MARK: Notes after pairing
 
     static let couldNotConnect = "\(appName) could not connect."
     static let confirmedTitle = "Confirmed on this Mac"
-    static let confirmedText = "Now confirm on Lucille's page too. \(appName)'s menu says Connected once Lucille is ready."
+    static let confirmedText = "If Lucille asks in your chat, say that the numbers match there too. \(appName)'s menu says Connected once Lucille is ready."
     static let nothingConnectedTitle = "Nothing was connected"
-    static let differedTold = "This Mac turned the connection down, and Lucille was told. Numbers that differ can mean that someone else made the code, or intercepted it. To try again, in Lucille, open Computers and add this computer, then paste the new code."
-    static let differedNotTold = "This Mac turned the connection down, but Lucille wasn't reachable, so in Lucille, open Computers and remove this computer. Numbers that differ can mean that someone else made the code, or intercepted it."
+    static let differedTold = "This Mac turned the connection down, and Lucille was told. Numbers that differ can mean that someone else saw your connect code, in your chat or on your screen. Check before you start again from \(appName)."
+    static let differedNotTold = "This Mac turned the connection down, but Lucille wasn't reachable, so in Lucille, remove this computer. Numbers that differ can mean that someone else saw your connect code, in your chat or on your screen."
     static let stoppedTold = "This Mac stopped connecting, and Lucille was told."
-    static let stoppedNotTold = "This Mac stopped connecting, but Lucille wasn't reachable, so in Lucille, open Computers and remove this computer."
+    static let stoppedNotTold = "This Mac stopped connecting, but Lucille wasn't reachable, so in Lucille, remove this computer."
     static let couldNotStop = "\(appName) could not stop connecting."
     static let stopUnknown = "\(appName) couldn't tell whether connecting stopped. Choose Stop Connecting… to try again."
     static let confirmedAnotherTitle = "A different connection was confirmed"
@@ -139,7 +187,8 @@ enum ConnectionText {
     /// was shown; after one was shown it is `expiredAfterSAS`. Any other code reads as the host's
     /// own sentence.
     static let refusals: [String: String] = [
-        "bad_code": "That isn't a code from Lucille. Copy it again from Lucille's page.",
+        // From the code Lucille delivered (spec/CLI.md §7, `pair begin`): it ends the request.
+        "bad_code": "Lucille's answer held no code \(appName) can use. Nothing was connected. Start again.",
         "wrong_hub": "This code isn't from Lucille. Nothing was connected.",
         "code_has_token": "This code isn't from Lucille. Nothing was connected.",
         "held": "This Mac already has a connection to Lucille, or one being set up. Choose Stop Connecting… or Disconnect from Lucille… first.",
@@ -148,10 +197,10 @@ enum ConnectionText {
         "policy_lock_failed": "\(appName) couldn't lock its settings, so nothing was connected. Try again.",
         // Reset Settings takes it as done: there was no invalid file to set aside.
         "not_invalid": "\(appName)'s settings can be read again, so nothing was changed.",
-        "answer_failed": "\(appName) couldn't answer this code. Nothing was connected. Copy a new code from Lucille and try again.",
-        "hub_error": "\(appName) couldn't reach Lucille. Check that this Mac is online, then try again. You can use the same code.",
-        "leaked": "This code may have been used by someone else. Nothing was connected. In Lucille, remove this computer, add it again, and share the new code with nobody.",
-        "expired": "The code expired. Nothing was connected. In Lucille, open Computers and add this computer again.",
+        "answer_failed": "\(appName) couldn't answer Lucille's code. Nothing was connected. Start again.",
+        "hub_error": "\(appName) couldn't reach Lucille. Check that this Mac is online, then try again.",
+        "leaked": "This connection may have been taken by someone else. Nothing was connected. In Lucille, remove this computer, then start again from \(appName), and show the new code to nobody.",
+        "expired": "Connecting didn't finish in time. Nothing was connected. Start again from \(appName).",
         "ended": "Lucille ended this connection. Nothing was connected.",
         "none": "The connection was ended on this Mac meanwhile. Nothing was connected.",
         "interrupted": "Connecting was paused. Choose Finish Connecting… to go on.",
@@ -168,6 +217,11 @@ enum ConnectionText {
         "connect_expired": "The code expired. Nothing was connected. Start again.",
         "newer_capsule": "Lucille may need a newer \(appName). Get it from where you got this one.",
         "key_misused": "Lucille's answer came twice, which Lucille never does. Nothing was connected. Start again.",
+        // No screen names the other account (decisions/0002 §11.5).
+        "other_account": "This code was sent to Lucille from a different account. Nothing was connected. Check that you sent it to the official Lucille account, then start again.",
+        "not_this_mac": "This connection wasn't started on this Mac. Nothing was connected.",
+        "bad_service": "\(appName) connects through Telegram only.",
+        "bad_username": "That isn't a Telegram username. It starts with a letter, and has only letters, digits and _.",
     ]
 
     /// Codes that can only be the app's own mistake against the host it ships, or a host that
@@ -179,7 +233,7 @@ enum ConnectionText {
         "bad_limit",
     ]
 
-    static let expiredAfterSAS = "The time to compare the numbers ran out. Nothing was connected. Start again in Lucille."
+    static let expiredAfterSAS = "The time to compare the numbers ran out. Nothing was connected. Start again from \(appName)."
     static let appBug = "Something went wrong in \(appName)'s helper program."
 
     /// The sentence for a refusal. `afterSAS` is whether a SAS was shown in this flow.
@@ -228,6 +282,14 @@ enum ConnectionText {
             return ConnectionNote(title: couldNotStop, text: stopUnknown, detail: nil)
         case .notStarted:
             return ConnectionNote(title: couldNotConnect, text: damaged, detail: nil)
+        case .connectEnded(let code, let message):
+            let text = refusal(code: code, message: message, afterSAS: false)
+            return ConnectionNote(title: couldNotConnect, text: text, detail: message == text ? nil : message)
+        case .cancelFailed(let error?):
+            let text = refusal(code: error.code, message: error.message, afterSAS: false)
+            return ConnectionNote(title: couldNotStop, text: text, detail: error.message == text ? nil : error.message)
+        case .cancelFailed(nil):
+            return ConnectionNote(title: couldNotStop, text: cancelUnknown, detail: nil)
         }
     }
 

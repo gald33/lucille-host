@@ -1,18 +1,9 @@
 import Foundation
 
-/// The numbers and rules the pairing flow works by, and the check on a pasted code.
+/// The numbers and rules the pairing flow works by.
 enum Pairing {
-    /// What every pairing code starts with (the pairing library's own prefix).
-    static let codePrefix = "swbp1_"
-    /// How long the part after the prefix may be: the whole code is then at most 8192 characters,
-    /// which with its newline fits `HostCLI.maxInputBytes`. A real code is a few hundred characters
-    /// of unpadded base64url; these bounds only stop what plainly is not one.
-    static let codeBodyLength = 100...8186
     /// How often `pair status` asks while the window shows the waiting page.
     static let pollInterval: TimeInterval = 5
-    /// How long the `pair --code-stdin` child may wait for Lucille before it is interrupted, which
-    /// keeps the pair; `pair status` then goes on asking while the window is open.
-    static let childTimeLimit: TimeInterval = 900
     /// How long after the SAS deadline the app asks `pair status`: the deadline is written to the
     /// second, so asking at once could find the SAS still pending while no screen shows it.
     static let deadlineGrace: TimeInterval = 3
@@ -24,49 +15,165 @@ enum Pairing {
     /// `pair confirm` refusals that mean the SAS is not on this screen yet: the app asks
     /// `pair status` again, and draws what it returns.
     static let redrawCodes: Set<String> = ["waiting", "sas_ready"]
-    /// Refusals after which the code window comes back, for another code or another try.
-    static let newCodeCodes: Set<String> = ["bad_code", "wrong_hub", "code_has_token", "answer_failed", "hub_error", "busy"]
-
-    private static let codeAlphabet = CharacterSet(
-        charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
-    )
-
-    /// The pasted text with every space and line break taken out: base64url has none, and a
-    /// pasted code can carry them.
-    static func cleaned(_ text: String) -> String {
-        var kept = String.UnicodeScalarView()
-        for scalar in text.unicodeScalars where !CharacterSet.whitespacesAndNewlines.contains(scalar) {
-            kept.append(scalar)
-        }
-        return String(kept)
-    }
-
-    /// Whether `code` (already `cleaned`) looks like a pairing code: the prefix, then 100 to 8186
-    /// characters of the base64url alphabet. The host checks it properly.
-    static func looksLikeCode(_ code: String) -> Bool {
-        guard code.hasPrefix(codePrefix) else {
-            return false
-        }
-        let body = code.unicodeScalars.dropFirst(codePrefix.unicodeScalars.count)
-        guard codeBodyLength.contains(body.count) else {
-            return false
-        }
-        return body.allSatisfy { codeAlphabet.contains($0) }
-    }
-
-    /// The hint the code window shows under what was typed or pasted; nil while it is empty or
-    /// looks like a code.
-    static func hint(for typed: String) -> String? {
-        let code = cleaned(typed)
-        if code.isEmpty || looksLikeCode(code) {
-            return nil
-        }
-        return ConnectionText.codeHint
-    }
 
     /// One pair's SAS, by the pair's name and its deadline.
     static func key(name: String, deadline: Date) -> String {
         "\(name)|\(Int(deadline.timeIntervalSince1970))"
+    }
+}
+
+/// The rules of Connect from Lucille's chat (decisions/0002 §11.4 and §11.5): the services, the
+/// user's username as the host normalizes it, and the forms of what `connect` objects carry. The
+/// host checks everything again; these only keep the window from offering what it would refuse,
+/// and from showing what is not in the host's form.
+enum Connect {
+    /// The chat services the app connects through, as the host names them (`connect.SERVICES`).
+    static let services: [String] = ["telegram"]
+    /// How long the `pair begin` or `pair resume` child may run before it is interrupted, which
+    /// keeps the request: the request's 20 minutes, its 300 s of skew, and the wait for the SAS
+    /// after Lucille's answer.
+    static let childTimeLimit: TimeInterval = 1800
+
+    /// A service's name, as the window shows it.
+    static func serviceName(_ service: String) -> String {
+        switch service {
+        case "telegram":
+            return "Telegram"
+        default:
+            return service
+        }
+    }
+
+    private static let crockford = Set("0123456789ABCDEFGHJKMNPQRSTVWXYZ".unicodeScalars)
+
+    /// Whether `text` is a connect code as the host writes one: two groups of five symbols of
+    /// Crockford's base32, upper case, joined by `-`.
+    static func isCode(_ text: String) -> Bool {
+        let scalars = Array(text.unicodeScalars)
+        guard scalars.count == 11 else {
+            return false
+        }
+        for (index, scalar) in scalars.enumerated() {
+            if index == 5 {
+                if scalar != "-" {
+                    return false
+                }
+            } else if !crockford.contains(scalar) {
+                return false
+            }
+        }
+        return true
+    }
+
+    /// Whether `text` is a username as the host normalizes one: a lower-case ASCII letter, then
+    /// up to 63 of `a-z`, `0-9` and `_`.
+    static func isUsername(_ text: String) -> Bool {
+        let scalars = Array(text.unicodeScalars)
+        guard (1...64).contains(scalars.count), ("a"..."z").contains(scalars[0]) else {
+            return false
+        }
+        return scalars.allSatisfy { ("a"..."z").contains($0) || ("0"..."9").contains($0) || $0 == "_" }
+    }
+
+    /// Whether `text` is a signed handle in its form: `@`, an ASCII letter, then up to 63 ASCII
+    /// letters, digits and `_`.
+    static func isHandle(_ text: String) -> Bool {
+        let scalars = Array(text.unicodeScalars)
+        guard (2...65).contains(scalars.count), scalars[0] == "@" else {
+            return false
+        }
+        let letter: (Unicode.Scalar) -> Bool = { ("a"..."z").contains($0) || ("A"..."Z").contains($0) }
+        guard letter(scalars[1]) else {
+            return false
+        }
+        return scalars.dropFirst(2).allSatisfy { letter($0) || ("0"..."9").contains($0) || $0 == "_" }
+    }
+
+    /// Whether `text` is a chat account's stable id on `service`, as `send_to` gives one:
+    /// `<service>:`, then 1 to 64 of ASCII letters, digits, `_` and `-` (the whole id matching
+    /// `^[a-z]{1,16}:[0-9A-Za-z_-]{1,64}$`).
+    static func isAccountID(_ text: String, service: String) -> Bool {
+        let prefix = service + ":"
+        guard (1...16).contains(service.unicodeScalars.count),
+              service.unicodeScalars.allSatisfy({ ("a"..."z").contains($0) }),
+              text.hasPrefix(prefix)
+        else {
+            return false
+        }
+        let rest = text.unicodeScalars.dropFirst(prefix.unicodeScalars.count)
+        return (1...64).contains(rest.count) && rest.allSatisfy {
+            ("a"..."z").contains($0) || ("A"..."Z").contains($0) || ("0"..."9").contains($0) || $0 == "_" || $0 == "-"
+        }
+    }
+
+    /// The username a typed text names on `service`, as the host's `normalize_username` gives it,
+    /// or nil if it names none. In this order: refuse any character outside ASCII; drop the spaces
+    /// (U+0020) around it; drop a leading `<service>:`, matched without regard to ASCII case,
+    /// which must name `service`; drop one leading `@`; lower ASCII letters only.
+    static func normalizedUsername(_ text: String, service: String) -> String? {
+        guard services.contains(service), text.unicodeScalars.allSatisfy(\.isASCII) else {
+            return nil
+        }
+        var scalars = Substring(text).unicodeScalars[...]
+        while scalars.first == " " {
+            scalars = scalars.dropFirst()
+        }
+        while scalars.last == " " {
+            scalars = scalars.dropLast()
+        }
+        var name = String(String.UnicodeScalarView(scalars))
+        if let colon = name.firstIndex(of: ":") {
+            guard asciiLower(String(name[..<colon])) == service else {
+                return nil
+            }
+            name = String(name[name.index(after: colon)...])
+        }
+        if name.hasPrefix("@") {
+            name.removeFirst()
+        }
+        let lowered = asciiLower(name)
+        return isUsername(lowered) ? lowered : nil
+    }
+
+    /// `text` with ASCII letters lowered and nothing else changed: never a Unicode lowering.
+    private static func asciiLower(_ text: String) -> String {
+        var kept = String.UnicodeScalarView()
+        for scalar in text.unicodeScalars {
+            if ("A"..."Z").contains(scalar), let lower = Unicode.Scalar(scalar.value + 32) {
+                kept.append(lower)
+            } else {
+                kept.append(scalar)
+            }
+        }
+        return String(kept)
+    }
+
+    /// The hint the account page shows under what was typed; nil while it is empty or names a
+    /// username.
+    static func hint(for typed: String, service: String) -> String? {
+        if typed.isEmpty || normalizedUsername(typed, service: service) != nil {
+            return nil
+        }
+        return ConnectionText.usernameHint(service: service)
+    }
+
+    /// The codes that end a request, which is then spent (spec/CLI.md §7, `pair begin`): the note
+    /// says why and offers Start Over.
+    static let endingCodes: Set<String> = [
+        "interference", "connect_expired", "newer_capsule", "key_misused", "other_account", "not_this_mac",
+    ]
+    /// The refusals of the code Lucille delivered, which end a request too.
+    static let deliveredCodeRefusals: Set<String> = ["bad_code", "wrong_hub", "code_has_token"]
+    /// Refusals of `pair begin` or `pair resume` after which the account page comes back, to
+    /// begin again: nothing was begun, or the hub could not be reached and no request was kept.
+    static let accountAgainCodes: Set<String> = ["bad_service", "bad_username", "hub_error", "busy", "lock_failed"]
+    /// Refusals that leave a request the host kept as it was.
+    static let keepsRequestCodes: Set<String> = ["interrupted", "busy", "lock_failed", "held"]
+
+    /// What `pair begin` reads on standard input: the service, then the username, one per line
+    /// (`HostChild` adds the last newline).
+    static func beginInput(service: String, username: String) -> String {
+        "\(service)\n\(username)"
     }
 }
 
@@ -88,11 +195,19 @@ enum PairingNote: Equatable, Sendable {
     case rejectFailed(HostError?)
     /// The pairing child could not be started.
     case notStarted
+    /// A Connect request ended (spec/CLI.md §7, `pair begin`): its code and the host's sentence.
+    /// The note offers Start Over.
+    case connectEnded(code: String, message: String?)
+    /// `pair cancel` refused, or ended with no answer: the request may still be kept.
+    case cancelFailed(HostError?)
 }
 
 /// The pairing flow, decisions/0001's gate: the Mac shows the SAS from `sas_pending`, and the user
-/// clicks They Match only if Lucille's page shows the same number (spec/CLI.md §2 and §7). It is a
-/// value: inputs in, effects out. It draws nothing and starts nothing; the app's glue runs each
+/// clicks They Match only if Lucille's number in the chat is the same (spec/CLI.md §2 and §7). The
+/// pairing comes from Connect from Lucille's chat (decisions/0002 §11.4): `pair begin`, then
+/// `pair resume` after a relaunch or an interruption, and `pair cancel` to stop. The app no longer
+/// pastes a code (`pair --code-stdin`). It is a value: inputs in, effects out. It draws nothing
+/// and starts nothing; the app's glue runs each
 /// effect and feeds back what it did, with the `epoch` the effect was issued in, and the flow
 /// drops anything from an older epoch.
 ///
@@ -103,6 +218,12 @@ enum PairingNote: Equatable, Sendable {
 /// - Each `sas_pending` must be drawn again before They Match counts.
 /// - `pair status` runs only while the window shows the waiting or the compare page.
 /// - After They Differ, They Match is never enabled again for that pair and deadline.
+/// - Connect to Lucille… reads `pair status` first: a request the host kept is taken up with
+///   `pair resume`, never begun again; with none, the account page asks for the service and the
+///   username before any code is shown.
+/// - `pair begin` starts only with a username in the host's form, and `pair cancel` runs only once
+///   no `pair begin` or `pair resume` child lives.
+/// - A request that ended says why, and never names the account Lucille signed for another.
 struct PairingFlow: Equatable, Sendable {
     /// Why the flow reads `status --json`.
     enum StatusPurpose: Equatable, Sendable {
@@ -118,6 +239,7 @@ struct PairingFlow: Equatable, Sendable {
         case pairStatus
         case pairConfirm
         case pairReject
+        case pairCancel
         case status(StatusPurpose)
     }
 
@@ -125,6 +247,8 @@ struct PairingFlow: Equatable, Sendable {
         case checking
         case confirming
         case rejecting
+        /// `pair cancel` runs, or waits for the `pair begin` or `pair resume` child to end.
+        case cancelling
     }
 
     /// The number on the compare page.
@@ -143,15 +267,22 @@ struct PairingFlow: Equatable, Sendable {
 
     enum Screen: Equatable, Sendable {
         case closed
-        case enterCode
+        /// The chat service and the user's own username there (decisions/0002 §11.5).
+        case account
+        /// `pair begin` runs, and has not yet written its code.
+        case starting
+        /// The connect code to send Lucille, while the request is live.
+        case connectCode(ConnectRequest)
         case waiting(clockSkewed: Bool)
         case compare(Comparison)
         case busy(Busy)
     }
 
     enum Effect: Equatable, Sendable {
-        /// Start `pair --code-stdin --json` with this code on its standard input.
-        case startPair(code: String)
+        /// Start `pair begin --json` with the service and the username on its standard input.
+        case startConnect(service: String, username: String)
+        /// Start `pair resume --json`, on the request the host kept.
+        case resumeConnect
         /// SIGINT the pairing child, which keeps the pair.
         case interruptPair
         case run(Verb)
@@ -161,8 +292,6 @@ struct PairingFlow: Equatable, Sendable {
         /// Send `deadlinePassed` at this wall-clock time.
         case deadlineAt(Date)
         case cancelDeadline
-        /// Empty the code field: the code is in the pipe.
-        case clearCodeField
         case say(PairingNote)
         /// Read `status --json` again for the menu. It starts nothing.
         case refreshStatus
@@ -178,8 +307,8 @@ struct PairingFlow: Equatable, Sendable {
         case startConnecting
         /// A relaunch, or the menu's Finish Connecting…: where `status` says the pair is.
         case resume(StatusPair)
-        /// Connect, with what the code field holds.
-        case submit(String)
+        /// Continue on the account page, with the service chosen and the username typed.
+        case submitAccount(service: String, typed: String)
         case childNotStarted
         case childObject(HostObject)
         case childExited(ChildEnd)
@@ -216,6 +345,15 @@ struct PairingFlow: Equatable, Sendable {
     private var checking: StatusPurpose?
     /// The pairs, by name and deadline, the user said differ.
     private var latched: Set<String> = []
+    /// The Connect request the host last reported, and whether it keeps one, as far as this run
+    /// of the app has seen: the menu then offers Finish Connecting… and Stop Connecting….
+    private(set) var request: ConnectRequest?
+    private(set) var requestKept = false
+    /// The account Lucille signed, once `connecting` has said it: the window shows it.
+    private(set) var signedAccount: SignedAccount?
+    /// The `pair status` read that Connect to Lucille… makes first is out.
+    private var lookingForRequest = false
+    private var cancelWhenChildEnds = false
 
     init() {}
 
@@ -236,6 +374,7 @@ struct PairingFlow: Equatable, Sendable {
         if case .childNotStarted = input {
             pairChildAlive = false
             rejectWhenChildEnds = false
+            cancelWhenChildEnds = false
             guard inputEpoch == epoch else {
                 return []
             }
@@ -250,8 +389,8 @@ struct PairingFlow: Equatable, Sendable {
             return startConnecting()
         case .resume(let pair):
             return resume(pair)
-        case .submit(let typed):
-            return submit(typed)
+        case .submitAccount(let service, let typed):
+            return submitAccount(service: service, typed: typed)
         case .childObject(let object):
             return childObject(object)
         case .verbResult(let verb, let outcome):
@@ -286,16 +425,92 @@ struct PairingFlow: Equatable, Sendable {
         shownSAS = false
         lastDeadlineCheck = nil
         checking = nil
+        signedAccount = nil
+        lookingForRequest = false
+        cancelWhenChildEnds = false
     }
 
+    /// Connect to Lucille…, or Finish Connecting… for a request: `pair status` first, so that a
+    /// request the host kept, from before a relaunch too, is taken up and not begun again.
     private mutating func startConnecting() -> [Effect] {
         guard !pairChildAlive, !isBusy else {
             return []
         }
         epoch += 1
         beginFlow()
-        screen = .enterCode
-        return [.cancelRunRetries, .cancelPoll, .cancelDeadline]
+        lookingForRequest = true
+        screen = .busy(.checking)
+        return [.cancelRunRetries, .cancelPoll, .cancelDeadline, .run(.pairStatus)]
+    }
+
+    /// What the first `pair status` found: a request to take up, a pair to go on with, or
+    /// nothing, and then the account page.
+    private mutating func lookedForRequest(_ outcome: VerbOutcome) -> [Effect] {
+        switch outcome {
+        case .done:
+            if let found = outcome.connectState {
+                switch found {
+                case .code(let kept):
+                    request = kept
+                    requestKept = true
+                    return takeUp(on: .connectCode(kept))
+                case .delivered:
+                    requestKept = true
+                    return takeUp(on: .waiting(clockSkewed: false))
+                case .connecting, .cancelled, .other:
+                    screen = .account
+                    return []
+                }
+            }
+            requestKept = false
+            switch outcome.pair {
+            case .waiting(let pairName)?:
+                name = pairName
+                screen = .waiting(clockSkewed: false)
+                return pollAgain()
+            case .sasPending(let pairName, let sas, let deadline)?:
+                return showSAS(name: pairName, sas: sas, deadline: deadline)
+            case .confirmed?:
+                screen = .closed
+                return [.startRunCheck]
+            default:
+                screen = .account
+                return []
+            }
+        case .refused(let error):
+            return refused(error)
+        case .cancelled:
+            screen = .closed
+            return [.refreshStatus]
+        default:
+            // `pair status` could not say: `pair begin` replaces any request the host kept.
+            screen = .account
+            return []
+        }
+    }
+
+    /// `pair resume`, on the request the host kept, with `page` on the screen meanwhile.
+    private mutating func takeUp(on page: Screen) -> [Effect] {
+        screen = page
+        pairChildAlive = true
+        lastError = nil
+        shownSAS = false
+        return [.cancelPoll, .resumeConnect]
+    }
+
+    private mutating func submitAccount(service: String, typed: String) -> [Effect] {
+        guard screen == .account, !pairChildAlive,
+              let username = Connect.normalizedUsername(typed, service: service)
+        else {
+            return []
+        }
+        screen = .starting
+        pairChildAlive = true
+        lastError = nil
+        shownSAS = false
+        request = nil
+        signedAccount = nil
+        return [.startConnect(service: service, username: username)]
     }
 
     private mutating func resume(_ pair: StatusPair) -> [Effect] {
@@ -325,25 +540,32 @@ struct PairingFlow: Equatable, Sendable {
         }
     }
 
-    private mutating func submit(_ typed: String) -> [Effect] {
-        guard case .enterCode = screen, !pairChildAlive else {
-            return []
-        }
-        let code = Pairing.cleaned(typed)
-        guard Pairing.looksLikeCode(code) else {
-            return []
-        }
-        screen = .waiting(clockSkewed: false)
-        pairChildAlive = true
-        lastError = nil
-        shownSAS = false
-        return [.clearCodeField, .startPair(code: code)]
-    }
-
     // MARK: The pairing child
 
     private mutating func childObject(_ object: HostObject) -> [Effect] {
         switch object {
+        case .connectState(.code(let live)):
+            request = live
+            requestKept = true
+            switch screen {
+            case .starting, .connectCode, .waiting:
+                screen = .connectCode(live)
+            default:
+                break
+            }
+            return []
+        case .connectState(.connecting(let account)):
+            // Lucille's answer passed, for the account typed: the host answers its code next, and
+            // deletes the request once the answer is tried.
+            signedAccount = account
+            requestKept = false
+            switch screen {
+            case .starting, .connectCode, .waiting:
+                screen = .waiting(clockSkewed: false)
+            default:
+                break
+            }
+            return []
         case .pairCode(let pairName):
             name = pairName
             return []
@@ -373,6 +595,16 @@ struct PairingFlow: Equatable, Sendable {
         pairChildAlive = false
         let error = lastError
         lastError = nil
+        if cancelWhenChildEnds {
+            cancelWhenChildEnds = false
+            rejectWhenChildEnds = false
+            if signedAccount == nil && name == nil {
+                return [.run(.pairCancel)]
+            }
+            // The answer was tried before the child ended: there is a pair now, to turn down.
+            screen = .busy(.rejecting)
+            return [.run(.pairReject)]
+        }
         if rejectWhenChildEnds {
             rejectWhenChildEnds = false
             return [.run(.pairReject)]
@@ -382,11 +614,14 @@ struct PairingFlow: Equatable, Sendable {
         }
         if case .exited(let status) = end, status == 1 || status == 2, let error {
             if error.code == "interrupted" {
-                // The pair is kept. While the window is open, `pair status` goes on asking.
-                if case .waiting = screen {
+                // The pair, or the request, is kept. While the window is open, `pair status` goes
+                // on asking, and takes a request up again with `pair resume`.
+                switch screen {
+                case .waiting, .connectCode, .starting:
                     return [.run(.pairStatus)]
+                default:
+                    return [.refreshStatus]
                 }
-                return [.refreshStatus]
             }
             return refused(error)
         }
@@ -408,6 +643,8 @@ struct PairingFlow: Equatable, Sendable {
             return confirmResult(outcome)
         case .pairReject:
             return rejectResult(outcome)
+        case .pairCancel:
+            return cancelResult(outcome)
         case .status(.beforeConfirm):
             return beforeConfirm(outcome)
         case .status(.afterConfirm):
@@ -418,11 +655,21 @@ struct PairingFlow: Equatable, Sendable {
     }
 
     private mutating func pairStatusResult(_ outcome: VerbOutcome) -> [Effect] {
+        if lookingForRequest {
+            lookingForRequest = false
+            guard case .busy(.checking) = screen else {
+                return []
+            }
+            return lookedForRequest(outcome)
+        }
         if isBusy {
             return []
         }
         switch outcome {
         case .done:
+            if let found = outcome.connectState {
+                return requestStatus(found)
+            }
             guard let state = outcome.pair else {
                 return pollAgain()
             }
@@ -448,6 +695,53 @@ struct PairingFlow: Equatable, Sendable {
             return refused(error)
         default:
             return pollAgain()
+        }
+    }
+
+    /// `pair status` reported the request, while the window waits with no child: take it up.
+    private mutating func requestStatus(_ found: ConnectState) -> [Effect] {
+        guard !pairChildAlive else {
+            return []
+        }
+        switch screen {
+        case .connectCode, .waiting, .starting:
+            break
+        default:
+            return []
+        }
+        switch found {
+        case .code(let kept):
+            request = kept
+            requestKept = true
+            return takeUp(on: .connectCode(kept))
+        case .delivered:
+            requestKept = true
+            return takeUp(on: .waiting(clockSkewed: false))
+        case .connecting, .cancelled, .other:
+            return pollAgain()
+        }
+    }
+
+    private mutating func cancelResult(_ outcome: VerbOutcome) -> [Effect] {
+        guard case .busy(.cancelling) = screen else {
+            return []
+        }
+        screen = .closed
+        switch outcome {
+        case .done:
+            // A cancel says nothing more (decisions/0002 §11.4, step 5).
+            requestKept = false
+            request = nil
+            return [.refreshStatus]
+        case .refused(let error):
+            if error.code == "none" {
+                requestKept = false
+                request = nil
+                return [.refreshStatus]
+            }
+            return [.say(.cancelFailed(error)), .refreshStatus]
+        default:
+            return [.say(.cancelFailed(nil)), .refreshStatus]
         }
     }
 
@@ -630,9 +924,40 @@ struct PairingFlow: Equatable, Sendable {
         return [.cancelRunRetries, .cancelPoll, .cancelDeadline, .run(.pairReject)]
     }
 
+    /// Whether Stop Connecting stops a Connect request, not a pair: no answer has been tried yet.
+    private var stopsRequest: Bool {
+        guard signedAccount == nil, name == nil else {
+            return false
+        }
+        switch screen {
+        case .starting, .connectCode:
+            return true
+        case .waiting:
+            return pairChildAlive || requestKept
+        case .closed:
+            return requestKept
+        default:
+            return false
+        }
+    }
+
     private mutating func stopConnecting() -> [Effect] {
         if isBusy {
             return []
+        }
+        if stopsRequest {
+            epoch += 1
+            target = nil
+            screen = .busy(.cancelling)
+            var effects: [Effect] = [.cancelRunRetries, .cancelPoll, .cancelDeadline]
+            if pairChildAlive {
+                // `pair cancel` is `busy` while the child waits on the request: stop it first.
+                cancelWhenChildEnds = true
+                effects.append(.interruptPair)
+            } else {
+                effects.append(.run(.pairCancel))
+            }
+            return effects
         }
         if case .compare(let shown) = screen {
             latched.insert(Pairing.key(name: shown.name, deadline: shown.deadline))
@@ -654,17 +979,24 @@ struct PairingFlow: Equatable, Sendable {
     // MARK: Timers and the window
 
     private func pollAgain() -> [Effect] {
-        if case .waiting = screen, !pairChildAlive {
-            return [.pollAfter(Pairing.pollInterval)]
+        switch screen {
+        case .waiting, .connectCode:
+            return pairChildAlive ? [] : [.pollAfter(Pairing.pollInterval)]
+        default:
+            return []
         }
-        return []
     }
 
     private func pollDue() -> [Effect] {
-        guard case .waiting = screen, !pairChildAlive else {
+        guard !pairChildAlive else {
             return []
         }
-        return [.run(.pairStatus)]
+        switch screen {
+        case .waiting, .connectCode:
+            return [.run(.pairStatus)]
+        default:
+            return []
+        }
     }
 
     private mutating func deadlinePassed(at: Date) -> [Effect] {
@@ -677,7 +1009,7 @@ struct PairingFlow: Equatable, Sendable {
 
     private mutating func windowClosed() -> [Effect] {
         switch screen {
-        case .enterCode, .waiting, .compare:
+        case .account, .starting, .connectCode, .waiting, .compare:
             screen = .closed
             var effects: [Effect] = [.cancelPoll, .cancelDeadline]
             if pairChildAlive {
@@ -692,8 +1024,22 @@ struct PairingFlow: Equatable, Sendable {
     // MARK: Endings
 
     private mutating func refused(_ error: HostError) -> [Effect] {
-        screen = Pairing.newCodeCodes.contains(error.code) ? .enterCode : .closed
         target = nil
+        if Connect.endingCodes.contains(error.code) || Connect.deliveredCodeRefusals.contains(error.code) {
+            // The request ended, and is spent: the note offers Start Over.
+            screen = .closed
+            requestKept = false
+            request = nil
+            return [
+                .cancelPoll, .cancelDeadline,
+                .say(.connectEnded(code: error.code, message: error.message)),
+                .refreshStatus,
+            ]
+        }
+        if !Connect.keepsRequestCodes.contains(error.code) {
+            requestKept = false
+        }
+        screen = Connect.accountAgainCodes.contains(error.code) ? .account : .closed
         return [
             .cancelPoll, .cancelDeadline,
             .say(.refused(code: error.code, message: error.message, afterSAS: shownSAS)),

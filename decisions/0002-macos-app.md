@@ -59,12 +59,12 @@ developing the app. Its builds stay ad hoc signed, for the repository owner's ow
   `policy reset`, `policy previous`, `credential` (the Gmail window's) and `run`'s events. It decides only on their fields, a refusal by its
   `code`, and shows their words. It reads and writes none of the host's files, and opens no network
   connection.
-- **Pairing by paste, on 0001's gate** (§11.3). The maintainer decided on 2026-11-02 to build it now on
-  [0001](0001-host-design.md)'s gate, not the typed one. The user pastes the code; the app passes it to
-  `pair --code-stdin --json` on standard input, shows the SAS from `sas_pending`, and the user clicks
-  **They Match** (`pair confirm --json`) only if Lucille's page shows the same number, or **They Differ**
-  (`pair reject --json`). The typed gate (§11.2) and the Connect flow (§11.4), decided on 2026-11-21, are
-  not built yet.
+- **Connect from Lucille's chat, on 0001's gate** (§11.4). The app asks for the chat username and passes it
+  to `pair begin --json` on standard input, shows the connect code the user sends Lucille, goes on with a
+  kept request through `pair resume --json` after a relaunch, shows the SAS from `sas_pending`, and the user
+  clicks **They Match** (`pair confirm --json`) only if Lucille shows the same number in the chat, or **They
+  Differ** (`pair reject --json`). It replaced the app's paste flow (§11.3), built first on 2026-11-02 on
+  [0001](0001-host-design.md)'s gate. The typed gate (§11.2), decided on 2026-11-21, is not built yet.
 - **Supervision of `run`** (§9): `run --json-events --exit-on-stdin-eof` as the app's child, with the
   lifeline; the exit table; restarts with back-off, and the stop after five crashes in ten minutes; Quit and
   logout with the drain ladder and **Stop now**; paused at the next launch after a `kill`, and never resumed
@@ -1238,8 +1238,9 @@ what each screen does.
 **Decided by the maintainer on 2026-11-21. The host's side is built: `connect.py` (the connect code, `K` and
 `N`, the typed username, how one read of the drop room is judged), `connecting.py` (the request, its reads,
 its expiry and the checks before the code is answered), and `pair begin`, `pair resume`, `pair cancel` and
-`pair status` (spec/CLI.md §7). Not yet: the app's Connect screens, and refusing every code without its own
-request's nonce, so the paste flow (§11.3) still works.** It replaces this record's earlier proposal, a
+`pair status` (spec/CLI.md §7), and the app's Connect screens (`macos/README.md`, "Connecting to Lucille").
+Not yet: refusing every code without its own request's nonce, so the paste flow (§11.3) still works from the
+command line.** It replaces this record's earlier proposal, a
 connect page on Lucille's website reached through a URL scheme: there is no website step. The two ends are
 Lucille's chat (for example in Telegram) and Capsule.
 

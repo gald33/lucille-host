@@ -863,22 +863,9 @@ extension SelfTest {
     // MARK: - The code check and the words
 
     static func checkCodeRules(_ report: Report) {
-        let body = String(repeating: "A", count: 100)
-        report.expect(Pairing.looksLikeCode("swbp1_" + body), "a code with 100 characters after its prefix looks like one")
-        report.expect(!Pairing.looksLikeCode("swbp1_" + String(body.dropLast())), "99 do not")
-        let longest = "swbp1_" + String(repeating: "a-_9", count: 2046) + "ab"
-        report.expect(Pairing.looksLikeCode(longest), "8186 do: the whole code is then 8192 characters")
-        report.expect(Data((longest + "\n").utf8).count == HostCLI.maxInputBytes,
-                      "the longest code that looks like one, with its newline, is the most the child's input may be")
-        report.expect(!Pairing.looksLikeCode("swbp1_" + String(repeating: "a", count: 8187)), "8187 do not")
-        report.expect(!Pairing.looksLikeCode("swb1_" + body) && !Pairing.looksLikeCode("swbsecret1_" + body),
-                      "an invite or a pair's secret is not a code")
-        report.expect(!Pairing.looksLikeCode("swbp1_" + body + "+") && !Pairing.looksLikeCode("swbp1_" + body + "="),
-                      "a character base64url does not use is refused")
-        report.expect(Pairing.cleaned("  swbp1_AB\nCD \r\n") == "swbp1_ABCD", "spaces and line breaks are taken out")
-        report.expect(Pairing.hint(for: "") == nil && Pairing.hint(for: " swbp1_" + body + "\n") == nil
-                          && Pairing.hint(for: "hello") == ConnectionText.codeHint,
-                      "the hint shows only for text that is not a code")
+        let longest = Connect.beginInput(service: "telegram", username: String(repeating: "a", count: 64))
+        report.expect(Data((longest + "\n").utf8).count <= HostCLI.maxInputBytes,
+                      "what pair begin reads, with the longest username, fits the child's input")
 
         let refusals = ConnectionText.refusals
         report.expect(refusals.values.allSatisfy { !$0.isEmpty }, "every refusal has words")
@@ -903,7 +890,7 @@ extension SelfTest {
                       "a refusal note has the app's sentence, and the host's words as details", "\(note)")
         let differed = ConnectionText.note(.rejected(lucilleTold: true, afterDiffer: true))
         let stopped = ConnectionText.note(.rejected(lucilleTold: true, afterDiffer: false))
-        report.expect(differed.text.contains("intercepted") && !stopped.text.contains("intercepted")
+        report.expect(differed.text.contains("someone else saw") && !stopped.text.contains("someone else saw")
                           && differed.title == ConnectionText.nothingConnectedTitle,
                       "They Differ says why numbers can differ; Stop Connecting does not")
         report.expect(ConnectionText.note(.rejected(lucilleTold: false, afterDiffer: true)).text.contains("remove this computer"),
@@ -2058,7 +2045,6 @@ extension SelfTest {
 
     static func checkPairing(_ fixtures: [String: Fixture], _ report: Report) {
         let deadline = sampleTime
-        let code = "swbp1_" + String(repeating: "Q", count: 160)
         let pairObjects: [HostObject] = fixtures["pair-code-stdin"]?.objects ?? [
             .pairCode(name: pairName), .policyReset,
             .pair(.accepted(name: pairName, clockSkewed: false)),
@@ -2072,13 +2058,25 @@ extension SelfTest {
         func send(_ input: PairingFlow.Input) -> [PairingFlow.Effect] {
             flow.handle(input, epoch: flow.epoch)
         }
-        _ = send(.startConnecting)
-        report.expect(flow.screen == .enterCode, "Connect to Lucille… opens the code window")
-        report.expect(send(.submit("hello")).isEmpty && flow.screen == .enterCode && !flow.pairChildAlive,
-                      "text that is not a code starts nothing")
-        let started = send(.submit("  " + code + "\n"))
-        report.expect(started == [.clearCodeField, .startPair(code: code)] && flow.pairChildAlive,
-                      "a code starts pair --code-stdin with the code, and the field is cleared", "\(started)")
+        /// Connect to Lucille…, no request kept, then Continue with a username: pair begin runs.
+        func begin() {
+            _ = send(.startConnecting)
+            _ = send(.verbResult(.pairStatus, .done([.pair(.noPair)])))
+            _ = send(.submitAccount(service: "telegram", typed: "ada"))
+        }
+        /// As begin, and then Lucille's answer passes: the pair exists from here.
+        func answered() {
+            begin()
+            _ = send(.childObject(.connectState(.connecting(SignedAccount(service: "telegram", from: "telegram:123456789", handle: "@Ada")))))
+        }
+        let looked = send(.startConnecting)
+        report.expect(looked == [.cancelRunRetries, .cancelPoll, .cancelDeadline, .run(.pairStatus)] && flow.screen == .busy(.checking),
+                      "Connect to Lucille… first asks pair status whether a request is kept", "\(looked)")
+        report.expect(send(.verbResult(.pairStatus, .done([.pair(.noPair)]))).isEmpty && flow.screen == .account,
+                      "with none, it asks for the account")
+        let started = send(.submitAccount(service: "telegram", typed: "ada"))
+        report.expect(started == [.startConnect(service: "telegram", username: "ada")] && flow.pairChildAlive,
+                      "a username starts pair begin", "\(started)")
         var shown: [PairingFlow.Effect] = []
         for object in pairObjects {
             shown += send(.childObject(object))
@@ -2107,7 +2105,8 @@ extension SelfTest {
         func comparing() -> PairingFlow {
             var fresh = PairingFlow()
             _ = fresh.handle(.startConnecting, epoch: fresh.epoch)
-            _ = fresh.handle(.submit(code), epoch: fresh.epoch)
+            _ = fresh.handle(.verbResult(.pairStatus, .done([.pair(.noPair)])), epoch: fresh.epoch)
+            _ = fresh.handle(.submitAccount(service: "telegram", typed: "ada"), epoch: fresh.epoch)
             _ = fresh.handle(.childObject(.pair(.sasPending(name: pairName, sas: "1234-5678", deadline: deadline))), epoch: fresh.epoch)
             _ = fresh.handle(.childExited(.exited(0)), epoch: fresh.epoch)
             _ = fresh.handle(.sasDrawn("1234-5678", at: 10), epoch: fresh.epoch)
@@ -2255,21 +2254,18 @@ extension SelfTest {
 
         // The pairing child: closing the window or its time limit interrupts it, which keeps the pair.
         flow = PairingFlow()
-        _ = send(.startConnecting)
-        _ = send(.submit(code))
+        begin()
         report.expect(send(.windowClosed) == [.cancelPoll, .cancelDeadline, .interruptPair], "closing the window interrupts pair")
         _ = send(.childObject(.error(HostError(code: "interrupted", message: "m", kind: nil))))
         report.expect(send(.childExited(.exited(1))) == [.refreshStatus] && flow.screen == .closed,
                       "interrupted: the pair is kept, and the menu offers Finish Connecting…")
         flow = PairingFlow()
-        _ = send(.startConnecting)
-        _ = send(.submit(code))
+        begin()
         report.expect(send(.childTimeLimit) == [.interruptPair], "the child's time limit interrupts it")
         _ = send(.childObject(.error(HostError(code: "interrupted", message: "m", kind: nil))))
         report.expect(send(.childExited(.exited(1))) == [.run(.pairStatus)], "and pair status goes on while the window is open")
         flow = PairingFlow()
-        _ = send(.startConnecting)
-        _ = send(.submit(code))
+        answered()
         let stop = send(.stopConnecting)
         report.expect(stop == [.cancelRunRetries, .cancelPoll, .cancelDeadline, .interruptPair],
                       "Stop Connecting interrupts a waiting pair first", "\(stop)")
@@ -2279,12 +2275,10 @@ extension SelfTest {
                           == [.say(.rejected(lucilleTold: false, afterDiffer: false)), .refreshStatus],
                       "and says Lucille was not told")
         flow = PairingFlow()
-        _ = send(.startConnecting)
-        _ = send(.submit(code))
+        begin()
         report.expect(send(.childNotStarted) == [.say(.notStarted), .refreshStatus], "a child that cannot start says so")
         flow = PairingFlow()
-        _ = send(.startConnecting)
-        _ = send(.submit(code))
+        answered()
         report.expect(send(.childExited(.signaled(15))) == [.run(.status(.afterChild))],
                       "a child that ends with no answer: status says where the pair is")
         report.expect(send(.verbResult(.status(.afterChild), .done([.status(status(.waiting(name: pairName)))]))) == [.run(.pairStatus)],
@@ -2292,8 +2286,7 @@ extension SelfTest {
         for (confirmedName, says) in [(pairName, [PairingFlow.Effect.startRunCheck]),
                                       ("pair-other", [.say(.confirmedAnother), .refreshStatus])] {
             flow = PairingFlow()
-            _ = send(.startConnecting)
-            _ = send(.submit(code))
+            answered()
             _ = send(.childObject(.pairCode(name: pairName)))
             _ = send(.childExited(.signaled(15)))
             let found = send(.verbResult(.status(.afterChild), .done([.status(status(.confirmed(name: confirmedName)))])))
@@ -2301,25 +2294,25 @@ extension SelfTest {
                           "a child that ended with \(confirmedName) confirmed: \(says)", "\(found)")
         }
 
-        // Every refusal pair --code-stdin can give, and which ones bring the code window back.
+        // Every refusal pair begin can give, and which ones bring the account page back.
         var codes = Array(ConnectionText.refusals.keys) + Array(ConnectionText.appBugCodes)
         codes.append("brand_new")
         for refusal in codes.sorted() where refusal != "interrupted" {
             flow = PairingFlow()
-            _ = send(.startConnecting)
-            _ = send(.submit(code))
+            begin()
             _ = send(.childObject(.error(HostError(code: refusal, message: "the host's words", kind: nil))))
             let said = send(.childExited(.exited(1)))
-            let again = Pairing.newCodeCodes.contains(refusal)
-            report.expect(said.contains(.say(.refused(code: refusal, message: "the host's words", afterSAS: false)))
-                              && flow.screen == (again ? PairingFlow.Screen.enterCode : .closed),
-                          "\(refusal) is said, and \(again ? "the code window stays" : "the window closes")", "\(said)")
+            let again = Connect.accountAgainCodes.contains(refusal)
+            let note: PairingNote = Connect.endingCodes.union(Connect.deliveredCodeRefusals).contains(refusal)
+                ? .connectEnded(code: refusal, message: "the host's words")
+                : .refused(code: refusal, message: "the host's words", afterSAS: false)
+            report.expect(said.contains(.say(note)) && flow.screen == (again ? PairingFlow.Screen.account : .closed),
+                          "\(refusal) is said, and \(again ? "the account page comes back" : "the window closes")", "\(said)")
         }
         let leakedObjects = fixtures["pair-code-stdin-leaked"]?.objects ?? []
         if !leakedObjects.isEmpty {
             flow = PairingFlow()
-            _ = send(.startConnecting)
-            _ = send(.submit(code))
+            begin()
             for object in leakedObjects {
                 _ = send(.childObject(object))
             }
@@ -2345,14 +2338,252 @@ extension SelfTest {
         report.expect(still.contains(.deadlineAt(deadline.addingTimeInterval(3 + Pairing.recheckDelay))),
                       "a SAS still pending past its deadline is asked about again later, not at once", "\(still)")
 
+        checkConnect(fixtures, report)
         checkPairingWalk(report)
+    }
+
+    /// Connect from Lucille's chat (decisions/0002 §11.4 and §11.5; spec/CLI.md §7, `pair begin`,
+    /// `pair resume`, `pair cancel`, `pair status`): the username as the host normalizes it, the
+    /// `connect` objects read in the host's form only, and the flow from the account page to the
+    /// number, after a relaunch too, and every way a request ends.
+    static func checkConnect(_ fixtures: [String: Fixture], _ report: Report) {
+        let names: [(String, String?)] = [
+            ("ada", "ada"), ("@Ada", "ada"), ("telegram:@ada", "ada"), ("TeleGram:ADA", "ada"),
+            ("  @ada  ", "ada"), ("a_1", "a_1"), (String(repeating: "a", count: 64), String(repeating: "a", count: 64)),
+            ("@telegram:ada", nil), ("other:ada", nil), ("1ada", nil), ("_ada", nil), ("ad a", nil), ("ada!", nil),
+            ("\u{E1}da", nil), ("\u{212A}ate", nil), ("\tada", nil), ("@@ada", nil), ("", nil), ("@", nil),
+            ("telegram:", nil), (String(repeating: "a", count: 65), nil),
+        ]
+        for (typed, want) in names {
+            let got = Connect.normalizedUsername(typed, service: "telegram")
+            report.expect(got == want, "the username \(typed.debugDescription) is \(want ?? "refused"), as the host has it", "\(got ?? "nil")")
+        }
+        report.expect(Connect.normalizedUsername("ada", service: "other") == nil, "a service the host does not offer names no username")
+        report.expect(Connect.hint(for: "", service: "telegram") == nil && Connect.hint(for: "@Ada", service: "telegram") == nil
+                          && Connect.hint(for: "1ada", service: "telegram") == ConnectionText.usernameHint(service: "telegram"),
+                      "the account page hints only under a text that names no username")
+        report.expect(Connect.beginInput(service: "telegram", username: "ada") == "telegram\nada",
+                      "pair begin reads the service, then the username, on standard input")
+
+        // The `connect` objects, read only in the host's form.
+        let reads: [(String, HostObject?)] = [
+            (#"{"v":1,"type":"connect","state":"code","code":"7KQ4M-X2D9P","expires_at":"2026-11-01T12:00:00Z","service":"telegram","username":"ada"}"#,
+             .connectState(.code(ConnectRequest(code: "7KQ4M-X2D9P", expiresAt: sampleTime, service: "telegram", username: "ada")))),
+            (#"{"v":1,"type":"connect","state":"delivered","service":"telegram"}"#, .connectState(.delivered(service: "telegram"))),
+            (#"{"v":1,"type":"connect","state":"connecting","service":"telegram","from":"telegram:123456789","handle":"@Ada"}"#,
+             .connectState(.connecting(SignedAccount(service: "telegram", from: "telegram:123456789", handle: "@Ada")))),
+            (#"{"v":1,"type":"connect","state":"cancelled"}"#, .connectState(.cancelled)),
+            (#"{"v":1,"type":"connect","state":"later"}"#, .connectState(.other("later"))),
+            (#"{"v":1,"type":"connect","state":"code","code":"7kq4m-x2d9p","expires_at":"2026-11-01T12:00:00Z","service":"telegram","username":"ada"}"#, nil),
+            (#"{"v":1,"type":"connect","state":"code","code":"7KQ4U-X2D9P","expires_at":"2026-11-01T12:00:00Z","service":"telegram","username":"ada"}"#, nil),
+            (#"{"v":1,"type":"connect","state":"code","code":"7KQ4M-X2D9P","expires_at":"2026-11-01T12:00:00Z","service":"signal","username":"ada"}"#, nil),
+            (#"{"v":1,"type":"connect","state":"code","code":"7KQ4M-X2D9P","expires_at":"2026-11-01T12:00:00Z","service":"telegram","username":"Ada"}"#, nil),
+            (#"{"v":1,"type":"connect","state":"connecting","service":"telegram","from":"telegram:1","handle":"@Lucille support"}"#, nil),
+            (#"{"v":1,"type":"connect","state":"connecting","service":"telegram","from":"telegram:1","handle":""}"#, nil),
+            (#"{"v":1,"type":"connect","state":"connecting","service":"telegram","from":"telegram:1","handle":"@\u0410da"}"#, nil),
+            // send_to: one to four of Lucille's accounts on the request's service, or none at all.
+            (#"{"v":1,"type":"connect","state":"code","code":"7KQ4M-X2D9P","expires_at":"2026-11-01T12:00:00Z","service":"telegram","username":"ada","send_to":[{"handle":"@LucilleBot","account":"telegram:123456789"}]}"#,
+             .connectState(.code(ConnectRequest(code: "7KQ4M-X2D9P", expiresAt: sampleTime, service: "telegram", username: "ada",
+                                                sendTo: [LucilleAccount(handle: "@LucilleBot", account: "telegram:123456789")])))),
+            (#"{"v":1,"type":"connect","state":"code","code":"7KQ4M-X2D9P","expires_at":"2026-11-01T12:00:00Z","service":"telegram","username":"ada","send_to":[{"handle":"@LucilleBot","account":"telegram:123456789"},{"handle":"@Lucille_2","account":"telegram:Ab_-9"}]}"#,
+             .connectState(.code(ConnectRequest(code: "7KQ4M-X2D9P", expiresAt: sampleTime, service: "telegram", username: "ada",
+                                                sendTo: [LucilleAccount(handle: "@LucilleBot", account: "telegram:123456789"), LucilleAccount(handle: "@Lucille_2", account: "telegram:Ab_-9")])))),
+            (#"{"v":1,"type":"connect","state":"code","code":"7KQ4M-X2D9P","expires_at":"2026-11-01T12:00:00Z","service":"telegram","username":"ada","send_to":[]}"#, nil),
+            (#"{"v":1,"type":"connect","state":"code","code":"7KQ4M-X2D9P","expires_at":"2026-11-01T12:00:00Z","service":"telegram","username":"ada","send_to":null}"#, nil),
+            (#"{"v":1,"type":"connect","state":"code","code":"7KQ4M-X2D9P","expires_at":"2026-11-01T12:00:00Z","service":"telegram","username":"ada","send_to":"@LucilleBot"}"#, nil),
+            (#"{"v":1,"type":"connect","state":"code","code":"7KQ4M-X2D9P","expires_at":"2026-11-01T12:00:00Z","service":"telegram","username":"ada","send_to":[{"handle":"@a","account":"telegram:1"},{"handle":"@b","account":"telegram:2"},{"handle":"@c","account":"telegram:3"},{"handle":"@d","account":"telegram:4"},{"handle":"@e","account":"telegram:5"}]}"#, nil),
+            (#"{"v":1,"type":"connect","state":"code","code":"7KQ4M-X2D9P","expires_at":"2026-11-01T12:00:00Z","service":"telegram","username":"ada","send_to":[{"handle":"LucilleBot","account":"telegram:123456789"}]}"#, nil),
+            (#"{"v":1,"type":"connect","state":"code","code":"7KQ4M-X2D9P","expires_at":"2026-11-01T12:00:00Z","service":"telegram","username":"ada","send_to":[{"handle":"@Lucille Bot","account":"telegram:123456789"}]}"#, nil),
+            (#"{"v":1,"type":"connect","state":"code","code":"7KQ4M-X2D9P","expires_at":"2026-11-01T12:00:00Z","service":"telegram","username":"ada","send_to":[{"handle":"@LucilleBot","account":"signal:123456789"}]}"#, nil),
+            (#"{"v":1,"type":"connect","state":"code","code":"7KQ4M-X2D9P","expires_at":"2026-11-01T12:00:00Z","service":"telegram","username":"ada","send_to":[{"handle":"@LucilleBot","account":"telegram:"}]}"#, nil),
+            (#"{"v":1,"type":"connect","state":"code","code":"7KQ4M-X2D9P","expires_at":"2026-11-01T12:00:00Z","service":"telegram","username":"ada","send_to":[{"handle":"@LucilleBot","account":"telegram:12 34"}]}"#, nil),
+            (#"{"v":1,"type":"connect","state":"code","code":"7KQ4M-X2D9P","expires_at":"2026-11-01T12:00:00Z","service":"telegram","username":"ada","send_to":[{"handle":"@LucilleBot"}]}"#, nil),
+            (#"{"v":1,"type":"connect","state":"code","code":"7KQ4M-X2D9P","expires_at":"2026-11-01T12:00:00Z","service":"telegram","username":"ada","send_to":["@LucilleBot"]}"#, nil),
+        ]
+        for (text, want) in reads {
+            let item = HostObject.parse(line: Data(text.utf8))
+            switch (item, want) {
+            case (.object(let got), let want?):
+                report.expect(got == want, "a connect object reads as the host wrote it", "\(got)")
+            case (.unusable, nil):
+                report.expect(true, "a connect object out of the host's form is not read")
+            default:
+                report.expect(false, "a connect object reads as it should: \(text)", "\(item)")
+            }
+        }
+        if let kept = fixtures["pair-status-connect"]?.objects {
+            report.expect(VerbOutcome.done(kept).connectState.map { if case .code = $0 { return true } else { return false } } == true,
+                          "the pair-status-connect fixture reads as a request kept")
+        }
+        if let cancelled = fixtures["pair-cancel"]?.objects {
+            report.expect(VerbOutcome.done(cancelled).connectState == .cancelled, "the pair-cancel fixture reads as cancelled")
+        }
+
+        let request = ConnectRequest(code: "7KQ4M-X2D9P", expiresAt: sampleTime, service: "telegram", username: "ada")
+        let account = SignedAccount(service: "telegram", from: "telegram:123456789", handle: "@Ada")
+        report.expect(ConnectionText.connectingAs(account) == "Connecting as @Ada on Telegram",
+                      "the signed handle is shown as Lucille signed it, with the service")
+        report.expect(ConnectionText.sendThis(code: request.code)
+                          == "Send this to Lucille in your chat: connect 7KQ4M-X2D9P. It works once, within 20 minutes.",
+                      "the code page says what to send, and that it works once, within 20 minutes")
+        report.expect(ConnectionText.sendThis(code: request.code, to: [LucilleAccount(handle: "@LucilleBot", account: "telegram:123456789")])
+                          == "Send this to Lucille in your chat, to @LucilleBot: connect 7KQ4M-X2D9P. It works once, within 20 minutes.",
+                      "with one account in send_to, the code page names its handle as it is")
+        let handles = ["@A1", "@B2", "@C3"].map { LucilleAccount(handle: $0, account: "telegram:1") }
+        report.expect(ConnectionText.sendThis(code: request.code, to: Array(handles.prefix(2))).contains("to @A1 or @B2: connect")
+                          && ConnectionText.sendThis(code: request.code, to: handles).contains("to @A1, @B2 or @C3: connect"),
+                      "with several, in the order given")
+        report.expect(Connect.isAccountID("telegram:123456789", service: "telegram")
+                          && Connect.isAccountID("telegram:" + String(repeating: "a", count: 64), service: "telegram")
+                          && !Connect.isAccountID("telegram:" + String(repeating: "a", count: 65), service: "telegram")
+                          && !Connect.isAccountID("telegram:\u{0430}", service: "telegram")
+                          && !Connect.isAccountID("Telegram:1", service: "telegram"),
+                      "an account id is the service, :, then 1 to 64 of letters, digits, _ and -")
+        report.expect(ConnectionText.usernamePrompt(service: "telegram") == "Your Telegram username, as in @ada.",
+                      "the account page asks for the username in decisions/0002's words")
+        let otherAccount = ConnectionText.note(.connectEnded(code: "other_account", message: "m"))
+        report.expect(otherAccount.text == "This code was sent to Lucille from a different account. Nothing was connected. Check that you sent it to the official Lucille account, then start again.",
+                      "another account is said in the decision's words, and names no account", otherAccount.text)
+        for code in Connect.endingCodes {
+            report.expect(ConnectionText.refusals[code] != nil, "\(code) has the app's own sentence")
+        }
+
+        var flow = PairingFlow()
+        func send(_ input: PairingFlow.Input) -> [PairingFlow.Effect] {
+            flow.handle(input, epoch: flow.epoch)
+        }
+        func atAccount() {
+            flow = PairingFlow()
+            _ = send(.startConnecting)
+            _ = send(.verbResult(.pairStatus, .done([.pair(.noPair)])))
+        }
+        func atCode() {
+            atAccount()
+            _ = send(.submitAccount(service: "telegram", typed: "@Ada"))
+            _ = send(.childObject(.connectState(.code(request))))
+        }
+
+        // Begin: the account first, then the code, then the account Lucille signed, then the number.
+        atAccount()
+        report.expect(send(.submitAccount(service: "telegram", typed: "@telegram:ada")).isEmpty && flow.screen == .account && !flow.pairChildAlive,
+                      "a text that names no username begins nothing")
+        report.expect(send(.submitAccount(service: "other", typed: "ada")).isEmpty && !flow.pairChildAlive,
+                      "nor a service the host does not offer")
+        let began = send(.submitAccount(service: "telegram", typed: "  @Ada "))
+        report.expect(began == [.startConnect(service: "telegram", username: "ada")] && flow.screen == .starting && flow.pairChildAlive,
+                      "Continue begins pair begin with the username as the host has it", "\(began)")
+        report.expect(send(.submitAccount(service: "telegram", typed: "ada")).isEmpty, "and only once")
+        _ = send(.childObject(.connectState(.code(request))))
+        report.expect(flow.screen == .connectCode(request) && flow.requestKept && flow.request == request,
+                      "the code is shown once pair begin writes it, and the request is kept", "\(flow.screen)")
+        report.expect(send(.pollDue).isEmpty, "no pair status while pair begin waits")
+        _ = send(.childObject(.connectState(.connecting(account))))
+        report.expect(flow.screen == .waiting(clockSkewed: false) && flow.signedAccount == account && !flow.requestKept,
+                      "connecting: the account Lucille signed, and the wait for the number")
+        var shown: [PairingFlow.Effect] = []
+        for object in [HostObject.pairCode(name: pairName), .pair(.accepted(name: pairName, clockSkewed: false)),
+                       .pair(.waiting(name: pairName)), .pair(.sasPending(name: pairName, sas: "1234-5678", deadline: sampleTime))] {
+            shown += send(.childObject(object))
+        }
+        if case .compare(let number) = flow.screen {
+            report.expect(number.sas == "1234-5678" && flow.signedAccount == account, "then the number, as from a pasted code")
+        } else {
+            report.expect(false, "the number follows connecting", "\(flow.screen)")
+        }
+
+        // A relaunch: pair status, then pair resume.
+        for (kept, page) in [(ConnectState.code(request), PairingFlow.Screen.connectCode(request)),
+                             (.delivered(service: "telegram"), .waiting(clockSkewed: false))] {
+            flow = PairingFlow()
+            _ = send(.startConnecting)
+            let resumed = send(.verbResult(.pairStatus, .done([.connectState(kept)])))
+            report.expect(resumed == [.cancelPoll, .resumeConnect] && flow.screen == page && flow.pairChildAlive && flow.requestKept,
+                          "a request kept (\(kept)) is taken up with pair resume, not begun again", "\(resumed) \(flow.screen)")
+        }
+        flow = PairingFlow()
+        _ = send(.startConnecting)
+        let held = send(.verbResult(.pairStatus, .done([.pair(.waiting(name: pairName))])))
+        report.expect(held == [.pollAfter(5)] && flow.screen == .waiting(clockSkewed: false),
+                      "a pair already answered goes on waiting for the number", "\(held)")
+        flow = PairingFlow()
+        _ = send(.startConnecting)
+        report.expect(send(.verbResult(.pairStatus, .cancelled)) == [.refreshStatus] && flow.screen == .closed,
+                      "Cancel while pair status looks closes the window")
+
+        // The window closed, or the child's time limit: the request is kept, and taken up again.
+        atCode()
+        report.expect(send(.windowClosed) == [.cancelPoll, .cancelDeadline, .interruptPair], "closing the window interrupts pair begin")
+        _ = send(.childObject(.error(HostError(code: "interrupted", message: "m", kind: nil))))
+        report.expect(send(.childExited(.exited(1))) == [.refreshStatus] && flow.requestKept,
+                      "interrupted: the request is kept, and the menu offers Finish Connecting…")
+        atCode()
+        _ = send(.childTimeLimit)
+        _ = send(.childObject(.error(HostError(code: "interrupted", message: "m", kind: nil))))
+        report.expect(send(.childExited(.exited(1))) == [.run(.pairStatus)], "the time limit, with the window open: pair status")
+        report.expect(send(.verbResult(.pairStatus, .done([.connectState(.code(request))]))) == [.cancelPoll, .resumeConnect],
+                      "then pair resume")
+
+        // Cancel: the child first, then pair cancel, and nothing more is said.
+        atCode()
+        let stop = send(.stopConnecting)
+        report.expect(stop == [.cancelRunRetries, .cancelPoll, .cancelDeadline, .interruptPair] && flow.screen == .busy(.cancelling),
+                      "Stop Connecting on the code interrupts pair begin first", "\(stop)")
+        report.expect(flow.handle(.childExited(.exited(1)), epoch: flow.epoch - 1) == [.run(.pairCancel)] && !flow.pairChildAlive,
+                      "then runs pair cancel once it has ended")
+        report.expect(send(.verbResult(.pairCancel, .done([.connectState(.cancelled)]))) == [.refreshStatus]
+                          && flow.screen == .closed && !flow.requestKept,
+                      "cancelled: the window closes, and nothing is said")
+        atCode()
+        _ = send(.windowClosed)
+        _ = send(.childObject(.error(HostError(code: "interrupted", message: "m", kind: nil))))
+        _ = send(.childExited(.exited(1)))
+        report.expect(send(.stopConnecting) == [.cancelRunRetries, .cancelPoll, .cancelDeadline, .run(.pairCancel)],
+                      "Stop Connecting… from the menu, with no child, runs pair cancel at once")
+        report.expect(send(.verbResult(.pairCancel, .refused(HostError(code: "none", message: "m", kind: nil)))) == [.refreshStatus],
+                      "none: there was nothing to cancel, which is done")
+        atCode()
+        _ = send(.windowClosed)
+        _ = send(.childExited(.exited(1)))
+        _ = send(.stopConnecting)
+        let busy = HostError(code: "busy", message: "m", kind: nil)
+        report.expect(send(.verbResult(.pairCancel, .refused(busy))) == [.say(.cancelFailed(busy)), .refreshStatus] && flow.requestKept,
+                      "a cancel refused says so, and the request is still offered")
+        atCode()
+        _ = send(.childObject(.connectState(.connecting(account))))
+        _ = send(.childObject(.pairCode(name: pairName)))
+        let rejectNow = send(.stopConnecting)
+        report.expect(rejectNow.contains(.interruptPair) && flow.screen == .busy(.rejecting),
+                      "once the answer is tried, Stop Connecting turns the pair down, as for a pasted code", "\(rejectNow)")
+
+        // Every way a request ends, from pair begin, pair resume and pair status.
+        for code in Connect.endingCodes.union(Connect.deliveredCodeRefusals).sorted() {
+            atCode()
+            _ = send(.childObject(.error(HostError(code: code, message: "the host's words", kind: nil))))
+            let said = send(.childExited(.exited(1)))
+            report.expect(said.contains(.say(.connectEnded(code: code, message: "the host's words"))) && flow.screen == .closed && !flow.requestKept,
+                          "\(code) from pair begin ends the request, says why, and offers Start Over", "\(said)")
+        }
+        for code in Connect.endingCodes.sorted() {
+            flow = PairingFlow()
+            _ = send(.startConnecting)
+            let said = send(.verbResult(.pairStatus, .refused(HostError(code: code, message: "m", kind: nil))))
+            report.expect(said.contains(.say(.connectEnded(code: code, message: "m"))) && flow.screen == .closed,
+                          "\(code) from pair status is said too")
+        }
+        for code in Connect.accountAgainCodes.sorted() {
+            atAccount()
+            _ = send(.submitAccount(service: "telegram", typed: "ada"))
+            _ = send(.childObject(.error(HostError(code: code, message: "m", kind: nil))))
+            let said = send(.childExited(.exited(1)))
+            report.expect(said.contains(.say(.refused(code: code, message: "m", afterSAS: false))) && flow.screen == .account,
+                          "\(code) from pair begin is said, and the account page comes back", "\(said)")
+        }
     }
 
     /// Thousands of inputs, in a seeded order, partly following the gate and partly not, with
     /// some answers from an older epoch: the rules hold at every step.
     static func checkPairingWalk(_ report: Report) {
         let deadline = sampleTime
-        let code = "swbp1_" + String(repeating: "Z", count: 120)
         let names = [pairName, "pair-other"]
         let sases = ["1234-5678", "8765-4321"]
         let deadlines = [deadline, deadline.addingTimeInterval(60)]
@@ -2363,7 +2594,25 @@ extension SelfTest {
         var clock: TimeInterval = 0
         var violations: [String] = []
         var confirms = 0
+        var begins = 0
+        var resumes = 0
+        let request = ConnectRequest(code: "7KQ4M-X2D9P", expiresAt: deadline, service: "telegram", username: "ada")
+        let account = SignedAccount(service: "telegram", from: "telegram:123456789", handle: "@Ada")
 
+        func randomConnect() -> VerbOutcome {
+            switch random.next(5) {
+            case 0:
+                return .done([.connectState(.code(request))])
+            case 1:
+                return .done([.connectState(.delivered(service: "telegram"))])
+            case 2:
+                return .done([.pair(.noPair)])
+            case 3:
+                return .refused(HostError(code: random.pick(["interference", "connect_expired", "store_error"]), message: "m", kind: nil))
+            default:
+                return random.next(2) == 0 ? .timedOut : .cancelled
+            }
+        }
         func randomPair() -> PairState {
             switch random.next(5) {
             case 0:
@@ -2411,8 +2660,17 @@ extension SelfTest {
             switch flow.screen {
             case .closed:
                 return .startConnecting
-            case .enterCode:
-                return .submit(code)
+            case .account:
+                return .submitAccount(service: "telegram", typed: random.pick(["@Ada", "telegram:ada", "1ada"]))
+            case .starting:
+                return .childObject(.connectState(.code(request)))
+            case .connectCode:
+                if flow.pairChildAlive {
+                    return random.next(3) == 0 ? .childExited(.exited(1)) : .childObject(.connectState(.connecting(account)))
+                }
+                return .verbResult(.pairStatus, randomConnect())
+            case .busy(.cancelling):
+                return .verbResult(.pairCancel, random.next(3) == 0 ? randomOutcome() : .done([.connectState(.cancelled)]))
             case .waiting:
                 if flow.pairChildAlive {
                     return .childObject(.pair(.sasPending(name: random.pick(names), sas: random.pick(sases), deadline: random.pick(deadlines))))
@@ -2424,6 +2682,9 @@ extension SelfTest {
                 }
                 return .sasDrawn(shown.sas, at: clock)
             case .busy(.checking):
+                if random.next(2) == 0 {
+                    return .verbResult(.pairStatus, randomConnect())
+                }
                 if let shown = lastShown, random.next(3) > 0 {
                     return .verbResult(random.pick([.status(.beforeConfirm), .status(.afterConfirm)]),
                                        .done([.status(status(.sasPending(name: shown.name, deadline: shown.deadline)))]))
@@ -2436,13 +2697,21 @@ extension SelfTest {
             }
         }
         func noise() -> PairingFlow.Input {
-            switch random.next(15) {
+            switch random.next(19) {
+            case 15:
+                return .submitAccount(service: random.pick(["telegram", "other"]), typed: random.pick(["ada", "@telegram:ada", "Ada_1"]))
+            case 16:
+                return .childObject(.connectState(.code(request)))
+            case 17:
+                return .childObject(.connectState(random.pick([.code(request), .connecting(account), .cancelled])))
+            case 18:
+                return .verbResult(random.pick([.pairStatus, .pairCancel]), randomConnect())
             case 0:
                 return .startConnecting
             case 1:
                 return .resume(randomStatusPair())
             case 2:
-                return .submit(random.next(2) == 0 ? code : "not a code")
+                return .submitAccount(service: "telegram", typed: random.next(2) == 0 ? "ada" : "not a name")
             case 3:
                 return .childObject(.pair(randomPair()))
             case 4:
@@ -2484,13 +2753,14 @@ extension SelfTest {
             let stale = random.next(10) == 0
             let epoch = stale ? flow.epoch - 1 : flow.epoch
             let screenBefore = flow.screen
+            let childBefore = flow.pairChildAlive
             if case .compare(let shown) = screenBefore {
                 lastShown = shown
             }
             let effects = flow.handle(input, epoch: epoch)
             if effects.contains(.run(.pairStatus)) {
                 switch flow.screen {
-                case .waiting, .compare:
+                case .waiting, .compare, .connectCode, .starting, .busy(.checking):
                     break
                 default:
                     violations.append("\(step): pair status with the window showing \(flow.screen)")
@@ -2512,18 +2782,42 @@ extension SelfTest {
                 }
                 matched = nil
             }
+            if effects.contains(.run(.pairCancel)) && flow.pairChildAlive {
+                violations.append("\(step): pair cancel while a pairing child lives")
+            }
             for effect in effects {
-                if case .startPair = effect {
-                    if case .submit = input {
+                switch effect {
+                case .startConnect(let service, let username):
+                    begins += 1
+                    if case .submitAccount(service, let typed) = input,
+                       Connect.normalizedUsername(typed, service: service) == username, screenBefore == .account {
                     } else {
-                        violations.append("\(step): pair started by \(input)")
+                        violations.append("\(step): pair begin started by \(input)")
                     }
+                case .resumeConnect:
+                    resumes += 1
+                    if case .verbResult(.pairStatus, let outcome) = input, !stale, outcome.connectState != nil {
+                    } else {
+                        violations.append("\(step): pair resume started by \(input)")
+                    }
+                default:
+                    break
+                }
+                switch effect {
+                case .startConnect, .resumeConnect:
+                    if childBefore {
+                        violations.append("\(step): a second pairing child started by \(input)")
+                    }
+                default:
+                    break
                 }
             }
         }
-        report.expect(violations.isEmpty, "over 40000 seeded steps, pair confirm follows only a drawn, matched, still-pending SAS, and pair status only an open window",
+        report.expect(violations.isEmpty, "over 40000 seeded steps, pair confirm follows only a drawn, matched, still-pending SAS, pair status only an open window, pair begin only a username in the host's form, pair resume only a reported request, and pair cancel only once no pairing child lives",
                       violations.prefix(5).joined(separator: "; "))
         report.expect(confirms >= 200, "the walk reached pair confirm often (\(confirms) times)")
+        report.expect(begins >= 100 && resumes >= 100,
+                      "the walk began and resumed Connect requests often (\(begins) and \(resumes) times), each only from the account page or a pair status that reported a request")
     }
 
     // MARK: - checkSetup
@@ -4161,14 +4455,16 @@ extension SelfTest {
         }
 
         let queue = DispatchQueue(label: "selftest.pair")
-        for (given, expected) in [("swbp1_" + String(repeating: "A", count: 120), "bad_code"), ("", "no_code")] {
+        // pair begin refuses a service or username it can't use before it reaches any hub.
+        for (given, expected) in [(Connect.beginInput(service: "telegram", username: "9 lives"), "bad_username"),
+                                  ("", "bad_service")] {
             let watch = ChildWatch()
-            let child = HostChild(cli: cli, verb: ["pair", "--code-stdin", "--store-file", "--json"], input: .code(given), deliverOn: queue)
+            let child = HostChild(cli: cli, verb: ["pair", "begin", "--store-file", "--json"], input: .code(given), deliverOn: queue)
             watch.watch(child)
             do {
                 try child.start()
             } catch {
-                report.expect(false, "start pair --code-stdin", "\(error)")
+                report.expect(false, "start pair begin", "\(error)")
                 continue
             }
             let ended = watch.waitForExit(seconds: 60)

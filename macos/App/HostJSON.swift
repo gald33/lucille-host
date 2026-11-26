@@ -98,6 +98,11 @@ struct JSONFields: Equatable, Sendable {
         return nil
     }
 
+    /// Whether the object has `key` at all, of any type.
+    func has(_ key: String) -> Bool {
+        values[key] != nil
+    }
+
     func array(_ key: String) -> [JSONValue]? {
         if case .array(let value)? = values[key] {
             return value
@@ -154,6 +159,44 @@ enum PairState: Equatable, Sendable {
     case rejected(name: String, lucilleTold: Bool)
     /// A state this release does not know. The state is closed within version 1, so this is
     /// never shown and never acted on.
+    case other(String)
+}
+
+/// A Connect request, as `connect` `code` gives it: the code the user sends Lucille, when it
+/// expires, the chat service, and the user's own username there, normalized.
+struct ConnectRequest: Equatable, Sendable {
+    let code: String
+    let expiresAt: Date
+    let service: String
+    let username: String
+    /// Lucille's official accounts on `service` to send the code to, in the order to show, from
+    /// the core's list; empty when the host names none.
+    var sendTo: [LucilleAccount] = []
+}
+
+/// One of Lucille's official chat accounts, as `connect` `code` names it in `send_to`: the handle
+/// the code page shows as it is, and the stable id, which nothing on the Mac checks.
+struct LucilleAccount: Equatable, Sendable {
+    let handle: String
+    let account: String
+}
+
+/// The chat account Lucille signed, as `connect` `connecting` gives it: its service, its stable
+/// id, and the handle beside it, which the window shows.
+struct SignedAccount: Equatable, Sendable {
+    let service: String
+    let from: String
+    let handle: String
+}
+
+/// The `connect` type's states (spec/CLI.md §6, `connect`).
+enum ConnectState: Equatable, Sendable {
+    case code(ConnectRequest)
+    /// Lucille's answer has arrived, and nothing was answered: `pair resume` connects.
+    case delivered(service: String)
+    case connecting(SignedAccount)
+    case cancelled
+    /// A state this release does not know: never shown and never acted on.
     case other(String)
 }
 
@@ -436,6 +479,9 @@ enum HostObject: Equatable, Sendable {
     case credentialRemoved(service: String, name: String)
     /// A credential that signed in to its service and out again (`credential test`).
     case credentialTest(service: String, name: String, host: String)
+    /// Where a Connect request from Lucille's chat is (`pair begin`, `pair resume`, `pair status`,
+    /// `pair cancel`).
+    case connectState(ConnectState)
     case unknown(type: String)
 
     /// The types this release reads. Every other type decodes as `unknown`.
@@ -443,7 +489,7 @@ enum HostObject: Equatable, Sendable {
         "pair_code", "policy_reset", "pair", "error", "status", "forget", "controls", "ready",
         "state", "request", "host_too_old", "stopped", "log_line", "version", "op", "op_removed",
         "root", "root_removed", "root_check", "alias_suggestion", "previous_policy",
-        "credential", "credential_removed", "credential_test",
+        "credential", "credential_removed", "credential_test", "connect",
     ]
 }
 
@@ -671,8 +717,70 @@ extension HostObject {
                 return nil
             }
             self = .credentialTest(service: service, name: name, host: host)
+        case "connect":
+            guard let state = HostObject.readConnect(fields) else {
+                return nil
+            }
+            self = .connectState(state)
         default:
             self = .unknown(type: type)
+        }
+    }
+
+    /// A `connect` object (spec/CLI.md §6, `connect`). Each field the app shows or acts on is read
+    /// only in the form the host's schema gives it: the code, the service, the username, and the
+    /// signed handle, which the window shows as "Connecting as @ada on Telegram".
+    static func readConnect(_ fields: JSONFields) -> ConnectState? {
+        guard let state = fields.string("state") else {
+            return nil
+        }
+        switch state {
+        case "code":
+            guard let code = fields.string("code"), Connect.isCode(code),
+                  let expires = fields.time("expires_at"),
+                  let service = fields.string("service"), Connect.services.contains(service),
+                  let username = fields.string("username"), Connect.isUsername(username)
+            else {
+                return nil
+            }
+            var sendTo: [LucilleAccount] = []
+            if fields.has("send_to") {
+                // One to four accounts, each on the request's own service; anything else makes the
+                // whole object unread.
+                guard let items = fields.array("send_to"), (1...4).contains(items.count) else {
+                    return nil
+                }
+                for item in items {
+                    guard case .object(let map) = item else {
+                        return nil
+                    }
+                    let entry = JSONFields(values: map)
+                    guard let handle = entry.string("handle"), Connect.isHandle(handle),
+                          let account = entry.string("account"), Connect.isAccountID(account, service: service)
+                    else {
+                        return nil
+                    }
+                    sendTo.append(LucilleAccount(handle: handle, account: account))
+                }
+            }
+            return .code(ConnectRequest(code: code, expiresAt: expires, service: service, username: username, sendTo: sendTo))
+        case "delivered":
+            guard let service = fields.string("service"), Connect.services.contains(service) else {
+                return nil
+            }
+            return .delivered(service: service)
+        case "connecting":
+            guard let service = fields.string("service"), Connect.services.contains(service),
+                  let from = fields.string("from"), let handle = fields.string("handle"),
+                  Connect.isHandle(handle)
+            else {
+                return nil
+            }
+            return .connecting(SignedAccount(service: service, from: from, handle: handle))
+        case "cancelled":
+            return .cancelled
+        default:
+            return .other(state)
         }
     }
 
@@ -1174,6 +1282,19 @@ enum VerbOutcome: Equatable, Sendable {
         }
         for object in objects.reversed() {
             if case .pair(let state) = object {
+                return state
+            }
+        }
+        return nil
+    }
+
+    /// The last `connect` object of a pairing verb that worked.
+    var connectState: ConnectState? {
+        guard case .done(let objects) = self else {
+            return nil
+        }
+        for object in objects.reversed() {
+            if case .connectState(let state) = object {
                 return state
             }
         }
