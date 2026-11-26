@@ -561,7 +561,7 @@ class Case:
         self.signer = signer
         self.fields: dict[str, object] = dict(signer.fields())
         self.keys: dict[str, bytes] = signer.keys
-        self.revoked: frozenset[str] = frozenset()
+        self.revoke = False
 
     def breaks(self, reason: str) -> None:
         """Make the post fail the check ``reason`` names, and only that one by itself."""
@@ -583,7 +583,9 @@ class Case:
         elif reason == delivery.BAD_CODE:
             fields["code"] = str(fields["code"]) + "\n"
         elif reason == delivery.REVOKED_KEY:
-            self.revoked = frozenset({self.signer.kid})
+            # Revoked whatever id the post ends up naming, so that a post whose id another breaker
+            # changed still fails this check too.
+            self.revoke = True
         elif reason == delivery.UNKNOWN_KEY:
             self.keys = {}
         elif reason == delivery.FORGED:
@@ -591,6 +593,12 @@ class Case:
             fields["sig"] = self.signer.fields(code=code, nonce=bytes(16))["sig"]
         else:  # pragma: no cover - a reason the table does not know
             raise AssertionError(reason)
+
+    @property
+    def revoked(self) -> frozenset[str]:
+        if not self.revoke:
+            return frozenset()
+        return frozenset({self.signer.kid, str(self.fields["kid"])})
 
     def refusal(self) -> delivery.Refused:
         with pytest.raises(delivery.Refused) as caught:
@@ -618,6 +626,16 @@ def test_a_post_failing_two_checks_is_refused_for_the_earlier(
     refusal = case.refusal()
     assert refusal.reason == earlier
     assert refusal.unknown_key is (earlier == delivery.UNKNOWN_KEY)
+
+
+def test_a_malformed_key_id_that_is_also_revoked_fails_both_and_is_reported_malformed(
+    signer: Signer,
+) -> None:
+    case = Case(signer)
+    case.breaks(delivery.REVOKED_KEY)
+    case.breaks(delivery.BAD_KID)
+    assert str(case.fields["kid"]) in case.revoked
+    assert case.refusal().reason == delivery.BAD_KID
 
 
 def test_a_revoked_and_unknown_key_id_is_reported_revoked_not_unknown(signer: Signer) -> None:

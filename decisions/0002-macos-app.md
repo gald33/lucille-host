@@ -177,7 +177,8 @@ developing the app. Its builds stay ad hoc signed, for the repository owner's ow
   on macOS 26 and 27, without the end-to-end check (§18, §19). Logs and UI snapshots are uploaded on every
   run. The disk image is uploaded only by a manual run whose every check passed, and kept 3 days.
 
-Not built yet: the typed gate and the Connect flow (§11.2, §11.4; decided on 2026-11-21), the check
+Not built yet: the typed gate and the Connect flow (§11.2, §11.4; decided on 2026-11-21; only the parts
+of Connect that need no hub are built, `connect.py` and `delivery.py`), the check
 after a folder is added from the menu, and at launch (`roots check`, §12; Set Up's Folders page runs it),
 the Welcome and main windows, updates, **Remove Capsule…** (section 17), Copy
 Diagnostics (§15), Developer ID signing and notarization, ripgrep (`Helpers/rg`; the pins hold an empty
@@ -1234,7 +1235,9 @@ what each screen does.
 
 ### 11.4 The final form: Connect from Lucille's chat
 
-**Decided by the maintainer on 2026-11-21, not built yet.** It replaces this record's earlier proposal, a
+**Decided by the maintainer on 2026-11-21. Only the parts that need no hub are built (`connect.py`): the
+connect code, `K` and `N`, the typed username's normalizing and check, and how one read of the drop room is
+judged. `pair begin` is not built yet.** It replaces this record's earlier proposal, a
 connect page on Lucille's website reached through a URL scheme: there is no website step. The two ends are
 Lucille's chat (for example in Telegram) and Capsule.
 
@@ -1351,7 +1354,8 @@ command line and any future shell get it.
      key and holds the JSON object of §11.5, in its form, with a signature that verifies (§11.5). Any other
      post that opens is ignored and logged, and neither spends the request nor ends the wait. A post that
      makes the read fail other than by a hub failure is interference (§11.4, "The wire"), and ends the
-     request. The same code, byte for byte, posted twice counts once.
+     request. The same delivery posted twice counts once: the same code, byte for byte, under the same key id,
+   for the same account and handle. The same code signed for two accounts is two deliveries.
    - A post opens only under the room's key, so a delivery shows that its writer held `C`, or `K`, as well as
      Lucille's key.
    - If the room holds more than one delivery when the host reads it, the host refuses them all, and the
@@ -1496,8 +1500,9 @@ code from `pair begin`, and deliver into the drop room a code whose note holds t
 
 ### 11.5 Lucille's signing key, pinned; no URL scheme
 
-**Decided by the maintainer on 2026-11-21. The host's checks on a delivery are built (`delivery.py`); nothing
-calls them until `pair begin` is built.** The host refuses any peer that cannot prove it
+**Decided by the maintainer on 2026-11-21. The host's checks on a delivery are built (`delivery.py`), and
+`connect.judge` makes them on each post of a read; nothing reads the drop room until `pair begin` is
+built.** The host refuses any peer that cannot prove it
 holds Lucille's signing key, before it redeems a code, and so before its gate exists and before any number is
 shown.
 

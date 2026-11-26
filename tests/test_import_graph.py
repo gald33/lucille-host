@@ -29,6 +29,7 @@ RUNTIME_MODULES = (
     "lucille_host._switchboard",
     "lucille_host.audit",
     "lucille_host.cli",
+    "lucille_host.connect",
     "lucille_host.containment",
     "lucille_host.controls",
     "lucille_host.credentials",
