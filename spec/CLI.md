@@ -625,8 +625,10 @@ Notes:
   - `newer_capsule`: the 20 minutes passed, and the only answers were signed with a key this release does
     not know;
   - `key_misused`: two answers passed, which Lucille never sends;
-  - `other_account`: the answer names another account than the one typed. No screen names that account;
-  - `not_this_mac`: the answer's code names another request;
+  - `other_account`: the answer names another account than the one typed, judged before the expiry. No
+    screen names that account;
+  - `not_this_mac`: the answer's code names another request, or carries no hello of the pairing library,
+    or the request was used already;
   - `bad_code`, `wrong_hub` or `code_has_token`: the answer's code is refused as `pair` refuses one.
 - **`pair resume`** takes up the request `pair begin` kept, as `begin` would have gone on. A shell that was
   relaunched calls `pair status`, then `pair resume` if it reports a `connect`.
@@ -828,7 +830,7 @@ limit, as it runs every verb, and stops it when the limit passes.
 | `newer_capsule` | The connect code expired, and Lucille's answers were signed with a key this release does not know: Lucille may need a newer Capsule. |
 | `key_misused` | Lucille's answer came twice, which Lucille never does. Nothing was connected. |
 | `other_account` | The connect code was sent to Lucille from a different account than the one typed. Nothing was connected. |
-| `not_this_mac` | Lucille's answer is for a request this computer did not make, or that was used already. Nothing was connected. |
+| `not_this_mac` | Lucille's answer is for a request this computer did not make (its code names another request, or carries no hello of the pairing library), or for one that was used already. Nothing was connected. |
 
 **As root.** Every verb but `--version`, `--help` and a command with no verb (which shows the version) is
 refused when the effective user id is 0: first thing after the command line parses, before the profile's

@@ -1085,11 +1085,11 @@ def _pair_action(args: argparse.Namespace, dirs: paths.Dirs, out: _Out) -> None:
     session = link.open_session(dirs, host_state.load_host_config(dirs), say=_say, warn=_warn)
     if args.code == "status":
         view = session.status_view()
-        if view.word == "none":
-            request = connecting.load(dirs.connect_file)
-            if request is not None:
-                _connect_status(session, request, dirs, out)
+        if view.word == "none" and dirs.connect_file.exists():
+            if _connect_status(session, dirs, out):
                 return
+            # A `pair begin` or `pair resume` answered the request's code, or ended it, meanwhile.
+            view = session.status_view()
         word, detail = link.pair_words(view)
         out.say(f"{word}: {detail}", "pair", **_pair_view(view))
         return
@@ -1354,8 +1354,7 @@ def _connect_action(args: argparse.Namespace, dirs: paths.Dirs, out: _Out) -> No
             _connect_resume(dirs, out)
 
 
-def _connect_code(live: connecting.Live, out: _Out) -> None:
-    request = live.request
+def _connect_code(request: connecting.Request, out: _Out) -> None:
     shown = connect.shown(request.code)
     until = link.iso(request.expires_at)
     out.say(
@@ -1410,7 +1409,7 @@ def _connect_begin(dirs: paths.Dirs, wanted: host_state.HostConfig, out: _Out) -
     except _switchboard.HubError as exc:
         raise _Refused("hub_error", f"{exc}: no Connect request was kept; try again") from None
     session.audit.write("connect", event="began", epoch=live.request.epoch)
-    _connect_code(live, out)
+    _connect_code(live.request, out)
     _connect_wait(session, live, dirs, wanted, opened, current, out)
 
 
@@ -1424,30 +1423,33 @@ def _connect_resume(dirs: paths.Dirs, out: _Out) -> None:
     current = host_state.load_host_config(dirs)
     session, opened, current = _pairing_session(dirs, current)
     live = connecting.open_request(request)
-    _connect_code(live, out)
+    _connect_code(live.request, out)
     _connect_wait(session, live, dirs, current, opened, current, out)
 
 
-def _connect_delivered(live: connecting.Live, out: _Out) -> None:
+def _connect_delivered(request: connecting.Request, out: _Out) -> None:
     out.say(
         "delivered: Lucille's answer has arrived; `lucille-host pair resume` connects",
         "connect",
         state="delivered",
-        service=live.request.service,
+        service=request.service,
     )
 
 
-def _connect_status(
-    session: link.Session, request: connecting.Request, dirs: paths.Dirs, out: _Out
-) -> None:
+def _connect_status(session: link.Session, dirs: paths.Dirs, out: _Out) -> bool:
     """``pair status`` with a Connect request and no pair: one read of the drop room under the
     pair lock, which records what it saw and redeems, posts and spends nothing (a request that
     ended is reported, and left for ``pair resume`` or ``pair begin``); or, while ``pair begin``
-    or ``pair resume`` holds the lock, what the file says."""
-    live = connecting.open_request(request)
+    or ``pair resume`` holds the lock, what the file says. The request is read under the lock,
+    so that one a ``begin`` or ``resume`` answered or ended meanwhile is never written back.
+    False when there is no request any more."""
     lock = paths.ensure_dir(dirs.state) / PAIR_LOCK
     try:
         with loop.one_at_a_time(lock, ALREADY_PAIRING, "`pair status`"):
+            request = connecting.load(dirs.connect_file)
+            if request is None:
+                return False
+            live = connecting.open_request(request)
             try:
                 step = connecting.poll(
                     session.link, dirs.connect_file, live, now=session.link.now, spend=False
@@ -1456,17 +1458,21 @@ def _connect_status(
                 # Reported, not ended here: the request is left as it is.
                 raise _Refused(ended.code, str(ended)) from None
             if step.found is not None:
-                _connect_delivered(step.live, out)
+                _connect_delivered(step.live.request, out)
             else:
-                _connect_code(step.live, out)
-            return
+                _connect_code(step.live.request, out)
+            return True
     except loop.Failed as exc:
         if exc.code != "busy":
             raise
+    request = connecting.load(dirs.connect_file)
+    if request is None:
+        return False
     if request.delivery_seen:
-        _connect_delivered(live, out)
+        _connect_delivered(request, out)
     else:
-        _connect_code(live, out)
+        _connect_code(request, out)
+    return True
 
 
 def _connect_cancel(dirs: paths.Dirs, out: _Out) -> None:

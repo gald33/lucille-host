@@ -5,6 +5,7 @@ Lucille that signs with a throwaway key pinned in place of Lucille's.
 
 from __future__ import annotations
 
+import contextlib
 import json
 from collections.abc import Iterator
 from pathlib import Path
@@ -13,7 +14,7 @@ from typing import Any
 import pytest
 from switchboard.testing import hub
 
-from lucille_host import _switchboard, connect, connecting, gate, state
+from lucille_host import _switchboard, connect, connecting, gate, loop, state
 from lucille_host.cli import PAIR_LOCK
 from tests._cli import HostCli, Ran, collecting, until
 from tests._host import HostEnv, lock_held
@@ -438,3 +439,25 @@ def test_the_code_and_username_are_kept_nowhere_once_connected(
         for value in cli.env.keyring.items.values()
     )
     assert json.dumps(request.code) not in cli.audit()
+
+
+def test_status_never_writes_back_a_request_answered_while_it_waited_for_the_lock(
+    cli: HostCli, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # `pair resume` answers the code and deletes the request in the moment between `status`
+    # seeing the file and taking the pair lock.
+    _begun(cli)
+    real = loop.one_at_a_time
+
+    @contextlib.contextmanager
+    def answered_first(lock: Path, busy: str, verb: str) -> Iterator[None]:
+        if verb == "`pair status`":
+            connecting.remove(cli.dirs.connect_file)
+        with real(lock, busy, verb):
+            yield
+
+    monkeypatch.setattr("lucille_host.loop.one_at_a_time", answered_first)
+    ran = cli.run("pair", "status", "--json")
+    assert ran.rc == 0, ran.text
+    assert _objects(ran) == [{"v": 1, "type": "pair", "state": "none"}]
+    assert not cli.dirs.connect_file.exists()

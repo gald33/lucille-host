@@ -22,6 +22,10 @@ expiry. At the expiry, in this order (:func:`expiry_code`):
 3. else a post was ignored only for a key id this release does not pin: ``newer_capsule``;
 4. else ``connect_expired``.
 
+A request used already is deleted at its expiry too, and ends with what these rules give: its
+answer was tried, so the first rule does not apply to it. A delivery for another account than the
+one typed is ``other_account`` even past the expiry (:func:`redeemable`).
+
 A read that holds no hello, or two, or 50 posts or more, or that failed other than at the hub, is
 ``interference`` at once (the first rule, and "The wire"); two deliveries are ``key_misused``.
 Each of these spends the request.
@@ -335,11 +339,15 @@ def redeemable(
     now: Callable[[], float],
 ) -> Live:
     """The last checks on a delivery before its code is answered (§11.4, steps 7 and 8), with
-    ``code`` already decoded and its hub and token checked: the signed account is the user's own,
-    the code has the library's hello, its note names this request's nonce, and the request is
-    unexpired and unused. Then the request is marked used, and synced to disk, before this
-    returns. Any failure raises :class:`Ended` with the file deleted, but a used request, which
-    is kept as it is."""
+    ``code`` already decoded and its hub and token checked, in this order: the signed account is
+    the user's own (``other_account``, judged first, as step 7 orders it, so that a delivery for
+    another account says so even when the expiry passed after it was read); the request is
+    unexpired (else ``interference``, §11.4 step 5's third rule); it is unused; the code has the
+    library's hello, and its note names this request's nonce (else ``not_this_mac``). Then the
+    request is marked used, and synced to disk, before this returns. Any failure raises
+    :class:`Ended` with the file deleted, but a request already used, which is left as it is:
+    the command that used it deletes it once the answer is tried, and :func:`poll` deletes it at
+    its expiry, as it deletes any request then."""
     request = live.request
     if not connect.names_user(found, request.service, request.username):
         raise _end(
