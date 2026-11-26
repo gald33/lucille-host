@@ -81,6 +81,8 @@ from lucille_host import (
     __version__,
     _switchboard,
     audit,
+    connect,
+    connecting,
     gate,
     link,
     loop,
@@ -104,6 +106,8 @@ from lucille_host.ops import (
 
 # The words ``pair`` takes in place of a code.
 PAIR_ACTIONS: Final = ("status", "confirm", "reject")
+# The actions of a Connect request from Lucille's chat (decisions/0002 §11.4).
+CONNECT_ACTIONS: Final = ("begin", "resume", "cancel")
 # In the state folder: held by ``pair [CODE]`` until it returns.
 PAIR_LOCK: Final = ".pair.lock"
 ALREADY_PAIRING: Final = (
@@ -571,8 +575,12 @@ def build_parser() -> argparse.ArgumentParser:
     pair.add_argument(
         "code",
         nargs="?",
-        metavar="CODE | status | confirm | reject",
-        help="the pairing code (read from stdin when it is not given), or one of the actions",
+        metavar="CODE | begin | resume | cancel | status | confirm | reject",
+        help=(
+            "the pairing code (read from stdin when it is not given), or one of the actions: "
+            "`begin` shows a connect code to send Lucille in your chat and waits for its answer, "
+            "`resume` waits again, `cancel` drops it"
+        ),
     )
     pair.add_argument(
         "--code-stdin",
@@ -1077,6 +1085,11 @@ def _pair_action(args: argparse.Namespace, dirs: paths.Dirs, out: _Out) -> None:
     session = link.open_session(dirs, host_state.load_host_config(dirs), say=_say, warn=_warn)
     if args.code == "status":
         view = session.status_view()
+        if view.word == "none" and dirs.connect_file.exists():
+            if _connect_status(session, dirs, out):
+                return
+            # A `pair begin` or `pair resume` answered the request's code, or ended it, meanwhile.
+            view = session.status_view()
         word, detail = link.pair_words(view)
         out.say(f"{word}: {detail}", "pair", **_pair_view(view))
         return
@@ -1143,6 +1156,9 @@ def _ask(session: link.Session, name: str, deadline: float | None, out: _Out) ->
 
 
 def _pair(args: argparse.Namespace, dirs: paths.Dirs, out: _Out) -> None:
+    if args.code in CONNECT_ACTIONS:
+        _connect_action(args, dirs, out)
+        return
     if args.code in PAIR_ACTIONS:
         _pair_action(args, dirs, out)
         return
@@ -1168,11 +1184,11 @@ def _pair(args: argparse.Namespace, dirs: paths.Dirs, out: _Out) -> None:
         _answer(args, dirs, wanted, out)
 
 
-def _answer(
-    args: argparse.Namespace, dirs: paths.Dirs, wanted: host_state.HostConfig, out: _Out
-) -> None:
-    """``pair [CODE]``, under the profile's pair lock: answer a code, wait for Lucille to collect
-    the answer, show the SAS and ask about it."""
+def _pairing_session(
+    dirs: paths.Dirs, wanted: host_state.HostConfig
+) -> tuple[link.Session, host_state.HostConfig, host_state.HostConfig]:
+    """The session a pairing uses, and the configurations it was opened with and found, once
+    no pair is held. Refuses ``held`` while one is."""
     current = host_state.load_host_config(dirs)
     try:
         session = link.open_session(dirs, current, say=_say, warn=_warn)
@@ -1204,12 +1220,39 @@ def _answer(
             "Disconnect first: this computer already holds a pair (`lucille-host pair reject` "
             "forgets one that is not confirmed yet)",
         )
+    return session, opened, current
+
+
+def _answer(
+    args: argparse.Namespace, dirs: paths.Dirs, wanted: host_state.HostConfig, out: _Out
+) -> None:
+    """``pair [CODE]``, under the profile's pair lock: answer a code, wait for Lucille to collect
+    the answer, show the SAS and ask about it."""
+    session, opened, current = _pairing_session(dirs, wanted)
     text = args.code
     if text is None:
         text = _read_line("Paste the pairing code Lucille shows: ", out).strip()
         if not text:
             raise _Refused("no_code", "no pairing code was given on stdin")
     code = session.check_code(text, wanted)
+    _answered(session, code, dirs, wanted, opened, current, out, ask=not args.code_stdin)
+
+
+def _answered(
+    session: link.Session,
+    code: _switchboard.Code,
+    dirs: paths.Dirs,
+    wanted: host_state.HostConfig,
+    opened: host_state.HostConfig,
+    current: host_state.HostConfig,
+    out: _Out,
+    *,
+    ask: bool,
+    answered: Callable[[], None] | None = None,
+) -> None:
+    """Answer a code the host has checked, wait for Lucille to collect the answer, show the SAS,
+    and ask about it when ``ask``. ``answered``, when given, is called once the answer was tried,
+    whatever came of it."""
     note = link.sanitize(code.note)
     out.say(
         f"pairing code for pair {code.name}, on {code.url}",
@@ -1239,7 +1282,11 @@ def _answer(
             "is held; `lucille-host policy previous` lists the earlier one",
             "policy_reset",
         )
-    name = session.accept(code)
+    try:
+        name = session.accept(code)
+    finally:
+        if answered is not None:
+            answered()
     if session.skewed:
         _warn(link.SKEWED)
     out.say(
@@ -1266,7 +1313,7 @@ def _answer(
         sas=sas,
         deadline=link.iso(found.deadline or 0),
     )
-    if args.code_stdin:
+    if not ask:
         return
     try:
         out.text(_ask(session, name, found.deadline, out))
@@ -1276,6 +1323,226 @@ def _answer(
             f"pair {name} is kept; `lucille-host pair status` shows its SAS again, and "
             "`lucille-host pair confirm` confirms it",
         ) from None
+
+
+# --- Connect from Lucille's chat (decisions/0002 §11.4) -------------------------------------------
+
+_SERVICE_NAMES: Final = MappingProxyType({"telegram": "Telegram"})
+
+
+def _connect_action(args: argparse.Namespace, dirs: paths.Dirs, out: _Out) -> None:
+    """``pair begin``, ``pair resume`` and ``pair cancel``, each under the profile's pair lock."""
+    if args.code_stdin or (args.code != "begin" and (args.hub is not None or args.store_file)):
+        options = "--hub and --store-file only" if args.code == "begin" else "no options"
+        raise _Refused("bad_options", f"`pair {args.code}` takes {options}")
+    wanted: host_state.HostConfig | None = None
+    if args.code == "begin":
+        try:
+            wanted = host_state.HostConfig(
+                hub=args.hub, store="file" if args.store_file else "keyring"
+            )
+        except ValueError as exc:
+            raise _Refused("bad_hub", str(exc)) from exc
+    host_state.startup_checks()
+    lock = paths.ensure_dir(dirs.state) / PAIR_LOCK
+    with loop.one_at_a_time(lock, ALREADY_PAIRING, "`pair`"):
+        if args.code == "cancel":
+            _connect_cancel(dirs, out)
+        elif wanted is not None:
+            _connect_begin(dirs, wanted, out)
+        else:
+            _connect_resume(dirs, out)
+
+
+def _connect_code(request: connecting.Request, out: _Out) -> None:
+    shown = connect.shown(request.code)
+    until = link.iso(request.expires_at)
+    out.say(
+        f"code: send this to Lucille in your chat: connect {shown}. It works once, until {until}",
+        "connect",
+        state="code",
+        code=shown,
+        expires_at=until,
+        service=request.service,
+        username=request.username,
+    )
+
+
+def _connect_ended(session: link.Session, ended: connecting.Ended) -> NoReturn:
+    """Log how the request ended, with the other account's signed ``from`` for a mismatch and
+    nothing else from the room, then refuse with its code."""
+    fields: dict[str, str] = {"code": ended.code, "why": ended.why}
+    if ended.sender:
+        fields["sender"] = ended.sender
+    session.audit.write("connect", event="ended", **fields)
+    raise _Refused(ended.code, str(ended))
+
+
+def _connect_begin(dirs: paths.Dirs, wanted: host_state.HostConfig, out: _Out) -> None:
+    """``pair begin``: ask the service and the user's own username, draw a code, post the
+    hello, and wait for Lucille's answer."""
+    session, opened, current = _pairing_session(dirs, wanted)
+    service = _read_line("Chat service (telegram): ", out).strip(" \n")
+    if service not in connect.SERVICES:
+        raise _Refused(
+            "bad_service", f"Capsule connects through {', '.join(sorted(connect.SERVICES))} only"
+        )
+    entry = _read_line(f"Your username on {_SERVICE_NAMES[service]}: ", out).rstrip("\n")
+    username = connect.normalize_username(entry, service)
+    if username is None:
+        raise _Refused(
+            "bad_username",
+            "that is not a username: it starts with a letter, and holds letters, digits and _ "
+            "only, 64 at most",
+        )
+    if wanted != current:
+        host_state.save_host_config(dirs, wanted)
+    try:
+        live = connecting.begin(
+            session.link,
+            dirs.connect_file,
+            service=service,
+            username=username,
+            hub=wanted.hub or _switchboard.LUCILLE_HUB,
+            now=session.link.now,
+        )
+    except _switchboard.HubError as exc:
+        raise _Refused("hub_error", f"{exc}: no Connect request was kept; try again") from None
+    session.audit.write("connect", event="began", epoch=live.request.epoch)
+    _connect_code(live.request, out)
+    _connect_wait(session, live, dirs, wanted, opened, current, out)
+
+
+def _connect_resume(dirs: paths.Dirs, out: _Out) -> None:
+    """``pair resume``: wait again on the request ``pair begin`` kept."""
+    request = connecting.load(dirs.connect_file)
+    if request is None:
+        raise _Refused(
+            "none", "no Connect request is waiting: `lucille-host pair begin` starts one"
+        )
+    current = host_state.load_host_config(dirs)
+    session, opened, current = _pairing_session(dirs, current)
+    live = connecting.open_request(request)
+    _connect_code(live.request, out)
+    _connect_wait(session, live, dirs, current, opened, current, out)
+
+
+def _connect_delivered(request: connecting.Request, out: _Out) -> None:
+    out.say(
+        "delivered: Lucille's answer has arrived; `lucille-host pair resume` connects",
+        "connect",
+        state="delivered",
+        service=request.service,
+    )
+
+
+def _connect_status(session: link.Session, dirs: paths.Dirs, out: _Out) -> bool:
+    """``pair status`` with a Connect request and no pair: one read of the drop room under the
+    pair lock, which records what it saw and redeems, posts and spends nothing (a request that
+    ended is reported, and left for ``pair resume`` or ``pair begin``); or, while ``pair begin``
+    or ``pair resume`` holds the lock, what the file says. The request is read under the lock,
+    so that one a ``begin`` or ``resume`` answered or ended meanwhile is never written back.
+    False when there is no request any more."""
+    lock = paths.ensure_dir(dirs.state) / PAIR_LOCK
+    try:
+        with loop.one_at_a_time(lock, ALREADY_PAIRING, "`pair status`"):
+            request = connecting.load(dirs.connect_file)
+            if request is None:
+                return False
+            live = connecting.open_request(request)
+            try:
+                step = connecting.poll(
+                    session.link, dirs.connect_file, live, now=session.link.now, spend=False
+                )
+            except connecting.Ended as ended:
+                # Reported, not ended here: the request is left as it is.
+                raise _Refused(ended.code, str(ended)) from None
+            if step.found is not None:
+                _connect_delivered(step.live.request, out)
+            else:
+                _connect_code(step.live.request, out)
+            return True
+    except loop.Failed as exc:
+        if exc.code != "busy":
+            raise
+    request = connecting.load(dirs.connect_file)
+    if request is None:
+        return False
+    if request.delivery_seen:
+        _connect_delivered(request, out)
+    else:
+        _connect_code(request, out)
+    return True
+
+
+def _connect_cancel(dirs: paths.Dirs, out: _Out) -> None:
+    """``pair cancel``: drop the request; its code connects nothing from now on."""
+    request = connecting.load(dirs.connect_file)
+    if request is None:
+        raise _Refused("none", "no Connect request is waiting")
+    connecting.remove(dirs.connect_file)
+    out.say(
+        "cancelled: the connect code no longer connects this computer", "connect", state="cancelled"
+    )
+
+
+def _connect_wait(
+    session: link.Session,
+    live: connecting.Live,
+    dirs: paths.Dirs,
+    wanted: host_state.HostConfig,
+    opened: host_state.HostConfig,
+    current: host_state.HostConfig,
+    out: _Out,
+) -> None:
+    """Read the drop room every :data:`connecting.POLL_EVERY` seconds until a delivery passes,
+    then answer its code as ``pair`` answers one. Ctrl-C keeps the request."""
+    path = dirs.connect_file
+    try:
+        while True:
+            try:
+                step = connecting.poll(session.link, path, live, now=session.link.now)
+            except connecting.Ended as ended:
+                _connect_ended(session, ended)
+            live = step.live
+            for why in step.ignored:
+                _warn(f"a post in the drop room was ignored: {why}")
+            if step.found is not None:
+                break
+            time.sleep(connecting.POLL_EVERY)
+    except KeyboardInterrupt:
+        raise link.Stopped(
+            "interrupted", "the Connect request is kept; `lucille-host pair resume` waits again"
+        ) from None
+    found = step.found
+    try:
+        code = session.check_code(found.code, wanted)
+    except link.Stopped:
+        connecting.remove(path)
+        raise
+    try:
+        live = connecting.redeemable(path, live, found, code, now=session.link.now)
+    except connecting.Ended as ended:
+        _connect_ended(session, ended)
+    out.say(
+        f"connecting: as {found.handle} on {_SERVICE_NAMES[live.request.service]}",
+        "connect",
+        state="connecting",
+        service=live.request.service,
+        handle=found.handle,
+        **{"from": found.sender},
+    )
+    _answered(
+        session,
+        code,
+        dirs,
+        wanted,
+        opened,
+        current,
+        out,
+        ask=not out.as_json,
+        answered=lambda: connecting.remove(path),
+    )
 
 
 def _stdin_fd() -> int:

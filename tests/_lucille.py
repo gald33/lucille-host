@@ -12,16 +12,22 @@ another, such as Lucille's (the in-process transport reaches the test hub whatev
 
 from __future__ import annotations
 
+import base64
 import contextlib
+import hashlib
+import json
 from collections.abc import Iterator
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
 import pytest
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 from switchboard import crypto, pairing, sharing
+from switchboard.config import ClientConfig
 
-from lucille_host import _switchboard
+from lucille_host import _switchboard, connect, delivery
 
 AGENT_ID = "lucille"
 HOST_ID = "lucille-host"
@@ -50,6 +56,45 @@ def unparsable_bodies() -> Iterator[None]:
         yield
 
 
+class Signer:
+    """A throwaway Ed25519 key, standing in for Lucille's signing key: never Lucille's own. A
+    test pins it in Lucille's place by its ``keys``."""
+
+    def __init__(self) -> None:
+        self.private = Ed25519PrivateKey.generate()
+        raw = self.private.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
+        self.kid = hashlib.sha256(raw).digest()[:8].hex()
+        self.keys = {self.kid: raw}
+
+    def delivery(self, code: str, nonce: bytes, *, sender: str, handle: str) -> str:
+        """The body of a delivery of ``code`` for the request whose nonce is ``nonce``."""
+        signed = delivery.signed_bytes(self.kid, nonce, code, sender, handle)
+        sig = base64.urlsafe_b64encode(self.private.sign(signed)).decode("ascii").rstrip("=")
+        return json.dumps(
+            {
+                "t": delivery.TYPE,
+                "code": code,
+                "kid": self.kid,
+                "from": sender,
+                "handle": handle,
+                "sig": sig,
+            }
+        )
+
+
+def drop_config(key: bytes, url: str = _switchboard.LUCILLE_HUB) -> Any:
+    """The drop room for ``K``, opened as "The wire" says Lucille opens it."""
+    room = pairing.handshake_room(key)
+    return ClientConfig(
+        url=url,
+        workspace=room.workspace,
+        key=room.key,
+        write_key=room.write_key,
+        peer_log="",
+        stash_db="",
+    )
+
+
 class FakeLucille:
     def __init__(
         self, h: Any, folder: Path, *, url: str | None = None, connect: Any = None
@@ -70,6 +115,52 @@ class FakeLucille:
         """Start a pairing; returns the code Lucille's page shows."""
         started = pairing.start(self.base, **self._with(store=self.pairs, **options))
         self.name = started.name
+        return started.code
+
+    def drop(self, key: bytes, body: Any) -> None:
+        """Post ``body`` into the drop room of ``K``, as anyone who holds the code can."""
+        config = drop_config(key, self.base.url)
+        with self.connect(config, agent_id=pairing.throwaway_agent("lucille")) as poster:
+            poster.post(connect.CHANNEL, body, ttl=connect.POST_TTL)
+
+    def read_drop(self, key: bytes) -> list[Any]:
+        """What the drop room of ``K`` holds, as Lucille reads it."""
+        config = drop_config(key, self.base.url)
+        with self.connect(config, agent_id=pairing.throwaway_agent("lucille")) as reader:
+            return list(reader.history(connect.CHANNEL, limit=connect.READ_LIMIT))
+
+    def deliver(
+        self,
+        shown: str,
+        signer: Signer,
+        *,
+        at_epoch: int | None = None,
+        sender: str = "telegram:123456789",
+        handle: str = "@ada",
+        note: str | None = None,
+        **options: Any,
+    ) -> str:
+        """Answer ``connect <shown>`` as Lucille does (decisions/0002 §11.4, step 6): stretch the
+        code for the epoch (this hub clock's, unless ``at_epoch`` names one), start a pairing
+        whose note names the request's nonce, and post its code into the drop room, signed by
+        ``signer``. Returns the pairing code delivered."""
+        code = connect.parse_code(shown)
+        assert code is not None, shown
+        at = connect.epoch(self.h.now) if at_epoch is None else at_epoch
+        key = connect.stretch(code, at)
+        nonce = connect.nonce(key)
+        options.setdefault("with_token", False)
+        options.setdefault("ttl", 900)
+        started = pairing.start(
+            self.base,
+            **self._with(
+                store=self.pairs,
+                note=f"lucille-host/2 n={nonce.hex()}" if note is None else note,
+                **options,
+            ),
+        )
+        self.name = started.name
+        self.drop(key, signer.delivery(started.code, nonce, sender=sender, handle=handle))
         return started.code
 
     def collect(self) -> Any:

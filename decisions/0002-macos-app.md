@@ -177,8 +177,8 @@ developing the app. Its builds stay ad hoc signed, for the repository owner's ow
   on macOS 26 and 27, without the end-to-end check (§18, §19). Logs and UI snapshots are uploaded on every
   run. The disk image is uploaded only by a manual run whose every check passed, and kept 3 days.
 
-Not built yet: the typed gate and the Connect flow (§11.2, §11.4; decided on 2026-11-21; only the parts
-of Connect that need no hub are built, `connect.py` and `delivery.py`), the check
+Not built yet: the typed gate (§11.2; decided on 2026-11-21), Connect in the app (§11.4: the host's
+`pair begin`, `pair resume` and `pair cancel` are built, and the paste flow still works), the check
 after a folder is added from the menu, and at launch (`roots check`, §12; Set Up's Folders page runs it),
 the Welcome and main windows, updates, **Remove Capsule…** (section 17), Copy
 Diagnostics (§15), Developer ID signing and notarization, ripgrep (`Helpers/rg`; the pins hold an empty
@@ -1235,9 +1235,11 @@ what each screen does.
 
 ### 11.4 The final form: Connect from Lucille's chat
 
-**Decided by the maintainer on 2026-11-21. Only the parts that need no hub are built (`connect.py`): the
-connect code, `K` and `N`, the typed username's normalizing and check, and how one read of the drop room is
-judged. `pair begin` is not built yet.** It replaces this record's earlier proposal, a
+**Decided by the maintainer on 2026-11-21. The host's side is built: `connect.py` (the connect code, `K` and
+`N`, the typed username, how one read of the drop room is judged), `connecting.py` (the request, its reads,
+its expiry and the checks before the code is answered), and `pair begin`, `pair resume`, `pair cancel` and
+`pair status` (spec/CLI.md §7). Not yet: the app's Connect screens, and refusing every code without its own
+request's nonce, so the paste flow (§11.3) still works.** It replaces this record's earlier proposal, a
 connect page on Lucille's website reached through a URL scheme: there is no website step. The two ends are
 Lucille's chat (for example in Telegram) and Capsule.
 
@@ -1501,8 +1503,8 @@ code from `pair begin`, and deliver into the drop room a code whose note holds t
 ### 11.5 Lucille's signing key, pinned; no URL scheme
 
 **Decided by the maintainer on 2026-11-21. The host's checks on a delivery are built (`delivery.py`), and
-`connect.judge` makes them on each post of a read; nothing reads the drop room until `pair begin` is
-built.** The host refuses any peer that cannot prove it
+`connect.judge` makes them on each post of every read `pair begin`, `pair resume` and `pair status`
+make.** The host refuses any peer that cannot prove it
 holds Lucille's signing key, before it redeems a code, and so before its gate exists and before any number is
 shown.
 

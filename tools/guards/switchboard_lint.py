@@ -58,7 +58,9 @@ included, and in ``tools/``):
   of the host's own must name; ``CHANNEL``, the name of the pair room's channel the library posts
   its notes on, which the read loop reads; and ``message_tag``, the ``TAG_PAIRED``,
   ``TAG_MOVED``, ``TAG_ENDED`` and ``TAG_SHARED`` constants and ``hub_errors``, which tell the
-  library's notes and the hub's errors apart without a hub call; never ``start``, ``collect``,
+  library's notes and the hub's errors apart without a hub call; ``handshake_room`` and
+  ``throwaway_agent``, which open a Connect request's drop room as decisions/0002 §11.4 says;
+  never ``start``, ``collect``,
   ``heal``, ``export`` or ``from_secret``),
   ``client`` (``Client`` and its errors), ``sharing`` (above), ``signing``
   (``SigningIdentity``, and ``verify``, which checks Lucille's signature on a connect delivery),
@@ -164,6 +166,8 @@ SURFACE: Mapping[str, frozenset[str]] = {
             "TAG_ENDED",
             "TAG_SHARED",
             "hub_errors",
+            "handshake_room",
+            "throwaway_agent",
         }
     ),
     "client": frozenset({"Client", "SwitchboardError", "ReadOnlyRoom"}),

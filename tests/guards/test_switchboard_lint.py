@@ -517,6 +517,8 @@ PINNED_SURFACE = {
         "TAG_ENDED",
         "TAG_SHARED",
         "hub_errors",
+        "handshake_room",
+        "throwaway_agent",
     },
     "client": {"Client", "SwitchboardError", "ReadOnlyRoom"},
     "sharing": {

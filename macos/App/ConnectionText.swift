@@ -162,6 +162,12 @@ enum ConnectionText {
         "already_confirmed": "This Mac was already confirmed. To end it, choose Disconnect from Lucille…",
         "insecure_keyring": "macOS's Keychain can't keep \(appName)'s connection safely, so \(appName) won't connect.",
         "store_error": "\(appName) can't open its Keychain item. If macOS asked about the Keychain, click Allow, then try again. If this keeps happening, restart your Mac.",
+        // A Connect request from Lucille's chat that ended (decisions/0002 §11.4), which
+        // `pair status` reports.
+        "interference": "\(appName) couldn't read Lucille's answer, and the code may be known to someone else. Start again.",
+        "connect_expired": "The code expired. Nothing was connected. Start again.",
+        "newer_capsule": "Lucille may need a newer \(appName). Get it from where you got this one.",
+        "key_misused": "Lucille's answer came twice, which Lucille never does. Nothing was connected. Start again.",
     ]
 
     /// Codes that can only be the app's own mistake against the host it ships, or a host that

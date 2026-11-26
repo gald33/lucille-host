@@ -379,14 +379,37 @@ is enabled, and no folder is held.
 | `state` | Other fields | Written by |
 |---|---|---|
 | `none` | | `pair status` |
-| `accepted` | `name`, `clock_skewed` (boolean) | `pair --code-stdin` |
-| `waiting` | `name` | `pair --code-stdin`, `pair status` |
-| `sas_pending` | `name`, `sas` (`^[0-9]{4}-[0-9]{4}$`), `deadline` | `pair --code-stdin`, `pair status` |
+| `accepted` | `name`, `clock_skewed` (boolean) | `pair --code-stdin`, `pair begin`, `pair resume` |
+| `waiting` | `name` | `pair --code-stdin`, `pair begin`, `pair resume`, `pair status` |
+| `sas_pending` | `name`, `sas` (`^[0-9]{4}-[0-9]{4}$`), `deadline` | `pair --code-stdin`, `pair begin`, `pair resume`, `pair status` |
 | `confirmed` | `name` | `pair status`, `pair confirm` |
 | `rejected` | `name`, `lucille_told` (boolean) | `pair reject` |
 
 `clock_skewed` is true when the hub refused the answer because this computer's clock is more than 300 s from
 its own: the answer was kept, and is sent again while `pair` waits, but the clock must be set right first.
+
+### `connect`: a Connect request from Lucille's chat
+
+[decisions/0002-macos-app.md](../decisions/0002-macos-app.md) §11.4: the user sends Lucille the connect code
+in their chat, and Lucille answers into a room only the two of them can find.
+
+| `state` | Other fields | Written by |
+|---|---|---|
+| `code` | `code` (`^[0-9A-HJKMNP-TV-Z]{5}-[0-9A-HJKMNP-TV-Z]{5}$`), `expires_at`, `service`, `username` | `pair begin`, `pair resume`, `pair status` |
+| `delivered` | `service` | `pair status` |
+| `connecting` | `service`, `from`, `handle` | `pair begin`, `pair resume` |
+| `cancelled` | | `pair cancel` |
+
+- `code` is the request: the user sends `connect <code>` to Lucille before `expires_at`. It works once.
+  `service` is the chat service (`telegram`), and `username` the user's own username there, as the host
+  normalized it: lower case, with no `@` (`^[a-z][a-z0-9_]{0,63}$`).
+- `delivered`: Lucille's answer has arrived, and nothing was answered; `pair resume` connects.
+- `connecting`: Lucille's answer passed every check, and names the account the user typed; the code it
+  carries is answered next, and `pair_code` and the `pair` objects follow, as from `pair --code-stdin`.
+  `from` is the chat account Lucille signed, its service and stable id (`^[a-z]{1,16}:[0-9A-Za-z_-]{1,64}$`),
+  and `handle` the handle Lucille signed beside it (`^@[A-Za-z][A-Za-z0-9_]{0,63}$`): the app shows
+  "Connecting as @ada on Telegram".
+- `cancelled`: the request was dropped, and its code connects nothing from now on.
 
 ### `previous_policy`
 
@@ -539,7 +562,10 @@ line with no verb never give it).
 | `log [--limit N]` | one `log_line` per line, oldest first; none when the log is empty | `bad_limit` |
 | `forget` | one `forget` | `none`, `several_pairs`, `room_not_left`, `pair_unusable`, `startup_refused`, `insecure_keyring`, `store_error`, `runtime_folder`, `state_invalid` |
 | `pair --code-stdin [--hub URL] [--store-file]` | `pair_code`; `policy_reset` if a policy was set aside; `pair` `accepted`; `pair` `waiting`; `pair` `sas_pending` | `code_in_argv`, `bad_hub`, `startup_refused`, `busy`, `lock_failed`, `held`, `no_code`, `bad_code`, `wrong_hub`, `code_has_token`, `policy_lock_failed`, `answer_failed`, `hub_error`, `leaked`, `expired`, `ended`, `none`, `no_gate`, `interrupted`, `pair_unusable`, `room_not_left`, `insecure_keyring`, `store_error`, `runtime_folder`, `state_invalid` |
-| `pair status` | one `pair`: `none`, `waiting`, `sas_pending` or `confirmed` | `bad_options`, `several_pairs`, `leaked`, `expired`, `ended`, `none`, `no_gate`, `pair_unusable`, `room_not_left`, `startup_refused`, `insecure_keyring`, `store_error`, `runtime_folder`, `state_invalid` |
+| `pair status` | one `pair`: `none`, `waiting`, `sas_pending` or `confirmed`; or, with no pair and a Connect request, one `connect`: `code` or `delivered` | `interference`, `connect_expired`, `newer_capsule`, `key_misused`, `hub_error`, `bad_options`, `several_pairs`, `leaked`, `expired`, `ended`, `none`, `no_gate`, `pair_unusable`, `room_not_left`, `startup_refused`, `insecure_keyring`, `store_error`, `runtime_folder`, `state_invalid` |
+| `pair begin [--hub URL] [--store-file]` | `connect` `code`; once Lucille's answer has passed, `connect` `connecting`, then what `pair --code-stdin` writes | `bad_options`, `bad_hub`, `startup_refused`, `busy`, `lock_failed`, `held`, `bad_service`, `bad_username`, `hub_error`, `interference`, `connect_expired`, `newer_capsule`, `key_misused`, `other_account`, `not_this_mac`, `bad_code`, `wrong_hub`, `code_has_token`, `interrupted`, and the codes of `pair --code-stdin` after its code is checked |
+| `pair resume` | as `pair begin`, on the request it kept | `bad_options`, `none`, and those of `pair begin` but `bad_hub`, `bad_service`, `bad_username` |
+| `pair cancel` | one `connect` `cancelled` | `bad_options`, `none`, `busy`, `lock_failed`, `startup_refused`, `runtime_folder`, `state_invalid` |
 | `pair confirm` | one `pair` `confirmed` | `bad_options`, `none`, `several_pairs`, `waiting`, `sas_ready`, `no_gate`, `expired`, `leaked`, `ended`, `pair_unusable`, `room_not_left`, `startup_refused`, `insecure_keyring`, `store_error`, `runtime_folder`, `state_invalid` |
 | `pair reject` | one `pair` `rejected` | `bad_options`, `none`, `several_pairs`, `already_confirmed`, `pair_unusable`, `room_not_left`, `startup_refused`, `insecure_keyring`, `store_error`, `runtime_folder`, `state_invalid` |
 | `policy previous` | one `previous_policy` | `previous_invalid` |
@@ -583,6 +609,36 @@ Notes:
   screen too. `pair status` writes `waiting` also when the hub could not be reached, and this computer holds
   no SAS: whether Lucille has collected the answer is then not known, its text says so, and the object does
   not (section 13). The next call 5 s later asks again.
+- **`pair begin`** starts a Connect request (decisions/0002 §11.4). Standard input is two lines: the chat
+  service (`telegram`), then the user's own username there, in any spelling the host takes (`ada`, `@Ada`,
+  `telegram:@ada`). It draws a connect code, posts the host's hello where Lucille will look, keeps the
+  request in the state folder, writes `connect` `code`, and reads Lucille's answer every 5 s. With `--json`
+  it never asks anything, and stops once the SAS is shown, as `pair --code-stdin` does. A hub that cannot be
+  reached when it posts the hello gives `hub_error`, and no request is kept. One request is kept at a time:
+  a new `begin` replaces it. Ctrl-C gives `interrupted` and keeps the request, which `pair resume` takes
+  up again. The request ends, and is spent, with one of these codes:
+  - `interference`: Capsule could not read Lucille's answer, and the code may be known to someone else.
+    It is given for a read of the room that fails other than at the hub, for a room that lost the host's
+    hello or holds a second one, or 50 posts or more, and, at the expiry, when the last read failed at the
+    hub or an answer was read and not yet answered;
+  - `connect_expired`: the 20 minutes passed;
+  - `newer_capsule`: the 20 minutes passed, and the only answers were signed with a key this release does
+    not know;
+  - `key_misused`: two answers passed, which Lucille never sends;
+  - `other_account`: the answer names another account than the one typed, judged before the expiry. No
+    screen names that account;
+  - `not_this_mac`: the answer's code names another request, or carries no hello of the pairing library,
+    or the request was used already;
+  - `bad_code`, `wrong_hub` or `code_has_token`: the answer's code is refused as `pair` refuses one.
+- **`pair resume`** takes up the request `pair begin` kept, as `begin` would have gone on. A shell that was
+  relaunched calls `pair status`, then `pair resume` if it reports a `connect`.
+- **`pair cancel`** drops the request. It refuses `busy` while `begin` or `resume` waits on it: the shell
+  stops that first.
+- **`pair status`**, with no pair held and a Connect request kept, reads Lucille's room once and reports the
+  request: `code`, or `delivered` when Lucille's answer has arrived. It records what it saw, but answers
+  nothing, posts nothing and spends nothing: a request that has ended is reported with its code, and left
+  for `pair resume` to spend. While `begin` or `resume` waits, it reports from the state folder, with no
+  read.
 - **`pair confirm`** is the user's "yes, Lucille's page shows the same SAS". `pair reject` is "no".
 - **`ops enable`** and **`ops disable`** write the operation's `op` object as it is once the change is made,
   so a shell sets its switch from the host's answer, not from what it asked for.
@@ -767,6 +823,14 @@ limit, as it runs every verb, and stops it when the limit passes.
 | `sign_in_refused` | `credential test`: Gmail refused the app password (wrong or revoked), or did within the last 15 minutes and was not asked again. |
 | `unreachable` | `credential test`: `imap.gmail.com` did not resolve, resolved to an address the host does not allow, could not be connected to, or the connection broke. |
 | `limit_reached` | `credential test`: the credential was used for more than 60 sign-ins in 10 minutes, or Gmail sent more than the host reads. |
+| `bad_service` | `pair begin`: that is not a chat service Capsule connects through (`telegram`). |
+| `bad_username` | `pair begin`: that is not a username: it starts with a letter, and holds letters, digits and `_` only, 64 at most. |
+| `interference` | Capsule couldn't read Lucille's answer, and the code may be known to someone else. Start again. |
+| `connect_expired` | The connect code expired. Start again. |
+| `newer_capsule` | The connect code expired, and Lucille's answers were signed with a key this release does not know: Lucille may need a newer Capsule. |
+| `key_misused` | Lucille's answer came twice, which Lucille never does. Nothing was connected. |
+| `other_account` | The connect code was sent to Lucille from a different account than the one typed. Nothing was connected. |
+| `not_this_mac` | Lucille's answer is for a request this computer did not make (its code names another request, or carries no hello of the pairing library), or for one that was used already. Nothing was connected. |
 
 **As root.** Every verb but `--version`, `--help` and a command with no verb (which shows the version) is
 refused when the effective user id is 0: first thing after the command line parses, before the profile's
@@ -1077,11 +1141,9 @@ leaves it out of `enabled_ops` (decisions/0003, "First use").
 
 - `diagnostics` and removing the host's data ([decisions/0002-macos-app.md](../decisions/0002-macos-app.md)
   §8).
-- The typed pairing gate and Connect from Lucille's chat (decisions/0002 §11.2, §11.4 and §11.5): decided on
-  2026-11-21. Only the parts that need no hub are built: the connect code, its key and nonce, the username
-  check, and the checks on a read of the drop room and on Lucille's signed delivery. No command uses them yet.
-  When built, `pair begin` reads the chat service and the user's own username on standard input, a change to
-  this contract.
+- The typed pairing gate (decisions/0002 §11.2): decided on 2026-11-21, not built. Connect from Lucille's
+  chat (§11.4 and §11.5) is built as `pair begin`, `pair resume` and `pair cancel` (section 7); the paste
+  flow, `pair --code-stdin`, is kept until the host refuses every code without its own request's nonce.
 - A typed history of what the host did, for a shell to show in words. `log_line` carries text only, which a
   shell shows as it is.
 - During pairing, whether the hub could be reached and whether it refuses this computer's clock, beside
@@ -1234,6 +1296,7 @@ Each line is one JSON object, of at most 1,024 bytes:
 
 - **1.0** (no release yet): the first version, with `run`'s event stream and exit codes, `policy reset`,
   and `credential` with `--json` (its types `credential`, `credential_removed` and `credential_test`), for
-  the Mac app's Gmail window.
+  the Mac app's Gmail window; and Connect from Lucille's chat: `pair begin`, `pair resume`, `pair cancel`,
+  the `connect` type, and its error codes.
   A build of the repository's development version is not a release, and writes contract 1.0 whatever it
   holds.

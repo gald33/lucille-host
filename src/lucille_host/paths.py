@@ -85,6 +85,11 @@ class Dirs:
         return self.state / "pair.json"
 
     @property
+    def connect_file(self) -> Path:
+        """The Connect request this computer is waiting on (``connecting.py``)."""
+        return self.state / "connect.json"
+
+    @property
     def rooms_file(self) -> Path:
         """The offers, the work rooms held and the rooms left (``rooms.py``)."""
         return self.state / "rooms.json"

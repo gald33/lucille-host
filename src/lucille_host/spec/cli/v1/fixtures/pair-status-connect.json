@@ -1,0 +1,20 @@
+{
+  "description": "pair status, with no pair held and a Connect request kept, which Lucille has not answered",
+  "argv": [
+    "pair",
+    "status",
+    "--json"
+  ],
+  "exit": 0,
+  "stdout": [
+    {
+      "v": 1,
+      "type": "connect",
+      "state": "code",
+      "code": "7KQ4M-X2D9P",
+      "expires_at": "2026-11-01T12:00:00Z",
+      "service": "telegram",
+      "username": "ada"
+    }
+  ]
+}
