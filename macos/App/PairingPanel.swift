@@ -262,7 +262,7 @@ final class PairingPanel: NSObject, NSWindowDelegate {
     }
 
     private func connectCodePage(_ request: ConnectRequest) -> NSView {
-        let send = label(ConnectionText.sendThis(code: request.code))
+        let send = label(ConnectionText.sendThis(code: request.code, to: request.sendTo))
         send.font = .boldSystemFont(ofSize: NSFont.systemFontSize)
         // The line to send, which the user may select and copy themselves: the app writes nothing
         // to the pasteboard.

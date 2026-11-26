@@ -99,9 +99,15 @@ enum ConnectionText {
     }
     static let continueButton = "Continue"
     static let gettingCode = "Getting a code…"
-    /// The code page, from decisions/0002 §3.1 step 6.
-    static func sendThis(code: String) -> String {
-        "Send this to Lucille in your chat: connect \(code). It works once, within 20 minutes."
+    /// The code page, from decisions/0002 §3.1 step 6; with the accounts the host names in
+    /// `send_to`, the handles as they are, and with none, no handle at all.
+    static func sendThis(code: String, to accounts: [LucilleAccount] = []) -> String {
+        let handles = accounts.map(\.handle)
+        guard let last = handles.last else {
+            return "Send this to Lucille in your chat: connect \(code). It works once, within 20 minutes."
+        }
+        let named = handles.count == 1 ? last : handles.dropLast().joined(separator: ", ") + " or " + last
+        return "Send this to Lucille in your chat, to \(named): connect \(code). It works once, within 20 minutes."
     }
     static func sendLine(code: String) -> String {
         "connect \(code)"
@@ -109,8 +115,8 @@ enum ConnectionText {
     static func codeExpires(_ when: Date) -> String {
         "It stops working at \(localTime(when))."
     }
-    /// The core holds no list of Lucille's chat accounts yet (decisions/0002 §11.7), so the page
-    /// names none.
+    /// Names no account: the handles, when the host gives them, are in `sendThis` (decisions/0002
+    /// §11.7).
     static let sendOnlyToLucille = "Send it only to the official Lucille account, in your own chat with it. Never send it to anyone else."
     static func waitingFor(username: String, service: String) -> String {
         "Waiting for Lucille to answer @\(username) on \(Connect.serviceName(service))…"

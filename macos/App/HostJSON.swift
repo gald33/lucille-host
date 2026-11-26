@@ -98,6 +98,11 @@ struct JSONFields: Equatable, Sendable {
         return nil
     }
 
+    /// Whether the object has `key` at all, of any type.
+    func has(_ key: String) -> Bool {
+        values[key] != nil
+    }
+
     func array(_ key: String) -> [JSONValue]? {
         if case .array(let value)? = values[key] {
             return value
@@ -164,6 +169,16 @@ struct ConnectRequest: Equatable, Sendable {
     let expiresAt: Date
     let service: String
     let username: String
+    /// Lucille's official accounts on `service` to send the code to, in the order to show, from
+    /// the core's list; empty when the host names none.
+    var sendTo: [LucilleAccount] = []
+}
+
+/// One of Lucille's official chat accounts, as `connect` `code` names it in `send_to`: the handle
+/// the code page shows as it is, and the stable id, which nothing on the Mac checks.
+struct LucilleAccount: Equatable, Sendable {
+    let handle: String
+    let account: String
 }
 
 /// The chat account Lucille signed, as `connect` `connecting` gives it: its service, its stable
@@ -728,7 +743,27 @@ extension HostObject {
             else {
                 return nil
             }
-            return .code(ConnectRequest(code: code, expiresAt: expires, service: service, username: username))
+            var sendTo: [LucilleAccount] = []
+            if fields.has("send_to") {
+                // One to four accounts, each on the request's own service; anything else makes the
+                // whole object unread.
+                guard let items = fields.array("send_to"), (1...4).contains(items.count) else {
+                    return nil
+                }
+                for item in items {
+                    guard case .object(let map) = item else {
+                        return nil
+                    }
+                    let entry = JSONFields(values: map)
+                    guard let handle = entry.string("handle"), Connect.isHandle(handle),
+                          let account = entry.string("account"), Connect.isAccountID(account, service: service)
+                    else {
+                        return nil
+                    }
+                    sendTo.append(LucilleAccount(handle: handle, account: account))
+                }
+            }
+            return .code(ConnectRequest(code: code, expiresAt: expires, service: service, username: username, sendTo: sendTo))
         case "delivered":
             guard let service = fields.string("service"), Connect.services.contains(service) else {
                 return nil
