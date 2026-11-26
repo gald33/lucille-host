@@ -33,9 +33,10 @@ Each of these spends the request.
 
 from __future__ import annotations
 
+import hashlib
 import hmac
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Final
@@ -57,6 +58,7 @@ __all__ = [
     "redeemable",
     "remove",
     "save",
+    "trusted_keys",
 ]
 
 VERSION: Final = 1
@@ -245,6 +247,18 @@ def begin(
     return replace(live, request=request)
 
 
+def trusted_keys(request: Request, config: state.HostConfig) -> Mapping[str, bytes]:
+    """The keys a delivery for ``request`` may be signed with: the release's own and, for a
+    request on the loopback hub the profile names, the test key it names beside it
+    (``pair begin --test-key``), which the app never names. A request on Lucille's hub takes the
+    release's keys only, whatever the profile says."""
+    keys = dict(_switchboard.LUCILLE_SIGNING_KEYS)
+    raw = None if config.test_key is None else state.decode_test_key(config.test_key)
+    if raw is not None and config.hub is not None and request.hub == config.hub:
+        keys[hashlib.sha256(raw).digest()[:8].hex()] = raw
+    return keys
+
+
 def expiry_code(request: Request) -> str:
     """The code a request that has expired ends with (the order is the module's)."""
     if request.delivery_seen and not request.used:
@@ -280,6 +294,7 @@ def poll(
     *,
     now: Callable[[], float],
     spend: bool = True,
+    keys: Mapping[str, bytes] | None = None,
 ) -> Step:
     """Read the drop room once and judge what it holds. Raises :class:`Ended` when the request
     has expired or the read ends it, with the file deleted unless ``spend`` is false; otherwise
@@ -309,11 +324,12 @@ def poll(
         request = replace(request, last_read="hub_error")
         save(path, request)
         return Step(replace(live, request=request), hub_error=failure)
-    # Looked up at each read, not bound when this module loads: the release's own keys.
+    # Looked up at each read, not bound when this module loads: the release's own keys, unless
+    # the caller names others (a test key, with a loopback hub only: :func:`trusted_keys`).
     read = connect.judge(
         rows,
         live.nonce,
-        keys=_switchboard.LUCILLE_SIGNING_KEYS,
+        keys=_switchboard.LUCILLE_SIGNING_KEYS if keys is None else keys,
         revoked=_switchboard.LUCILLE_REVOKED_KEY_IDS,
     )
     if read.outcome == connect.INTERFERENCE:

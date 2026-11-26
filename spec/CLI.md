@@ -563,7 +563,7 @@ line with no verb never give it).
 | `forget` | one `forget` | `none`, `several_pairs`, `room_not_left`, `pair_unusable`, `startup_refused`, `insecure_keyring`, `store_error`, `runtime_folder`, `state_invalid` |
 | `pair --code-stdin [--hub URL] [--store-file]` | `pair_code`; `policy_reset` if a policy was set aside; `pair` `accepted`; `pair` `waiting`; `pair` `sas_pending` | `code_in_argv`, `bad_hub`, `startup_refused`, `busy`, `lock_failed`, `held`, `no_code`, `bad_code`, `wrong_hub`, `code_has_token`, `policy_lock_failed`, `answer_failed`, `hub_error`, `leaked`, `expired`, `ended`, `none`, `no_gate`, `interrupted`, `pair_unusable`, `room_not_left`, `insecure_keyring`, `store_error`, `runtime_folder`, `state_invalid` |
 | `pair status` | one `pair`: `none`, `waiting`, `sas_pending` or `confirmed`; or, with no pair and a Connect request, one `connect`: `code` or `delivered` | `interference`, `connect_expired`, `newer_capsule`, `key_misused`, `hub_error`, `bad_options`, `several_pairs`, `leaked`, `expired`, `ended`, `none`, `no_gate`, `pair_unusable`, `room_not_left`, `startup_refused`, `insecure_keyring`, `store_error`, `runtime_folder`, `state_invalid` |
-| `pair begin [--hub URL] [--store-file]` | `connect` `code`; once Lucille's answer has passed, `connect` `connecting`, then what `pair --code-stdin` writes | `bad_options`, `bad_hub`, `startup_refused`, `busy`, `lock_failed`, `held`, `bad_service`, `bad_username`, `hub_error`, `interference`, `connect_expired`, `newer_capsule`, `key_misused`, `other_account`, `not_this_mac`, `bad_code`, `wrong_hub`, `code_has_token`, `interrupted`, and the codes of `pair --code-stdin` after its code is checked |
+| `pair begin [--hub URL [--test-key KEY]] [--store-file]` | `connect` `code`; once Lucille's answer has passed, `connect` `connecting`, then what `pair --code-stdin` writes | `bad_options`, `bad_hub`, `startup_refused`, `busy`, `lock_failed`, `held`, `bad_service`, `bad_username`, `hub_error`, `interference`, `connect_expired`, `newer_capsule`, `key_misused`, `other_account`, `not_this_mac`, `bad_code`, `wrong_hub`, `code_has_token`, `interrupted`, and the codes of `pair --code-stdin` after its code is checked |
 | `pair resume` | as `pair begin`, on the request it kept | `bad_options`, `none`, and those of `pair begin` but `bad_hub`, `bad_service`, `bad_username` |
 | `pair cancel` | one `connect` `cancelled` | `bad_options`, `none`, `busy`, `lock_failed`, `startup_refused`, `runtime_folder`, `state_invalid` |
 | `pair confirm` | one `pair` `confirmed` | `bad_options`, `none`, `several_pairs`, `waiting`, `sas_ready`, `no_gate`, `expired`, `leaked`, `ended`, `pair_unusable`, `room_not_left`, `startup_refused`, `insecure_keyring`, `store_error`, `runtime_folder`, `state_invalid` |
@@ -630,6 +630,13 @@ Notes:
   - `not_this_mac`: the answer's code names another request, or carries no hello of the pairing library,
     or the request was used already;
   - `bad_code`, `wrong_hub` or `code_has_token`: the answer's code is refused as `pair` refuses one.
+- **`--test-key`** is for the end-to-end tests and the conformance suite, which play Lucille against a local
+  hub and sign with a key of their own: 32 bytes in unpadded base64url. `pair begin` takes it only with
+  `--hub`, and saves it for the profile, as it saves `--hub`. An answer to a request on that loopback hub may
+  then be signed with it, as well as with the release's own keys; a request on Lucille's hub takes the
+  release's keys only. The app never passes it. Any other use is `bad_options`. A key is base64url, so it
+  may start with `-`: a harness writes it joined to the flag, `--test-key=KEY`, as it writes a path that
+  starts with `-` to `--suggest-alias`.
 - **`pair resume`** takes up the request `pair begin` kept, as `begin` would have gone on. A shell that was
   relaunched calls `pair status`, then `pair resume` if it reports a `connect`.
 - **`pair cancel`** drops the request. It refuses `busy` while `begin` or `resume` waits on it: the shell
