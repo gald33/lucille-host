@@ -9,9 +9,9 @@ command line and files.
 
 This folder holds the Swift sources of a first, small version of Capsule; the scripts that build and check
 it are in [`tools/macos/`](../tools/macos/). It is not a release and it is not ready for anyone who is not
-developing it. It is meant to connect this Mac to Lucille: you paste the code Lucille's page shows, then
-compare the number the app shows with the one on Lucille's page. Outside CI, the maintainer reported it
-working once: on their own Mac, on 2026-11-09, with the disk image of run 42531994220 ([Signing](#signing)). The
+developing it. It is meant to connect this Mac to Lucille: you send Lucille, in your chat, the code the app
+shows, then compare the number the app shows with the one Lucille shows there. Outside CI, the maintainer
+reported the earlier paste flow working once: on their own Mac, on 2026-11-09, with the disk image of run 42531994220 ([Signing](#signing)). The
 try before it there, on 2026-11-08, with a build signed with the hardened runtime, failed. While it is
 open, it keeps the host running.
 This way of connecting is only for the repository owner's own Mac, because anyone can make a code that
@@ -294,49 +294,58 @@ read again each time it is shown.
 
 ## Connecting to Lucille
 
-The app connects on [decisions/0001](../decisions/0001-host-design.md)'s gate: the Mac shows the
-number, and you confirm only if Lucille's page shows the same number. The maintainer decided on
-2026-11-02 to build this now. The typed digits and Connect from Lucille's chat of decisions/0002 (§11.2
-and §11.4) were decided on 2026-11-21, and are not built.
+The app connects through Lucille's chat (decisions/0002 §11.4), then on
+[decisions/0001](../decisions/0001-host-design.md)'s gate: the Mac shows a number, and you confirm only if
+Lucille shows the same number in your chat. The typed digits of decisions/0002 §11.2 are not built yet:
+you still compare the number and click They Match.
 
-1. **Connect to Lucille…** opens the pairing window. It says: "In Lucille, open Computers and add this
-   computer. Copy the code Lucille shows, then paste it below." You paste with Command-V, or Control-click
-   the box and choose Paste. The app never reads the pasteboard itself: the window passes Command-V, C,
-   X, A and Z on to the field being edited, as an Edit menu would. If folders were added, or an ability
-   other than `host.describe` is on, the window also says that connecting sets them aside.
-2. **Connect** is on only once the text looks like a code: `swbp1_`, then 100 to 8186 characters of
-   base64url (at most 8192 in all), with spaces and line breaks taken out. The app writes the code on the standard input of
-   `pair --code-stdin --json`, never on its command line, and then clears the field. The host does every
-   real check. Each refusal is said in a plain sentence, with the host's words as details.
-3. Until Lucille answers, the window says "Waiting for Lucille…". Its **Cancel** asks whether to stop
-   connecting.
+1. **Connect to Lucille…** first reads `pair status --json`. If a connect request from before is kept, after
+   a relaunch too, the app goes on with it through `pair resume --json` (step 3). Otherwise the window asks
+   "Which chat do you talk to Lucille in?", with Telegram the one choice, and "Your Telegram username, as in
+   @ada." The app reads the username as the host does: a `telegram:` prefix and one `@` are taken out,
+   it is lowercased, and it must start with a letter and hold only letters, digits and `_`, at most 64.
+   Anything else gets a hint under the field, and **Continue** stays off. The window says how to set a
+   username for someone who has none. If folders were added, or an ability other than `host.describe` is
+   on, the window also says that connecting sets them aside.
+2. **Continue** writes the service and the username on the standard input of `pair begin --json`, never on
+   its command line. The window shows "Getting a code from Lucille…", then the code the host made: "Send
+   this to Lucille in your chat: connect 7KQ4M-X2D9P. It works once, within 20 minutes." The code can be
+   selected and copied; the app writes nothing to the pasteboard and never reads it. The host does every
+   real check. Each refusal is said in a plain sentence, with the host's words as details. The ones that
+   end a request (the code expired, it was sent from another account, it was not started on this Mac, and
+   the others of spec/CLI.md §7) offer **Start Over**. A code sent from another account never shows which.
+3. Once Lucille's answer passes, the window says "Connecting as @ada on Telegram", with the handle the
+   answer was signed for, then waits for Lucille's number. Its **Cancel** asks whether to stop connecting:
+   before the answer passed, that runs `pair cancel --json` once the `pair` child has ended, and after it,
+   `pair reject --json`.
 4. Once the host writes `sas_pending`, the window shows the number in large type, asks "Does Lucille's
-   page show this number?", and says by when to answer. **They Match** and **They Differ** stay off until
+   number in your chat match this one?", and says by when to answer. **They Match** and **They Differ** stay off until
    the number is on the screen, in a window that is visible and not wholly hidden by other windows
    (macOS says only whether some part of a window shows, so a window over the number alone does not
    count). Neither is a default button and neither has the focus, so Return and Space answer
    nothing. A click on They Match counts only from 0.3 seconds after the number was drawn.
 5. **They Match** first reads `status --json`. It runs `pair confirm --json` only if the same
    connection, with the same deadline, still waits for that number, and only once for each click.
-   Then the app says "Confirmed on this Mac", and to confirm on Lucille's page too, and starts `run`.
+   Then the app says "Confirmed on this Mac", and to confirm in your chat too, and starts `run`.
    One gap is left: `pair confirm` names no connection, so a command run on profile `mac-app` from
    Terminal between the app's `status` read and its `pair confirm` is not excluded. The app's own
    verbs that open the store run one at a time, so none of them can come between.
 6. **They Differ** runs `pair reject --json`. The app says that nothing was connected, whether Lucille was
-   told, and that numbers that differ can mean that someone else made the code, or intercepted it. After
+   told, and that numbers that differ can mean that someone else saw your connect code. After
    They Differ, They Match stays off for that connection for as long as Capsule stays open: the app
    keeps no memory of its own. If turning the connection down failed, it is still waiting, and after
    a relaunch the window shows the number with They Match on again; choose **Stop Connecting…**
    again rather than They Match.
 
-The window stays on the screen while you look at Lucille's page in the browser. Closing it keeps the
-connection being set up, and the menu then offers **Finish Connecting…** and **Stop Connecting…**. When
-the window opens again, after a relaunch too, the app reads `pair status --json` and shows the number
-again. It reads `pair status` only while the window is open: every 5 seconds while it waits for Lucille,
-and at the deadline. Nothing but They Match confirms a connection. The `pair` child that waits for
-Lucille gets 15 minutes, then SIGINT, which keeps the connection. **Stop Connecting…** while that child
-still waits gives it SIGINT, then SIGTERM after 5 seconds and SIGKILL after 3 more, and turns the
-connection down once it has ended.
+The window stays on the screen while you look at your chat in another app. Closing it keeps the
+request, or the connection being set up, and the menu then offers **Finish Connecting…** and **Stop
+Connecting…**. When the window opens again, after a relaunch too, the app reads `pair status --json`:
+on a kept request it runs `pair resume --json`, and on a connection being set up it shows the number
+again. It reads `pair status` only while the window is open: every 5 seconds while it waits, and at the
+deadline. Nothing but They Match confirms a connection. The `pair` child that waits for Lucille gets 30
+minutes, then SIGINT, which keeps the request. **Stop Connecting…** while that child still waits gives it
+SIGINT, then SIGTERM after 5 seconds and SIGKILL after 3 more, and cancels the request, or turns the
+connection down, once it has ended.
 
 The compare page does not stop someone who can rewrite Lucille's page, a browser extension say: they can
 show the same number there. That is one reason this way of connecting is only for the owner's Mac.
@@ -354,7 +363,7 @@ on its last page ends it, as Done does.
 1. **Add back what you had before?**, only when this connection set your earlier settings aside. A new
    connection starts from the fresh policy, with no folders and only `host.describe` on, and the host
    keeps the one it replaced (decisions/0002 §11.6). The page is shown only when all of these hold: this
-   run of the app started the `pair --code-stdin` child for the attempt They Match confirmed, and that
+   run of the app started the `pair begin` or `pair resume` child for the attempt They Match confirmed, and that
    child said it set the policy aside (`policy_reset`); `policy previous --json`, with 30 seconds, says
    the policy it found was set aside at or after the second that attempt started (an earlier one is
    another connection's, spec/CLI.md §6); and something is left to offer. An attempt runs from Connect to
@@ -644,7 +653,8 @@ This has not been tried on a Mac: CI never makes a profile with two connections.
   `roots check`, and, for the Gmail window, `credential list`, `set`, `test` and `remove`. It decides only on the objects' fields,
   a refusal by its `code`, never on their words, which it shows. It shows the lines on standard error
   only as the details of a usage error and of a run that wrote no `error` object.
-- Two of its children live long: `pair --code-stdin --json`, while it waits for Lucille, and `run`. One
+- Two of its children live long: `pair begin --json` or `pair resume --json`, while it waits for Lucille,
+  and `run`. One
   routine starts every child, under one lock, and keeps the ends of the pipes the app holds out of every
   later child, so no other child holds `run`'s lifeline. Each child's two outputs are read on threads of
   their own. A line of `run`'s events longer than 16384 bytes, newline included, or one that ends in a

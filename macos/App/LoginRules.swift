@@ -59,6 +59,9 @@ enum LoginRules {
             return code == "none"
         case .confirmed, .confirmedAnother, .notConfirmed, .confirmUnknown, .rejectFailed, .notStarted:
             return false
+        case .connectEnded, .cancelFailed:
+            // A Connect request is no pair: nothing that ends one forgets a pair.
+            return false
         }
     }
 

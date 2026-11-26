@@ -156,21 +156,21 @@ On the bundle made read-only (CI runs ``chmod -R a-w`` first):
   Smaller Folder and Cancel and no button that adds the folder, and adds neither. The Open panel's
   buttons are looked for in every window, sheet and group, since where they sit differs between
   macOS versions; where its prompt is nowhere, Return, its default button, chooses
-  (:data:`CHOOSE_IN_PANEL`), and what the app shows next is checked as before. Then, with a
-  code-shaped text on the pasteboard, it chooses Connect to Lucille…: the code window opens with
-  its field empty, and the field stays empty once it has the focus, so the app read nothing from
-  the pasteboard; a typed word gets the hint; Command-V, typed through System Events, pastes
-  exactly what was copied; Connect hands it to the host, which refuses it as no code, and the app
-  says so in its own words. Last, best effort and failing nothing, it adds a folder it makes in
-  Documents, typing its path only once it has read the Open panel's button: if macOS asks, it
-  prints the question and, where it names the app or its interpreter and is the one window of the
-  process that draws it, answers Don't Allow, reads that the app says macOS is blocking it,
-  presses Open Privacy Settings and prints what System Settings shows; if macOS does not ask, it
-  says so; either way, each on its own, it presses the app's Cancel if the folder is still being
-  checked, ends a ``roots add`` of the app's profile still running 30 seconds later, says when a
-  question of macOS's is left on screen, removes the folder, quits System Settings if it started
-  it, and asks ``tccutil reset`` to take back what macOS was asked. It ends, clean-up included,
-  inside the ui step's limit, :data:`UI_STEP_LIMIT` (:func:`_drive_documents_prompt`). It checks
+  (:data:`CHOOSE_IN_PANEL`), and what the app shows next is checked as before. Then, with a text on
+  the pasteboard, it chooses Connect to Lucille…: the Connect window opens on its account page with
+  the username field empty, and the field stays empty once it has the focus, so the app read nothing
+  from the pasteboard; a typed text that names no username gets the hint, and a username turns
+  Continue on, which it never presses, so nothing asks the hub for a code. Last, best effort and
+  failing nothing, it adds a folder it makes in Documents, typing its path only once it has read the
+  Open panel's button: if macOS asks, it prints the question and, where it names the app or its
+  interpreter and is the one window of the process that draws it, answers Don't Allow, reads that
+  the app says macOS is blocking it, presses Open Privacy Settings and prints what System Settings
+  shows; if macOS does not ask, it says so; either way, each on its own, it presses the app's Cancel
+  if the folder is still being checked, ends a ``roots add`` of the app's profile still running 30
+  seconds later, says when a question of macOS's is left on screen, removes the folder, quits System
+  Settings if it started it, and asks ``tccutil reset`` to take back what macOS was asked. It ends,
+  clean-up included, inside the ui step's limit, :data:`UI_STEP_LIMIT`
+  (:func:`_drive_documents_prompt`). It checks
   each step against the host's own state, on the app's own profile (:data:`APP_PROFILE`). It uses
   the real HOME and leaves the host as it found it. Where macOS does not let System Events drive
   other apps, it says so and drives nothing, which is a failure with ``--require-driven`` (the
@@ -3019,26 +3019,26 @@ FINISH_ITEM: Final = "Finish Connecting…"
 DISCONNECT_ITEM: Final = "Disconnect from Lucille…"
 CONNECTING: Final = "Connecting to Lucille…"
 CONNECTED: Final = "Connected to Lucille"
-# The code window: its title, the three sentences it says, the hint under a typed word that is no
-# code, and its button. Then what the app says when the host refuses a text as no code (bad_code).
+# The Connect window's account page: its title, what it asks, the hint under a typed text that
+# names no username, and its button. The ui check never presses the button: pair begin would ask
+# the real hub for a connect code.
 CODE_TITLE: Final = "Connect to Lucille"
-CODE_WORDS: Final = (
-    "In Lucille, open Computers and add this computer. Copy the code Lucille shows, then paste it "
-    "below.",
-    "To paste, press Command-V, or Control-click the box and choose Paste.",
-    "Paste only a code you copied from Lucille's page yourself. Never paste one someone sent you.",
+ACCOUNT_WORDS: Final = (
+    "Which chat do you talk to Lucille in?",
+    "Your Telegram username, as in @ada.",
 )
-CODE_HINT: Final = "That doesn't look like a code from Lucille. Copy it again from Lucille's page."
-CONNECT_BUTTON: Final = "Connect"
-BAD_CODE: Final = "That isn't a code from Lucille. Copy it again from Lucille's page."
-# A code-shaped text the ui check leaves on the pasteboard when the code window opens, which the
-# app must not read; and the text it pastes, which passes the app's own check on a code (the
-# prefix, then 100 to 8192 characters of base64url) and which the host refuses as no code.
+USERNAME_HINT: Final = (
+    "That isn't a Telegram username. It starts with a letter, and has only letters, digits and _."
+)
+CONTINUE_BUTTON: Final = "Continue"
+# A text the ui check leaves on the pasteboard when the Connect window opens, which the app must
+# not read; a typed text that names no username; and one that does.
 PASTEBOARD_SENTINEL: Final = "swbp1_" + "S" * 120
-PASTED_TEXT: Final = "swbp1_" + "A" * 120
+NOT_A_USERNAME: Final = "9 lives"
+A_USERNAME: Final = "@ada"
 # The compare page, and the note after They Match.
 COMPARE_TITLE: Final = "Compare the numbers"
-COMPARE_QUESTION: Final = "Does Lucille's page show this number?"
+COMPARE_QUESTION: Final = "Does Lucille's number in your chat match this one?"
 THEY_MATCH: Final = "They Match"
 CONFIRMED_TITLE: Final = "Confirmed on this Mac"
 # Set Up's window and its pages, as App/Setup.swift spells them.
@@ -4325,38 +4325,40 @@ def _drive_whole_disk(checker: Checker, python: Path, screens: Path) -> None:
 
 
 def _drive_code_window(checker: Checker, python: Path, screens: Path, logs: Sequence[Path]) -> None:
-    """With a code-shaped text on the pasteboard, choose Connect to Lucille…: the code window opens
-    with its field empty, and the field stays empty once it has the focus, so the app read nothing
-    from the pasteboard. A typed word gets the hint, and Connect stays off. Command-V, typed
-    through System Events, pastes exactly the text copied, which the app's own check passes;
-    Connect hands it to the host on standard input, which refuses it as no code, and the app says
-    so. Nothing is paired, and neither text reaches the app's standard output or error. Cancel
-    closes the window, and the pasteboard is cleared."""
+    """With a text on the pasteboard, choose Connect to Lucille…: with no connect request kept,
+    the Connect window opens on its account page, which asks which chat and for the username, with
+    the username field empty, and still empty once it has the focus, so the app read nothing from
+    the pasteboard. Continue is off while the field is empty; a typed text that names no username
+    gets the hint, and Continue stays off; a username turns it on. Continue is never pressed, so
+    nothing asks the hub for a code. Nothing is paired, no request is kept, and the pasteboard's
+    text reaches neither the app's standard output nor its error. Cancel closes the window, and
+    the pasteboard is cleared."""
     pair = _pair_state(python)
     if not checker.expect(pair is not None, "status --json reads the app's profile"):
         return
     if pair != "none":
-        print(f"note: the app's profile holds a pair ({pair}), so the code window was not tried")
+        print(f"note: the app's profile holds a pair ({pair}), so the Connect window was not tried")
         return
     _set_pasteboard(PASTEBOARD_SENTINEL)
     try:
         worked, said = _choose(CONNECT_ITEM.removesuffix("…"))
         opened = worked and _wait_until(lambda: CODE_TITLE in _window_names(), 15)
+        asked = opened and _wait_until(
+            lambda: all(any(words in text for text in _texts()) for words in ACCOUNT_WORDS), 30
+        )
         _screenshot(screens / "17-code-window.png")
         if not checker.expect(
             opened, f"choosing {CONNECT_ITEM!r} opens the window {CODE_TITLE!r}", said
         ):
             return
-        texts = _texts()
         checker.expect(
-            all(any(words in text for text in texts) for words in CODE_WORDS),
-            "it says where the code comes from, how to paste it, and never to paste one someone "
-            "sent",
-            f"{texts}",
+            asked,
+            "with no request kept, it asks which chat, and for the username",
+            f"{_texts()}",
         )
         checker.expect(
             _field() == (True, ""),
-            "the code field opens empty: the app read nothing from the pasteboard",
+            "the username field opens empty: the app read nothing from the pasteboard",
             f"{_field()}",
         )
         worked, said = _system_events(
@@ -4369,49 +4371,33 @@ def _drive_code_window(checker: Checker, python: Path, screens: Path, logs: Sequ
             f"{said} {_field()}",
         )
         checker.expect(
-            _enabled(CONNECT_BUTTON) == "false",
-            f"{CONNECT_BUTTON} is off while the field is empty",
-            _enabled(CONNECT_BUTTON),
+            _enabled(CONTINUE_BUTTON) == "false",
+            f"{CONTINUE_BUTTON} is off while the field is empty",
+            _enabled(CONTINUE_BUTTON),
         )
-        _system_events('set frontmost to true\nkeystroke "hello"')
-        hinted = _wait_until(lambda: _says(CODE_HINT), 10)
+        _system_events(f"set frontmost to true\nkeystroke {_quoted(NOT_A_USERNAME)}")
+        hinted = _wait_until(lambda: _says(USERNAME_HINT), 10)
         _screenshot(screens / "18-code-hint.png")
         checker.expect(
-            hinted and _enabled(CONNECT_BUTTON) == "false",
-            f"a typed word that is no code gets the hint {CODE_HINT!r}, and {CONNECT_BUTTON} "
-            "stays off",
+            hinted and _enabled(CONTINUE_BUTTON) == "false",
+            f"a typed text that names no username gets the hint {USERNAME_HINT!r}, and "
+            f"{CONTINUE_BUTTON} stays off",
             f"{_texts()}",
         )
-        # Take the word out with Backspace, then paste with Command-V, which the window forwards
-        # to the field: the user's own paste, through the field.
         _system_events("set frontmost to true\nrepeat 20 times\nkey code 51\nend repeat")
-        _set_pasteboard(PASTED_TEXT)
-        _system_events('set frontmost to true\nkeystroke "v" using command down')
-        pasted = _wait_until(lambda: _field() == (True, PASTED_TEXT), 10)
-        _screenshot(screens / "19-code-pasted.png")
+        _system_events(f"set frontmost to true\nkeystroke {_quoted(A_USERNAME)}")
+        typed = _wait_until(lambda: _field() == (True, A_USERNAME), 10)
+        _screenshot(screens / "19-code-username.png")
         checker.expect(
-            pasted, "Command-V pastes into the field exactly the text copied", f"{_field()}"
+            typed and _enabled(CONTINUE_BUTTON) == "true" and not _says(USERNAME_HINT),
+            f"a username takes the hint away and turns {CONTINUE_BUTTON} on",
+            f"{_field()} {_enabled(CONTINUE_BUTTON)} {_texts()}",
         )
-        checker.expect(
-            _enabled(CONNECT_BUTTON) == "true",
-            f"{CONNECT_BUTTON} is on once the field holds something shaped like a code",
-            _enabled(CONNECT_BUTTON),
-        )
-        worked, said = _press(CONNECT_BUTTON)
-        refused = worked and _wait_until(lambda: _says(BAD_CODE), 60)
-        _screenshot(screens / "20-code-refused.png")
-        checker.expect(
-            refused,
-            f"{CONNECT_BUTTON} hands it to the host, which refuses it as no code; the app says "
-            f"{BAD_CODE!r}",
-            f"{said} {_texts()}",
-        )
-        _press("OK")
         checker.expect(_pair_state(python) == "none", "the app's profile still holds no pair")
         logged = "".join(log.read_text(encoding="utf-8", errors="replace") for log in logs)
         checker.expect(
-            PASTED_TEXT not in logged and PASTEBOARD_SENTINEL not in logged,
-            "neither text reaches the app's standard output or standard error",
+            PASTEBOARD_SENTINEL not in logged,
+            "the pasteboard's text reaches neither the app's standard output nor its error",
         )
     finally:
         _set_pasteboard("")
@@ -4419,7 +4405,7 @@ def _drive_code_window(checker: Checker, python: Path, screens: Path, logs: Sequ
             worked, said = _press("Cancel")
             checker.expect(
                 worked and _wait_until(lambda: CODE_TITLE not in _window_names(), 10),
-                "Cancel closes the code window",
+                "Cancel closes the Connect window",
                 said,
             )
 

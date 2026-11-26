@@ -77,9 +77,10 @@ struct HostCLI: Sendable {
     /// version record, apart from a command-line host's `default` (decisions/0002 §9).
     static let appProfile = "mac-app"
 
-    /// The most a short standard input may be: a pairing code (at most 8192 characters, which
-    /// `Pairing.looksLikeCode` checks) and its newline. It is written into the pipe before the
-    /// child starts, so it must fit the pipe's buffer, which is 16384 bytes on macOS.
+    /// The most a short standard input may be: what `pair begin` reads (the service and the
+    /// username, a few dozen bytes) and its newline, or a pairing code the self-test hands `pair
+    /// --code-stdin` (at most 8192 characters). It is written into the pipe before the child
+    /// starts, so it must fit the pipe's buffer, which is 16384 bytes on macOS.
     static let maxInputBytes = 8193
 
     let python: URL
@@ -515,8 +516,9 @@ struct ChildExit: Equatable, Sendable {
 final class HostChild: @unchecked Sendable {
     /// What the child gets on its standard input.
     enum Input: Sendable {
-        /// A pairing code, written into the pipe before the child starts, with a newline. It goes
-        /// into neither argv nor any log.
+        /// Text written into the pipe before the child starts, with a newline: what `pair begin`
+        /// reads (the service, then the username), or a pairing code. It goes into neither argv
+        /// nor any log.
         case code(String)
         /// The lifeline, which the app holds and never writes to; `closeLifeline()` closes it.
         case lifeline

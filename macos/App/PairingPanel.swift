@@ -1,13 +1,15 @@
 import AppKit
 
-/// The window the app pairs in, on decisions/0001's gate: a page for the code, one while it waits
-/// for Lucille, one to compare the numbers, and one while a verb it asked for runs. It shows what
+/// The window the app pairs in, on decisions/0001's gate, for Connect from Lucille's chat: a page
+/// for the chat account, one with the connect code to send, one while it waits for Lucille, one to
+/// compare the numbers, and one while a verb it asked for runs. It shows what
 /// `PairingFlow`'s screen says and tells the app what the user did; it decides nothing itself.
 ///
 /// - It is one non-modal panel that stays on the screen while the user looks at Lucille's page in
 ///   another app, above other windows.
-/// - The user pastes the code into its field: the app never reads the pasteboard. Command-V, C, X,
-///   A and Z reach the field through the panel, as an Edit menu would send them.
+/// - The user types or pastes their username into its field: the app never reads the pasteboard,
+///   and writes nothing to it. Command-V, C, X, A and Z reach the field through the panel, as an
+///   Edit menu would send them; the connect code is selectable, for the user to copy.
 /// - The number counts as drawn only once it is on the screen: the panel visible and not wholly
 ///   hidden by other windows (macOS's occlusion state says only that some part of it shows), a
 ///   moment after it was set. They Match and They Differ stay off until then, neither is a
@@ -20,8 +22,9 @@ import AppKit
 @MainActor
 final class PairingPanel: NSObject, NSWindowDelegate {
     /// What the user did. The app's glue turns each into an input of `PairingFlow`.
-    var onSubmit: ((String) -> Void)?
-    /// The window's close button, or Cancel on the code page; or the window closing on a route
+    /// Continue on the account page: the service chosen, and the username as typed.
+    var onSubmitAccount: ((String, String) -> Void)?
+    /// The window's close button, or Cancel on the account page; or the window closing on a route
     /// that asked nobody first.
     var onClose: (() -> Void)?
     /// Cancel on the waiting page: the app asks whether to stop connecting.
@@ -36,8 +39,10 @@ final class PairingPanel: NSObject, NSWindowDelegate {
 
     private enum Page: Equatable {
         case none
-        case code
-        case waiting(clockSkewed: Bool)
+        case account
+        case starting
+        case connectCode(ConnectRequest)
+        case waiting(clockSkewed: Bool, account: SignedAccount?)
         case compare
         case busy(PairingFlow.Busy)
     }
@@ -46,9 +51,12 @@ final class PairingPanel: NSObject, NSWindowDelegate {
     private let panel: GatePanel
     private var page: Page = .none
     private var content: NSView
-    private var field: CodeField?
-    private var hint: NSTextField?
-    private var connect: NSButton?
+    private var services: NSPopUpButton?
+    private var username: CodeField?
+    private var usernameHint: NSTextField?
+    private var proceed: NSButton?
+    /// The account Lucille signed, which the compare page shows above the number.
+    private var account: SignedAccount?
     private var match: NSButton?
     private var differ: NSButton?
     /// The number the compare page shows, and whether the flow has been told it is drawn.
@@ -102,7 +110,7 @@ final class PairingPanel: NSObject, NSWindowDelegate {
         guard page != .none else {
             return
         }
-        clearCode()
+        clearUsername()
         drawCheck.cancel()
         page = .none
         shown = nil
@@ -110,31 +118,54 @@ final class PairingPanel: NSObject, NSWindowDelegate {
         panel.orderOut(nil)
     }
 
-    /// The code page. `setAside` adds the sentence that connecting sets the folders and abilities
-    /// aside.
-    func showCode(setAside: Bool) {
-        let fresh = page != .code
+    /// The account page: the chat service, and the user's own username there. `setAside` adds the
+    /// sentence that connecting sets the folders and abilities aside.
+    func showAccount(setAside: Bool) {
+        let fresh = page != .account
         if fresh {
-            install(codePage(setAside: setAside), title: ConnectionText.codeTitle, page: .code)
-            panel.initialFirstResponder = field
+            install(accountPage(setAside: setAside), title: ConnectionText.codeTitle, page: .account)
+            panel.initialFirstResponder = username
         }
         present()
-        if fresh, let field {
-            _ = panel.makeFirstResponder(field)
+        if fresh, let username {
+            _ = panel.makeFirstResponder(username)
         }
     }
 
-    func showWaiting(clockSkewed: Bool) {
-        if page != .waiting(clockSkewed: clockSkewed) {
-            install(waitingPage(clockSkewed: clockSkewed), title: ConnectionText.codeTitle,
-                    page: .waiting(clockSkewed: clockSkewed))
+    func showStarting() {
+        if page != .starting {
+            install(startingPage(), title: ConnectionText.codeTitle, page: .starting)
+        }
+        present()
+    }
+
+    /// The connect code to send Lucille, while the request is live.
+    func showConnectCode(_ request: ConnectRequest) {
+        if page != .connectCode(request) {
+            install(connectCodePage(request), title: ConnectionText.codeTitle, page: .connectCode(request))
+            panel.initialFirstResponder = nil
+            _ = panel.makeFirstResponder(nil)
+        }
+        present()
+    }
+
+    /// The waiting page; with `account`, the account Lucille signed for this Connect.
+    func showWaiting(clockSkewed: Bool, account signed: SignedAccount? = nil) {
+        account = signed
+        let wanted = Page.waiting(clockSkewed: clockSkewed, account: signed)
+        if page != wanted {
+            install(waitingPage(clockSkewed: clockSkewed, account: signed), title: ConnectionText.codeTitle, page: wanted)
         }
         present()
     }
 
     /// The compare page. A new number, or one the flow wants drawn again, is reported drawn once
     /// it is on the screen; until the flow has that, both buttons are off.
-    func showCompare(_ comparison: PairingFlow.Comparison) {
+    func showCompare(_ comparison: PairingFlow.Comparison, account signed: SignedAccount? = nil) {
+        if signed != account {
+            account = signed
+            shown = nil
+        }
         let same = page == .compare && shown.map {
             $0.name == comparison.name && $0.sas == comparison.sas
                 && $0.deadline == comparison.deadline && $0.canMatch == comparison.canMatch
@@ -170,55 +201,93 @@ final class PairingPanel: NSObject, NSWindowDelegate {
         present()
     }
 
-    /// Empty the code field, and what the window's field editor and its undo still hold of it.
-    func clearCode() {
-        guard let field else {
+    /// Empty the username field, and what the window's field editor and its undo still hold of it.
+    func clearUsername() {
+        guard let username else {
             return
         }
         panel.endEditing(for: nil)
-        field.stringValue = ""
+        username.stringValue = ""
         panel.fieldEditor(false, for: nil)?.string = ""
         panel.undoManager?.removeAllActions()
-        codeChanged("")
+        usernameChanged("")
     }
 
     // MARK: Pages
 
-    private func codePage(setAside: Bool) -> NSView {
+    private func accountPage(setAside: Bool) -> NSView {
+        let intro = label(ConnectionText.accountIntro)
+        intro.font = .boldSystemFont(ofSize: NSFont.systemFontSize)
+        let services = NSPopUpButton(frame: .zero, pullsDown: false)
+        for service in Connect.services {
+            services.addItem(withTitle: Connect.serviceName(service))
+            services.lastItem?.representedObject = service
+        }
+        services.setAccessibilityLabel(ConnectionText.serviceLabel)
+        services.target = self
+        services.action = #selector(serviceChosen(_:))
+        let service = Connect.services[0]
+        let prompt = label(ConnectionText.usernamePrompt(service: service))
         let field = CodeField(string: "")
-        field.placeholderString = ConnectionText.codePlaceholder
-        field.setAccessibilityLabel(ConnectionText.codePlaceholder)
+        field.placeholderString = ConnectionText.usernamePlaceholder
+        field.setAccessibilityLabel(ConnectionText.usernamePrompt(service: service))
         field.usesSingleLineMode = true
         field.cell?.wraps = false
         field.cell?.isScrollable = true
         field.onChange = { [weak self] text in
-            self?.codeChanged(text)
+            self?.usernameChanged(text)
         }
         let hint = label("", secondary: true)
-        let connect = NSButton(title: ConnectionText.connectButton, target: self, action: #selector(connectPressed(_:)))
-        connect.keyEquivalent = "\r"
-        connect.isEnabled = false
+        let needed = label(ConnectionText.usernameNeeded(service: service), secondary: true)
         let cancel = NSButton(title: ConnectionText.cancelButton, target: self, action: #selector(closePressed(_:)))
         cancel.keyEquivalent = "\u{1b}"
-        var rows: [NSView] = [
-            label(ConnectionText.codeSteps),
-            label(ConnectionText.codePasteHow),
-            label(ConnectionText.codeWarning),
-        ]
+        let proceed = NSButton(title: ConnectionText.continueButton, target: self, action: #selector(continuePressed(_:)))
+        proceed.keyEquivalent = "\r"
+        proceed.isEnabled = false
+        var rows: [NSView] = [intro, services, prompt, field, hint, needed]
         if setAside {
             rows.append(label(ConnectionText.settingsSetAside))
         }
-        rows += [field, hint]
-        self.field = field
-        self.hint = hint
-        self.connect = connect
-        return layout(rows, buttons: [cancel, connect])
+        self.services = services
+        self.username = field
+        self.usernameHint = hint
+        self.proceed = proceed
+        return layout(rows, buttons: [cancel, proceed])
     }
 
-    private func waitingPage(clockSkewed: Bool) -> NSView {
+    private func startingPage() -> NSView {
+        let cancel = NSButton(title: ConnectionText.cancelButton, target: self, action: #selector(stopPressed(_:)))
+        cancel.keyEquivalent = "\u{1b}"
+        return layout([spinnerRow(ConnectionText.gettingCode)], buttons: [cancel])
+    }
+
+    private func connectCodePage(_ request: ConnectRequest) -> NSView {
+        let send = label(ConnectionText.sendThis(code: request.code))
+        send.font = .boldSystemFont(ofSize: NSFont.systemFontSize)
+        // The line to send, which the user may select and copy themselves: the app writes nothing
+        // to the pasteboard.
+        let line = NSTextField(labelWithString: ConnectionText.sendLine(code: request.code))
+        line.font = .monospacedSystemFont(ofSize: 26, weight: .semibold)
+        line.alignment = .center
+        line.isSelectable = true
+        let only = label(ConnectionText.sendOnlyToLucille)
+        let expires = label(ConnectionText.codeExpires(request.expiresAt), secondary: true)
+        let waiting = spinnerRow(ConnectionText.waitingFor(username: request.username, service: request.service))
+        let cancel = NSButton(title: ConnectionText.cancelButton, target: self, action: #selector(stopPressed(_:)))
+        cancel.keyEquivalent = "\u{1b}"
+        return layout([send, line, only, expires, waiting], buttons: [cancel])
+    }
+
+    private func waitingPage(clockSkewed: Bool, account signed: SignedAccount?) -> NSView {
         let title = label(ConnectionText.waitingTitle)
         title.font = .boldSystemFont(ofSize: NSFont.systemFontSize)
-        var rows: [NSView] = [title, label(ConnectionText.waitingKeepOpen)]
+        var rows: [NSView] = []
+        if let signed {
+            let who = label(ConnectionText.connectingAs(signed))
+            who.font = .boldSystemFont(ofSize: NSFont.systemFontSize)
+            rows.append(who)
+        }
+        rows += [title, label(ConnectionText.waitingNumberInChat)]
         if clockSkewed {
             rows.append(label(ConnectionText.waitingClockWrong))
         }
@@ -228,6 +297,10 @@ final class PairingPanel: NSObject, NSWindowDelegate {
     }
 
     private func comparePage(_ comparison: PairingFlow.Comparison) -> NSView {
+        var rows: [NSView] = []
+        if let account {
+            rows.append(label(ConnectionText.connectingAs(account)))
+        }
         let question = label(ConnectionText.compareQuestion)
         question.font = .boldSystemFont(ofSize: NSFont.systemFontSize)
         let number = NSTextField(labelWithString: comparison.sas)
@@ -242,7 +315,7 @@ final class PairingPanel: NSObject, NSWindowDelegate {
         match.isEnabled = false
         self.differ = differ
         self.match = match
-        return layout([question, number, rule, deadline], buttons: [differ, match])
+        return layout(rows + [question, number, rule, deadline], buttons: [differ, match])
     }
 
     private func busyPage(_ busy: PairingFlow.Busy) -> NSView {
@@ -254,14 +327,24 @@ final class PairingPanel: NSObject, NSWindowDelegate {
             words = ConnectionText.confirming
         case .rejecting:
             words = ConnectionText.turningDown
+        case .cancelling:
+            words = ConnectionText.cancelling
         }
+        let cancel = NSButton(title: ConnectionText.cancelButton, target: self, action: #selector(cancelBusyPressed(_:)))
+        cancel.keyEquivalent = "\u{1b}"
+        return layout([spinnerRow(words)], buttons: [cancel])
+    }
+
+    /// A small spinner, then `words`.
+    private func spinnerRow(_ words: String) -> NSView {
         let row = NSView()
         let spinner = NSProgressIndicator()
         spinner.style = .spinning
         spinner.controlSize = .small
         spinner.isIndeterminate = true
         spinner.startAnimation(nil)
-        let text = NSTextField(labelWithString: words)
+        let text = NSTextField(wrappingLabelWithString: words)
+        text.preferredMaxLayoutWidth = width - 70
         for view in [spinner, text] {
             view.translatesAutoresizingMaskIntoConstraints = false
             row.addSubview(view)
@@ -274,9 +357,7 @@ final class PairingPanel: NSObject, NSWindowDelegate {
             text.topAnchor.constraint(equalTo: row.topAnchor),
             text.bottomAnchor.constraint(equalTo: row.bottomAnchor),
         ])
-        let cancel = NSButton(title: ConnectionText.cancelButton, target: self, action: #selector(cancelBusyPressed(_:)))
-        cancel.keyEquivalent = "\u{1b}"
-        return layout([row], buttons: [cancel])
+        return row
     }
 
     private func label(_ text: String, secondary: Bool = false) -> NSTextField {
@@ -327,14 +408,15 @@ final class PairingPanel: NSObject, NSWindowDelegate {
     }
 
     private func install(_ view: NSView, title: String, page newPage: Page) {
-        if page == .code {
-            clearCode()
+        if page == .account {
+            clearUsername()
         }
         drawCheck.cancel()
-        if newPage != .code {
-            field = nil
-            hint = nil
-            connect = nil
+        if newPage != .account {
+            services = nil
+            username = nil
+            usernameHint = nil
+            proceed = nil
         }
         if newPage != .compare {
             match = nil
@@ -374,13 +456,29 @@ final class PairingPanel: NSObject, NSWindowDelegate {
 
     // MARK: What the user does
 
-    private func codeChanged(_ text: String) {
-        let words = Pairing.hint(for: text) ?? ""
-        connect?.isEnabled = Pairing.looksLikeCode(Pairing.cleaned(text))
-        if let hint, hint.stringValue != words {
-            hint.stringValue = words
+    /// The service chosen on the account page, as the host names it.
+    private var chosenService: String {
+        (services?.selectedItem?.representedObject as? String) ?? Connect.services[0]
+    }
+
+    private func usernameChanged(_ text: String) {
+        let words = Connect.hint(for: text, service: chosenService) ?? ""
+        proceed?.isEnabled = Connect.normalizedUsername(text, service: chosenService) != nil
+        if let usernameHint, usernameHint.stringValue != words {
+            usernameHint.stringValue = words
             fit()
         }
+    }
+
+    @objc private func serviceChosen(_ sender: Any?) {
+        usernameChanged(username?.stringValue ?? "")
+    }
+
+    @objc private func continuePressed(_ sender: Any?) {
+        guard let username else {
+            return
+        }
+        onSubmitAccount?(chosenService, username.stringValue)
     }
 
     /// Report the number drawn once the window shows it: visible, and not wholly hidden by other
@@ -418,13 +516,6 @@ final class PairingPanel: NSObject, NSWindowDelegate {
         default:
             return now
         }
-    }
-
-    @objc private func connectPressed(_ sender: Any?) {
-        guard let field else {
-            return
-        }
-        onSubmit?(field.stringValue)
     }
 
     @objc private func closePressed(_ sender: Any?) {

@@ -4441,9 +4441,11 @@ def test_every_error_code_the_app_meets_has_words() -> None:
     # Each code has one meaning here, and none is a word the contract does not have.
     assert not set(refusals) & app_bugs and not (set(refusals) | app_bugs) & redraw
     assert handled <= _spec_error_codes(), sorted(handled - _spec_error_codes())
-    # The code window comes back only for refusals that have words.
-    again = _swift_string_set(_swift("Pairing.swift"), "newCodeCodes")
-    assert again <= set(refusals)
+    # The account page comes back, and a request ends with Start Over, only for refusals that
+    # have words.
+    pairing = _swift("Pairing.swift")
+    for name in ("accountAgainCodes", "endingCodes", "deliveredCodeRefusals"):
+        assert _swift_string_set(pairing, name) <= set(refusals), name
     # A code expiring, the time to compare running out, and a leaked code read apart.
     after = re.search(r'static let expiredAfterSAS = "([^"]+)"', words)
     assert after is not None
@@ -4658,11 +4660,11 @@ def test_the_compare_page_keeps_its_safety_properties() -> None:
         assert "panel.hidesOnDeactivate = false" in _swift(name), name
     panel = _swift("PairingPanel.swift")
     # The compare page gives neither button a key equivalent, and starts with nothing focused, so
-    # Return and Space answer nothing; Connect, on the code page, is the only default button.
+    # Return and Space answer nothing; Continue, on the account page, is the only default button.
     compare = _swift_function(panel, "    private func comparePage(")
     assert "keyEquivalent" not in compare
     assert panel.count('keyEquivalent = "\\r"') == 1
-    assert 'connect.keyEquivalent = "\\r"' in panel
+    assert 'proceed.keyEquivalent = "\\r"' in panel
     shown = _swift_function(panel, "    func showCompare(")
     assert "panel.initialFirstResponder = nil" in shown
     assert "_ = panel.makeFirstResponder(nil)" in shown
@@ -5285,7 +5287,11 @@ def test_set_up_opens_once_they_match_here_is_connected() -> None:
     # gate, is unchanged.
     connection = _swift("Connection.swift")
     assert "    private func feedSetUp(_ input: SetupFlow.Input) {" in connection
-    start = _swift_function(connection, "    private func startPair(code: String, epoch: Int) {")
+    start = _swift_function(
+        connection,
+        "    private func startPair(verb: [String], input: String, limit: TimeInterval,"
+        " epoch: Int) {",
+    )
     assert start.index("feedSetUp(.pairStarted(at: Date(), epoch: epoch))") < start.index(
         "try child.start()"
     )
@@ -8060,11 +8066,8 @@ def test_the_pairing_checks_look_for_the_apps_own_words() -> None:
         "connecting": check_app.CONNECTING,
         "connected": check_app.CONNECTED,
         "codeTitle": check_app.CODE_TITLE,
-        "codeSteps": check_app.CODE_WORDS[0],
-        "codePasteHow": check_app.CODE_WORDS[1],
-        "codeWarning": check_app.CODE_WORDS[2],
-        "codeHint": check_app.CODE_HINT,
-        "connectButton": check_app.CONNECT_BUTTON,
+        "accountIntro": check_app.ACCOUNT_WORDS[0],
+        "continueButton": check_app.CONTINUE_BUTTON,
         "compareTitle": check_app.COMPARE_TITLE,
         "compareQuestion": check_app.COMPARE_QUESTION,
         "theyMatch": check_app.THEY_MATCH,
@@ -8091,7 +8094,18 @@ def test_the_pairing_checks_look_for_the_apps_own_words() -> None:
     }
     for name, said in words.items():
         assert f'static let {name} = "{_named_in_swift(said)}"' in text, name
-    assert f'"bad_code": "{check_app.BAD_CODE}",' in text
+    # The account page's prompt and hint, for Telegram, the one service there is.
+    assert 'case "telegram":\n            return "Telegram"' in _swift("Pairing.swift")
+    assert check_app.ACCOUNT_WORDS[1] == "Your Telegram username, as in @ada."
+    assert 'return "Your \\(name) username, as in @ada."' in text
+    assert check_app.USERNAME_HINT == (
+        "That isn't a Telegram username. It starts with a letter, and has only letters, digits "
+        "and _."
+    )
+    assert (
+        "\"That isn't a \\(Connect.serviceName(service)) username. It starts with a letter, and "
+        'has only letters, digits and _."'
+    ) in text
     assert check_app.CONNECT_ITEM in check_app.MENU_ITEMS
     # Activity… is always in the menu; Stop What's Running only while an operation runs.
     assert check_app.ACTIVITY_ITEM in check_app.MENU_ITEMS
@@ -8126,17 +8140,16 @@ def test_the_pairing_checks_look_for_the_apps_own_words() -> None:
     )
     for said in [*words.values(), *entries, "OK", "Cancel", check_app.QUIT_ITEM]:
         assert check_app._quoted(said) == f'"{said}"'
-    # The text the ui check pastes passes the app's own check on a code, and so would the one it
-    # leaves on the pasteboard, which the app must never read by itself.
-    pairing = _swift("Pairing.swift")
-    assert 'static let codePrefix = "swbp1_"' in pairing
-    # The whole code is then at most 8192 characters, and with its newline fits the input a child
-    # gets.
-    assert "static let codeBodyLength = 100...8186" in pairing
+    # What pair begin reads, the service and the longest username, fits the input a child gets;
+    # the texts the ui check types read as no username and as one, as the app's own check has it.
     assert "static let maxInputBytes = 8193" in _swift("HostCLI.swift")
-    for code in (check_app.PASTED_TEXT, check_app.PASTEBOARD_SENTINEL):
-        assert re.fullmatch(r"swbp1_[A-Za-z0-9_-]{100,8186}", code), code
-    assert check_app.PASTED_TEXT != check_app.PASTEBOARD_SENTINEL
+    pairing = _swift("Pairing.swift")
+    assert 'static let services: [String] = ["telegram"]' in pairing
+    assert '        "\\(service)\\n\\(username)"\n    }' in pairing
+    username = re.compile(r"[a-z][a-z0-9_]{0,63}")
+    assert not username.fullmatch(check_app.NOT_A_USERNAME.lower())
+    assert username.fullmatch(check_app.A_USERNAME.removeprefix("@"))
+    assert check_app.PASTEBOARD_SENTINEL not in (check_app.NOT_A_USERNAME, check_app.A_USERNAME)
 
 
 def test_the_checks_open_activity_and_stop_whats_running() -> None:
