@@ -5,9 +5,11 @@ execution with user values after `--`, path containment, the environment allowli
 audit log, `pause` and `kill`, and drain; pairing, its hub check and the local SAS gate; the read loop, and
 with it the envelope checks, dedupe and expiry; the private `XDG_RUNTIME_DIR` against a planted signer
 socket; `forget`; and supervising `run`: its lifeline on standard input, the policy reloaded as it changes
-and acted on not at all while invalid, and the refusal of a downgrade. Not built: the conformance suite; the release workflow and its provenance (protected
-tags, the `pypi` environment, attestations); the check of Switchboard's release provenance; and
-`files.search`. No other protection below is built yet. Each protection not yet built is one the first
+and acted on not at all while invalid, and the refusal of a downgrade; and `files.search`, with no hidden
+file searched, no ignore or configuration file read, no link followed, and no folder searched that holds
+the host's own. Not built: the conformance suite; the release workflow and its provenance (protected
+tags, the `pypi` environment, attestations); and the check of Switchboard's release provenance. No other
+protection below is built yet. Each protection not yet built is one the first
 release must have. The full design is [decisions/0001-host-design.md](decisions/0001-host-design.md).
 
 ## What the host protects

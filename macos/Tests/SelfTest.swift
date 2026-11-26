@@ -1704,39 +1704,40 @@ extension SelfTest {
                           "\(name) gives the host's version", "\(objects)")
         }
         let listed = VerbOutcome.done(fixtures["ops-list"]?.objects ?? []).abilities
-        report.expect(listed.map(\.name) == ["host.describe", "host.sleep", "files.sha256", "github.read",
+        report.expect(listed.map(\.name) == ["host.describe", "host.sleep", "files.sha256", "files.search", "github.read",
                                              "gmail.check", "gmail.mailboxes", "gmail.search", "gmail.read"]
-                          && listed.map(\.state) == [.enabled, .disabled, .disabled, .disabled, .disabled, .disabled, .disabled, .disabled]
-                          && listed.map(\.isOn) == [true, false, false, false, false, false, false, false]
-                          && listed.map(\.diagnostic) == [false, true, false, false, false, false, false, false]
-                          && listed.allSatisfy({ !$0.sendsFileContent }),
+                          && listed.map(\.state) == [.enabled, .disabled, .disabled, .disabled, .disabled, .disabled, .disabled, .disabled, .disabled]
+                          && listed.map(\.isOn) == [true, false, false, false, false, false, false, false, false]
+                          && listed.map(\.diagnostic) == [false, true, false, false, false, false, false, false, false]
+                          && listed.map(\.sendsFileContent) == [false, false, false, true, false, false, false, false, false],
                       "ops list reads each operation in catalog order, its switch from enabled", "\(listed)")
         let shown = listed.filter(\.isShown)
-        report.expect(shown.map(\.title) == ["Check a file's fingerprint", "Read from GitHub with a token kept here",
+        report.expect(shown.map(\.title) == ["Check a file's fingerprint", "Search the files in a folder", "Read from GitHub with a token kept here",
                                              "Check that Gmail can be read", "List your Gmail mailboxes", "Search your Gmail", "Read one Gmail message"]
                           && shown.map(\.detail) == ["Lucille gets a code that identifies the file's exact contents, not the contents.",
+                                                     "Lucille gets the lines that match its search in the files of one folder you added, with each file's path inside that folder, up to 200 lines a file. Hidden files are never searched.",
                                                      "Lucille gets GitHub's reply to one read it names: your repositories, issues, pull requests, commits or a README. The token goes only to api.github.com; Lucille learns only its name.",
                                                      "Lucille learns whether the app password kept here still signs in to Gmail.",
                                                      "Lucille gets the names of your Gmail mailboxes and labels.",
                                                      "Lucille gets the sender, recipients, subject, date and size of up to 50 messages that match its search, never their text. The app password goes only to imap.gmail.com.",
                                                      "Lucille gets one message it names: its headers, up to 32 KB of its text, and its attachments' names, types and sizes, never their contents."],
-                      "the menu lists files.sha256, github.read and the gmail operations, in the core's words", "\(shown)")
+                      "the menu lists files.sha256, files.search, github.read and the gmail operations, in the core's words", "\(shown)")
         let every = VerbOutcome.done(fixtures["ops-list-every-state"]?.objects ?? []).abilities
-        report.expect(every.map(\.state) == [.disabled, .unavailable(missingExecutable: "/bin/sleep"), .disabledByUpgrade, .disabled,
+        report.expect(every.map(\.state) == [.disabled, .unavailable(missingExecutable: "/bin/sleep"), .disabledByUpgrade, .disabled, .disabled,
                                               .disabled, .disabled, .disabled, .disabled, .notInCatalog]
-                          && every.map(\.isOn) == [false, true, false, false, false, false, false, false, false]
-                          && every.map(\.canChange) == [true, true, true, true, true, true, true, true, false]
-                          && every.map(\.isShown) == [false, false, true, true, true, true, true, true, false],
+                          && every.map(\.isOn) == [false, true, false, false, false, false, false, false, false, false]
+                          && every.map(\.canChange) == [true, true, true, true, true, true, true, true, true, false]
+                          && every.map(\.isShown) == [false, false, true, true, true, true, true, true, true, false],
                       "every state reads: one this Mac can't run is on as the policy says, and can be turned off", "\(every)")
         let content = VerbOutcome.done(fixtures["ops-list-sends-file-content"]?.objects ?? []).abilities
         let questionOn: [Bool] = content.map { $0.asksFirst(turningOn: true) }
         let questionOff: [Bool] = content.map { $0.asksFirst(turningOn: false) }
-        report.expect(questionOn == [false, false, true, false, false, false, false, false]
-                          && questionOff == [false, false, false, false, false, false, false, false],
-                      "only the operation that sends file contents asks first, and only before it is turned on",
+        report.expect(questionOn == [false, false, true, true, false, false, false, false, false]
+                          && questionOff == [false, false, false, false, false, false, false, false, false],
+                      "only the operations that send file contents ask first, and only before they are turned on",
                       "\(questionOn) \(questionOff)")
         let sendsContent = content.first(where: { $0.sendsFileContent })
-        report.expect(content.map(\.sendsFileContent) == [false, false, true, false, false, false, false, false]
+        report.expect(content.map(\.sendsFileContent) == [false, false, true, true, false, false, false, false, false]
                           && sendsContent.map({ HostText.turnOnQuestion($0).text }) == sendsContent?.detail,
                       "an operation that sends file contents says so in a field, which the question before it is turned on reads",
                       "\(content)")
