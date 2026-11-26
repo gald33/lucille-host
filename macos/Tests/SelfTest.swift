@@ -1820,6 +1820,7 @@ extension SelfTest {
             let listed = VerbOutcome.done(fixtures["ops-list"]?.objects ?? []).summaries
             report.expect(listed == ["host.describe": "Describe this computer's host", "host.sleep": "Wait up to 4 minutes, for testing",
                                      "files.sha256": "Check a file's fingerprint",
+                                     "files.search": "Search the files in a folder",
                                      "github.read": "Read from GitHub with a token kept here",
                                      "gmail.check": "Check that Gmail can be read",
                                      "gmail.mailboxes": "List your Gmail mailboxes",
@@ -1827,7 +1828,7 @@ extension SelfTest {
                                      "gmail.read": "Read one Gmail message"],
                           "ops list --json gives each operation's summary, in the core's words", "\(listed)")
             let every = VerbOutcome.done(fixtures["ops-list-every-state"]?.objects ?? []).summaries
-            report.expect(every.count == 8 && every["host.nothing"] == nil,
+            report.expect(every.count == 9 && every["host.nothing"] == nil,
                           "a policy entry this release does not have has no summary", "\(every)")
             report.expect(VerbOutcome.done(fixtures["log"]?.objects ?? []).logLines
                               == [#"{"kind":"test","n":1}"#, #"{"kind":"test","n":2}"#],
@@ -2881,9 +2882,9 @@ extension SelfTest {
         let lacking = Ability(name: "old.op", state: .notInCatalog, enabled: true, summary: nil, sends: nil,
                               sendsFileContent: false, diagnostic: false)
         let lackingOnPage = lacking.isOnSetUpPage
-        report.expect(onPage == ["host.describe", "files.sha256", "github.read",
+        report.expect(onPage == ["host.describe", "files.sha256", "files.search", "github.read",
                                  "gmail.check", "gmail.mailboxes", "gmail.search", "gmail.read"] && !lackingOnPage,
-                      "What Lucille may do switches host.describe, files.sha256, github.read and the gmail operations, not host.sleep, which is for testing, nor a name this release lacks",
+                      "What Lucille may do switches host.describe, files.sha256, files.search, github.read and the gmail operations, not host.sleep, which is for testing, nor a name this release lacks",
                       "\(onPage)")
 
         // The way the app feeds it: this session's pairing started at `at`, in the pairing flow's
