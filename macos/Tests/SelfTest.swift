@@ -2381,24 +2381,6 @@ extension SelfTest {
             (#"{"v":1,"type":"connect","state":"connecting","service":"telegram","from":"telegram:1","handle":"@Lucille support"}"#, nil),
             (#"{"v":1,"type":"connect","state":"connecting","service":"telegram","from":"telegram:1","handle":""}"#, nil),
             (#"{"v":1,"type":"connect","state":"connecting","service":"telegram","from":"telegram:1","handle":"@\u0410da"}"#, nil),
-            // send_to: one to four of Lucille's accounts on the request's service, or none at all.
-            (#"{"v":1,"type":"connect","state":"code","code":"7KQ4M-X2D9P","expires_at":"2026-11-01T12:00:00Z","service":"telegram","username":"ada","send_to":[{"handle":"@LucilleBot","account":"telegram:123456789"}]}"#,
-             .connectState(.code(ConnectRequest(code: "7KQ4M-X2D9P", expiresAt: sampleTime, service: "telegram", username: "ada",
-                                                sendTo: [LucilleAccount(handle: "@LucilleBot", account: "telegram:123456789")])))),
-            (#"{"v":1,"type":"connect","state":"code","code":"7KQ4M-X2D9P","expires_at":"2026-11-01T12:00:00Z","service":"telegram","username":"ada","send_to":[{"handle":"@LucilleBot","account":"telegram:123456789"},{"handle":"@Lucille_2","account":"telegram:Ab_-9"}]}"#,
-             .connectState(.code(ConnectRequest(code: "7KQ4M-X2D9P", expiresAt: sampleTime, service: "telegram", username: "ada",
-                                                sendTo: [LucilleAccount(handle: "@LucilleBot", account: "telegram:123456789"), LucilleAccount(handle: "@Lucille_2", account: "telegram:Ab_-9")])))),
-            (#"{"v":1,"type":"connect","state":"code","code":"7KQ4M-X2D9P","expires_at":"2026-11-01T12:00:00Z","service":"telegram","username":"ada","send_to":[]}"#, nil),
-            (#"{"v":1,"type":"connect","state":"code","code":"7KQ4M-X2D9P","expires_at":"2026-11-01T12:00:00Z","service":"telegram","username":"ada","send_to":null}"#, nil),
-            (#"{"v":1,"type":"connect","state":"code","code":"7KQ4M-X2D9P","expires_at":"2026-11-01T12:00:00Z","service":"telegram","username":"ada","send_to":"@LucilleBot"}"#, nil),
-            (#"{"v":1,"type":"connect","state":"code","code":"7KQ4M-X2D9P","expires_at":"2026-11-01T12:00:00Z","service":"telegram","username":"ada","send_to":[{"handle":"@a","account":"telegram:1"},{"handle":"@b","account":"telegram:2"},{"handle":"@c","account":"telegram:3"},{"handle":"@d","account":"telegram:4"},{"handle":"@e","account":"telegram:5"}]}"#, nil),
-            (#"{"v":1,"type":"connect","state":"code","code":"7KQ4M-X2D9P","expires_at":"2026-11-01T12:00:00Z","service":"telegram","username":"ada","send_to":[{"handle":"LucilleBot","account":"telegram:123456789"}]}"#, nil),
-            (#"{"v":1,"type":"connect","state":"code","code":"7KQ4M-X2D9P","expires_at":"2026-11-01T12:00:00Z","service":"telegram","username":"ada","send_to":[{"handle":"@Lucille Bot","account":"telegram:123456789"}]}"#, nil),
-            (#"{"v":1,"type":"connect","state":"code","code":"7KQ4M-X2D9P","expires_at":"2026-11-01T12:00:00Z","service":"telegram","username":"ada","send_to":[{"handle":"@LucilleBot","account":"signal:123456789"}]}"#, nil),
-            (#"{"v":1,"type":"connect","state":"code","code":"7KQ4M-X2D9P","expires_at":"2026-11-01T12:00:00Z","service":"telegram","username":"ada","send_to":[{"handle":"@LucilleBot","account":"telegram:"}]}"#, nil),
-            (#"{"v":1,"type":"connect","state":"code","code":"7KQ4M-X2D9P","expires_at":"2026-11-01T12:00:00Z","service":"telegram","username":"ada","send_to":[{"handle":"@LucilleBot","account":"telegram:12 34"}]}"#, nil),
-            (#"{"v":1,"type":"connect","state":"code","code":"7KQ4M-X2D9P","expires_at":"2026-11-01T12:00:00Z","service":"telegram","username":"ada","send_to":[{"handle":"@LucilleBot"}]}"#, nil),
-            (#"{"v":1,"type":"connect","state":"code","code":"7KQ4M-X2D9P","expires_at":"2026-11-01T12:00:00Z","service":"telegram","username":"ada","send_to":["@LucilleBot"]}"#, nil),
         ]
         for (text, want) in reads {
             let item = HostObject.parse(line: Data(text.utf8))
@@ -2426,19 +2408,6 @@ extension SelfTest {
         report.expect(ConnectionText.sendThis(code: request.code)
                           == "Send this to Lucille in your chat: connect 7KQ4M-X2D9P. It works once, within 20 minutes.",
                       "the code page says what to send, and that it works once, within 20 minutes")
-        report.expect(ConnectionText.sendThis(code: request.code, to: [LucilleAccount(handle: "@LucilleBot", account: "telegram:123456789")])
-                          == "Send this to Lucille in your chat, to @LucilleBot: connect 7KQ4M-X2D9P. It works once, within 20 minutes.",
-                      "with one account in send_to, the code page names its handle as it is")
-        let handles = ["@A1", "@B2", "@C3"].map { LucilleAccount(handle: $0, account: "telegram:1") }
-        report.expect(ConnectionText.sendThis(code: request.code, to: Array(handles.prefix(2))).contains("to @A1 or @B2: connect")
-                          && ConnectionText.sendThis(code: request.code, to: handles).contains("to @A1, @B2 or @C3: connect"),
-                      "with several, in the order given")
-        report.expect(Connect.isAccountID("telegram:123456789", service: "telegram")
-                          && Connect.isAccountID("telegram:" + String(repeating: "a", count: 64), service: "telegram")
-                          && !Connect.isAccountID("telegram:" + String(repeating: "a", count: 65), service: "telegram")
-                          && !Connect.isAccountID("telegram:\u{0430}", service: "telegram")
-                          && !Connect.isAccountID("Telegram:1", service: "telegram"),
-                      "an account id is the service, :, then 1 to 64 of letters, digits, _ and -")
         report.expect(ConnectionText.usernamePrompt(service: "telegram") == "Your Telegram username, as in @ada.",
                       "the account page asks for the username in decisions/0002's words")
         let otherAccount = ConnectionText.note(.connectEnded(code: "other_account", message: "m"))

@@ -89,23 +89,6 @@ enum Connect {
         return scalars.dropFirst(2).allSatisfy { letter($0) || ("0"..."9").contains($0) || $0 == "_" }
     }
 
-    /// Whether `text` is a chat account's stable id on `service`, as `send_to` gives one:
-    /// `<service>:`, then 1 to 64 of ASCII letters, digits, `_` and `-` (the whole id matching
-    /// `^[a-z]{1,16}:[0-9A-Za-z_-]{1,64}$`).
-    static func isAccountID(_ text: String, service: String) -> Bool {
-        let prefix = service + ":"
-        guard (1...16).contains(service.unicodeScalars.count),
-              service.unicodeScalars.allSatisfy({ ("a"..."z").contains($0) }),
-              text.hasPrefix(prefix)
-        else {
-            return false
-        }
-        let rest = text.unicodeScalars.dropFirst(prefix.unicodeScalars.count)
-        return (1...64).contains(rest.count) && rest.allSatisfy {
-            ("a"..."z").contains($0) || ("A"..."Z").contains($0) || ("0"..."9").contains($0) || $0 == "_" || $0 == "-"
-        }
-    }
-
     /// The username a typed text names on `service`, as the host's `normalize_username` gives it,
     /// or nil if it names none. In this order: refuse any character outside ASCII; drop the spaces
     /// (U+0020) around it; drop a leading `<service>:`, matched without regard to ASCII case,
