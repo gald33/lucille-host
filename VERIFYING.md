@@ -470,12 +470,25 @@ Every file of a release on PyPI must carry a PEP 740 attestation:
 - its publisher names repository `gald33/lucille-host`, workflow `release.yml` and environment `pypi`;
 - its signing certificate's Runner Environment extension reads `github-hosted`.
 
+- the certificate names the release's tag, `refs/tags/v<version>`.
+
 The `[verify]` extra installs `pypi-attestations`, and a later release adds `lucille-host verify` to make
-this check. Until then it is a manual check. The GitHub Release also carries `SHA256SUMS`.
+this check on an installed host. The release workflow makes it after publishing
+(`tools/release/check_release.py published`, which also checks that PyPI serves exactly the bytes the
+workflow built), and the GitHub Release carries `SHA256SUMS`. The environment is not in the signing
+certificate, so what is checked is PyPI's record of it.
 
 The same check works for the pinned `agent-switchboard` release. Its publisher is `gald33/switchboard`,
-workflow `publish.yml`, environment `pypi`, ref `refs/tags/v2.6.0`. That certificate was decoded on
-2026-10-19 but not verified cryptographically. Check it yourself.
+workflow `publish.yml`, environment `pypi`, ref `refs/tags/v2.6.0`. The release workflow checks it before
+it builds, and you can run the same check from a checkout:
+
+```sh
+uv sync --locked --extra verify
+uv run python tools/release/check_release.py dependency agent-switchboard --scratch /tmp/sb-check
+```
+
+It downloads each file of the release `uv.lock` pins, checks it against the lock's sha256 and PyPI's,
+and verifies its attestation with sigstore.
 
 A release is called "reproducible" only when a rebuild from the tagged source produced the same sha256s.
 No rebuild job exists yet.

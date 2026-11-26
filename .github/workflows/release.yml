@@ -1,0 +1,203 @@
+name: release
+
+# A release of the host to PyPI (decisions/0001, "Packaging, releases and verification"). It runs
+# on a pushed v* tag only; the tag must be protected, and environment `pypi` must need the
+# repository owner's approval (both are repository settings, which no file here can show). The Mac
+# jobs decisions/0002 lists for this workflow need a signing identity and are not here yet.
+on:
+  push:
+    tags: ["v*"]
+
+# Nothing by default; each job asks for what it needs.
+permissions: {}
+
+# One release run per tag, never cancelled part way.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+# GitHub-hosted runners only, and every action pinned by full commit SHA
+# (tools/guards/workflow_lint.py fails the build otherwise). Every value from GitHub reaches a
+# shell through env:, never inside run:.
+
+jobs:
+  # Build the wheel and the sdist from the tagged commit, once, with the pinned build backend.
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    env:
+      UV_PYTHON_PREFERENCE: only-managed
+      REF_NAME: ${{ github.ref_name }}
+    outputs:
+      version: ${{ steps.tag.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          # The whole history, so that the tagged commit can be checked to be on main.
+          fetch-depth: 0
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          version: "0.11.32"
+          python-version: "3.13.14"
+          enable-cache: false
+      - name: Check the tag is v<version>, a final release
+        id: tag
+        run: |
+          version=$(uv run --no-project python tools/release/check_release.py tag "$REF_NAME")
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - name: Check the tagged commit is on main
+        run: |
+          git fetch --no-tags origin main
+          git merge-base --is-ancestor "$GITHUB_SHA" FETCH_HEAD
+      - name: Install pypi-attestations from the lock
+        run: uv sync --locked --no-install-project --no-dev --extra verify
+      # Before anything is published: the Switchboard release the host pins is the one its own
+      # repository published from a GitHub-hosted runner.
+      - name: Check the agent-switchboard release uv.lock pins is PyPI's, attested by its own repository
+        run: uv run --no-sync python tools/release/check_release.py dependency agent-switchboard --scratch "$RUNNER_TEMP/dependency"
+      - name: Build the wheel and the sdist with the pinned build backend
+        run: |
+          SOURCE_DATE_EPOCH=$(git log -1 --format=%ct "$GITHUB_SHA")
+          export SOURCE_DATE_EPOCH
+          uv build --no-config --no-cache --sdist --wheel \
+            --build-constraints tools/macos/build-constraints.txt --require-hashes \
+            --out-dir dist .
+          # uv build writes a .gitignore into the folder it makes; the release is the two files.
+          rm dist/.gitignore
+      - name: Write SHA256SUMS
+        env:
+          VERSION: ${{ steps.tag.outputs.version }}
+        run: |
+          mkdir sums
+          uv run --no-project python tools/release/check_release.py sums dist --version "$VERSION" --out sums/SHA256SUMS
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release
+          path: |
+            dist/
+            sums/
+          if-no-files-found: error
+          retention-days: 7
+
+  # Upload to PyPI by Trusted Publishing, in environment `pypi`, with PEP 740 attestations. This
+  # job checks out nothing and runs no code from the repository.
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment:
+      name: pypi
+      url: https://pypi.org/project/lucille-host/
+    permissions:
+      id-token: write
+    env:
+      VERSION: ${{ needs.build.outputs.version }}
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release
+          path: release
+      - name: Check the files are the ones the build job hashed
+        working-directory: release
+        run: |
+          ls -la dist sums
+          test "$(ls dist | sort)" = "$(printf '%s\n' "lucille_host-$VERSION-py3-none-any.whl" "lucille_host-$VERSION.tar.gz")"
+          (cd dist && sha256sum --check --strict ../sums/SHA256SUMS)
+      - uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # v1.14.3
+        with:
+          packages-dir: release/dist/
+          attestations: true
+
+  # PyPI serves exactly the bytes the build job made, and attests each file to this repository,
+  # release.yml and environment `pypi`, from a GitHub-hosted runner, at this tag.
+  provenance:
+    needs: [build, publish]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    env:
+      UV_PYTHON_PREFERENCE: only-managed
+      VERSION: ${{ needs.build.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          version: "0.11.32"
+          python-version: "3.13.14"
+          enable-cache: false
+      - name: Install pypi-attestations from the lock
+        run: uv sync --locked --no-install-project --no-dev --extra verify
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release
+          path: release
+      - name: Check what PyPI serves and attests
+        run: uv run --no-sync python tools/release/check_release.py published release/dist release/sums/SHA256SUMS --version "$VERSION"
+
+  # Install the release from PyPI into a fresh environment, as VERIFYING.md says a third party
+  # does, and run the conformance suite against it.
+  conformance:
+    needs: [build, publish]
+    name: conformance (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    permissions: {}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    env:
+      UV_PYTHON_PREFERENCE: only-managed
+      VERSION: ${{ needs.build.outputs.version }}
+    steps:
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          version: "0.11.32"
+          python-version: "3.13.14"
+          enable-cache: false
+      - name: Install lucille-host[conformance] from PyPI into a fresh environment
+        run: |
+          uv venv --no-config verify-env
+          for attempt in 1 2 3 4 5 6 7 8 9 10; do
+            if uv pip install --no-config --no-cache --python verify-env "lucille-host[conformance]==$VERSION"; then
+              break
+            fi
+            if [ "$attempt" = 10 ]; then exit 1; fi
+            sleep 30
+          done
+      - name: Check the installed host is the release
+        run: test "$(verify-env/bin/lucille-host --version)" = "lucille-host $VERSION"
+      - name: Run the conformance suite
+        run: verify-env/bin/python -m lucille_host.conformance
+
+  # The GitHub Release, with the files PyPI serves and their SHA256SUMS, once both checks pass.
+  github-release:
+    needs: [build, provenance, conformance]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    env:
+      VERSION: ${{ needs.build.outputs.version }}
+      REF_NAME: ${{ github.ref_name }}
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release
+          path: release
+      - name: Check the files are the ones the build job hashed
+        working-directory: release
+        run: (cd dist && sha256sum --check --strict ../sums/SHA256SUMS)
+      - name: Create the GitHub Release
+        run: |
+          gh release create "$REF_NAME" --verify-tag --title "lucille-host $VERSION" \
+            --notes "lucille-host $VERSION, as published on PyPI: https://pypi.org/project/lucille-host/$VERSION/" \
+            release/dist/* release/sums/SHA256SUMS
