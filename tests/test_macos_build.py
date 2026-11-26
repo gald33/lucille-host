@@ -4364,7 +4364,7 @@ CONNECTION_VERBS = frozenset(
         # pair begin reaches the codes of pair --code-stdin once its code is checked, which its
         # row names only by reference: that row stays until the contract moves them.
         "pair --code-stdin [--hub URL] [--store-file]",
-        "pair begin [--hub URL] [--store-file]",
+        "pair begin [--hub URL [--test-key KEY]] [--store-file]",
         "pair resume",
         "pair cancel",
         "pair status",
