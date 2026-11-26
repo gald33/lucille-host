@@ -829,7 +829,7 @@ limit, as it runs every verb, and stops it when the limit passes.
 | `sign_in_refused` | `credential test`: Gmail refused the app password (wrong or revoked), or did within the last 15 minutes and was not asked again. |
 | `unreachable` | `credential test`: `imap.gmail.com` did not resolve, resolved to an address the host does not allow, could not be connected to, or the connection broke. |
 | `limit_reached` | `credential test`: the credential was used for more than 60 sign-ins in 10 minutes, or Gmail sent more than the host reads. |
-| `bad_service` | `pair begin`: that is not a chat service Capsule connects through (`telegram`). |
+| `bad_service` | `pair begin`: that is not a chat service Capsule connects through (`telegram`). A pairing code given there, as the paste form took one, is refused with it too, saying that pasting a code is no longer supported. |
 | `bad_username` | `pair begin`: that is not a username: it starts with a letter, and holds letters, digits and `_` only, 64 at most. |
 | `interference` | Capsule couldn't read Lucille's answer, and the code may be known to someone else. Start again. |
 | `connect_expired` | The connect code expired. Start again. |

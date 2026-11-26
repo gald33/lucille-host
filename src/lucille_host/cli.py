@@ -113,7 +113,8 @@ from lucille_host.ops import (
 PAIR_ACTIONS: Final = ("status", "confirm", "reject")
 # The actions of a Connect request from Lucille's chat (decisions/0002 §11.4).
 CONNECT_ACTIONS: Final = ("begin", "resume", "cancel")
-# In the state folder: held by ``pair [CODE]`` until it returns.
+# In the state folder: held by ``pair begin``, ``pair resume`` and ``pair cancel`` until each
+# returns.
 PAIR_LOCK: Final = ".pair.lock"
 ALREADY_PAIRING: Final = (
     "another `lucille-host pair` is running for this profile, and a profile answers one pairing "
@@ -1311,6 +1312,12 @@ def _answered(
 # --- Connect from Lucille's chat (decisions/0002 §11.4) -------------------------------------------
 
 _SERVICE_NAMES: Final = MappingProxyType({"telegram": "Telegram"})
+# How every pairing code the library makes begins.
+_PAIRING_CODE_PREFIX: Final = "swbp1_"
+PASTE_IS_GONE: Final = (
+    "pasting a pairing code is no longer supported: `lucille-host pair begin` reads the chat "
+    "service (telegram), then your username there, and shows a code to send Lucille in your chat"
+)
 
 
 def _connect_action(args: argparse.Namespace, dirs: paths.Dirs, out: _Out) -> None:
@@ -1373,6 +1380,10 @@ def _connect_begin(dirs: paths.Dirs, wanted: host_state.HostConfig, out: _Out) -
     session, opened, current = _pairing_session(dirs, wanted)
     service = _read_line("Chat service (telegram): ", out).strip(" \n")
     if service not in connect.SERVICES:
+        if service.lower().startswith(_PAIRING_CODE_PREFIX):
+            # A pairing code piped in, as the paste form took one: say that form is gone, and
+            # never repeat the code.
+            raise _Refused("bad_service", PASTE_IS_GONE)
         raise _Refused(
             "bad_service", f"Capsule connects through {', '.join(sorted(connect.SERVICES))} only"
         )

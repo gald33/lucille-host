@@ -31,7 +31,7 @@ from switchboard import client, pairing
 from switchboard.testing import hub
 
 from lucille_host import _switchboard, connect, gate, link, loop, paths, policy, spec, state, store
-from lucille_host.cli import ALREADY_PAIRING, PAIR_LOCK, main
+from lucille_host.cli import ALREADY_PAIRING, PAIR_LOCK, PASTE_IS_GONE, main
 from tests import _audit_hook
 from tests._cli import STDIN, HostCli, collecting, until
 from tests._host import HostEnv, lock_free, lock_held
@@ -1129,6 +1129,25 @@ def test_a_code_is_never_taken_on_the_command_line(cli: HostCli) -> None:
             if path.is_file():
                 assert given not in path.read_text(errors="replace"), path
         assert all(given not in value for value in cli.env.keyring.items.values())
+
+
+@pytest.mark.parametrize("argv", [("pair",), ("pair", "begin"), ("--json", "pair")])
+def test_a_code_piped_in_says_pasting_is_gone(cli: HostCli, argv: tuple[str, ...]) -> None:
+    # The old habit, or an old script: a pairing code on standard input, where `pair begin` reads
+    # the chat service. It is refused as no service, saying plainly that pasting is gone, and
+    # the code is never repeated.
+    code = cli.lucille().start()
+    for given in (code, code.upper(), "  " + code):
+        ran = cli.run(*argv, stdin=given + "\n")
+        assert ran.rc == 1, ran.text
+        assert PASTE_IS_GONE in ran.err, ran.err
+        assert code not in ran.text and code.upper() not in ran.text
+        if "--json" in argv:
+            assert [o["code"] for o in _objects(ran)] == ["bad_service"]
+    assert cli.gate() is None and cli.held() == [] and not cli.dirs.connect_file.exists()
+    # Any other service is refused as before.
+    ran = cli.run("pair", stdin="slack\nada\n")
+    assert ran.rc == 1 and PASTE_IS_GONE not in ran.err and "telegram only" in ran.err
 
 
 def test_pair_alone_connects_as_begin(cli: HostCli) -> None:
