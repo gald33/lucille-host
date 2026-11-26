@@ -597,6 +597,14 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="keep the pair in files in the state folder, not the OS keyring (weaker)",
     )
+    pair.add_argument(
+        "--test-key",
+        metavar="KEY",
+        help=(
+            "pair begin, with --hub only: also take answers signed with this key (32 bytes, "
+            "base64url), for testing against a local hub; the app never passes it"
+        ),
+    )
 
     run = verbs.add_parser(
         "run",
@@ -1080,7 +1088,7 @@ def _pair_view(view: link.PairView) -> dict[str, Any]:
 
 
 def _pair_action(args: argparse.Namespace, dirs: paths.Dirs, out: _Out) -> None:
-    if args.code_stdin or args.hub is not None or args.store_file:
+    if args.code_stdin or args.hub is not None or args.store_file or args.test_key is not None:
         raise _Refused("bad_options", f"`pair {args.code}` takes no options")
     session = link.open_session(dirs, host_state.load_host_config(dirs), say=_say, warn=_warn)
     if args.code == "status":
@@ -1162,6 +1170,8 @@ def _pair(args: argparse.Namespace, dirs: paths.Dirs, out: _Out) -> None:
     if args.code in PAIR_ACTIONS:
         _pair_action(args, dirs, out)
         return
+    if args.test_key is not None:
+        raise _Refused("bad_options", "--test-key is taken by `pair begin` only")
     if args.code_stdin and args.code is not None:
         raise _Refused(
             "code_in_argv", "with --code-stdin the code is read from stdin only; do not pass it"
@@ -1332,9 +1342,14 @@ _SERVICE_NAMES: Final = MappingProxyType({"telegram": "Telegram"})
 
 def _connect_action(args: argparse.Namespace, dirs: paths.Dirs, out: _Out) -> None:
     """``pair begin``, ``pair resume`` and ``pair cancel``, each under the profile's pair lock."""
-    if args.code_stdin or (args.code != "begin" and (args.hub is not None or args.store_file)):
-        options = "--hub and --store-file only" if args.code == "begin" else "no options"
+    options_given = args.hub is not None or args.store_file or args.test_key is not None
+    if args.code_stdin or (args.code != "begin" and options_given):
+        options = (
+            "--hub, --store-file and --test-key only" if args.code == "begin" else "no options"
+        )
         raise _Refused("bad_options", f"`pair {args.code}` takes {options}")
+    if args.code == "begin" and args.test_key is not None and args.hub is None:
+        raise _Refused("bad_options", "--test-key is taken only with --hub")
     wanted: host_state.HostConfig | None = None
     if args.code == "begin":
         try:
@@ -1343,6 +1358,10 @@ def _connect_action(args: argparse.Namespace, dirs: paths.Dirs, out: _Out) -> No
             )
         except ValueError as exc:
             raise _Refused("bad_hub", str(exc)) from exc
+        if args.test_key is not None:
+            if host_state.decode_test_key(args.test_key) is None:
+                raise _Refused("bad_options", "--test-key is 32 bytes in unpadded base64url")
+            wanted = replace(wanted, test_key=args.test_key)
     host_state.startup_checks()
     lock = paths.ensure_dir(dirs.state) / PAIR_LOCK
     with loop.one_at_a_time(lock, ALREADY_PAIRING, "`pair`"):
@@ -1450,7 +1469,12 @@ def _connect_status(
         with loop.one_at_a_time(lock, ALREADY_PAIRING, "`pair status`"):
             try:
                 step = connecting.poll(
-                    session.link, dirs.connect_file, live, now=session.link.now, spend=False
+                    session.link,
+                    dirs.connect_file,
+                    live,
+                    now=session.link.now,
+                    spend=False,
+                    keys=connecting.trusted_keys(request, host_state.load_host_config(dirs)),
                 )
             except connecting.Ended as ended:
                 # Reported, not ended here: the request is left as it is.
@@ -1495,7 +1519,13 @@ def _connect_wait(
     try:
         while True:
             try:
-                step = connecting.poll(session.link, path, live, now=session.link.now)
+                step = connecting.poll(
+                    session.link,
+                    path,
+                    live,
+                    now=session.link.now,
+                    keys=connecting.trusted_keys(live.request, wanted),
+                )
             except connecting.Ended as ended:
                 _connect_ended(session, ended)
             live = step.live

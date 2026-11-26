@@ -241,6 +241,7 @@ Moving the bytes between jobs (the smoke jobs build nothing):
 from __future__ import annotations
 
 import argparse
+import base64
 import bisect
 import concurrent.futures
 import contextlib
@@ -7363,6 +7364,7 @@ class _Harness:
     until: Callable[..., Any]
     body: Callable[..., dict[str, Any]]
     fake_lucille: Any  # tests._lucille.FakeLucille
+    signer: Any  # tests._lucille.Signer, a throwaway key in Lucille's key's place
     loopback_hub: Any  # tests._process.LoopbackHub
     client: Any  # switchboard.client.Client
     hub_program: Path
@@ -7762,17 +7764,25 @@ class _PairingCheck:
         )
 
     def pair_through_the_harness(self) -> None:
-        """Pair the app's profile as a test harness does (spec/CLI.md section 7): ``pair
-        --code-stdin`` with ``--hub`` and ``--store-file``, the code on standard input, Lucille
-        collecting the answer. It ends once it has shown the SAS, so the SAS is pending, and the
-        app must show it again before They Match counts."""
-        code = self.lucille.start()
-        pair = self.start(
-            self.host_argv("pair", "--code-stdin", "--json", "--hub", self.url, "--store-file"),
-            env=self.host_env,
-            piped=True,
-        )
-        pair.write(code.encode() + b"\n")
+        """Pair the app's profile as a test harness does (spec/CLI.md section 7): ``pair begin``
+        with ``--hub``, ``--store-file`` and a test key, the chat service and a username on
+        standard input; Lucille, signing with that throwaway key, delivers its code into the drop
+        room and collects the answer. It ends once it has shown the SAS, so the SAS is pending,
+        and the app must show it again before They Match counts."""
+        signer = self.h.signer()
+        raw = next(iter(signer.keys.values()))
+        key = base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+        argv = ["pair", "begin", "--json", "--hub", self.url, "--store-file", "--test-key", key]
+        pair = self.start(self.host_argv(*argv), env=self.host_env, piped=True)
+        pair.write(b"telegram\nada\n")
+
+        def shown_code() -> str | None:
+            assert pair.proc.poll() in (None, 0), pair.describe()
+            found = pair.objects("connect", state="code")
+            return str(found[0]["code"]) if found else None
+
+        code = self.h.until(shown_code, "pair begin showing its connect code", self.children)
+        self.lucille.deliver(code, signer)
 
         def collected() -> bool:
             assert pair.proc.poll() in (None, 0), pair.describe()
@@ -8680,7 +8690,7 @@ def check_pairing(app: Path, checker: Checker, work: Path, require_driven: bool 
     try:
         from switchboard.client import Client
 
-        from tests._lucille import FakeLucille
+        from tests._lucille import FakeLucille, Signer
         from tests._process import LISTENING, SWITCHBOARD, Child, LoopbackHub, child_env, until
         from tests._run import body
     except ImportError as exc:
@@ -8698,6 +8708,7 @@ def check_pairing(app: Path, checker: Checker, work: Path, require_driven: bool 
         until=until,
         body=body,
         fake_lucille=FakeLucille,
+        signer=Signer,
         loopback_hub=LoopbackHub,
         client=Client,
         hub_program=SWITCHBOARD,

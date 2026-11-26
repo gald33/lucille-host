@@ -30,6 +30,7 @@
 
 from __future__ import annotations
 
+import base64
 import json
 import os
 import re
@@ -49,6 +50,7 @@ __all__ = [
     "StateError",
     "Unprepared",
     "check_runtime",
+    "decode_test_key",
     "load_host_config",
     "prepare_runtime",
     "read_json",
@@ -65,6 +67,8 @@ STORE_KINDS: Final = ("keyring", "file")
 ENV_PREFIX: Final = "SWITCHBOARD_"
 _LOOPBACK_HUB = re.compile(r"http://(?:127\.0\.0\.1|localhost):([1-9][0-9]{0,4})", re.ASCII)
 _HOST_KEYS = frozenset({"v", "hub", "store"})
+# A host file that names a test key as well (``pair begin --test-key``).
+_HOST_KEYS_TESTING = _HOST_KEYS | {"test_key"}
 # The latest time a file of the host's own may hold: the last second of the year 9999, the last
 # that can be written as a date.
 LATEST: Final = 253402300799
@@ -167,10 +171,15 @@ def valid_loopback_hub(url: str) -> bool:
 
 @dataclass(frozen=True)
 class HostConfig:
-    """Where the pair is kept, and the loopback hub the local configuration names, if any."""
+    """Where the pair is kept, the loopback hub the local configuration names, if any, and the
+    test key a Connect request on that hub takes in Lucille's key's place (``pair begin
+    --test-key``), if any: a key the tests and the conformance suite sign with, and the app never
+    names. It is taken only with a loopback hub, and only for a request on that hub."""
 
     hub: str | None = None
     store: str = "keyring"
+    # 32 raw bytes in unpadded base64url.
+    test_key: str | None = None
 
     def __post_init__(self) -> None:
         if self.store not in STORE_KINDS:
@@ -179,6 +188,27 @@ class HostConfig:
             raise ValueError(
                 "a configured hub is http://127.0.0.1:<port> or http://localhost:<port>"
             )
+        if self.test_key is not None:
+            if self.hub is None:
+                raise ValueError("a test key is taken only with a loopback hub (--hub)")
+            if decode_test_key(self.test_key) is None:
+                raise ValueError("a test key is 32 bytes in unpadded base64url")
+
+
+def decode_test_key(text: str) -> bytes | None:
+    """The 32 raw bytes of a test key written in unpadded base64url, equal to its own
+    re-encoding; None for anything else."""
+    if not isinstance(text, str) or len(text) != 43 or not text.isascii():
+        return None
+    if any(not (symbol.isalnum() or symbol in "-_") for symbol in text):
+        return None
+    try:
+        raw = base64.urlsafe_b64decode(text + "=")
+    except ValueError:
+        return None
+    if len(raw) != 32 or base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=") != text:
+        return None
+    return raw
 
 
 def load_host_config(dirs: paths.Dirs) -> HostConfig:
@@ -186,20 +216,31 @@ def load_host_config(dirs: paths.Dirs) -> HostConfig:
     data = read_json(dirs.host_file)
     if data is None:
         return HostConfig()
-    if not isinstance(data, dict) or set(data) != _HOST_KEYS or data["v"] != 1:
+    if (
+        not isinstance(data, dict)
+        or set(data) not in (_HOST_KEYS, _HOST_KEYS_TESTING)
+        or data["v"] != 1
+    ):
         raise StateError(f"{dirs.host_file} is not a lucille-host configuration")
-    hub, store = data["hub"], data["store"]
-    if not (hub is None or isinstance(hub, str)) or not isinstance(store, str):
+    hub, store, test_key = data["hub"], data["store"], data.get("test_key")
+    if (
+        not (hub is None or isinstance(hub, str))
+        or not isinstance(store, str)
+        or not (test_key is None or isinstance(test_key, str))
+    ):
         raise StateError(f"{dirs.host_file} is not a lucille-host configuration")
     try:
-        return HostConfig(hub=hub, store=store)
+        return HostConfig(hub=hub, store=store, test_key=test_key)
     except ValueError as exc:
         raise StateError(f"{dirs.host_file}: {exc}") from exc
 
 
 def save_host_config(dirs: paths.Dirs, config: HostConfig) -> None:
     paths.ensure_dir(dirs.config)
-    write_json(dirs.host_file, {"v": 1, "hub": config.hub, "store": config.store})
+    data: dict[str, Any] = {"v": 1, "hub": config.hub, "store": config.store}
+    if config.test_key is not None:
+        data["test_key"] = config.test_key
+    write_json(dirs.host_file, data)
 
 
 def startup_checks(environ: Mapping[str, str] | None = None) -> None:

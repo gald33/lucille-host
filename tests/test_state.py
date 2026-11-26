@@ -219,3 +219,20 @@ def test_write_json_replaces_the_file_whole(tmp_path: Path) -> None:
     assert state.read_json(path) == {"b": 2}
     assert sorted(p.name for p in tmp_path.iterdir()) == ["x.json"]
     assert state.read_json(tmp_path / "missing.json") is None
+
+
+def test_a_test_key_is_kept_with_a_loopback_hub_only(host_env: Any) -> None:
+    key = "A" * 42 + "A"
+    assert state.decode_test_key(key) == bytes(32)
+    with pytest.raises(ValueError):
+        state.HostConfig(test_key=key)
+    for bad in ("A" * 42, "A" * 44, "A" * 42 + "B", "A" * 42 + "=", "Á" * 43, "+" * 43):
+        assert state.decode_test_key(bad) is None
+        with pytest.raises(ValueError):
+            state.HostConfig(hub="http://127.0.0.1:8765", test_key=bad)
+    dirs = host_env.dirs
+    config = state.HostConfig(hub="http://127.0.0.1:8765", store="file", test_key=key)
+    state.save_host_config(dirs, config)
+    assert state.load_host_config(dirs) == config
+    state.save_host_config(dirs, state.HostConfig(hub="http://127.0.0.1:8765"))
+    assert "test_key" not in dirs.host_file.read_text()
