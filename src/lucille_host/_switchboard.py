@@ -562,11 +562,11 @@ def decode_code(text: str) -> Code:
     way. A ``RecursionError`` is read the same, should the parser ever stop short of that, which
     no payload the check passes makes it do."""
     if _payload_refused(text):
-        raise BadCode("Lucille's answer does not hold a whole pairing code")
+        raise BadCode("this is not a pairing code, whole and in its one encoding")
     try:
         code = pairing.PairingCode.decode(text)
     except (pairing.PairingError, RecursionError):
-        raise BadCode("Lucille's answer does not hold a whole pairing code") from None
+        raise BadCode("this is not a pairing code, whole and in its one encoding") from None
     return Code(
         text=text,
         url=code.url,
