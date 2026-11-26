@@ -742,11 +742,13 @@ where there is one (`waiting`, `sas_pending`, `confirmed`, `leaked`, `expired`, 
 **`release.yml`** runs on protected `v*` tags, on GitHub-hosted runners only, with every action pinned by
 commit SHA:
 1. **Build**, with a tag-equals-version guard, an exact-pinned build backend, and `SOURCE_DATE_EPOCH`.
-2. **Publish**, in environment `pypi`, which needs the repository owner's approval. It uses PyPI Trusted
+2. **Conformance before publishing:** install the built wheel with `[conformance]` into a fresh venv and
+   run the suite. An upload to PyPI cannot be undone, so a suite that fails stops the release here.
+3. **Publish**, in environment `pypi`, which needs the repository owner's approval. It uses PyPI Trusted
    Publishing through `pypa/gh-action-pypi-publish`, which uploads PEP 740 attestations.
-3. **Post-publish:** download from PyPI, install `lucille-host[conformance]` into a fresh venv, and run
-   the conformance suite.
-4. **GitHub Release**, with `SHA256SUMS`.
+4. **Post-publish:** check what PyPI serves and attests; download from PyPI, install
+   `lucille-host[conformance]` into a fresh venv, and run the conformance suite again.
+5. **GitHub Release**, with `SHA256SUMS`.
 
 A workflow-lint test rejects any `self-hosted` label, and any action not pinned by SHA.
 

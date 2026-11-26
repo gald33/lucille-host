@@ -31,7 +31,7 @@ PINNED_ACTIONS = {
     "actions/download-artifact": "9000827ccba6bdab643e8b6fd33ac0654aef8333",
     "pypa/gh-action-pypi-publish": "7245906fb61fa33a13554f9d5fb856fe61758086",
 }
-JOBS = ("build", "publish", "provenance", "conformance", "github-release")
+JOBS = ("build", "conformance-built", "publish", "provenance", "conformance", "github-release")
 VERSION = "1.2.3"
 
 
@@ -67,7 +67,8 @@ def test_the_jobs_and_their_order() -> None:
     needs = {name: job.get("needs") for name, job in jobs.items()}
     assert needs == {
         "build": None,
-        "publish": "build",
+        "conformance-built": "build",
+        "publish": ["build", "conformance-built"],
         "provenance": ["build", "publish"],
         "conformance": ["build", "publish"],
         "github-release": ["build", "provenance", "conformance"],
@@ -79,6 +80,7 @@ def test_each_job_has_only_the_permissions_it_needs() -> None:
     assert workflow["permissions"] == {}
     assert {name: job["permissions"] for name, job in workflow["jobs"].items()} == {
         "build": {"contents": "read"},
+        "conformance-built": {},
         "publish": {"id-token": "write"},
         "provenance": {"contents": "read"},
         "conformance": {},
@@ -154,6 +156,25 @@ def test_the_build_constraints_are_pyproject_build_requires_by_hash() -> None:
 def test_publish_and_the_release_check_the_files_against_sha256sums() -> None:
     for name in ("publish", "github-release"):
         assert "sha256sum --check --strict ../sums/SHA256SUMS" in _runs(name)
+    # macOS has shasum, not sha256sum.
+    assert "shasum -a 256 --check --strict ../sums/SHA256SUMS" in _runs("conformance-built")
+
+
+def test_the_built_wheel_passes_the_conformance_suite_before_anything_is_published() -> None:
+    job = _workflow()["jobs"]["conformance-built"]
+    assert job["strategy"]["matrix"]["os"] == ["ubuntu-latest", "macos-latest"]
+    assert not any(uses.startswith("actions/checkout@") for uses in _uses("conformance-built"))
+    runs = [step.get("run", "") for step in _steps("conformance-built")]
+    install = next(run for run in runs if "uv pip install" in run)
+    assert "uv venv --no-config verify-env" in install
+    assert (
+        '"lucille-host[conformance] @ file://$PWD/release/dist/'
+        'lucille_host-$VERSION-py3-none-any.whl"' in install
+    )
+    assert 'test "$(verify-env/bin/lucille-host --version)" = "lucille-host $VERSION"' in runs
+    assert runs[-1] == "verify-env/bin/python -m lucille_host.conformance"
+    # Nothing reaches PyPI until it has passed.
+    assert "conformance-built" in _workflow()["jobs"]["publish"]["needs"]
 
 
 def test_provenance_runs_the_published_check() -> None:
