@@ -512,6 +512,9 @@ def test_a_key_under_an_id_its_bytes_do_not_give_is_refused() -> None:
     raw = os.urandom(32)
     with pytest.raises(ValueError, match="id its bytes do not give"):
         _switchboard._pinned({_id(os.urandom(32)): raw}, frozenset())
+    # An id with a letter in it, so that its upper case is another id.
+    while _id(raw) == _id(raw).upper():
+        raw = os.urandom(32)
     with pytest.raises(ValueError, match="id its bytes do not give"):
         _switchboard._pinned({_id(raw).upper(): raw}, frozenset())
 
@@ -573,7 +576,9 @@ class Case:
         elif reason == delivery.WRONG_TYPE:
             fields["t"] = "lucille-host/hello/1"
         elif reason == delivery.BAD_KID:
-            fields["kid"] = str(fields["kid"]).upper()
+            # Sixteen characters, but the last is no hex digit: upper case alone would change
+            # nothing in an id of digits only.
+            fields["kid"] = str(fields["kid"])[:-1] + "g"
         elif reason == delivery.BAD_FROM:
             fields["from"] = "Telegram:123456789"
         elif reason == delivery.BAD_HANDLE:
