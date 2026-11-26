@@ -6,6 +6,7 @@ Lucille that signs with a throwaway key pinned in place of Lucille's.
 from __future__ import annotations
 
 import contextlib
+import dataclasses
 import json
 from collections.abc import Iterator
 from pathlib import Path
@@ -439,6 +440,106 @@ def test_the_code_and_username_are_kept_nowhere_once_connected(
         for value in cli.env.keyring.items.values()
     )
     assert json.dumps(request.code) not in cli.audit()
+
+
+# --- the test key --------------------------------------------------------------------------------
+
+LOOPBACK = "http://127.0.0.1:8765"
+
+
+def _b64(raw: bytes) -> str:
+    import base64
+
+    return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+
+
+def test_begin_with_a_test_key_takes_answers_signed_with_it(cli: HostCli) -> None:
+    # No key is pinned in Lucille's place: the test key, named on a loopback hub, is taken.
+    made = Signer()
+    raw = next(iter(made.keys.values()))
+    running = cli.start(
+        "pair", "begin", "--json", "--hub", LOOPBACK, f"--test-key={_b64(raw)}", stdin=STDIN
+    )
+    request = _waiting(cli)
+    assert request.hub == LOOPBACK
+    lucille = cli.lucille(url=LOOPBACK)
+    lucille.deliver(connect.shown(request.code), made)
+    with collecting(lucille):
+        ran = running.wait()
+    assert ran.rc == 0, ran.text
+    assert _objects(ran)[-1]["state"] == "sas_pending"
+    assert state.load_host_config(cli.dirs).test_key == _b64(raw)
+
+
+def test_without_the_test_key_its_answers_are_unknown(cli: HostCli) -> None:
+    made = Signer()
+    running = cli.start("pair", "begin", "--json", "--hub", LOOPBACK, stdin=STDIN)
+    request = _waiting(cli)
+    cli.lucille(url=LOOPBACK).deliver(connect.shown(request.code), made)
+    # Once a read has seen the answer, and ignored it for its unknown key.
+    until(lambda: _request(cli).unknown_key_seen)
+    cli.h.advance(connecting.LIFE)
+    ran = running.wait()
+    assert ran.rc == 1
+    assert _objects(ran)[-1]["code"] == "newer_capsule"
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ("pair", "begin", "--test-key", "A" * 43),
+        ("pair", "resume", "--test-key", "A" * 43),
+        ("pair", "cancel", "--test-key", "A" * 43),
+        ("pair", "status", "--test-key", "A" * 43),
+        ("pair", "--code-stdin", "--test-key", "A" * 43),
+        ("pair", "begin", "--hub", LOOPBACK, "--test-key", "A" * 42),
+        ("pair", "begin", "--hub", LOOPBACK, "--test-key", "A" * 42 + "B"),
+        ("pair", "begin", "--hub", LOOPBACK, "--test-key", "A" * 42 + "="),
+    ],
+)
+def test_the_test_key_is_taken_by_begin_with_a_loopback_hub_only(
+    cli: HostCli, argv: tuple[str, ...]
+) -> None:
+    ran = cli.run(*argv, "--json", stdin=STDIN)
+    assert ran.rc == 1
+    assert _objects(ran)[-1]["code"] == "bad_options"
+    assert not cli.dirs.connect_file.exists()
+
+
+def test_a_test_key_that_starts_with_a_dash_is_taken_in_its_joined_form(cli: HostCli) -> None:
+    # A key is base64url, so one in 64 starts with `-`, which a separate word would make read as
+    # an option: the joined form, `--test-key=KEY`, is how a harness passes it.
+    raw = bytes([0xF8]) + bytes(31)
+    assert _b64(raw).startswith("-")
+    running = cli.start(
+        "pair", "begin", "--json", "--hub", LOOPBACK, f"--test-key={_b64(raw)}", stdin=STDIN
+    )
+    assert _waiting(cli).hub == LOOPBACK
+    assert state.load_host_config(cli.dirs).test_key == _b64(raw)
+    cli.stopping.set()
+    assert running.wait().rc == 1
+
+
+def test_trusted_keys_add_the_test_key_for_its_own_hub_only() -> None:
+    made = Signer()
+    raw = next(iter(made.keys.values()))
+    request = connecting.Request(
+        code="7KQ4MX2D9P",
+        epoch=1,
+        hub=LOOPBACK,
+        service="telegram",
+        username="ada",
+        posted_at=1.0,
+        expires_at=2.0,
+    )
+    release = dict(_switchboard.LUCILLE_SIGNING_KEYS)
+    with_key = state.HostConfig(hub=LOOPBACK, test_key=_b64(raw))
+    assert dict(connecting.trusted_keys(request, with_key)) == {**release, made.kid: raw}
+    assert dict(connecting.trusted_keys(request, state.HostConfig(hub=LOOPBACK))) == release
+    on_lucilles = dataclasses.replace(request, hub=_switchboard.LUCILLE_HUB)
+    assert dict(connecting.trusted_keys(on_lucilles, with_key)) == release
+    other_port = state.HostConfig(hub="http://127.0.0.1:9999", test_key=_b64(raw))
+    assert dict(connecting.trusted_keys(request, other_port)) == release
 
 
 def test_status_never_writes_back_a_request_answered_while_it_waited_for_the_lock(

@@ -7,7 +7,8 @@ root. This one patches nothing in the host. It starts a real Switchboard hub as 
 suite) on a loopback port the hub picks; plays Lucille in this process, with the Switchboard
 library, against that hub; and runs the command as child processes of the interpreter running the
 suite (``python -m lucille_host``), with a private home and ``--store-file``, so that no keyring is
-needed: ``pair --code-stdin --json``, ``pair confirm --json``, then ``run --json-events
+needed: ``pair begin --json`` with a test key (Lucille's side signs with a throwaway key, never
+Lucille's), ``pair confirm --json``, then ``run --json-events
 --exit-on-stdin-eof`` with a standard input whose write end this test holds, as spec/CLI.md section
 13.1 says a shell starts it.
 
@@ -21,6 +22,7 @@ end-to-end check (``tools/macos/check_app.py pairing``) uses too.
 
 from __future__ import annotations
 
+import base64
 import os
 import sys
 from collections.abc import Callable
@@ -30,7 +32,7 @@ from typing import Any
 import pytest
 from switchboard.client import Client
 
-from tests._lucille import FakeLucille
+from tests._lucille import FakeLucille, Signer
 from tests._process import LISTENING, SWITCHBOARD, Child, LoopbackHub, child_env, until
 from tests._run import body
 from tests.spec._support import cli_objects
@@ -99,10 +101,22 @@ def test_run_as_separate_processes(tmp_path: Path, monkeypatch: pytest.MonkeyPat
         url = until(listening, "the hub listening", children)
         lucille = FakeLucille(LoopbackHub(url), tmp_path / "lucille", connect=Client)
 
-        # `pair --code-stdin --json`: the code on standard input, Lucille collecting the answer.
-        code = lucille.start()
-        pair = start([*host, "pair", "--code-stdin", "--json", "--hub", url, "--store-file"])
-        pair.write(code.encode() + b"\n")
+        # `pair begin --json` with a test key: the chat service and the username on standard
+        # input; Lucille delivers its signed code into the drop room, and collects the answer.
+        signer = Signer()
+        raw = next(iter(signer.keys.values()))
+        key = base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+        pair = start(
+            [*host, "pair", "begin", "--json", "--hub", url, "--store-file", f"--test-key={key}"]
+        )
+        pair.write(b"telegram\nada\n")
+
+        def shown_code() -> str | None:
+            assert pair.proc.poll() in (None, 0), pair.describe()
+            found = pair.objects("connect", state="code")
+            return str(found[0]["code"]) if found else None
+
+        lucille.deliver(until(shown_code, "pair begin showing its connect code", children), signer)
 
         def collected() -> bool:
             assert pair.proc.poll() in (None, 0), pair.describe()
@@ -111,21 +125,21 @@ def test_run_as_separate_processes(tmp_path: Path, monkeypatch: pytest.MonkeyPat
         until(collected, "Lucille collecting the answer", children)
         assert pair.wait() == 0, pair.describe()
         said = cli_objects(pair.text)
-        assert said[0] == {
-            "v": 1,
-            "type": "pair_code",
-            "name": lucille.name,
-            "hub": url,
-            "note": "",
-        }
-        assert said[1] == {
+        assert [(found["type"], found.get("state")) for found in said[:2]] == [
+            ("connect", "code"),
+            ("connect", "connecting"),
+        ]
+        assert said[1]["handle"] == "@ada"
+        assert said[2]["type"] == "pair_code" and said[2]["name"] == lucille.name
+        assert said[2]["hub"] == url and said[2]["note"].startswith("lucille-host/2 n=")
+        assert said[3] == {
             "v": 1,
             "type": "pair",
             "state": "accepted",
             "name": lucille.name,
             "clock_skewed": False,
         }
-        assert {found["state"] for found in said[2:-1]} == {"waiting"}
+        assert {found["state"] for found in said[4:-1]} == {"waiting"}
         shown = said[-1]
         assert {key: shown[key] for key in ("type", "state", "name", "sas")} == {
             "type": "pair",
