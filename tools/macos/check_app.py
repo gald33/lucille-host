@@ -8769,7 +8769,7 @@ def check_dmg(dmgs: Sequence[Path], checker: Checker) -> None:
 PROBE_VERBS: Final = (
     ("status", ["--json", "status"], None),
     ("pair status", ["--json", "pair", "status"], None),
-    ("pair --code-stdin, not a code", ["pair", "--code-stdin", "--json"], "swbp1_not-a-code\n"),
+    ("pair begin, not a username", ["pair", "begin", "--json"], "telegram\n9 lives\n"),
     ("run, standard input already ended", ["run", "--json-events", "--exit-on-stdin-eof"], ""),
 )
 

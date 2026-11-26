@@ -189,7 +189,8 @@ enum PairingNote: Equatable, Sendable {
 /// clicks They Match only if Lucille's number in the chat is the same (spec/CLI.md §2 and §7). The
 /// pairing comes from Connect from Lucille's chat (decisions/0002 §11.4): `pair begin`, then
 /// `pair resume` after a relaunch or an interruption, and `pair cancel` to stop. The app no longer
-/// pastes a code (`pair --code-stdin`). It is a value: inputs in, effects out. It draws nothing and starts nothing; the app's glue runs each
+/// pastes a code (`pair --code-stdin`). It is a value: inputs in, effects out. It draws nothing
+/// and starts nothing; the app's glue runs each
 /// effect and feeds back what it did, with the `epoch` the effect was issued in, and the flow
 /// drops anything from an older epoch.
 ///

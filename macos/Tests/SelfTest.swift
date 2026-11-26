@@ -4424,14 +4424,16 @@ extension SelfTest {
         }
 
         let queue = DispatchQueue(label: "selftest.pair")
-        for (given, expected) in [("swbp1_" + String(repeating: "A", count: 120), "bad_code"), ("", "no_code")] {
+        // pair begin refuses a service or username it can't use before it reaches any hub.
+        for (given, expected) in [(Connect.beginInput(service: "telegram", username: "9 lives"), "bad_username"),
+                                  ("", "bad_service")] {
             let watch = ChildWatch()
-            let child = HostChild(cli: cli, verb: ["pair", "--code-stdin", "--store-file", "--json"], input: .code(given), deliverOn: queue)
+            let child = HostChild(cli: cli, verb: ["pair", "begin", "--store-file", "--json"], input: .code(given), deliverOn: queue)
             watch.watch(child)
             do {
                 try child.start()
             } catch {
-                report.expect(false, "start pair --code-stdin", "\(error)")
+                report.expect(false, "start pair begin", "\(error)")
                 continue
             }
             let ended = watch.waitForExit(seconds: 60)

@@ -78,9 +78,9 @@ struct HostCLI: Sendable {
     static let appProfile = "mac-app"
 
     /// The most a short standard input may be: what `pair begin` reads (the service and the
-    /// username, a few dozen bytes) and its newline, or a pairing code the self-test hands `pair
-    /// --code-stdin` (at most 8192 characters). It is written into the pipe before the child
-    /// starts, so it must fit the pipe's buffer, which is 16384 bytes on macOS.
+    /// username, a few dozen bytes) and its newline, with room to spare. It is written into the
+    /// pipe before the child starts, so it must fit the pipe's buffer, which is 16384 bytes on
+    /// macOS.
     static let maxInputBytes = 8193
 
     let python: URL
@@ -134,8 +134,8 @@ struct HostCLI: Sendable {
 
     /// The verbs of the app's short runs that take the host's policy lock while they run
     /// (src/lucille_host/cli.py, `_policy_lock`), by their verb and action: every change to
-    /// abilities and folders, and Reset Settings. `pair --code-stdin` takes it too, but runs as a
-    /// long-lived child (`spawn`), never through `run`. A run of another verb, left behind, holds
+    /// abilities and folders, and Reset Settings. `pair begin` and `pair resume` take it too, once
+    /// Lucille's answer passes, but run as a long-lived child (`spawn`), never through `run`. A run of another verb, left behind, holds
     /// nothing up.
     static let policyLockVerbs: Set<String> = ["ops enable", "ops disable", "roots add", "roots remove", "policy reset"]
 
@@ -505,9 +505,9 @@ struct ChildExit: Equatable, Sendable {
     let stdoutComplete: Bool
 }
 
-/// The one long-lived child type: `pair --code-stdin --json`, which waits for Lucille, and
-/// `run --json-events --exit-on-stdin-eof`, which the app supervises (spec/CLI.md §13). Both
-/// output streams are read as they come, on threads of their own, until the child has exited,
+/// The one long-lived child type: `pair begin --json` or `pair resume --json`, which wait for
+/// Lucille, and `run --json-events --exit-on-stdin-eof`, which the app supervises (spec/CLI.md
+/// §13). Both output streams are read as they come, on threads of their own, until the child has exited,
 /// during a quit too. Standard output is read as JSON lines (`JSONLines`); each object, each line
 /// that could not be used and each line of standard error is delivered on `deliverOn`, in order,
 /// and `onExit` last, once standard output has ended or 2 seconds have passed. Nothing is
