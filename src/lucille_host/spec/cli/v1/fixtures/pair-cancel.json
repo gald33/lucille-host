@@ -1,0 +1,16 @@
+{
+  "description": "pair cancel, with a Connect request kept",
+  "argv": [
+    "pair",
+    "cancel",
+    "--json"
+  ],
+  "exit": 0,
+  "stdout": [
+    {
+      "v": 1,
+      "type": "connect",
+      "state": "cancelled"
+    }
+  ]
+}

@@ -1,0 +1,180 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/gald33/lucille-host/blob/main/src/lucille_host/spec/cli/v1/connect.schema.json",
+  "title": "lucille-host --json: connect",
+  "description": "Where a Connect request from Lucille's chat is (decisions/0002 section 11.4).",
+  "oneOf": [
+    {
+      "$ref": "#/$defs/connect.code"
+    },
+    {
+      "$ref": "#/$defs/connect.delivered"
+    },
+    {
+      "$ref": "#/$defs/connect.connecting"
+    },
+    {
+      "$ref": "#/$defs/connect.cancelled"
+    }
+  ],
+  "$defs": {
+    "time": {
+      "description": "A time, UTC, ISO 8601, to the second.",
+      "type": "string",
+      "minLength": 20,
+      "maxLength": 20,
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"
+    },
+    "connect_code": {
+      "description": "The connect code, as the user sends it to Lucille: two groups of five symbols of Crockford's base32.",
+      "type": "string",
+      "minLength": 11,
+      "maxLength": 11,
+      "pattern": "^[0-9A-HJKMNP-TV-Z]{5}-[0-9A-HJKMNP-TV-Z]{5}$"
+    },
+    "chat_service": {
+      "description": "The chat service the user connects from.",
+      "type": "string",
+      "enum": [
+        "telegram"
+      ]
+    },
+    "username": {
+      "description": "The user's own username on the chat service, normalized: lower case, no @.",
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64,
+      "pattern": "^[a-z][a-z0-9_]{0,63}$"
+    },
+    "signed_from": {
+      "description": "The chat account Lucille signed: its service and stable id, never a display name.",
+      "type": "string",
+      "minLength": 3,
+      "maxLength": 81,
+      "pattern": "^[a-z]{1,16}:[0-9A-Za-z_-]{1,64}$"
+    },
+    "signed_handle": {
+      "description": "The handle Lucille signed beside the account, as the chat service gave it.",
+      "type": "string",
+      "minLength": 2,
+      "maxLength": 65,
+      "pattern": "^@[A-Za-z][A-Za-z0-9_]{0,63}$"
+    },
+    "connect.code": {
+      "description": "The request is live: the user sends `connect <code>` to Lucille before `expires_at`.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "v",
+        "type",
+        "state",
+        "code",
+        "expires_at",
+        "service",
+        "username"
+      ],
+      "properties": {
+        "v": {
+          "const": 1
+        },
+        "type": {
+          "const": "connect"
+        },
+        "state": {
+          "const": "code"
+        },
+        "code": {
+          "$ref": "#/$defs/connect_code"
+        },
+        "expires_at": {
+          "$ref": "#/$defs/time"
+        },
+        "service": {
+          "$ref": "#/$defs/chat_service"
+        },
+        "username": {
+          "$ref": "#/$defs/username"
+        }
+      }
+    },
+    "connect.delivered": {
+      "description": "Lucille's answer has arrived, and nothing has been answered yet: `pair resume` connects.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "v",
+        "type",
+        "state",
+        "service"
+      ],
+      "properties": {
+        "v": {
+          "const": 1
+        },
+        "type": {
+          "const": "connect"
+        },
+        "state": {
+          "const": "delivered"
+        },
+        "service": {
+          "$ref": "#/$defs/chat_service"
+        }
+      }
+    },
+    "connect.connecting": {
+      "description": "Lucille's answer passed every check, and names the account the user typed: its code is answered next.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "v",
+        "type",
+        "state",
+        "service",
+        "from",
+        "handle"
+      ],
+      "properties": {
+        "v": {
+          "const": 1
+        },
+        "type": {
+          "const": "connect"
+        },
+        "state": {
+          "const": "connecting"
+        },
+        "service": {
+          "$ref": "#/$defs/chat_service"
+        },
+        "from": {
+          "$ref": "#/$defs/signed_from"
+        },
+        "handle": {
+          "$ref": "#/$defs/signed_handle"
+        }
+      }
+    },
+    "connect.cancelled": {
+      "description": "The request was dropped: its code connects nothing from now on.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "v",
+        "type",
+        "state"
+      ],
+      "properties": {
+        "v": {
+          "const": 1
+        },
+        "type": {
+          "const": "connect"
+        },
+        "state": {
+          "const": "cancelled"
+        }
+      }
+    }
+  }
+}

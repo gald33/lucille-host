@@ -97,7 +97,15 @@
             "paused",
             "sign_in_refused",
             "unreachable",
-            "limit_reached"
+            "limit_reached",
+            "bad_service",
+            "bad_username",
+            "interference",
+            "connect_expired",
+            "newer_capsule",
+            "other_account",
+            "key_misused",
+            "not_this_mac"
           ]
         },
         "message": {

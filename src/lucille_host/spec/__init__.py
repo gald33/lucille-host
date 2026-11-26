@@ -67,6 +67,7 @@ CLI_TYPES = (
     "pair_code",
     "policy_reset",
     "pair",
+    "connect",
     "previous_policy",
     "ready",
     "state",

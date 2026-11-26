@@ -83,6 +83,7 @@ from types import MappingProxyType
 from typing import Any, Final
 
 from switchboard import client, crypto, pairing, sharing, signing
+from switchboard.config import ClientConfig
 
 from lucille_host import nesting, paths, store
 from lucille_host import state as host_state
@@ -211,6 +212,16 @@ class Unopenable(HubError):
     """A message in a room could not be opened with the room's key."""
 
 
+class Interfered(Exception):
+    """A read of a Connect request's drop room failed other than at the hub: interference
+    (decisions/0002 §11.4, "The wire"). ``kind`` is the class of what was raised, and nothing
+    from the room."""
+
+    def __init__(self, kind: str) -> None:
+        super().__init__(f"the drop room could not be read ({kind})")
+        self.kind = kind
+
+
 class RoomError(Exception):
     """A sharing call refused. ``state`` is Switchboard's word for why: for a room looked up by
     name, ``left`` (this computer left a room of that name), ``offered`` (one of that name is
@@ -238,6 +249,9 @@ class Code:
     note: str
     # The pair's name: the one the code gives, or the default the library derives.
     name: str
+    # Whether the initiator left a hello in the handshake room (the code's ``p``). A code Lucille
+    # delivers into a Connect request's drop room has one (decisions/0002 §11.4, "The wire").
+    hello: bool = False
 
 
 @dataclass(frozen=True)
@@ -559,6 +573,7 @@ def decode_code(text: str) -> Code:
         carries_token=code.token is not None,
         note=code.note,
         name=code.pair_name,
+        hello=code.hello,
     )
 
 
@@ -992,6 +1007,15 @@ class Link:
             built.cipher = _Opener(built.cipher)
         return built
 
+    def drop_client(self, drop: DropRoom) -> DropClient:
+        """A client of a Connect request's drop room, under a fresh throwaway agent id, through
+        the host's own client factory, reading a body it cannot parse as one it cannot open
+        (:class:`_Opener`)."""
+        built = self.connect(drop.config, agent_id=pairing.throwaway_agent("connect"))
+        if built.cipher is not None:
+            built.cipher = _Opener(built.cipher)
+        return DropClient(built)
+
     def pair_notes(self, pair: Pair) -> PairNotes:
         """A reader of the ``pair`` channel in pair:<name>, at the generation ``pair`` names."""
         return PairNotes(self._reader(pair.room))
@@ -1196,6 +1220,75 @@ class RoomClient:
         self._client.close()
 
     def __enter__(self) -> RoomClient:
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        self.close()
+
+
+@dataclass(frozen=True)
+class DropRoom:
+    """A Connect request's drop room: the library's handshake room for ``K``, on ``url``, with
+    no token of the host's own, so that the managed hub's published one applies. Its name, its
+    write key and the key that seals its posts all come from ``K``."""
+
+    url: str
+    workspace: str
+    config: Any = field(repr=False)
+
+
+def drop_room(key: bytes, url: str = LUCILLE_HUB) -> DropRoom:
+    """The drop room for a request's ``K`` (decisions/0002 §11.4, "The wire")."""
+    if len(key) != 32:
+        raise ValueError("K is 32 bytes")
+    room = pairing.handshake_room(key)
+    config = ClientConfig(
+        url=url,
+        workspace=room.workspace,
+        key=room.key,
+        write_key=room.write_key,
+        peer_log="",
+        stash_db="",
+    )
+    return DropRoom(url=url, workspace=room.workspace, config=config)
+
+
+class DropClient:
+    """Posts and reads in one drop room, under an agent id used for this client only. Built by
+    :meth:`Link.drop_client`."""
+
+    def __init__(self, built: Any) -> None:
+        self._client = built
+
+    def post(self, channel: str, body: Any, *, ttl: int) -> Posted:
+        """Post ``body`` on ``channel``, living ``ttl`` seconds. A hub failure is a
+        :class:`HubError`; it posted nothing that the host relies on."""
+        try:
+            stored = self._client.post(channel, body, type="note", thread=None, ttl=ttl)
+        except pairing.hub_errors() as exc:
+            raise _hub_error(exc) from None
+        return Posted(seq=int(stored["seq"]), created_at=_stamp(stored.get("created_at")))
+
+    def read(self, channel: str, *, limit: int) -> list[Any]:
+        """The newest ``limit`` posts on ``channel`` (``Client.history``), each as the library
+        gives it. Only a hub failure, an exception of a class in ``pairing.hub_errors()``, is a
+        :class:`HubError`, tried again at the next poll. Any other exception, whatever its class,
+        is :class:`Interfered`: a post that does not open, or opens to something that is not JSON,
+        among them."""
+        try:
+            rows = self._client.history(channel, limit=limit)
+        except pairing.hub_errors() as exc:
+            raise _hub_error(exc) from None
+        except Exception as exc:  # noqa: BLE001 - any other failure of a read is interference
+            raise Interfered(type(exc).__name__) from None
+        if not isinstance(rows, list):
+            raise Interfered(type(rows).__name__)
+        return rows
+
+    def close(self) -> None:
+        self._client.close()
+
+    def __enter__(self) -> DropClient:
         return self
 
     def __exit__(self, *exc: object) -> None:

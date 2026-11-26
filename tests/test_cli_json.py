@@ -39,6 +39,8 @@ from lucille_host import (
     _exec,
     _switchboard,
     cli,
+    connect,
+    connecting,
     gate,
     link,
     paths,
@@ -73,6 +75,7 @@ SAMPLE_TIME = "2026-11-01T12:00:00Z"
 SAMPLE_SAS = "1234-5678"
 SAMPLE_PAIR = "pair-abcdef"
 SAMPLE_GENERATION = 1
+SAMPLE_CONNECT_CODE = "7KQ4M-X2D9P"
 TIME = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z")
 PROFILES = ("default", "mac-app")
 USAGE_MESSAGE = "the command line could not be parsed; standard error says why"
@@ -143,6 +146,8 @@ class World:
                     ),
                 )
         self.lucille: Any = None
+        # The connect code of the Connect request a set-up kept, as the user sees it.
+        self.connect_code: str | None = None
         self.stdin = ""
         # A standard input with a file descriptor behind it, for `run`'s lifeline.
         self.stdin_file: Any = None
@@ -215,6 +220,18 @@ class World:
 
     def interrupted(self) -> None:
         self.host.interrupted(self.code())
+
+    def connect_request(self) -> None:
+        """A Connect request kept, as `pair begin` keeps one, its hello in the drop room."""
+        made = connecting.begin(
+            _switchboard.open_link(self.dirs, state.load_host_config(self.dirs)),
+            self.dirs.connect_file,
+            service="telegram",
+            username="ada",
+            hub=_switchboard.LUCILLE_HUB,
+            now=lambda: float(self.host.h.now),
+        )
+        self.connect_code = connect.shown(made.request.code)
 
     def sas(self) -> str | None:
         if self.lucille is None or self.lucille.name is None:
@@ -530,6 +547,8 @@ SETUPS: dict[str, Callable[[World], None]] = {
     "pair-status-confirmed": lambda w: w.paired(confirm=True),
     "pair-confirm": lambda w: w.paired(),
     "pair-reject": lambda w: w.paired(),
+    "pair-cancel": lambda w: w.connect_request(),
+    "pair-status-connect": lambda w: w.connect_request(),
     "policy-previous": _policy_previous,
     "policy-reset": _not_toml,
     "run-events-requests": _run_requests,
@@ -562,6 +581,8 @@ HUB_CASES = frozenset(
         "pair-status-confirmed",
         "pair-confirm",
         "pair-reject",
+        "pair-cancel",
+        "pair-status-connect",
         "run-events-requests",
         "run-events-no-gate",
         "run-events-pair-unusable",
@@ -596,6 +617,8 @@ def _replacements(w: World) -> list[tuple[str, str]]:
     pairs.append((str(w.home), SAMPLE_HOME))
     if w.lucille is not None and w.lucille.name is not None:
         pairs.append((w.lucille.name, SAMPLE_PAIR))
+    if w.connect_code is not None:
+        pairs.append((w.connect_code, SAMPLE_CONNECT_CODE))
     sas = w.sas()
     if sas is not None:
         pairs.append((sas, SAMPLE_SAS))
@@ -1446,12 +1469,19 @@ def test_every_failure_has_a_code(
                 continue
             if isinstance(given, ast.Name) and given.id == "word":
                 continue  # a word outcome() gave, checked below
+            if (
+                isinstance(given, ast.Attribute)
+                and given.attr == "code"
+                and (isinstance(given.value, ast.Name) and given.value.id == "ended")
+            ):
+                continue  # how a Connect request ended, checked below
             assert isinstance(given, ast.Constant), f"{name}:{node.lineno}: no literal code"
             literal.append((f"{name}:{node.lineno}", given.value))
     # `rejected` is the interactive `n`, which `pair --code-stdin` never asks.
     assert [(where, code) for where, code in literal if code not in enum | {"rejected"}] == []
     assert len(literal) > 40
     assert {link.outcome(word) for word in ("aborted", "expired", "ended", "unknown")} <= enum
+    assert set(connecting.MESSAGES) <= enum
     # Every other failure main catches has its code: the table below, which spec/CLI.md section
     # 10 gives, in the order the classes are tried.
     assert list(cli.FAILURE_CODES) == FAILURE_CODES
