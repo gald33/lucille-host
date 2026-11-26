@@ -154,6 +154,69 @@ def test_begin_in_text_shows_the_code_to_send(cli: HostCli, signer: Signer) -> N
     assert "connecting: as @ada on Telegram" in ran.out
 
 
+def test_the_code_names_no_account_while_the_core_lists_none(cli: HostCli) -> None:
+    running = cli.start("pair", "begin", "--json", stdin=STDIN)
+    _waiting(cli)
+    cli.stopping.set()
+    ran = running.wait()
+    code = _objects(ran)[0]
+    assert code["state"] == "code" and "send_to" not in code
+
+
+OFFICIAL = (
+    connect.Account(handle="@Lucille", account="telegram:1001"),
+    connect.Account(handle="@lucille_help", account="telegram:1002"),
+)
+
+
+def test_the_code_names_the_official_accounts_the_core_lists(
+    cli: HostCli, signer: Signer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(connect, "OFFICIAL_ACCOUNTS", {"telegram": OFFICIAL})
+    running = cli.start("pair", "begin", "--json", stdin=STDIN)
+    request = _waiting(cli)
+    lucille = cli.lucille()
+    lucille.deliver(connect.shown(request.code), signer)
+    with collecting(lucille):
+        ran = running.wait()
+    assert ran.rc == 0, ran.text
+    found = _objects(ran)
+    assert found[0]["send_to"] == [
+        {"handle": "@Lucille", "account": "telegram:1001"},
+        {"handle": "@lucille_help", "account": "telegram:1002"},
+    ]
+    # The accounts change what is shown, never the request or what Lucille's answer must name.
+    assert found[1]["from"] == "telegram:123456789"
+    assert found[-1]["state"] == "sas_pending"
+
+
+@pytest.mark.parametrize(
+    ("accounts", "named"),
+    [
+        ((), ""),
+        (OFFICIAL[:1], ", to @Lucille"),
+        (OFFICIAL, ", to @Lucille or @lucille_help"),
+        (
+            (*OFFICIAL, connect.Account(handle="@LucilleBot", account="telegram:1003")),
+            ", to @Lucille, @lucille_help or @LucilleBot",
+        ),
+    ],
+)
+def test_the_code_line_names_the_official_accounts(
+    cli: HostCli,
+    monkeypatch: pytest.MonkeyPatch,
+    accounts: tuple[connect.Account, ...],
+    named: str,
+) -> None:
+    monkeypatch.setattr(connect, "OFFICIAL_ACCOUNTS", {"telegram": accounts})
+    running = cli.start("pair", "begin", stdin=STDIN)
+    request = _waiting(cli)
+    cli.stopping.set()
+    ran = running.wait()
+    shown = connect.shown(request.code)
+    assert f"code: send this to Lucille in your chat{named}: connect {shown}. It works" in ran.out
+
+
 @pytest.mark.parametrize("entry", ["slack\nada\n", "\nada\n", "Telegram\nada\n", ""])
 def test_begin_refuses_a_service_capsule_does_not_offer(cli: HostCli, entry: str) -> None:
     ran = cli.run("pair", "begin", "--json", stdin=entry)

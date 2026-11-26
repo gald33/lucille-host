@@ -395,14 +395,18 @@ in their chat, and Lucille answers into a room only the two of them can find.
 
 | `state` | Other fields | Written by |
 |---|---|---|
-| `code` | `code` (`^[0-9A-HJKMNP-TV-Z]{5}-[0-9A-HJKMNP-TV-Z]{5}$`), `expires_at`, `service`, `username` | `pair begin`, `pair resume`, `pair status` |
+| `code` | `code` (`^[0-9A-HJKMNP-TV-Z]{5}-[0-9A-HJKMNP-TV-Z]{5}$`), `expires_at`, `service`, `username`, `send_to`? | `pair begin`, `pair resume`, `pair status` |
 | `delivered` | `service` | `pair status` |
 | `connecting` | `service`, `from`, `handle` | `pair begin`, `pair resume` |
 | `cancelled` | | `pair cancel` |
 
 - `code` is the request: the user sends `connect <code>` to Lucille before `expires_at`. It works once.
   `service` is the chat service (`telegram`), and `username` the user's own username there, as the host
-  normalized it: lower case, with no `@` (`^[a-z][a-z0-9_]{0,63}$`).
+  normalized it: lower case, with no `@` (`^[a-z][a-z0-9_]{0,63}$`). `send_to`, when present, is Lucille's
+  official accounts on `service`, from a list in the host, in the order to show: one to four objects, each
+  with `handle` (`^@[A-Za-z][A-Za-z0-9_]{0,63}$`), to show as it is, and `account`, its stable id, as
+  `connecting`'s `from` gives one. It is absent while the host lists none, and the request is the same
+  either way.
 - `delivered`: Lucille's answer has arrived, and nothing was answered; `pair resume` connects.
 - `connecting`: Lucille's answer passed every check, and names the account the user typed; the code it
   carries is answered next, and `pair_code` and the `pair` objects follow, as from `pair --code-stdin`.
@@ -1304,6 +1308,6 @@ Each line is one JSON object, of at most 1,024 bytes:
 - **1.0** (no release yet): the first version, with `run`'s event stream and exit codes, `policy reset`,
   and `credential` with `--json` (its types `credential`, `credential_removed` and `credential_test`), for
   the Mac app's Gmail window; and Connect from Lucille's chat: `pair begin`, `pair resume`, `pair cancel`,
-  the `connect` type, and its error codes.
+  the `connect` type, with Lucille's official accounts on `code` (`send_to`), and its error codes.
   A build of the repository's development version is not a release, and writes contract 1.0 whatever it
   holds.

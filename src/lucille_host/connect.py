@@ -11,6 +11,8 @@ ends must compute alike, and how the computer judges one read of that room:
   room is the library's handshake room for ``K``, which the hub-facing code builds.
 - **The user's own username** (:func:`normalize_username`), typed before the code is shown, and
   the check that a delivery's signed account names it (:func:`names_user`, decisions/0002 §11.5).
+- **Lucille's official chat accounts** (:data:`OFFICIAL_ACCOUNTS`, :func:`official_accounts`), which
+  Capsule names beside the code (decisions/0002 §11.4 step 1, §11.7).
 - **One read of the drop room** (:func:`judge`): the host's hello, the deliveries that pass
   ``delivery.verify``, and the posts it ignores.
 
@@ -27,6 +29,7 @@ import re
 import secrets
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
+from types import MappingProxyType
 from typing import Final
 
 from lucille_host import _switchboard, delivery
@@ -36,17 +39,22 @@ __all__ = [
     "CHANNEL",
     "EPOCH_SECONDS",
     "HELLO",
+    "MOST_ACCOUNTS",
+    "OFFICIAL_ACCOUNTS",
     "POST_TTL",
     "READ_LIMIT",
     "SERVICES",
     "SYMBOLS",
+    "Account",
     "Read",
+    "check_accounts",
     "draw_code",
     "epoch",
     "judge",
     "names_user",
     "nonce",
     "normalize_username",
+    "official_accounts",
     "parse_code",
     "shown",
     "stretch",
@@ -79,10 +87,61 @@ HELLO: Final = {"t": "lucille-host/hello/1"}
 # The chat services Capsule offers, by the name a signed account starts with.
 SERVICES: Final = frozenset({"telegram"})
 
+
+@dataclass(frozen=True)
+class Account:
+    """One of Lucille's official chat accounts: the handle Capsule shows as it is, and the stable
+    id, the ``from`` Lucille signs a delivery from that account with."""
+
+    handle: str
+    account: str
+
+
+# Lucille's official chat accounts, by service, in the order Capsule names them: at most
+# :data:`MOST_ACCOUNTS` for each. None is listed until the maintainer confirms them; a service
+# with none has the code shown with no account named, and connects as it would with one.
+OFFICIAL_ACCOUNTS: Final[Mapping[str, tuple[Account, ...]]] = MappingProxyType({"telegram": ()})
+MOST_ACCOUNTS: Final = 4
+# An account's handle and its stable id, as a delivery's signed ``handle`` and ``from`` are.
+_HANDLE: Final = re.compile(r"@[A-Za-z][A-Za-z0-9_]{0,63}")
+_ACCOUNT_ID: Final = re.compile(r"[a-z]{1,16}:[0-9A-Za-z_-]{1,64}")
+
 # Crockford's readings: I and L are one, O is zero.
 _READS_AS: Final = str.maketrans({"I": "1", "L": "1", "O": "0"})
 # A typed username once normalized: a letter, then up to 63 letters, digits and underscores.
 _USERNAME: Final = re.compile(r"[a-z][a-z0-9_]{0,63}")
+
+
+def check_accounts(table: Mapping[str, Sequence[Account]]) -> None:
+    """Refuse a list of official accounts that is not one :data:`OFFICIAL_ACCOUNTS` may hold: a
+    service Capsule does not offer, more than :data:`MOST_ACCOUNTS` for one, a handle or an id
+    outside its grammar, an id on another service, or an id or a handle listed twice."""
+    for service, accounts in table.items():
+        if service not in SERVICES:
+            raise ValueError(f"official accounts for a service Capsule does not offer: {service!r}")
+        if len(accounts) > MOST_ACCOUNTS:
+            raise ValueError(f"more than {MOST_ACCOUNTS} official accounts on {service}")
+        for entry in accounts:
+            if not isinstance(entry, Account):
+                raise ValueError("an official account is an Account")
+            if _HANDLE.fullmatch(entry.handle) is None:
+                raise ValueError(f"an official account's handle is not one: {entry.handle!r}")
+            if _ACCOUNT_ID.fullmatch(entry.account) is None or not entry.account.startswith(
+                service + ":"
+            ):
+                raise ValueError(f"an official account's id is not one on {service}")
+        ids = [entry.account for entry in accounts]
+        handles = [entry.handle.lower() for entry in accounts]
+        if len(set(ids)) != len(ids) or len(set(handles)) != len(handles):
+            raise ValueError(f"an official account is listed twice on {service}")
+
+
+check_accounts(OFFICIAL_ACCOUNTS)
+
+
+def official_accounts(service: str) -> tuple[Account, ...]:
+    """Lucille's official accounts on ``service``, in order; none when it lists none."""
+    return tuple(OFFICIAL_ACCOUNTS.get(service, ()))
 
 
 # --- The connect code -------------------------------------------------------------------------

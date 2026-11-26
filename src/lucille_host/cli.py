@@ -1376,14 +1376,25 @@ def _connect_action(args: argparse.Namespace, dirs: paths.Dirs, out: _Out) -> No
 def _connect_code(request: connecting.Request, out: _Out) -> None:
     shown = connect.shown(request.code)
     until = link.iso(request.expires_at)
+    # Lucille's official accounts on the request's service, when the core lists any (§11.7).
+    accounts = connect.official_accounts(request.service)
+    fields: dict[str, Any] = {}
+    to = ""
+    if accounts:
+        fields["send_to"] = [{"handle": a.handle, "account": a.account} for a in accounts]
+        handles = [a.handle for a in accounts]
+        named = handles[0] if len(handles) == 1 else ", ".join(handles[:-1]) + " or " + handles[-1]
+        to = f", to {named}"
     out.say(
-        f"code: send this to Lucille in your chat: connect {shown}. It works once, until {until}",
+        f"code: send this to Lucille in your chat{to}: connect {shown}. "
+        f"It works once, until {until}",
         "connect",
         state="code",
         code=shown,
         expires_at=until,
         service=request.service,
         username=request.username,
+        **fields,
     )
 
 

@@ -8,6 +8,9 @@
       "$ref": "#/$defs/connect.code"
     },
     {
+      "$ref": "#/$defs/connect.code_send_to"
+    },
+    {
       "$ref": "#/$defs/connect.delivered"
     },
     {
@@ -60,6 +63,23 @@
       "maxLength": 65,
       "pattern": "^@[A-Za-z][A-Za-z0-9_]{0,63}$"
     },
+    "official_account": {
+      "description": "One of Lucille's official chat accounts: the handle to show as it is, and its stable id, the `from` Lucille signs with.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "handle",
+        "account"
+      ],
+      "properties": {
+        "handle": {
+          "$ref": "#/$defs/signed_handle"
+        },
+        "account": {
+          "$ref": "#/$defs/signed_from"
+        }
+      }
+    },
     "connect.code": {
       "description": "The request is live: the user sends `connect <code>` to Lucille before `expires_at`.",
       "type": "object",
@@ -94,6 +114,53 @@
         },
         "username": {
           "$ref": "#/$defs/username"
+        }
+      }
+    },
+    "connect.code_send_to": {
+      "description": "The request is live, as `connect.code`, with Lucille's official accounts on the service to send the code to.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "v",
+        "type",
+        "state",
+        "code",
+        "expires_at",
+        "service",
+        "username",
+        "send_to"
+      ],
+      "properties": {
+        "v": {
+          "const": 1
+        },
+        "type": {
+          "const": "connect"
+        },
+        "state": {
+          "const": "code"
+        },
+        "code": {
+          "$ref": "#/$defs/connect_code"
+        },
+        "expires_at": {
+          "$ref": "#/$defs/time"
+        },
+        "service": {
+          "$ref": "#/$defs/chat_service"
+        },
+        "username": {
+          "$ref": "#/$defs/username"
+        },
+        "send_to": {
+          "description": "Lucille's official accounts on the service, from the host's list, in the order to show: one to four.",
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 4,
+          "items": {
+            "$ref": "#/$defs/official_account"
+          }
         }
       }
     },

@@ -12,6 +12,7 @@ import hashlib
 import json
 import os
 import time
+from typing import Any
 
 import pytest
 from cryptography.hazmat.primitives import hashes
@@ -21,7 +22,7 @@ from cryptography.hazmat.primitives.kdf.scrypt import Scrypt
 from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 from switchboard import pairing
 
-from lucille_host import _switchboard, connect, delivery
+from lucille_host import _switchboard, connect, delivery, spec
 
 # --- The connect code -------------------------------------------------------------------------
 
@@ -466,3 +467,71 @@ def test_a_read_keeps_nothing_from_the_room_but_the_delivery(signer: Signer) -> 
     read = _judge(rows, signer)
     assert "secret junk" not in repr(read)
     assert code not in repr(read)
+
+
+# --- Lucille's official accounts ----------------------------------------------------------------
+
+
+def _account(handle: str = "@lucille", account: str = "telegram:1001") -> connect.Account:
+    return connect.Account(handle=handle, account=account)
+
+
+def test_the_official_accounts_list_none_until_confirmed() -> None:
+    # The list is filled in only once the maintainer confirms Lucille's accounts; until then the
+    # code is shown with none named, and Connect works as it would with them.
+    assert dict(connect.OFFICIAL_ACCOUNTS) == {"telegram": ()}
+    assert connect.official_accounts("telegram") == ()
+    assert connect.official_accounts("slack") == ()
+
+
+def test_the_schema_bounds_the_accounts_as_the_core_does() -> None:
+    schema = spec.load_cli_schema("connect")
+    send_to = schema["$defs"]["connect.code_send_to"]["properties"]["send_to"]
+    assert (send_to["minItems"], send_to["maxItems"]) == (1, connect.MOST_ACCOUNTS)
+    entry = schema["$defs"]["official_account"]["properties"]
+    assert entry["handle"] == {"$ref": "#/$defs/signed_handle"}
+    assert entry["account"] == {"$ref": "#/$defs/signed_from"}
+    assert schema["$defs"]["signed_handle"]["pattern"] == f"^{connect._HANDLE.pattern}$"
+    assert schema["$defs"]["signed_from"]["pattern"] == f"^{connect._ACCOUNT_ID.pattern}$"
+
+
+def test_the_official_accounts_cannot_be_changed_in_place() -> None:
+    with pytest.raises(TypeError):
+        connect.OFFICIAL_ACCOUNTS["telegram"] = (_account(),)  # type: ignore[index]
+
+
+def test_a_list_of_official_accounts_in_its_grammar_is_taken() -> None:
+    connect.check_accounts(
+        {
+            "telegram": (
+                _account("@Lucille", "telegram:1001"),
+                _account("@lucille_help", "telegram:abc-_9"),
+                _account("@L", "telegram:" + "9" * 64),
+                _account("@x" + "y" * 63, "telegram:4"),
+            )
+        }
+    )
+
+
+@pytest.mark.parametrize(
+    "table",
+    [
+        {"slack": (_account(account="slack:1"),)},
+        {"telegram": tuple(_account(f"@l{n}", f"telegram:{n}") for n in range(5))},
+        {"telegram": (_account(handle="lucille"),)},
+        {"telegram": (_account(handle="@1ucille"),)},
+        {"telegram": (_account(handle="@lu-cille"),)},
+        {"telegram": (_account(handle="@x" + "y" * 64),)},
+        {"telegram": (_account(account="telegram:"),)},
+        {"telegram": (_account(account="telegram:12 3"),)},
+        {"telegram": (_account(account="telegram:" + "9" * 65),)},
+        {"telegram": (_account(account="slack:1001"),)},
+        {"telegram": (_account(account="1001"),)},
+        {"telegram": (_account("@a", "telegram:1"), _account("@b", "telegram:1"))},
+        {"telegram": (_account("@Ada", "telegram:1"), _account("@ada", "telegram:2"))},
+        {"telegram": ({"handle": "@lucille", "account": "telegram:1"},)},
+    ],
+)
+def test_a_list_of_official_accounts_outside_its_grammar_is_refused(table: Any) -> None:
+    with pytest.raises(ValueError):
+        connect.check_accounts(table)

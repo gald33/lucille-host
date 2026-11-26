@@ -45,6 +45,7 @@ VALUE_KEYWORDS = {
     "pattern",
     "minimum",
     "maximum",
+    "minItems",
     "maxItems",
     "uniqueItems",
 }
