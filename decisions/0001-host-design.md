@@ -625,6 +625,11 @@ policy changed. A plain hash would let anyone holding it confirm a guessed folde
 
 ## CLI verbs (v0.1)
 
+**Changed by [0002](0002-macos-app.md) §11.4, for every shell.** No pairing code is pasted: `pair [CODE]` and
+`--code-stdin` are gone. `pair` (or `pair begin`, then `pair resume` or `pair cancel`) shows a connect code to
+send Lucille in the chat, and answers only the pairing code in Lucille's signed answer to that request. What
+this record says below of reading a code applies to that code; [spec/CLI.md](../spec/CLI.md) §7 has the verbs.
+
 `pair [CODE] [--code-stdin] [--hub URL] [--store-file]`, `pair status`, `pair confirm`, `pair reject`,
 `run [--json-events] [--exit-on-stdin-eof] [--allow-downgrade]`, `status`, `log [--limit N]`, `forget`,
 `ops list|enable|disable`, `roots list|add|remove`, `policy previous|reset`, `pause`, `resume`, `kill`,

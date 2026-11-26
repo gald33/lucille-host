@@ -485,10 +485,16 @@ def test_status_clock_skew_from_the_library_s_writes(
 def test_pair_says_when_the_hub_refuses_its_answer_for_the_clock(
     cli: HostCli, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    ahead = [True]
+    # The host's clock runs ahead from when Lucille delivers the code: the request was kept, and
+    # the hub refuses the answer for the clock.
+    ahead = [False]
     _host_writes_ahead(monkeypatch, ahead)
+
+    def run_ahead(_code: str) -> None:
+        ahead[0] = True
+
     lucille = cli.lucille()
-    running = cli.start("pair", "--code-stdin", stdin=lucille.start() + "\n")
+    running = cli.begin(lucille, before_post=run_ahead)
     until(lambda: cli.listens > 0, what="the wait")
     ahead[0] = False
     with collecting(lucille):
@@ -499,18 +505,20 @@ def test_pair_says_when_the_hub_refuses_its_answer_for_the_clock(
     (accepted,) = [line for line in lines if line.get("event") == "accepted"]
     assert (accepted["sent"], accepted["skewed"]) == (False, True)
     # With --json, the accepted object says so, and stderr warns the same.
-    ahead[0] = True
     second = cli.lucille()
     listened = cli.listens
-    running = cli.start(
-        "--profile", "json", "--json", "pair", "--code-stdin", stdin=second.start() + "\n"
-    )
+    running = cli.begin(second, "--json", profile="json", before_post=run_ahead)
     until(lambda: cli.listens > listened, what="the wait")
     ahead[0] = False
     with collecting(second):
         ran = running.wait(30)
     assert ran.rc == 0, ran.text
-    assert _objects(ran.out)[1] == {
+    (accepted,) = [
+        found
+        for found in _objects(ran.out)
+        if (found["type"], found.get("state")) == ("pair", "accepted")
+    ]
+    assert accepted == {
         "v": 1,
         "type": "pair",
         "state": "accepted",
@@ -522,8 +530,7 @@ def test_pair_says_when_the_hub_refuses_its_answer_for_the_clock(
 
 def test_status_never_shows_sas(cli: HostCli) -> None:
     lucille = cli.lucille()
-    code = lucille.start()
-    cli.interrupted(code)
+    cli.interrupted(lucille)
     ran = cli.run("status")
     assert ran.rc == 0, ran.text
     # It makes no hub call, so it says only that no command has seen Lucille collect the answer.
@@ -568,7 +575,7 @@ def test_status_shows_no_sas_the_host_has_not_shown(cli: HostCli) -> None:
     # The SAS has reached the host (`pair confirm` resolved, and refused: nothing had shown it),
     # and no command has shown it. `status` says so, shows none, and starts no deadline.
     lucille = cli.lucille()
-    cli.interrupted(lucille.start())
+    cli.interrupted(lucille)
     assert lucille.collect().state == "paired"
     ran = cli.run("pair", "confirm")
     assert ran.rc == 1 and ran.err.startswith("sas_ready: "), ran.text
@@ -587,7 +594,7 @@ def test_status_shows_no_sas_the_host_has_not_shown(cli: HostCli) -> None:
 
 def test_status_json_never_shows_sas(cli: HostCli) -> None:
     lucille = cli.lucille()
-    cli.interrupted(lucille.start())
+    cli.interrupted(lucille)
     outputs = []
 
     def pair_of_status() -> dict[str, Any]:

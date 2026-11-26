@@ -8,6 +8,7 @@ from __future__ import annotations
 import contextlib
 import dataclasses
 import json
+import os
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -15,7 +16,7 @@ from typing import Any
 import pytest
 from switchboard.testing import hub
 
-from lucille_host import _switchboard, connect, connecting, gate, loop, state
+from lucille_host import _switchboard, connect, connecting, gate, link, loop, state
 from lucille_host.cli import PAIR_LOCK
 from tests._cli import HostCli, Ran, collecting, until
 from tests._host import HostEnv, lock_held
@@ -43,17 +44,7 @@ def cli(
     capsys: pytest.CaptureFixture[str],
     monkeypatch: pytest.MonkeyPatch,
 ) -> Iterator[HostCli]:
-    monkeypatch.setattr("lucille_host.connecting.POLL_EVERY", 0.05)
     host = HostCli(h, host_env, tmp_path, capsys, monkeypatch)
-    poll = connecting.poll
-
-    def stoppable(*args: Any, **kwargs: Any) -> Any:
-        # A wait the test stopped ends as Ctrl-C ends it.
-        if host.stopping.is_set():
-            raise KeyboardInterrupt
-        return poll(*args, **kwargs)
-
-    monkeypatch.setattr("lucille_host.connecting.poll", stoppable)
     yield host
     host.stopping.set()
 
@@ -61,7 +52,11 @@ def cli(
 @pytest.fixture
 def signer(monkeypatch: pytest.MonkeyPatch) -> Signer:
     made = Signer()
-    monkeypatch.setattr("lucille_host._switchboard.LUCILLE_SIGNING_KEYS", made.keys)
+    # Beside the keys already pinned, the one HostCli pins among them.
+    monkeypatch.setattr(
+        "lucille_host._switchboard.LUCILLE_SIGNING_KEYS",
+        {**_switchboard.LUCILLE_SIGNING_KEYS, **made.keys},
+    )
     return made
 
 
@@ -195,10 +190,7 @@ def test_begin_keeps_no_request_when_the_hub_cannot_be_reached(
 
 
 def test_begin_refuses_while_a_pair_is_held(cli: HostCli, signer: Signer) -> None:
-    lucille = cli.lucille()
-    code = lucille.start()
-    with collecting(lucille):
-        assert cli.run("pair", "--code-stdin", stdin=code + "\n").rc == 0
+    cli.paired(cli.lucille())
     ran = cli.run("pair", "begin", "--json", stdin=STDIN)
     assert ran.rc == 1
     assert _objects(ran)[-1]["code"] == "held"
@@ -216,7 +208,6 @@ def test_begin_refuses_while_another_pair_runs(cli: HostCli) -> None:
 @pytest.mark.parametrize(
     "argv",
     [
-        ("pair", "begin", "--code-stdin"),
         ("pair", "resume", "--hub", "http://127.0.0.1:8765"),
         ("pair", "resume", "--store-file"),
         ("pair", "cancel", "--store-file"),
@@ -491,7 +482,7 @@ def test_without_the_test_key_its_answers_are_unknown(cli: HostCli) -> None:
         ("pair", "resume", "--test-key", "A" * 43),
         ("pair", "cancel", "--test-key", "A" * 43),
         ("pair", "status", "--test-key", "A" * 43),
-        ("pair", "--code-stdin", "--test-key", "A" * 43),
+        ("pair", "--test-key", "A" * 43),
         ("pair", "begin", "--hub", LOOPBACK, "--test-key", "A" * 42),
         ("pair", "begin", "--hub", LOOPBACK, "--test-key", "A" * 42 + "B"),
         ("pair", "begin", "--hub", LOOPBACK, "--test-key", "A" * 42 + "="),
@@ -562,3 +553,54 @@ def test_status_never_writes_back_a_request_answered_while_it_waited_for_the_loc
     assert ran.rc == 0, ran.text
     assert _objects(ran) == [{"v": 1, "type": "pair", "state": "none"}]
     assert not cli.dirs.connect_file.exists()
+
+
+# --- the core's rule: no code but one delivered for a request -----------------------------------
+
+
+def _session(cli: HostCli) -> link.Session:
+    config = state.load_host_config(cli.dirs)
+    return link.open_session(cli.dirs, config, say=lambda _: None, warn=lambda _: None)
+
+
+@pytest.mark.parametrize(
+    "note",
+    ["", "lucille-host/2 n={other}", "lucille-host/2 n={NONCE}", "lucille-host/2 n={nonce} "],
+)
+def test_the_core_answers_no_code_but_one_for_its_own_request(cli: HostCli, note: str) -> None:
+    # Whatever shell calls it, `Session.accept` answers a code only when its note names the
+    # request's nonce: a code someone was handed, with any other note or none, is refused before
+    # anything is written, and Lucille has nothing to collect.
+    nonce = os.urandom(connect.NONCE_BYTES)
+    # One with a letter in it, so that its upper case is the same nonce in another case.
+    while nonce.hex() == nonce.hex().upper():
+        nonce = os.urandom(connect.NONCE_BYTES)
+    upper = nonce.hex().upper()
+    other = os.urandom(connect.NONCE_BYTES).hex()
+    lucille = cli.lucille()
+    text = lucille.start(note=note.format(nonce=nonce.hex(), NONCE=upper, other=other))
+    session = _session(cli)
+    code = session.check_code(text, state.load_host_config(cli.dirs))
+    with pytest.raises(link.Stopped) as refused:
+        session.accept(code, nonce=nonce)
+    assert refused.value.code == "not_this_mac"
+    assert cli.gate() is None and cli.held() == []
+    assert lucille.collect().state == "waiting"
+    # The same code's pairing, noted for the request, is answered.
+    lucille = cli.lucille()
+    text = lucille.start(note=connect.note_for(nonce))
+    code = session.check_code(text, state.load_host_config(cli.dirs))
+    assert session.accept(code, nonce=nonce) == lucille.name
+    assert cli.held() == [lucille.name]
+
+
+def test_a_nonce_is_its_own_length() -> None:
+    with pytest.raises(ValueError):
+        connect.note_for(b"\0" * 15)
+    with pytest.raises(ValueError):
+        connect.answers_request(
+            _switchboard.Code(
+                text="x", url=_switchboard.LUCILLE_HUB, carries_token=False, note="", name="p"
+            ),
+            b"\0" * 17,
+        )

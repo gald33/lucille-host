@@ -36,9 +36,16 @@ LINES: dict[str, list[str]] = {
     "status": ["status"],
     "log": ["log"],
     "forget": ["forget"],
-    "pair": ["pair", "ABC-DEF"],
-    "pair code-stdin": ["pair", "--code-stdin"],
+    "pair": ["pair"],
+    "pair code": ["pair", "ABC-DEF"],
     "pair store-file": ["pair", "--store-file", "ABC-DEF"],
+    "pair begin": ["pair", "begin"],
+    "pair begin store-file": ["pair", "begin", "--store-file"],
+    "pair begin hub": [
+        *("pair", "begin", "--hub", "http://127.0.0.1:8765", f"--test-key={'A' * 43}")
+    ],
+    "pair resume": ["pair", "resume"],
+    "pair cancel": ["pair", "cancel"],
     "pair status": ["pair", "status"],
     "pair confirm": ["pair", "confirm"],
     "pair reject": ["pair", "reject"],

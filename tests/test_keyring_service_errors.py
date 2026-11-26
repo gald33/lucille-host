@@ -512,7 +512,7 @@ def test_pair_store_file_falls_back_when_the_service_fails_the_first_read(
 def test_pair_without_store_file_does_not_fall_back(cli: HostCli, raising: Raising) -> None:
     raising.on_read = lambda: _reply(SPAWN_FAILED)
     lucille = cli.lucille()
-    ran = cli.run("--json", "pair", "--code-stdin", stdin=lucille.start() + "\n")
+    ran = cli.begin(lucille, "--json").wait()
     assert ran.rc == 1, ran.text
     assert _support.cli_objects(ran.out) == [
         {
@@ -523,6 +523,8 @@ def test_pair_without_store_file_does_not_fall_back(cli: HostCli, raising: Raisi
         }
     ]
     assert "kept in a file" not in ran.text and not cli.dirs.store_files.exists()
+    # Refused before a Connect request was kept: there is none to resume.
+    assert cli.request() is None
 
 
 def _not_answered() -> Exception:
@@ -561,11 +563,13 @@ def test_pair_store_file_does_not_fall_back_on_any_other_store_error(
     # other store error is not the service failing. None moves the pair to the file store.
     raising.on_read = make
     lucille = cli.lucille()
-    ran = cli.run("--json", "pair", "--code-stdin", "--store-file", stdin=lucille.start() + "\n")
+    ran = cli.begin(lucille, "--json", "--store-file").wait()
     assert ran.rc == 1, ran.text
     [error] = _support.cli_objects(ran.out)
     assert (error["code"], error["message"]) == ("store_error", message)
     assert "kept in a file" not in ran.text and not cli.dirs.store_files.exists()
+    # Refused before a Connect request was kept: there is none to resume.
+    assert cli.request() is None
 
 
 def test_a_write_of_the_pair_item_tried_is_remembered_whether_or_not_it_landed(
@@ -596,8 +600,10 @@ def test_pair_store_file_never_falls_back_once_a_write_of_the_pair_item_was_trie
     store._PAIR_WRITE_TRIED.set()
     raising.on_read = lambda: _reply(SPAWN_FAILED)
     lucille = cli.lucille()
-    ran = cli.run("--json", "pair", "--code-stdin", "--store-file", stdin=lucille.start() + "\n")
+    ran = cli.begin(lucille, "--json", "--store-file").wait()
     assert ran.rc == 1, ran.text
     [error] = _support.cli_objects(ran.out)
     assert error["code"] == "store_error"
     assert "kept in a file" not in ran.text and not cli.dirs.store_files.exists()
+    # Refused before a Connect request was kept: there is none to resume.
+    assert cli.request() is None

@@ -1,0 +1,41 @@
+{
+  "description": "pair begin, with Lucille's answer delivered and its code answered first by another computer",
+  "argv": [
+    "--json",
+    "pair",
+    "begin"
+  ],
+  "exit": 1,
+  "stdout": [
+    {
+      "v": 1,
+      "type": "connect",
+      "state": "code",
+      "code": "7KQ4M-X2D9P",
+      "expires_at": "2026-11-01T12:00:00Z",
+      "service": "telegram",
+      "username": "ada"
+    },
+    {
+      "v": 1,
+      "type": "connect",
+      "state": "connecting",
+      "service": "telegram",
+      "handle": "@ada",
+      "from": "telegram:123456789"
+    },
+    {
+      "v": 1,
+      "type": "pair_code",
+      "name": "pair-abcdef",
+      "hub": "https://switchboard.lucille-ai.com",
+      "note": "lucille-host/2 n=0123456789abcdef0123456789abcdef"
+    },
+    {
+      "v": 1,
+      "type": "error",
+      "code": "leaked",
+      "message": "the pairing code leaked: another computer answered it, or somebody holding it interfered with the pairing, so this computer's half is gone. Start again in Lucille with a fresh code, and share it with nobody (already_redeemed)"
+    }
+  ]
+}

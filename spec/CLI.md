@@ -34,11 +34,12 @@ fixtures are the contract together. It is separate from the protocol between Luc
   people. A shell shows them; it never branches on them.
 - **A shell never writes the host's files.** Every change goes through a verb: `ops enable`, `roots add`,
   `pause`, `pair confirm`, and the rest. It does not read them either for anything a verb reports.
-- **A secret is never passed in argv.** A pairing code goes to `pair --code-stdin --json` on standard input.
-  Any secret a later version takes is read the same way. With `--json`, `pair` refuses a code on its
-  command line (`code_in_argv`), and does not repeat it. The host never writes a pairing code it read from
-  standard input, in JSON or in text. A word given on the command line may be quoted on standard error by
-  a usage error; with `--json`, the `usage` object never quotes it.
+- **A secret is never passed in argv.** A pairing code is never given to the host at all: it arrives in a
+  Connect request's drop room, from Lucille (`pair begin`). `pair` refuses anything on its command line that
+  is not an action (`code_in_argv`), and does not repeat it. A secret a later version takes is read from
+  standard input. The host never writes a pairing code it was delivered, in JSON or in text. A word given on
+  the command line may be quoted on standard error by a usage error; with `--json`, the `usage` object never
+  quotes it.
 - **The user compares the SAS.** A shell shows the user the `sas` the host wrote, and runs `pair confirm`
   only when the user says Lucille's page shows the same. It never confirms on its own, and never before it
   has shown that SAS. It calls `pair status` only while it shows the user the `sas` that call returns. To
@@ -84,7 +85,7 @@ fixtures are the contract together. It is separate from the protocol between Luc
 
 - With `--json`, standard output holds only JSON objects, one per line. Each line is one object, written
   whole with its newline and flushed before the host does the next thing, so a reader can act on each line
-  as it arrives. A verb that streams (`pair --code-stdin`, `roots check`) writes each object when it is known.
+  as it arrives. A verb that streams (`pair begin`, `roots check`) writes each object when it is known.
 - Each object has `"v": 1` and a `"type"` (section 6), then that type's fields.
 - The output is ASCII: every character outside ASCII is written as a JSON `\u` escape. Every string is valid
   Unicode. A file name that is not valid UTF-8 reaches the host as unpaired surrogates; each is written as
@@ -379,9 +380,9 @@ is enabled, and no folder is held.
 | `state` | Other fields | Written by |
 |---|---|---|
 | `none` | | `pair status` |
-| `accepted` | `name`, `clock_skewed` (boolean) | `pair --code-stdin`, `pair begin`, `pair resume` |
-| `waiting` | `name` | `pair --code-stdin`, `pair begin`, `pair resume`, `pair status` |
-| `sas_pending` | `name`, `sas` (`^[0-9]{4}-[0-9]{4}$`), `deadline` | `pair --code-stdin`, `pair begin`, `pair resume`, `pair status` |
+| `accepted` | `name`, `clock_skewed` (boolean) | `pair begin`, `pair resume` |
+| `waiting` | `name` | `pair begin`, `pair resume`, `pair status` |
+| `sas_pending` | `name`, `sas` (`^[0-9]{4}-[0-9]{4}$`), `deadline` | `pair begin`, `pair resume`, `pair status` |
 | `confirmed` | `name` | `pair status`, `pair confirm` |
 | `rejected` | `name`, `lucille_told` (boolean) | `pair reject` |
 
@@ -405,7 +406,8 @@ in their chat, and Lucille answers into a room only the two of them can find.
   normalized it: lower case, with no `@` (`^[a-z][a-z0-9_]{0,63}$`).
 - `delivered`: Lucille's answer has arrived, and nothing was answered; `pair resume` connects.
 - `connecting`: Lucille's answer passed every check, and names the account the user typed; the code it
-  carries is answered next, and `pair_code` and the `pair` objects follow, as from `pair --code-stdin`.
+  carries is answered next, and `pair_code`, `policy_reset` if a policy was set aside, and the `pair`
+  objects follow.
   `from` is the chat account Lucille signed, its service and stable id (`^[a-z]{1,16}:[0-9A-Za-z_-]{1,64}$`),
   and `handle` the handle Lucille signed beside it (`^@[A-Za-z][A-Za-z0-9_]{0,63}$`): the app shows
   "Connecting as @ada on Telegram".
@@ -561,10 +563,9 @@ line with no verb never give it).
 | `status` | one `status` | `startup_refused`, `runtime_folder`, `state_invalid` |
 | `log [--limit N]` | one `log_line` per line, oldest first; none when the log is empty | `bad_limit` |
 | `forget` | one `forget` | `none`, `several_pairs`, `room_not_left`, `pair_unusable`, `startup_refused`, `insecure_keyring`, `store_error`, `runtime_folder`, `state_invalid` |
-| `pair --code-stdin [--hub URL] [--store-file]` | `pair_code`; `policy_reset` if a policy was set aside; `pair` `accepted`; `pair` `waiting`; `pair` `sas_pending` | `code_in_argv`, `bad_hub`, `startup_refused`, `busy`, `lock_failed`, `held`, `no_code`, `bad_code`, `wrong_hub`, `code_has_token`, `policy_lock_failed`, `answer_failed`, `hub_error`, `leaked`, `expired`, `ended`, `none`, `no_gate`, `interrupted`, `pair_unusable`, `room_not_left`, `insecure_keyring`, `store_error`, `runtime_folder`, `state_invalid` |
 | `pair status` | one `pair`: `none`, `waiting`, `sas_pending` or `confirmed`; or, with no pair and a Connect request, one `connect`: `code` or `delivered` | `interference`, `connect_expired`, `newer_capsule`, `key_misused`, `hub_error`, `bad_options`, `several_pairs`, `leaked`, `expired`, `ended`, `none`, `no_gate`, `pair_unusable`, `room_not_left`, `startup_refused`, `insecure_keyring`, `store_error`, `runtime_folder`, `state_invalid` |
-| `pair begin [--hub URL [--test-key KEY]] [--store-file]` | `connect` `code`; once Lucille's answer has passed, `connect` `connecting`, then what `pair --code-stdin` writes | `bad_options`, `bad_hub`, `startup_refused`, `busy`, `lock_failed`, `held`, `bad_service`, `bad_username`, `hub_error`, `interference`, `connect_expired`, `newer_capsule`, `key_misused`, `other_account`, `not_this_mac`, `bad_code`, `wrong_hub`, `code_has_token`, `interrupted`, and the codes of `pair --code-stdin` after its code is checked |
-| `pair resume` | as `pair begin`, on the request it kept | `bad_options`, `none`, and those of `pair begin` but `bad_hub`, `bad_service`, `bad_username` |
+| `pair begin [--hub URL [--test-key KEY]] [--store-file]`, or `pair` with no action | `connect` `code`; once Lucille's answer has passed, `connect` `connecting`, `pair_code`, `policy_reset` if a policy was set aside, `pair` `accepted`, `pair` `waiting`, `pair` `sas_pending` | `code_in_argv`, `bad_options`, `bad_hub`, `startup_refused`, `busy`, `lock_failed`, `held`, `bad_service`, `bad_username`, `hub_error`, `interference`, `connect_expired`, `newer_capsule`, `key_misused`, `other_account`, `not_this_mac`, `bad_code`, `wrong_hub`, `code_has_token`, `policy_lock_failed`, `answer_failed`, `leaked`, `expired`, `ended`, `none`, `no_gate`, `interrupted`, `pair_unusable`, `room_not_left`, `insecure_keyring`, `store_error`, `runtime_folder`, `state_invalid` |
+| `pair resume` | as `pair begin`, on the request it kept | `bad_options`, `none`, and those of `pair begin` but `code_in_argv`, `bad_hub`, `bad_service`, `bad_username` |
 | `pair cancel` | one `connect` `cancelled` | `bad_options`, `none`, `busy`, `lock_failed`, `startup_refused`, `runtime_folder`, `state_invalid` |
 | `pair confirm` | one `pair` `confirmed` | `bad_options`, `none`, `several_pairs`, `waiting`, `sas_ready`, `no_gate`, `expired`, `leaked`, `ended`, `pair_unusable`, `room_not_left`, `startup_refused`, `insecure_keyring`, `store_error`, `runtime_folder`, `state_invalid` |
 | `pair reject` | one `pair` `rejected` | `bad_options`, `none`, `several_pairs`, `already_confirmed`, `pair_unusable`, `room_not_left`, `startup_refused`, `insecure_keyring`, `store_error`, `runtime_folder`, `state_invalid` |
@@ -577,9 +578,10 @@ line with no verb never give it).
 | `credential test <service> <name>` | one `credential_test` | `no_test`, `no_such_credential`, `paused`, `bad_credential`, `unreachable`, `limit_reached`, `sign_in_refused`, `insecure_keyring`, `store_error` |
 
 Notes:
-- **`pair` with `--json`** reads the code from standard input, and only with `--code-stdin`:
-  `pair --json` without it is a usage error, and `pair <code> --json` is refused (`code_in_argv`). It never
-  asks anything, and stops once the SAS is shown (`sas_pending`, exit 0). Once it has answered the code, it
+- **`pair`** takes no pairing code. `pair` alone is `pair begin`; a word that is not an action (`begin`,
+  `resume`, `cancel`, `status`, `confirm`, `reject`) is refused (`code_in_argv`), and is not repeated. There
+  is no `--code-stdin` (a usage error). With `--json`, `pair begin` never asks anything, and stops once the
+  SAS is shown (`sas_pending`, exit 0). Once it has answered the code, it
   resolves the pair every 5 s, and at once when a note of the pairing library arrives, sending an unsent
   answer again, until Lucille has collected the answer. It may write `waiting` more than once; a reader
   takes the latest. A pairing that ends early writes an `error` with `leaked` (the code leaked: start again
@@ -598,10 +600,6 @@ Notes:
   back, as above), a locked keyring, an unlock prompt the user dismissed, or any other error of a Secret
   Service that runs; nor once that process has tried to write the pair to the keyring, which could leave one
   pair there and another in the file.
-- **Standard input of `pair --code-stdin`** is one line: the code, with or without a newline after it.
-  The host reads that line and nothing more. It may exit before it reads anything (`code_in_argv`,
-  `bad_hub`, `busy`, `held`, ...), so a shell writes the code at once, closes standard input, and ignores
-  a broken pipe.
 - **`pair status`** resolves the pair once, sending an unsent answer again. A shell that was relaunched
   learns where the pair is from `status`, and calls `pair status` once its pairing screen is up; it calls it
   every 5 s while it reports `waiting`. `status` cannot tell its `waiting` from a pair whose answer Lucille
@@ -611,9 +609,11 @@ Notes:
   not (section 13). The next call 5 s later asks again.
 - **`pair begin`** starts a Connect request (decisions/0002 §11.4). Standard input is two lines: the chat
   service (`telegram`), then the user's own username there, in any spelling the host takes (`ada`, `@Ada`,
-  `telegram:@ada`). It draws a connect code, posts the host's hello where Lucille will look, keeps the
-  request in the state folder, writes `connect` `code`, and reads Lucille's answer every 5 s. With `--json`
-  it never asks anything, and stops once the SAS is shown, as `pair --code-stdin` does. A hub that cannot be
+  `telegram:@ada`). It may exit before it reads anything (`code_in_argv`, `bad_hub`, `busy`, `held`, ...),
+  so a shell writes both lines at once, closes standard input, and ignores a broken pipe. It draws a connect
+  code, posts the host's hello where Lucille will look, keeps the request in the state folder, writes
+  `connect` `code`, and reads Lucille's answer every 5 s. Without `--json`, it asks at the SAS for `y` or
+  `n`; the end of standard input leaves the answer to `pair confirm` or `pair reject`. A hub that cannot be
   reached when it posts the hello gives `hub_error`, and no request is kept. One request is kept at a time:
   a new `begin` replaces it. Ctrl-C gives `interrupted` and keeps the request, which `pair resume` takes
   up again. The request ends, and is spent, with one of these codes:
@@ -629,7 +629,7 @@ Notes:
     screen names that account;
   - `not_this_mac`: the answer's code names another request, or carries no hello of the pairing library,
     or the request was used already;
-  - `bad_code`, `wrong_hub` or `code_has_token`: the answer's code is refused as `pair` refuses one.
+  - `bad_code`, `wrong_hub` or `code_has_token`: the answer's code is not one the host answers.
 - **`--test-key`** is for the end-to-end tests and the conformance suite, which play Lucille against a local
   hub and sign with a key of their own: 32 bytes in unpadded base64url. `pair begin` takes it only with
   `--hub`, and saves it for the profile, as it saves `--hub`. An answer to a request on that loopback hub may
@@ -678,7 +678,7 @@ Notes:
 This release's pairing gate is the one in
 [decisions/0001-host-design.md](../decisions/0001-host-design.md), "Pairing": the computer shows the SAS,
 the user compares it with Lucille's page, and confirms on the computer. So `sas_pending` carries the SAS
-(`sas`) and the deadline, from `pair --code-stdin --json` and from `pair status --json`, as their text does.
+(`sas`) and the deadline, from `pair begin --json` and from `pair status --json`, as their text does.
 
 Writing the SAS in JSON counts as showing it: the first time either verb writes it, the deadline starts, as
 when the text shows it. The program that reads it shows it to the user, and the user's `y` (`pair confirm`)
@@ -796,12 +796,11 @@ limit, as it runs every verb, and stops it when the limit passes.
 | `previous_invalid` | The policy a pairing set aside is invalid, or the time it was set aside (its file's modification time) is not from 1970 to the end of 9999. |
 | `bad_limit` | `--limit` takes 1 or more. |
 | `bad_options` | `pair status`, `pair confirm` and `pair reject` take no options. |
-| `code_in_argv` | A pairing code was given on the command line, with `--code-stdin` or `--json`. |
+| `code_in_argv` | `pair` was given something other than an action; a pairing code is never taken. |
 | `bad_hub` | `--hub` names a hub that is not `http://127.0.0.1:<port>` or `http://localhost:<port>`. |
 | `busy` | Another `pair` of this profile is running. |
 | `lock_failed` | The lock that keeps one `pair` per profile could not be taken on this filesystem. |
 | `held` | This computer already holds a pair: disconnect first. |
-| `no_code` | No pairing code was given on standard input. |
 | `bad_code` | That is not a pairing code. |
 | `wrong_hub` | The code is for another hub, not Lucille's (or for a loopback hub `--hub` did not name). |
 | `code_has_token` | The code carries a hub token, and the host takes only codes that do not. |
@@ -830,7 +829,7 @@ limit, as it runs every verb, and stops it when the limit passes.
 | `sign_in_refused` | `credential test`: Gmail refused the app password (wrong or revoked), or did within the last 15 minutes and was not asked again. |
 | `unreachable` | `credential test`: `imap.gmail.com` did not resolve, resolved to an address the host does not allow, could not be connected to, or the connection broke. |
 | `limit_reached` | `credential test`: the credential was used for more than 60 sign-ins in 10 minutes, or Gmail sent more than the host reads. |
-| `bad_service` | `pair begin`: that is not a chat service Capsule connects through (`telegram`). |
+| `bad_service` | `pair begin`: that is not a chat service Capsule connects through (`telegram`). A pairing code given there, as the paste form took one, is refused with it too, saying that pasting a code is no longer supported. |
 | `bad_username` | `pair begin`: that is not a username: it starts with a letter, and holds letters, digits and `_` only, 64 at most. |
 | `interference` | Capsule couldn't read Lucille's answer, and the code may be known to someone else. Start again. |
 | `connect_expired` | The connect code expired. Start again. |
@@ -868,9 +867,10 @@ Each fixture is one command line and what it writes:
 - `argv` is what follows `lucille-host`. `stdout` is the objects in order. Each fixture's `description`
   says what was set up before the command ran.
 - Paths in a fixture are under `/home/me`, as Linux's folders name them; the version is a sample, and so is
-  each pair name, SAS, time and generation. The tests put the real values in their place before they
-  compare: the profile's folders, the home folder, the version, the pair's name, Lucille's SAS, a time, and
-  the executable this computer's family names for an operation. A run record's pid and skew are set by
+  each pair name, SAS, time, generation, connect code and request nonce in a code's note. The tests put the
+  real values in their place before they compare: the profile's folders, the home folder, the version, the
+  pair's name, Lucille's SAS, a time, the connect code, the nonce, and the executable this computer's family
+  names for an operation. A run record's pid and skew are set by
   the test.
 - Every object in every fixture validates against its type's schema, and the tests run every fixture's
   command line and compare. They also run it without `--json`, from the same set-up, and check that the
@@ -1149,8 +1149,8 @@ leaves it out of `enabled_ops` (decisions/0003, "First use").
 - `diagnostics` and removing the host's data ([decisions/0002-macos-app.md](../decisions/0002-macos-app.md)
   §8).
 - The typed pairing gate (decisions/0002 §11.2): decided on 2026-11-21, not built. Connect from Lucille's
-  chat (§11.4 and §11.5) is built as `pair begin`, `pair resume` and `pair cancel` (section 7); the paste
-  flow, `pair --code-stdin`, is kept until the host refuses every code without its own request's nonce.
+  chat (§11.4 and §11.5) is built as `pair begin`, `pair resume` and `pair cancel` (section 7), and is the
+  only way to pair.
 - A typed history of what the host did, for a shell to show in words. `log_line` carries text only, which a
   shell shows as it is.
 - During pairing, whether the hub could be reached and whether it refuses this computer's clock, beside
@@ -1304,6 +1304,7 @@ Each line is one JSON object, of at most 1,024 bytes:
 - **1.0** (no release yet): the first version, with `run`'s event stream and exit codes, `policy reset`,
   and `credential` with `--json` (its types `credential`, `credential_removed` and `credential_test`), for
   the Mac app's Gmail window; and Connect from Lucille's chat: `pair begin`, `pair resume`, `pair cancel`,
-  the `connect` type, and its error codes.
+  the `connect` type, and its error codes. The paste form is gone: `pair` takes no pairing code, on its
+  command line or with `--code-stdin`, and answers only a code delivered for its own Connect request.
   A build of the repository's development version is not a release, and writes contract 1.0 whatever it
   holds.

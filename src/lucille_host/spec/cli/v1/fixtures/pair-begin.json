@@ -1,18 +1,35 @@
 {
-  "description": "pair --code-stdin from a policy that is not the fresh one, until the SAS is shown",
+  "description": "pair begin, from a policy that is not the fresh one, with Lucille's answer delivered, until the SAS is shown",
   "argv": [
     "pair",
-    "--code-stdin",
+    "begin",
     "--json"
   ],
   "exit": 0,
   "stdout": [
     {
       "v": 1,
+      "type": "connect",
+      "state": "code",
+      "code": "7KQ4M-X2D9P",
+      "expires_at": "2026-11-01T12:00:00Z",
+      "service": "telegram",
+      "username": "ada"
+    },
+    {
+      "v": 1,
+      "type": "connect",
+      "state": "connecting",
+      "service": "telegram",
+      "handle": "@ada",
+      "from": "telegram:123456789"
+    },
+    {
+      "v": 1,
       "type": "pair_code",
       "name": "pair-abcdef",
       "hub": "https://switchboard.lucille-ai.com",
-      "note": ""
+      "note": "lucille-host/2 n=0123456789abcdef0123456789abcdef"
     },
     {
       "v": 1,

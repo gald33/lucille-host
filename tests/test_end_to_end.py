@@ -1,5 +1,6 @@
-"""The host end to end, through the command a user runs: ``pair``, ``pair confirm``, ``run``, a
-work room Lucille offers taken, a request answered, ``status``, ``log`` and ``forget``.
+"""The host end to end, through the command a user runs: ``pair begin`` and a code Lucille delivers,
+``pair confirm``, ``run``, a work room Lucille offers taken, a request answered, ``status``,
+``log`` and ``forget``.
 
 Every verb runs through ``main`` in this process, against Switchboard's in-process test hub, with
 a fake Lucille on the other side (``tests/_lucille.py``); ``run`` runs on a thread of its own, as
@@ -159,8 +160,12 @@ def test_end_to_end_pair_run_forget(flow: Flow, host_env: HostEnv) -> None:
     # Before pairing: no pair, no room, and nothing `run` saw.
     assert _line(seen["before"], "pair") == "pair: none: this computer holds no pair"
     assert _line(seen["before"], "work room") == NO_ROOM
-    # `pair` showed the SAS Lucille's page shows, and `pair confirm` confirmed it.
-    assert f"the SAS is {lucille.sas()}." in seen["paired"].out.splitlines()[-1]
+    # `pair begin` showed the SAS Lucille's page shows, found no answer to its question at the end
+    # of its input, and left it for `pair confirm`, which confirmed it.
+    shown = seen["paired"].out.splitlines()
+    assert shown[0].startswith("code: send this to Lucille in your chat: connect ")
+    assert f"the SAS is {lucille.sas()}." in shown[-2]
+    assert shown[-1].startswith(f"sas_pending: pair {lucille.name} is not confirmed yet: ")
     assert seen["confirm"].rc == 0 and seen["confirm"].out.startswith("confirmed: ")
     # The request answered: a `done` reply from the host, as a note with no thread.
     reply = seen["reply"]

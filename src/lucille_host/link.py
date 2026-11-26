@@ -119,7 +119,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, replace
 from typing import Final
 
-from lucille_host import _switchboard, gate, paths, rooms, state, store
+from lucille_host import _switchboard, connect, gate, paths, rooms, state, store
 from lucille_host.audit import AuditLog
 
 __all__ = [
@@ -879,8 +879,13 @@ class Session:
             )
         return code
 
-    def accept(self, code: _switchboard.Code) -> str:
-        """Write the gate's record, then answer the code. Returns the pair's name. All of it under
+    def accept(self, code: _switchboard.Code, *, nonce: bytes) -> str:
+        """Answer a code delivered for the Connect request whose nonce is ``nonce``: refused
+        (``not_this_mac``), with nothing written, unless the code answers it
+        (``connect.answers_request``). No code is answered another way, in any shell: a code
+        someone was handed, made with the public library, has no request's nonce.
+
+        Write the gate's record, then answer the code. Returns the pair's name. All of it under
         the record lock, so that to another command the gate record and the pair the library
         saves within the answer come together: ``forget`` with no pair held takes a gate record
         with no pair for one a dropped pair left, and deletes it with the rooms that pair still
@@ -889,6 +894,13 @@ class Session:
         in the same call, and what is left of it is forgotten before another command can act on
         it under the record lock, with no line in the audit log, which never had it as accepted.
         When the code is not answered, only the record this call wrote is deleted."""
+        if not connect.answers_request(code, nonce):
+            raise Stopped(
+                "refused",
+                "this code answers no Connect request of this computer's: start from "
+                "`lucille-host pair begin`",
+                code="not_this_mac",
+            )
         saved = gate.Gate(pair=code.name, hub=code.url, created_at=self.link.now())
         with self._record_lock():
             self._save(saved)
