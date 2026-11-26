@@ -16,6 +16,7 @@ from __future__ import annotations
 import collections
 import dataclasses
 import json
+import os
 import threading
 import time
 import uuid
@@ -26,7 +27,7 @@ from typing import Any
 
 import pytest
 
-from lucille_host import _switchboard, gate, link, loop, paths, policy, rooms, state
+from lucille_host import _switchboard, connect, gate, link, loop, paths, policy, rooms, state
 from lucille_host.controls import Controls
 from lucille_host.journal import Journal
 from lucille_host.ops import OPERATIONS
@@ -134,8 +135,10 @@ class RunHost:
         self.lucille = FakeLucille(h, folder / "lucille", url=_switchboard.LUCILLE_HUB)
         self.said: list[str] = []
         session = self.session()
-        code = self.lucille.start(name="lucille")
-        self.name = session.accept(session.check_code(code, self.config))
+        # Paired as Connect pairs (decisions/0002 §11.4): the code's note names a request's nonce.
+        nonce = os.urandom(connect.NONCE_BYTES)
+        code = self.lucille.start(name="lucille", note=connect.note_for(nonce))
+        self.name = session.accept(session.check_code(code, self.config), nonce=nonce)
         self.lucille.collect()
         assert session.resolve(self.name).sas_known
         if open_gate:

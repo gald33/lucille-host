@@ -228,7 +228,7 @@ enum ConnectionText {
     /// cannot start here: each reads as `appBug`, with the host's words as details.
     static let appBugCodes: Set<String> = [
         "usage", "internal", "bad_profile", "unsupported_platform", "os_error", "code_in_argv",
-        "bad_hub", "bad_options", "no_code", "startup_refused", "runtime_folder", "state_invalid",
+        "bad_hub", "bad_options", "startup_refused", "runtime_folder", "state_invalid",
         // `log --limit` takes 1 or more, and the app always asks for 200.
         "bad_limit",
     ]

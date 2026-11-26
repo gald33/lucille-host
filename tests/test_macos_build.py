@@ -4306,7 +4306,7 @@ _NAMES_A_TEST_HUB_OR_FILE_STORE = (r"--hub\b", r"--store-file\b")
 
 
 @pytest.mark.parametrize(
-    "line", ['["pair", "--code-stdin", "--hub", hub, "--json"]', 'verb.append("--store-file")']
+    "line", ['["pair", "begin", "--hub", hub, "--json"]', 'verb.append("--store-file")']
 )
 def test_the_test_hub_scan_sees_each_way(line: str) -> None:
     assert _matches(_NAMES_A_TEST_HUB_OR_FILE_STORE, line), line
@@ -4361,9 +4361,6 @@ CONNECTION_VERBS = frozenset(
     {
         "status",
         "forget",
-        # pair begin reaches the codes of pair --code-stdin once its code is checked, which its
-        # row names only by reference: that row stays until the contract moves them.
-        "pair --code-stdin [--hub URL] [--store-file]",
         "pair begin [--hub URL [--test-key KEY]] [--store-file]",
         "pair resume",
         "pair cancel",
@@ -5157,7 +5154,7 @@ def test_set_up_is_a_flow_the_self_test_walks_and_a_panel_that_draws_it() -> Non
     )
     checks = _swift_function(selftest, "    static func checkSetup(")
     assert "checkSetupWalk(report)" in checks
-    for fixture in ('"pair-code-stdin"', '"policy-previous"', '"policy-previous-none"'):
+    for fixture in ('"pair-begin"', '"policy-previous"', '"policy-previous-none"'):
         assert f"fixtures[{fixture}]" in checks, fixture
     assert 'fixtures["ops-list-sends-file-content"]' in checks
     walk = _swift_function(selftest, "    static func checkSetupWalk(_ report: Report) {")

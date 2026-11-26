@@ -3,20 +3,25 @@
 With no arguments, or with ``--version``, it prints ``lucille-host <version>`` and exits 0. The
 verbs:
 
-- ``pair [CODE]``: answer the pairing code Lucille shows, wait for Lucille to collect the answer,
-  then show the pair's SAS and ask for ``y`` if Lucille's page shows the same (``link.py``,
-  ``gate.py``): ``y`` confirms, ``n`` forgets the pair, and the end of stdin leaves the answer to
-  ``pair confirm`` or ``pair reject``. What was typed at a terminal before the question is
-  discarded, unanswered. The code is read from stdin when it is not given, and only
-  from stdin with ``--code-stdin``, which also stops once the SAS is shown (``sas_pending``).
-  ``--hub`` names a loopback hub to accept codes for, and ``--store-file`` keeps the pair in files
-  rather than the OS keyring; both are saved for the profile. ``pair`` refuses while a pair is
-  held, and while another ``pair`` of the profile runs: it holds ``state/.pair.lock``, taken
-  without waiting, until it returns. It resets the policy to the fresh one before it answers a new
-  code, keeping the earlier one aside;
+- ``pair begin`` (or ``pair`` alone): Connect from Lucille's chat (decisions/0002 §11.4). It reads
+  the chat service and the user's own username there, shows a connect code to send Lucille, and
+  waits for Lucille's signed answer in the request's drop room (``connecting.py``). It answers the
+  pairing code that answer carries only once it has passed every check, its note naming this
+  request's nonce among them, then waits for Lucille to collect the answer, shows the pair's SAS,
+  and asks for ``y`` if Lucille's page shows the same (``link.py``, ``gate.py``): ``y`` confirms,
+  ``n`` forgets the pair, and the end of stdin leaves the answer to ``pair confirm`` or ``pair
+  reject``. What was typed at a terminal before the question is discarded, unanswered. With
+  ``--json`` it stops once the SAS is shown (``sas_pending``). ``--hub`` names a loopback hub to
+  connect through, and ``--store-file`` keeps the pair in files rather than the OS keyring; both
+  are saved for the profile. It refuses while a pair is held, and while another ``pair`` of the
+  profile runs: it holds ``state/.pair.lock``, taken without waiting, until it returns. It resets
+  the policy to the fresh one before it answers a new code, keeping the earlier one aside. No
+  pairing code is ever pasted: one that answers no request of this computer's is refused, in
+  every shell (``link.Session.accept``);
+- ``pair resume`` and ``pair cancel``: wait again on the kept request, or drop it;
 - ``pair status``, ``pair confirm`` and ``pair reject``: where the pair is (showing the SAS again
-  while it waits to be confirmed), the ``y`` given later, and forgetting a pair that has not been
-  confirmed;
+  while it waits to be confirmed, and the request while one is kept), the ``y`` given later, and
+  forgetting a pair that has not been confirmed;
 - ``run``: the long-running host (``loop.py``): it keeps the pair, takes the work rooms Lucille
   offers over it, and reads and answers Lucille's requests there, once the local gate is open.
   The first SIGTERM, SIGHUP or Ctrl-C drains it; it also stops, exiting 0, when the pair ends.
@@ -50,7 +55,7 @@ early, or a refusal of the pairing verbs, prints its state word first (``leaked:
 of ``spec/CLI.md`` instead of its text, one per line, with the same exit codes; stderr stays as it
 is. A failure ends with an ``error`` object, and a usage error writes one too. Each verb writes its
 text and its objects at the same points, from the same values, so that they say the same. With
-``--json``, ``pair`` takes the code only on stdin, with ``--code-stdin``, and asks nothing.
+``--json``, ``pair`` asks nothing.
 ``run``'s JSON form is ``run --json-events`` (``--json`` beside it adds nothing): one writer thread
 writes its events (:class:`_Events`), and ``stopped`` is the last.
 
@@ -563,34 +568,30 @@ def build_parser() -> argparse.ArgumentParser:
 
     pair = verbs.add_parser(
         "pair",
-        help="pair with Lucille: answer its code, then confirm the SAS both sides show",
+        help="connect to Lucille from your chat, then confirm the SAS both sides show",
         description=(
-            "`pair [CODE]` answers the pairing code Lucille shows, then shows the pair's SAS and "
-            "asks for y if Lucille's page shows the same; `pair status` says where the pair is, "
-            "and shows the SAS again while it waits; `pair confirm` confirms the SAS shown; "
-            "`pair reject` forgets a pair that is not confirmed."
+            "`pair begin` (or `pair` alone) shows a connect code to send Lucille in your chat, "
+            "waits for Lucille's answer, then shows the pair's SAS and asks for y if Lucille's "
+            "page shows the same; `pair resume` waits again, and `pair cancel` drops the code; "
+            "`pair status` says where the pair is, and shows the SAS again while it waits; "
+            "`pair confirm` confirms the SAS shown; `pair reject` forgets a pair that is not "
+            "confirmed. No pairing code is pasted."
         ),
     )
     _json_option(pair)
     pair.add_argument(
-        "code",
+        "action",
         nargs="?",
-        metavar="CODE | begin | resume | cancel | status | confirm | reject",
-        help=(
-            "the pairing code (read from stdin when it is not given), or one of the actions: "
-            "`begin` shows a connect code to send Lucille in your chat and waits for its answer, "
-            "`resume` waits again, `cancel` drops it"
-        ),
-    )
-    pair.add_argument(
-        "--code-stdin",
-        action="store_true",
-        help="read the code from stdin only, and stop once the SAS is shown",
+        metavar="begin | resume | cancel | status | confirm | reject",
+        help="what to do; `begin` when none is given",
     )
     pair.add_argument(
         "--hub",
         metavar="URL",
-        help="also accept codes for this hub: http://127.0.0.1:<port> or http://localhost:<port>",
+        help=(
+            "pair begin: connect through this hub on this computer: http://127.0.0.1:<port> or "
+            "http://localhost:<port>"
+        ),
     )
     pair.add_argument(
         "--store-file",
@@ -777,8 +778,6 @@ def _check_usage(parser: argparse.ArgumentParser, args: argparse.Namespace) -> N
             forms["credential"].error(
                 "with --json, credential set reads the value with --value-stdin"
             )
-    if args.verb == "pair" and as_json and args.code is None and not args.code_stdin:
-        forms["pair"].error("with --json, pair reads the code with --code-stdin")
     if args.verb == "roots" and args.roots_verb == "add":
         add = forms["roots add"]
         if args.suggest_alias is not None:
@@ -1088,10 +1087,10 @@ def _pair_view(view: link.PairView) -> dict[str, Any]:
 
 
 def _pair_action(args: argparse.Namespace, dirs: paths.Dirs, out: _Out) -> None:
-    if args.code_stdin or args.hub is not None or args.store_file or args.test_key is not None:
-        raise _Refused("bad_options", f"`pair {args.code}` takes no options")
+    if args.hub is not None or args.store_file or args.test_key is not None:
+        raise _Refused("bad_options", f"`pair {args.action}` takes no options")
     session = link.open_session(dirs, host_state.load_host_config(dirs), say=_say, warn=_warn)
-    if args.code == "status":
+    if args.action == "status":
         view = session.status_view()
         if view.word == "none" and dirs.connect_file.exists():
             if _connect_status(session, dirs, out):
@@ -1101,7 +1100,7 @@ def _pair_action(args: argparse.Namespace, dirs: paths.Dirs, out: _Out) -> None:
         word, detail = link.pair_words(view)
         out.say(f"{word}: {detail}", "pair", **_pair_view(view))
         return
-    if args.code == "reject":
+    if args.action == "reject":
         told = session.reject()
         out.say(
             f"rejected: pair {told.name} is forgotten on this computer; "
@@ -1164,34 +1163,22 @@ def _ask(session: link.Session, name: str, deadline: float | None, out: _Out) ->
 
 
 def _pair(args: argparse.Namespace, dirs: paths.Dirs, out: _Out) -> None:
-    if args.code in CONNECT_ACTIONS:
+    if args.action is None:
+        # `pair` alone connects, as `pair begin` does (decisions/0002 §11.4, step 5).
+        args.action = "begin"
+    if args.action in CONNECT_ACTIONS:
         _connect_action(args, dirs, out)
         return
-    if args.code in PAIR_ACTIONS:
+    if args.action in PAIR_ACTIONS:
         _pair_action(args, dirs, out)
         return
-    if args.test_key is not None:
-        raise _Refused("bad_options", "--test-key is taken by `pair begin` only")
-    if args.code_stdin and args.code is not None:
-        raise _Refused(
-            "code_in_argv", "with --code-stdin the code is read from stdin only; do not pass it"
-        )
-    if out.as_json and args.code is not None:
-        raise _Refused(
-            "code_in_argv",
-            "with --json the code is read from stdin only, with --code-stdin; do not pass it",
-        )
-    try:
-        wanted = host_state.HostConfig(hub=args.hub, store="file" if args.store_file else "keyring")
-    except ValueError as exc:
-        raise _Refused("bad_hub", str(exc)) from exc
-    host_state.startup_checks()
-    # One `pair` of the profile at a time, from before it looks for a pair held until it returns,
-    # its question included: two at once could each answer a code. `pair status`, `pair confirm`
-    # and `pair reject` take no such lock, so that the SAS can be confirmed in another shell.
-    lock = paths.ensure_dir(dirs.state) / PAIR_LOCK
-    with loop.one_at_a_time(lock, ALREADY_PAIRING, "`pair`"):
-        _answer(args, dirs, wanted, out)
+    # Anything else may be a pairing code someone was told to paste: it is never taken, and never
+    # repeated.
+    raise _Refused(
+        "code_in_argv",
+        "`pair` takes no pairing code: `lucille-host pair begin` shows a code to send Lucille in "
+        "your chat; the actions are begin, resume, cancel, status, confirm and reject",
+    )
 
 
 def _pairing_session(
@@ -1233,21 +1220,6 @@ def _pairing_session(
     return session, opened, current
 
 
-def _answer(
-    args: argparse.Namespace, dirs: paths.Dirs, wanted: host_state.HostConfig, out: _Out
-) -> None:
-    """``pair [CODE]``, under the profile's pair lock: answer a code, wait for Lucille to collect
-    the answer, show the SAS and ask about it."""
-    session, opened, current = _pairing_session(dirs, wanted)
-    text = args.code
-    if text is None:
-        text = _read_line("Paste the pairing code Lucille shows: ", out).strip()
-        if not text:
-            raise _Refused("no_code", "no pairing code was given on stdin")
-    code = session.check_code(text, wanted)
-    _answered(session, code, dirs, wanted, opened, current, out, ask=not args.code_stdin)
-
-
 def _answered(
     session: link.Session,
     code: _switchboard.Code,
@@ -1257,12 +1229,13 @@ def _answered(
     current: host_state.HostConfig,
     out: _Out,
     *,
+    nonce: bytes,
     ask: bool,
     answered: Callable[[], None] | None = None,
 ) -> None:
-    """Answer a code the host has checked, wait for Lucille to collect the answer, show the SAS,
-    and ask about it when ``ask``. ``answered``, when given, is called once the answer was tried,
-    whatever came of it."""
+    """Answer a code the host has checked, delivered for the request whose nonce is ``nonce``,
+    wait for Lucille to collect the answer, show the SAS, and ask about it when ``ask``.
+    ``answered``, when given, is called once the answer was tried, whatever came of it."""
     note = link.sanitize(code.note)
     out.say(
         f"pairing code for pair {code.name}, on {code.url}",
@@ -1293,7 +1266,7 @@ def _answered(
             "policy_reset",
         )
     try:
-        name = session.accept(code)
+        name = session.accept(code, nonce=nonce)
     finally:
         if answered is not None:
             answered()
@@ -1343,15 +1316,12 @@ _SERVICE_NAMES: Final = MappingProxyType({"telegram": "Telegram"})
 def _connect_action(args: argparse.Namespace, dirs: paths.Dirs, out: _Out) -> None:
     """``pair begin``, ``pair resume`` and ``pair cancel``, each under the profile's pair lock."""
     options_given = args.hub is not None or args.store_file or args.test_key is not None
-    if args.code_stdin or (args.code != "begin" and options_given):
-        options = (
-            "--hub, --store-file and --test-key only" if args.code == "begin" else "no options"
-        )
-        raise _Refused("bad_options", f"`pair {args.code}` takes {options}")
-    if args.code == "begin" and args.test_key is not None and args.hub is None:
+    if args.action != "begin" and options_given:
+        raise _Refused("bad_options", f"`pair {args.action}` takes no options")
+    if args.action == "begin" and args.test_key is not None and args.hub is None:
         raise _Refused("bad_options", "--test-key is taken only with --hub")
     wanted: host_state.HostConfig | None = None
-    if args.code == "begin":
+    if args.action == "begin":
         try:
             wanted = host_state.HostConfig(
                 hub=args.hub, store="file" if args.store_file else "keyring"
@@ -1365,7 +1335,7 @@ def _connect_action(args: argparse.Namespace, dirs: paths.Dirs, out: _Out) -> No
     host_state.startup_checks()
     lock = paths.ensure_dir(dirs.state) / PAIR_LOCK
     with loop.one_at_a_time(lock, ALREADY_PAIRING, "`pair`"):
-        if args.code == "cancel":
+        if args.action == "cancel":
             _connect_cancel(dirs, out)
         elif wanted is not None:
             _connect_begin(dirs, wanted, out)
@@ -1570,6 +1540,7 @@ def _connect_wait(
         opened,
         current,
         out,
+        nonce=live.nonce,
         ask=not out.as_json,
         answered=lambda: connecting.remove(path),
     )

@@ -1561,18 +1561,26 @@ extension SelfTest {
 
     static func checkFixtureObjects(_ fixtures: [String: Fixture], _ report: Report) {
         let deadline = sampleTime
-        let pairing = fixtures["pair-code-stdin"]?.objects ?? []
+        let pairing = fixtures["pair-begin"]?.objects ?? []
         report.expect(pairing == [
+            .connectState(.code(ConnectRequest(code: "7KQ4M-X2D9P", expiresAt: deadline, service: "telegram", username: "ada"))),
+            .connectState(.connecting(SignedAccount(service: "telegram", from: "telegram:123456789", handle: "@ada"))),
             .pairCode(name: pairName), .policyReset,
             .pair(.accepted(name: pairName, clockSkewed: false)),
             .pair(.waiting(name: pairName)),
             .pair(.sasPending(name: pairName, sas: "1234-5678", deadline: deadline)),
-        ], "pair --code-stdin reads as its code, the policy set aside, accepted, waiting, then the SAS", "\(pairing)")
-        let leaked = fixtures["pair-code-stdin-leaked"]?.objects.last
+        ], "pair begin reads as its request, Lucille's answer, its code, the policy set aside, accepted, waiting, then the SAS", "\(pairing)")
+        let leaked = fixtures["pair-begin-leaked"]?.objects.last
         if case .error(let error)? = leaked {
             report.expect(error.code == "leaked", "a leaked code ends with its error")
         } else {
-            report.expect(false, "pair-code-stdin-leaked ends with an error", "\(String(describing: leaked))")
+            report.expect(false, "pair-begin-leaked ends with an error", "\(String(describing: leaked))")
+        }
+        let interfered = fixtures["pair-begin-interference"]?.objects.last
+        if case .error(let error)? = interfered {
+            report.expect(error.code == "interference", "a request interfered with ends with its error")
+        } else {
+            report.expect(false, "pair-begin-interference ends with an error", "\(String(describing: interfered))")
         }
         report.expect(fixtures["pair-status-sas-pending"]?.objects
                           == [.pair(.sasPending(name: pairName, sas: "1234-5678", deadline: deadline))]
@@ -2043,14 +2051,27 @@ extension SelfTest {
 
     // MARK: - checkPairing
 
+    /// A pairing's objects from its pairing code on: what `pair begin` writes once Lucille's answer
+    /// has passed, without the `connect` objects before it.
+    static func pairingPart(_ objects: [HostObject]) -> [HostObject] {
+        objects.filter {
+            if case .connectState = $0 {
+                return false
+            }
+            return true
+        }
+    }
+
     static func checkPairing(_ fixtures: [String: Fixture], _ report: Report) {
         let deadline = sampleTime
-        let pairObjects: [HostObject] = fixtures["pair-code-stdin"]?.objects ?? [
+        // pair begin's objects from its pairing code on, as the fixture has them: the request and
+        // Lucille's answer before them are checked in checkFixtureObjects.
+        let pairObjects: [HostObject] = pairingPart(fixtures["pair-begin"]?.objects ?? [
             .pairCode(name: pairName), .policyReset,
             .pair(.accepted(name: pairName, clockSkewed: false)),
             .pair(.waiting(name: pairName)),
             .pair(.sasPending(name: pairName, sas: "1234-5678", deadline: deadline)),
-        ]
+        ])
         let pending = status(.sasPending(name: pairName, deadline: deadline))
 
         // The whole gate, as the fixture runs it.
@@ -2309,7 +2330,7 @@ extension SelfTest {
             report.expect(said.contains(.say(note)) && flow.screen == (again ? PairingFlow.Screen.account : .closed),
                           "\(refusal) is said, and \(again ? "the account page comes back" : "the window closes")", "\(said)")
         }
-        let leakedObjects = fixtures["pair-code-stdin-leaked"]?.objects ?? []
+        let leakedObjects = pairingPart(fixtures["pair-begin-leaked"]?.objects ?? [])
         if !leakedObjects.isEmpty {
             flow = PairingFlow()
             begin()
@@ -2824,7 +2845,7 @@ extension SelfTest {
 
     /// Set Up (decisions/0002 §3.1 steps 8 to 10, §11.6): once a pair They Match confirmed in this
     /// app session is connected, one window with pages; Add back first only for a pairing whose
-    /// own `pair --code-stdin` child, started in this session, set the policy aside (spec/CLI.md §6,
+    /// own `pair begin` child, started in this session, set the policy aside (spec/CLI.md §6,
     /// `policy_reset` and `previous_policy`), offering only what the menu's own gates can add, with
     /// every box unchecked.
     static func checkSetup(_ fixtures: [String: Fixture], _ report: Report) {
@@ -2834,14 +2855,14 @@ extension SelfTest {
         let setAside = PreviousPolicy.found(setAsideAt: start, ops: ["files.sha256", "host.sleep"], folders: [docs])
 
         // What the app reads, from the host's own fixtures when it is given them.
-        let pairObjects: [HostObject] = fixtures["pair-code-stdin"]?.objects ?? [
+        let pairObjects: [HostObject] = fixtures["pair-begin"]?.objects ?? [
             .pairCode(name: pairName), .policyReset, .pair(.accepted(name: pairName, clockSkewed: false)),
         ]
         let previousObjects: [HostObject] = fixtures["policy-previous"]?.objects ?? [.previousPolicy(setAside)]
         let noneObjects: [HostObject] = fixtures["policy-previous-none"]?.objects ?? [.previousPolicy(.nothingSetAside)]
         let previous = VerbOutcome.done(previousObjects)
         let nothing = VerbOutcome.done(noneObjects)
-        report.expect(pairObjects.contains(.policyReset), "pair --code-stdin says when it set the policy aside", "\(pairObjects)")
+        report.expect(pairObjects.contains(.policyReset), "pair begin says when it set the policy aside", "\(pairObjects)")
         report.expect(previous.previousPolicy == setAside,
                       "policy previous reads when the policy was set aside, to the second, with its operations and folders", "\(previous)")
         report.expect(nothing.previousPolicy == PreviousPolicy.nothingSetAside, "and that none was set aside", "\(nothing)")

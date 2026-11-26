@@ -30,10 +30,10 @@ from keyring.backends.fail import Keyring as FailKeyring
 from switchboard import client, pairing
 from switchboard.testing import hub
 
-from lucille_host import _switchboard, gate, link, loop, paths, policy, spec, state, store
+from lucille_host import _switchboard, connect, gate, link, loop, paths, policy, spec, state, store
 from lucille_host.cli import ALREADY_PAIRING, PAIR_LOCK, main
 from tests import _audit_hook
-from tests._cli import HostCli, collecting, until
+from tests._cli import STDIN, HostCli, collecting, until
 from tests._host import HostEnv, lock_free, lock_held
 from tests._keyring import NULL_SENTENCE, MemoryKeyring, no_session_bus, turned_off
 from tests._lucille import FakeLucille
@@ -66,6 +66,13 @@ def cli(
     host.stopping.set()
 
 
+def _delivered(cli: HostCli, lucille: FakeLucille, running: Any, **delivery: Any) -> None:
+    """Lucille answers the request ``running`` keeps, once it keeps one."""
+    request = cli.waiting(running)
+    assert request is not None, "no Connect request was kept"
+    lucille.deliver(connect.shown(request.code), cli.signer, **delivery)
+
+
 def _recode(code: str, **changes: Any) -> str:
     """The same code with some of its fields changed, as somebody who held it could make."""
     return dataclasses.replace(pairing.PairingCode.decode(code), **changes).encode()
@@ -95,22 +102,25 @@ def _nothing_changed(cli: HostCli, before: policy.Policy) -> None:
 # --- the code ------------------------------------------------------------------------------------
 
 
+def _refused_and_spent(cli: HostCli, ran: Any, before: policy.Policy) -> None:
+    """A delivered code the host refused: nothing answered or changed, and the request spent."""
+    assert ran.rc == 1
+    _nothing_changed(cli, before)
+    assert not cli.dirs.connect_file.exists()
+
+
 def test_pair_refuses_foreign_hub(cli: HostCli, tmp_path: Path) -> None:
     _enable_and_add_a_folder(tmp_path)
     before = cli.policy()
     for url in ("https://hub.example", "https://switchboard.lucille-ai.com.example"):
         lucille = cli.lucille(url=url)
-        ran = cli.run("pair", lucille.start())
-        assert ran.rc == 1
-        assert ran.err.startswith("refused: this code is for another hub"), ran.err
-        _nothing_changed(cli, before)
+        ran = cli.connect(lucille)
+        assert "refused: this code is for another hub" in ran.err, ran.err
+        _refused_and_spent(cli, ran, before)
         # Nothing was answered: Lucille has nothing to collect.
         assert lucille.collect().state == "waiting"
-    # The same code with Lucille's hub in it is accepted.
-    lucille = cli.lucille(url="https://hub.example")
-    code = _recode(lucille.start(), url=_switchboard.LUCILLE_HUB + "/")
-    with collecting(lucille):
-        ran = cli.run("pair", "--code-stdin", stdin=code + "\n")
+    # A code for Lucille's own hub is accepted.
+    ran = cli.connect(cli.lucille())
     assert ran.rc == 0, ran.text
 
 
@@ -130,11 +140,16 @@ def test_pair_compares_the_hub_as_a_string(url: str, cli: HostCli) -> None:
     # Only Lucille's hub URL as it is written, every trailing / aside: another spelling of it is
     # another hub, as check 3 has it for a room's hub.
     lucille = cli.lucille(url="https://hub.example")
-    code = _recode(lucille.start(), url=url)
-    assert pairing.PairingCode.decode(code).url == url
-    ran = cli.run("pair", code)
+    delivered = []
+
+    def respelled(code: str) -> str:
+        delivered.append(_recode(code, url=url))
+        return delivered[-1]
+
+    ran = cli.connect(lucille, recode=respelled)
+    assert pairing.PairingCode.decode(delivered[0]).url == url
     assert ran.rc == 1
-    assert ran.err.startswith("refused: this code is for another hub"), ran.err
+    assert "refused: this code is for another hub" in ran.err, ran.err
     assert cli.gate() is None and cli.held() == []
 
 
@@ -142,33 +157,29 @@ def test_pair_refuses_code_with_token(cli: HostCli, tmp_path: Path) -> None:
     _enable_and_add_a_folder(tmp_path)
     before = cli.policy()
     lucille = cli.lucille()
-    code = _recode(lucille.start(), token="sb_a_hub_token")
-    assert pairing.PairingCode.decode(code).token == "sb_a_hub_token"
-    ran = cli.run("pair", code)
-    assert ran.rc == 1
-    assert ran.err.startswith("refused: this code carries a hub token"), ran.err
+    ran = cli.connect(lucille, recode=lambda code: _recode(code, token="sb_a_hub_token"))
+    assert "refused: this code carries a hub token" in ran.err, ran.err
     assert "sb_a_hub_token" not in ran.text
-    _nothing_changed(cli, before)
+    _refused_and_spent(cli, ran, before)
     assert lucille.collect().state == "waiting"
 
 
 def test_pair_refuses_unconfigured_loopback(cli: HostCli, tmp_path: Path) -> None:
     _enable_and_add_a_folder(tmp_path)
     before = cli.policy()
-    lucille = cli.lucille(url=LOOPBACK)
-    code = lucille.start()
     for options in ([], ["--hub", "http://127.0.0.1:8766"], ["--hub", "http://localhost:8765"]):
-        ran = cli.run("pair", *options, code)
-        assert ran.rc == 1
-        assert ran.err.startswith("refused: "), ran.err
+        lucille = cli.lucille(url=LOOPBACK)
+        ran = cli.connect(lucille, *options)
+        assert "refused: " in ran.err, ran.err
         assert "--hub" in ran.err
-        _nothing_changed(cli, before)
-    assert lucille.collect().state == "waiting"
+        assert ran.rc == 1 and cli.gate() is None and cli.held() == []
+        assert cli.policy() == before and not cli.dirs.connect_file.exists()
+        assert lucille.collect().state == "waiting"
 
 
 def test_pair_accepts_configured_loopback(cli: HostCli) -> None:
     for wrong in ("https://127.0.0.1:8765", "http://127.0.0.1:0", "http://10.0.0.1:8765"):
-        ran = cli.run("pair", "--hub", wrong, "swbp1_x")
+        ran = cli.run("pair", "begin", "--hub", wrong, stdin="telegram\nada\n")
         assert ran.rc == 1 and ran.err.startswith("lucille-host: a configured hub"), ran.err
     lucille = cli.lucille(url=LOOPBACK)
     ran = cli.paired(lucille, "--hub", LOOPBACK)
@@ -179,37 +190,34 @@ def test_pair_accepts_configured_loopback(cli: HostCli) -> None:
     assert found is not None and found.hub == LOOPBACK
     # With --json, in another profile: the code's hub is the loopback hub, as the text says.
     second = cli.lucille(url=LOOPBACK)
-    code = second.start()
-    with collecting(second):
-        argv = ["--profile", "json", "--json", "pair", "--code-stdin", "--hub", LOOPBACK]
-        ran = cli.run(*argv, stdin=code + "\n")
+    ran = cli.connect(second, "--json", "--hub", LOOPBACK, profile="json")
     assert ran.rc == 0, ran.text
-    first = _objects(ran)[0]
-    assert (first["type"], first["name"], first["hub"]) == ("pair_code", second.name, LOOPBACK)
+    first = next(o for o in _objects(ran) if o["type"] == "pair_code")
+    assert (first["name"], first["hub"]) == (second.name, LOOPBACK)
 
 
 def test_pair_note_shown_sanitized(cli: HostCli) -> None:
+    # Lucille's own note names the request; anything else in a note is refused before it is
+    # shown (`not_this_mac`), so a note with more in it is never shown at all.
     lucille = cli.lucille()
-    unsafe = "Gal's‮ laptop\x1b[2J⁦x‏؜ \x85\ud800" + "n" * 400
-    code = lucille.start(note=unsafe)
-    assert pairing.PairingCode.decode(code).note == unsafe
-    with collecting(lucille):
-        ran = cli.run("pair", "--code-stdin", stdin=code + "\n")
-    assert ran.rc == 0, ran.text
+    unsafe = "Gal's‮ laptop\x1b[2J⁦x‏؜ \x85\ud800" + "n" * 400
+    ran = cli.connect(lucille, note=unsafe)
+    assert ran.rc == 1, ran.text
+    assert "laptop" not in ran.text and "\x1b" not in ran.text
+    assert cli.gate() is None and cli.held() == []
+    # The note of a code that answers the request is shown, made safe, in text and in JSON.
+    lucille = cli.lucille()
+    ran = cli.paired(lucille)
     notes = [line for line in ran.out.splitlines() if line.startswith("note: ")]
     assert len(notes) == 1
     shown = notes[0].removeprefix("note: ")
-    assert shown.startswith("Gal's  laptop [2J x")
-    assert len(shown) <= link.NOTE_LIMIT
-    assert all(" " <= char <= "~" for char in shown), shown
-    # With --json, the pair_code object carries the same note, made safe the same way.
+    assert re.fullmatch(r"lucille-host/2 n=[0-9a-f]{32}", shown), shown
     second = cli.lucille()
-    code = second.start(note=unsafe)
-    with collecting(second):
-        ran = cli.run("--profile", "json", "--json", "pair", "--code-stdin", stdin=code + "\n")
+    ran = cli.connect(second, "--json", profile="json")
     assert ran.rc == 0, ran.text
-    first = _objects(ran)[0]
-    assert first["type"] == "pair_code" and first["note"] == shown == link.sanitize(unsafe)
+    first = next(o for o in _objects(ran) if o["type"] == "pair_code")
+    assert first["note"] == link.sanitize(first["note"])
+    assert re.fullmatch(r"lucille-host/2 n=[0-9a-f]{32}", first["note"])
     assert list(_support.validator_for(spec.load_cli_schema("pair_code")).iter_errors(first)) == []
 
 
@@ -683,23 +691,23 @@ def test_spec_gives_every_sentence_a_refusal_can_end_with() -> None:
 
 def test_pair_refuses_while_held(cli: HostCli, tmp_path: Path) -> None:
     first = cli.lucille()
-    cli.interrupted(first.start())
+    cli.interrupted(first)
     held = cli.held()
     assert len(held) == 1
     _enable_and_add_a_folder(tmp_path)
     before, kept = cli.policy(), cli.gate()
-    second = cli.lucille()
-    for argv in (["pair", second.start()], ["pair", "--store-file", second.start()]):
-        ran = cli.run(*argv)
+    for argv in (["pair"], ["pair", "begin"], ["pair", "--store-file"]):
+        ran = cli.run(*argv, stdin=STDIN)
         assert ran.rc == 1
         assert "Disconnect first" in ran.err, ran.err
         assert cli.held() == held and cli.gate() == kept and cli.policy() == before
-    assert second.collect().state == "waiting"
+        # No request was kept, so none could be answered.
+        assert not cli.dirs.connect_file.exists()
     # Once the first pair is confirmed, the same.
     assert first.collect().state == "paired"
     assert cli.run("pair", "status").out.startswith("sas_pending:")
     assert cli.run("pair", "confirm").rc == 0
-    ran = cli.run("pair", second.start())
+    ran = cli.run("pair", stdin=STDIN)
     assert ran.rc == 1 and "Disconnect first" in ran.err
     assert cli.held() == held
 
@@ -732,30 +740,29 @@ class _Given:
 
 
 def test_a_second_pair_refuses_while_one_runs(cli: HostCli, tmp_path: Path) -> None:
-    # The first `pair` waits for its code on stdin. Before, it had looked for a pair held before
-    # it read the code, and held nothing until it answered: a second `pair` meanwhile answered a
-    # code of its own, the first then answered too, and the profile held two pairs, the gate's
-    # record naming only the later.
+    # The first `pair` waits for the chat service on stdin. A pairing holds the pair lock from
+    # before it looks for a pair held until it returns: two at once could each answer a code,
+    # and the profile hold two pairs, the gate's record naming only the later.
     _enable_and_add_a_folder(tmp_path)
     before = cli.policy()
-    first, second = cli.lucille(), cli.lucille()
+    first = cli.lucille()
     stdin = _Given()
     running = cli.start("pair", stdin=stdin)
     stdin.wait_asked(1)
-    code = second.start()
-    with collecting(second):
-        ran = cli.run("pair", "--code-stdin", stdin=code + "\n", timeout=30)
+    ran = cli.run("pair", "begin", stdin=STDIN, timeout=30)
     assert ran.rc == 1, ran.text
     assert ran.err == f"lucille-host: {ALREADY_PAIRING}\n"
     _nothing_changed(cli, before)
-    assert second.collect().state == "waiting"
+    assert not cli.dirs.connect_file.exists()
     lock = cli.dirs.state / PAIR_LOCK
     assert not lock_free(lock), "another process could take the pair lock"
     # The first goes on, and pairs.
     cli.monkeypatch.setattr("sys.stdin", stdin)
-    stdin.give(first.start() + "\n")
+    stdin.give("telegram\n")
+    stdin.give("ada\n")
+    _delivered(cli, first, running)
     with collecting(first):
-        stdin.wait_asked(2)  # the SAS is shown, and the question asked
+        stdin.wait_asked(3)  # the SAS is shown, and the question asked
     stdin.give("y\n")
     ran = running.wait()
     assert ran.rc == 0, ran.text
@@ -768,10 +775,8 @@ def test_a_second_pair_refuses_while_one_runs(cli: HostCli, tmp_path: Path) -> N
 
 def test_pair_refuses_while_another_process_runs_pair(cli: HostCli) -> None:
     before = cli.policy()
-    lucille = cli.lucille()
-    code = lucille.start()
-    with lock_held(paths.ensure_dir(cli.dirs.state) / PAIR_LOCK), collecting(lucille):
-        ran = cli.run("pair", "--code-stdin", stdin=code + "\n", timeout=30)
+    with lock_held(paths.ensure_dir(cli.dirs.state) / PAIR_LOCK):
+        ran = cli.run("pair", stdin=STDIN, timeout=30)
     assert ran.rc == 1, ran.text
     assert ran.err == f"lucille-host: {ALREADY_PAIRING}\n"
     _nothing_changed(cli, before)
@@ -786,7 +791,6 @@ def test_pair_refuses_where_the_pair_lock_cannot_be_taken(
     # `pair` cannot make sure that no other `pair` of the profile answers a code: it says so,
     # naming itself, and answers nothing.
     before = cli.policy()
-    code = cli.lucille().start()
     real = os.lockf
 
     def cannot_lock(descriptor: int, command: int, length: int) -> None:
@@ -795,7 +799,7 @@ def test_pair_refuses_where_the_pair_lock_cannot_be_taken(
         real(descriptor, command, length)
 
     monkeypatch.setattr("os.lockf", cannot_lock)
-    ran = cli.run("pair", "--code-stdin", stdin=code + "\n", timeout=30)
+    ran = cli.run("pair", stdin=STDIN, timeout=30)
     lock = os.path.realpath(cli.dirs.state / PAIR_LOCK)
     assert ran.rc == 1, ran.text
     assert ran.err == (
@@ -811,10 +815,12 @@ def test_pair_status_confirm_and_reject_work_while_pair_asks(cli: HostCli, verb:
     # take no such lock: the SAS can still be shown, confirmed or rejected in another shell.
     lucille = cli.lucille()
     stdin = _Given()
-    stdin.give(lucille.start() + "\n")
+    stdin.give("telegram\n")
+    stdin.give("ada\n")
+    running = cli.start("pair", stdin=stdin)
+    _delivered(cli, lucille, running)
     with collecting(lucille):
-        running = cli.start("pair", stdin=stdin)
-        stdin.wait_asked(2)
+        stdin.wait_asked(3)
     lock = cli.dirs.state / PAIR_LOCK
     assert not lock_free(lock), "the pair lock is not held while `pair` asks"
     # It is `state/.pair.lock`, and not `run`'s lock: a `run` started now is not refused as one
@@ -856,9 +862,9 @@ def test_store_file_pairs_where_the_keyring_stores_nothing(
     else:
         no_session_bus(monkeypatch)
     lucille = cli.lucille()
-    ran = cli.run("pair", "--code-stdin", stdin=lucille.start() + "\n")
+    ran = cli.run("pair", stdin=STDIN)
     assert ran.rc == 1 and "has no keyring to store in" in ran.err and "--store-file" in ran.err
-    assert cli.gate() is None
+    assert cli.gate() is None and not cli.dirs.connect_file.exists()
     ran = cli.paired(lucille, "--store-file")
     assert "weaker than the OS keyring" in ran.err
     assert cli.run("pair", "confirm").rc == 0
@@ -892,9 +898,9 @@ def test_keyrings_off_switch_refuses_the_keyring_as_storing_nothing(
         "message": NULL_SENTENCE,
     }
     lucille = cli.lucille()
-    ran = cli.run("pair", "--code-stdin", stdin=lucille.start() + "\n")
+    ran = cli.run("pair", stdin=STDIN)
     assert ran.rc == 1 and ran.err == f"lucille-host: {NULL_SENTENCE}\n", ran.text
-    assert cli.gate() is None
+    assert cli.gate() is None and not cli.dirs.connect_file.exists()
     ran = cli.paired(lucille, "--store-file")
     assert "weaker than the OS keyring" in ran.err
     assert cli.run("pair", "confirm").rc == 0
@@ -992,10 +998,9 @@ def test_a_write_the_keyring_did_not_answer_in_time_is_read_again_by_the_next_st
     # confirms, or finds no pair and pairs anew.
     backend = _late_writer(cli, monkeypatch, cli.dirs.gate_file.exists)
     lucille = cli.lucille()
-    code = lucille.start()
     try:
         # A write with no deadline would wait for the release below: it fails here instead.
-        ran = cli.run("--json", "pair", "--code-stdin", stdin=code + "\n", timeout=LATE_WAIT)
+        ran = cli.begin(lucille, "--json").wait(LATE_WAIT)
     finally:
         if not lands:
             backend.lost.set()
@@ -1083,56 +1088,59 @@ def test_a_forget_whose_write_did_not_answer_in_time_keeps_the_gate_record(
         assert cli.held() == [] and cli.gate() is None
 
 
-def test_code_never_in_argv(cli: HostCli) -> None:
-    lucille = cli.lucille()
-    code = lucille.start()
-    ran = cli.run("pair", "--code-stdin", code)
-    assert ran.rc == 1
-    assert "read from stdin only" in ran.err
-    assert cli.gate() is None and cli.held() == []
-    assert cli.run("pair", "--code-stdin", stdin="\n").rc == 1
-    # With --json, a code on the command line is refused whether or not --code-stdin is given,
-    # and is written nowhere.
-    for argv in (("pair", code, "--json"), ("pair", "--json", "--code-stdin", code)):
+def test_a_code_is_never_taken_on_the_command_line(cli: HostCli) -> None:
+    # No pairing code is pasted: one given to `pair` is refused, in text and in JSON, and written
+    # nowhere.
+    code = cli.lucille().start()
+    for argv in (("pair", code), ("pair", code, "--json"), ("--json", "pair", code)):
         ran = cli.run(*argv)
         assert ran.rc == 1, argv
-        (refused,) = _objects(ran)
-        assert (refused["type"], refused["code"]) == ("error", "code_in_argv"), argv
-        assert code not in ran.text
-    assert cli.gate() is None and cli.held() == []
-    # A code where the parser takes no word: standard error may quote it, the JSON never does.
+        assert code not in ran.text, argv
+        assert "`lucille-host pair begin` shows a code" in ran.err, ran.err
+        if "--json" in argv:
+            (refused,) = _objects(ran)
+            assert (refused["type"], refused["code"]) == ("error", "code_in_argv"), argv
+    assert cli.gate() is None and cli.held() == [] and not cli.dirs.connect_file.exists()
+    # Nor on standard input: `--code-stdin` is gone, a usage error.
     cli.capsys.readouterr()
+    with pytest.raises(SystemExit) as exit_info:
+        main(["--json", "pair", "--code-stdin"])
+    out, err = cli.capsys.readouterr()
+    assert exit_info.value.code == 2
+    assert [json.loads(line)["code"] for line in out.splitlines()] == ["usage"]
+    # A code where the parser takes no word: standard error may quote it, the JSON never does.
     with pytest.raises(SystemExit) as exit_info:
         main(["pair", "status", code, "--json"])
     out, err = cli.capsys.readouterr()
     assert exit_info.value.code == 2
     assert [json.loads(line)["code"] for line in out.splitlines()] == ["usage"]
     assert code not in out and code in err
-    with collecting(lucille):
-        ran = cli.run("pair", "--code-stdin", stdin=code + "\n")
+    # The code Lucille delivers is nowhere the host writes: not its output, its files or its
+    # keyring item.
+    delivered: list[str] = []
+    ran = cli.connect(cli.lucille(), before_post=delivered.append)
     assert ran.rc == 0, ran.text
-    # The code is nowhere the host writes: not its output, its files or its keyring item.
-    assert code not in ran.text
-    second = cli.lucille()
-    other = second.start()
-    with collecting(second):
-        ran = cli.run("--profile", "json", "pair", "--code-stdin", "--json", stdin=other + "\n")
-    assert ran.rc == 0, ran.text
-    assert other not in ran.text and code not in ran.text
-    for path in cli.env.home.rglob("*"):
-        if path.is_file():
-            assert code not in path.read_text(errors="replace"), path
-    assert all(code not in value for value in cli.env.keyring.items.values())
+    ran2 = cli.connect(cli.lucille(), "--json", profile="json", before_post=delivered.append)
+    assert ran2.rc == 0, ran2.text
+    assert len(delivered) == 2
+    for given in delivered:
+        assert given not in ran.text and given not in ran2.text
+        for path in cli.env.home.rglob("*"):
+            if path.is_file():
+                assert given not in path.read_text(errors="replace"), path
+        assert all(given not in value for value in cli.env.keyring.items.values())
 
 
-def test_pair_reads_the_code_from_stdin_when_it_is_not_given(cli: HostCli) -> None:
+def test_pair_alone_connects_as_begin(cli: HostCli) -> None:
     lucille = cli.lucille()
-    code = lucille.start()
+    running = cli.start("pair", stdin=STDIN)
+    _delivered(cli, lucille, running)
     with collecting(lucille):
-        ran = cli.run("pair", stdin=code + "\n")
-    # With no answer after the code, the SAS is shown, and the answer left for `pair confirm`
+        ran = running.wait()
+    # With no answer after the username, the SAS is shown, and the answer left for `pair confirm`
     # or `pair reject`.
     assert ran.rc == 0, ran.text
+    assert ran.out.startswith("code: send this to Lucille in your chat: connect "), ran.out
     found = cli.gate()
     assert found is not None and found.deadline is not None
     assert ran.out.splitlines()[-2:] == [
@@ -1149,32 +1157,51 @@ def test_pair_reads_the_code_from_stdin_when_it_is_not_given(cli: HostCli) -> No
 # --- waiting for Lucille to collect --------------------------------------------------------------
 
 
-def test_code_stdin_waits_until_sas_pending(cli: HostCli) -> None:
+def _connect_lines(ran: Any) -> list[str]:
+    """``pair begin``'s text lines from the pairing code on: what Lucille's answer started."""
+    lines = ran.out.splitlines()
+    assert lines[0].startswith("code: send this to Lucille in your chat: connect "), lines
+    assert lines[1] == "connecting: as @ada on Telegram", lines
+    return lines[2:]
+
+
+def test_begin_waits_until_sas_pending(cli: HostCli) -> None:
     lucille = cli.lucille()
     ran = cli.paired(lucille)
-    lines = ran.out.splitlines()
+    lines = _connect_lines(ran)
     assert lines[0] == f"pairing code for pair {lucille.name}, on {_switchboard.LUCILLE_HUB}"
-    assert [line.split(":", 1)[0] for line in lines[1:]] == ["accepted", "waiting", "sas_pending"]
+    assert lines[1].startswith("note: lucille-host/2 n=")
+    assert [line.split(":", 1)[0] for line in lines[2:]] == [
+        "accepted",
+        "waiting",
+        "sas_pending",
+        "sas_pending",
+    ]
     found = cli.gate()
     assert found is not None and found.pair == lucille.name
     assert found.shown_at == cli.h.now and found.deadline == found.shown_at + gate.WINDOW
     assert found.opened_at is None
     # It stops once the SAS is shown, as Lucille's page shows it, with the deadline.
-    assert f"the SAS is {lucille.sas()}." in lines[-1]
-    assert link.iso(found.deadline) in lines[-1]
+    assert f"the SAS is {lucille.sas()}." in lines[-2]
+    assert link.iso(found.deadline) in lines[-2]
 
     # With --json: the same steps, as objects, the SAS and the deadline in the last; no prompt.
     second = cli.lucille()
-    code = second.start()
-    with collecting(second):
-        ran = cli.run("--profile", "json", "pair", "--code-stdin", "--json", stdin=code + "\n")
+    ran = cli.connect(second, "--json", profile="json")
     assert ran.rc == 0, ran.text
     found = gate.load(paths.dirs("json").gate_file)
     assert found is not None and found.deadline is not None
     assert found.shown_at == cli.h.now
     name = second.name
-    assert _objects(ran) == [
-        {"v": 1, "type": "pair_code", "name": name, "hub": _switchboard.LUCILLE_HUB, "note": ""},
+    objects = _objects(ran)
+    assert [(o["type"], o["state"]) for o in objects[:2]] == [
+        ("connect", "code"),
+        ("connect", "connecting"),
+    ]
+    note = objects[2]["note"]
+    assert re.fullmatch(r"lucille-host/2 n=[0-9a-f]{32}", note)
+    assert objects[2:] == [
+        {"v": 1, "type": "pair_code", "name": name, "hub": _switchboard.LUCILLE_HUB, "note": note},
         {"v": 1, "type": "pair", "state": "accepted", "name": name, "clock_skewed": False},
         {"v": 1, "type": "pair", "state": "waiting", "name": name},
         {
@@ -1190,12 +1217,11 @@ def test_code_stdin_waits_until_sas_pending(cli: HostCli) -> None:
     # From a policy that is not the fresh one, the policy is set aside before the code is
     # answered, and it says so first.
     assert cli.run("--profile", "reset", "ops", "enable", "host.sleep").rc == 0
-    third = cli.lucille()
-    code = third.start()
-    with collecting(third):
-        ran = cli.run("--profile", "reset", "pair", "--code-stdin", "--json", stdin=code + "\n")
+    ran = cli.connect(cli.lucille(), "--json", profile="reset")
     assert ran.rc == 0, ran.text
     assert [(o["type"], o.get("state")) for o in _objects(ran)] == [
+        ("connect", "code"),
+        ("connect", "connecting"),
         ("pair_code", None),
         ("policy_reset", None),
         ("pair", "accepted"),
@@ -1203,18 +1229,23 @@ def test_code_stdin_waits_until_sas_pending(cli: HostCli) -> None:
         ("pair", "sas_pending"),
     ]
     # A code that leaked, and one past its time, end with an error object, exit 1.
-    leaked = cli.lucille()
-    code = leaked.start()
     elsewhere = pairing.PairStore(cli.folder / "elsewhere", env={})
-    pairing.accept(code, None, store=elsewhere, connect=cli.h.client_class(), now=cli.h.now)
-    ran = cli.run("--profile", "leaked", "pair", "--code-stdin", "--json", stdin=code + "\n")
+
+    def redeemed_first(code: str) -> None:
+        pairing.accept(code, None, store=elsewhere, connect=cli.h.client_class(), now=cli.h.now)
+
+    ran = cli.connect(cli.lucille(), "--json", profile="leaked", before_post=redeemed_first)
     assert ran.rc == 1
-    assert [o["type"] for o in _objects(ran)] == ["pair_code", "error"]
+    assert [o["type"] for o in _objects(ran)][-2:] == ["pair_code", "error"]
     assert _objects(ran)[-1]["code"] == "leaked"
-    late = cli.lucille()
-    code = late.start()
-    cli.h.advance(2 * 3600)
-    ran = cli.run("--profile", "late", "--json", "pair", "--code-stdin", stdin=code + "\n")
+    # A pairing code past its time, while the Connect request is still live.
+    ran = cli.connect(
+        cli.lucille(),
+        "--json",
+        profile="late",
+        ttl=60,
+        before_post=lambda _code: cli.h.advance(1000),
+    )
     assert ran.rc == 1 and _objects(ran)[-1]["code"] == "expired", ran.text
 
 
@@ -1226,28 +1257,26 @@ class _Typed(io.StringIO):
 
 
 def test_json_pair_asks_nothing_at_a_terminal(cli: HostCli) -> None:
-    # As text, `pair --code-stdin` asks for the code on stderr when stdin is a terminal.
-    lucille = cli.lucille()
-    code = lucille.start()
-    with collecting(lucille):
-        ran = cli.run("--profile", "text", "pair", "--code-stdin", stdin=_Typed(code + "\n"))
-    assert ran.rc == 0 and ran.err.startswith("Paste the pairing code Lucille shows: "), ran.text
+    # As text, `pair begin` asks for the chat service on stderr when stdin is a terminal.
+    ran = cli.connect(cli.lucille(), stdin=_Typed(STDIN), profile="text")
+    assert ran.rc == 0 and ran.err.startswith("Chat service (telegram): "), ran.text
     # With --json it asks nothing, through to the SAS, and when nothing is typed.
-    second = cli.lucille()
-    code = second.start()
-    with collecting(second):
-        ran = cli.run("pair", "--code-stdin", "--json", stdin=_Typed(code + "\n"))
+    ran = cli.connect(cli.lucille(), "--json", stdin=_Typed(STDIN))
     assert ran.rc == 0 and ran.err == "", ran.text
-    assert [o.get("state") for o in _objects(ran)] == [None, "accepted", "waiting", "sas_pending"]
-    ran = cli.run("--profile", "empty", "--json", "pair", "--code-stdin", stdin=_Typed("\n"))
-    assert ran.rc == 1 and ran.err == "lucille-host: no pairing code was given on stdin\n"
-    assert [o["code"] for o in _objects(ran)] == ["no_code"]
+    assert [o.get("state") for o in _objects(ran)] == [
+        "code",
+        "connecting",
+        None,
+        "accepted",
+        "waiting",
+        "sas_pending",
+    ]
+    ran = cli.run("--profile", "empty", "--json", "pair", "begin", stdin=_Typed("\n"))
+    assert ran.rc == 1 and not ran.err.startswith("Chat service"), ran.text
+    assert [o["code"] for o in _objects(ran)] == ["bad_service"]
     # A code on the command line is refused before anything is read or asked.
     ran = cli.run("--profile", "argv", "pair", "swbp1_x", "--json", stdin=_Typed("\n"))
-    assert ran.rc == 1 and ran.err == (
-        "lucille-host: with --json the code is read from stdin only, with --code-stdin; do not "
-        "pass it\n"
-    )
+    assert ran.rc == 1 and ran.err.startswith("lucille-host: `pair` takes no pairing code"), ran.err
 
 
 def test_pair_completes_without_paired_note(cli: HostCli) -> None:
@@ -1263,7 +1292,7 @@ def test_pair_completes_without_paired_note(cli: HostCli) -> None:
             return super().post(channel, body, **options)
 
     lucille = cli.lucille(connect=Quiet)
-    running = cli.start("pair", "--code-stdin", stdin=lucille.start() + "\n")
+    running = cli.begin(lucille)
     # Lucille collects only once the host has resolved and is listening for a note.
     until(lambda: cli.listens > 0)
     assert lucille.collect().state == "paired"
@@ -1279,7 +1308,7 @@ def test_a_paired_note_wakes_the_wait_at_once(
     # With the periodic resolve far off, only the note can end the wait in time.
     monkeypatch.setattr("lucille_host.link.RESOLVE_EVERY", 600.0)
     lucille = cli.lucille()
-    running = cli.start("pair", "--code-stdin", stdin=lucille.start() + "\n")
+    running = cli.begin(lucille)
     until(lambda: cli.listens > 0)
     assert lucille.collect().state == "paired"
     ran = running.wait(15)
@@ -1299,15 +1328,18 @@ def _answered_twice(cli: HostCli, lucille: FakeLucille, code: str) -> None:
 @pytest.mark.parametrize("case", ["already_redeemed", "aborted", "superseded"])
 def test_pair_leaked_states_stop(case: str, cli: HostCli, monkeypatch: pytest.MonkeyPatch) -> None:
     lucille = cli.lucille()
-    code = lucille.start()
     if case == "already_redeemed":
         other = pairing.PairStore(cli.folder / "other", env={})
-        pairing.accept(code, None, store=other, connect=cli.h.client_class(), now=cli.h.now)
-        ran = cli.run("pair", "--code-stdin", stdin=code + "\n")
+
+        def redeemed_first(code: str) -> None:
+            pairing.accept(code, None, store=other, connect=cli.h.client_class(), now=cli.h.now)
+
+        ran = cli.begin(lucille, before_post=redeemed_first).wait()
     elif case == "aborted":
-        running = cli.start("pair", "--code-stdin", stdin=code + "\n")
+        delivered: list[str] = []
+        running = cli.begin(lucille, before_post=delivered.append)
         until(lambda: '"event":"accepted"' in cli.audit())
-        _answered_twice(cli, lucille, code)
+        _answered_twice(cli, lucille, delivered[0])
         ran = running.wait()
     else:
 
@@ -1315,7 +1347,7 @@ def test_pair_leaked_states_stop(case: str, cli: HostCli, monkeypatch: pytest.Mo
             raise pairing.PairingError("another answer was collected", state="superseded")
 
         monkeypatch.setattr("switchboard.pairing.resolve", superseded)
-        ran = cli.run("pair", "--code-stdin", stdin=code + "\n")
+        ran = cli.begin(lucille).wait()
     assert ran.rc == 1
     assert ran.err.startswith("leaked: the pairing code leaked"), ran.err
     assert f"({case})" in ran.err
@@ -1330,14 +1362,13 @@ def test_pair_leaked_states_stop(case: str, cli: HostCli, monkeypatch: pytest.Mo
 @pytest.mark.parametrize("case", ["expired", "wrong_hub", "never_confirmed", "unsent"])
 def test_pair_again_states_stop(case: str, cli: HostCli) -> None:
     lucille = cli.lucille()
-    code = lucille.start()
     if case == "expired":
-        cli.h.advance(2 * 3600)
-        ran = cli.run("pair", code)
+        # The pairing code is past its time, while the Connect request is still live (1200 s).
+        ran = cli.begin(lucille, ttl=60, before_post=lambda _code: cli.h.advance(1000)).wait()
     elif case == "wrong_hub":
-        ran = cli.run("pair", _recode(code, secret=os.urandom(32)))
+        ran = cli.begin(lucille, recode=lambda code: _recode(code, secret=os.urandom(32))).wait()
     elif case == "never_confirmed":
-        running = cli.start("pair", "--code-stdin", stdin=code + "\n")
+        running = cli.begin(lucille)
         until(lambda: '"event":"accepted"' in cli.audit())
         # Lucille never collects; its window ends 12 hours after the code expires.
         cli.h.advance(13 * 3600)
@@ -1353,7 +1384,7 @@ def test_pair_again_states_stop(case: str, cli: HostCli) -> None:
                 return super().post(channel, body, **options)
 
         cli.client_class = NoAnswer
-        running = cli.start("pair", "--code-stdin", stdin=code + "\n")
+        running = cli.begin(lucille)
         until(lambda: '"event":"accepted"' in cli.audit())
         assert '"sent":false' in cli.audit()
         cli.h.advance(2 * 3600)
@@ -1390,7 +1421,7 @@ def test_a_hub_out_of_reach_while_waiting_is_waited_out(cli: HostCli) -> None:
             return super()._call(*args, **options)
 
     cli.client_class = Flaky
-    running = cli.start("pair", "--code-stdin", stdin=lucille.start() + "\n")
+    running = cli.begin(lucille)
     until(lambda: cli.listens > 0)
     out_of_reach.set()
     until(lambda: len(failed) >= 4)
@@ -1413,7 +1444,7 @@ def test_an_unparsable_note_in_the_pair_room_is_waited_out(cli: HostCli) -> None
         return notes(link, pair)
 
     cli.monkeypatch.setattr(_switchboard.Link, "pair_notes", kept)
-    running = cli.start("pair", "--code-stdin", stdin=lucille.start() + "\n")
+    running = cli.begin(lucille)
     until(lambda: cli.listens > 0)
     lucille.post_unparsable(rooms[-1], pairing.CHANNEL)
     listened = cli.listens
@@ -1431,7 +1462,7 @@ def test_pair_status_resumes(cli: HostCli) -> None:
     ran = cli.run("pair", "status")
     assert (ran.rc, ran.out) == (0, "none: this computer holds no pair\n")
     lucille = cli.lucille()
-    cli.interrupted(lucille.start())
+    cli.interrupted(lucille)
     ran = cli.run("pair", "status")
     # It asked the hub, so it says what `status`, which makes no hub call, cannot.
     assert (ran.rc, ran.out) == (
@@ -1517,14 +1548,7 @@ def test_pair_status_resumes(cli: HostCli) -> None:
 
     assert pair_json("status") == [{"v": 1, "type": "pair", "state": "none"}]
     second = cli.lucille()
-    code = second.start()
-
-    def interrupt(*_: Any, **__: Any) -> Any:
-        raise KeyboardInterrupt
-
-    with cli.monkeypatch.context() as patch:
-        patch.setattr("lucille_host._switchboard.PairNotes.wait", interrupt)
-        ran = cli.run("--profile", "json", "pair", "--code-stdin", "--json", stdin=code + "\n")
+    ran = cli.interrupted(second, "--json", profile="json")
     assert ran.rc == 1 and ran.err.startswith("interrupted: ")
     assert _objects(ran)[-1] == {
         "v": 1,
@@ -1568,12 +1592,12 @@ def test_json_takes_the_longest_pair_name_and_the_most_folders(
     assert len(found["policy"]["folders"]) == policy.MAX_ROOTS
     lucille = cli.lucille()
     longest = "p" * 32
-    code = lucille.start(name=longest)
-    with collecting(lucille):
-        ran = cli.run("pair", "--code-stdin", "--json", stdin=code + "\n")
+    ran = cli.connect(lucille, "--json", name=longest)
     assert ran.rc == 0, ran.text
     objects = _objects(ran)
     assert [(o["type"], o.get("state"), o.get("name")) for o in objects] == [
+        ("connect", "code", None),
+        ("connect", "connecting", None),
         ("pair_code", None, longest),
         ("policy_reset", None, None),
         ("pair", "accepted", longest),
@@ -1591,7 +1615,7 @@ def test_json_takes_the_longest_pair_name_and_the_most_folders(
 
 def test_an_interrupted_pair_is_kept(cli: HostCli) -> None:
     lucille = cli.lucille()
-    ran = cli.interrupted(lucille.start())
+    ran = cli.interrupted(lucille)
     assert "pair status` resumes" in ran.err
     assert cli.held() == [lucille.name]
     found = cli.gate()
@@ -1612,8 +1636,12 @@ class _User:
         self.cli = cli
         self.answer = answer
         self.asked: list[gate.Gate | None] = []
+        # `pair begin` reads the chat service and the username first.
+        self.first = STDIN.splitlines(keepends=True)
 
     def readline(self) -> str:
+        if self.first:
+            return self.first.pop(0)
         self.asked.append(self.cli.gate())
         if len(self.asked) > self.ASKED_MOST:
             return ""
@@ -1633,6 +1661,9 @@ class _Terminal:
         self.file = open(slave, encoding="utf-8")  # closed by close()
         self.answer = answer
         self.asked = 0
+        # `pair begin` reads the chat service and the username first, as typed then; anything
+        # typed ahead stays on the terminal.
+        self.first = STDIN.splitlines(keepends=True)
         if ahead:
             self.type(ahead)
 
@@ -1648,6 +1679,8 @@ class _Terminal:
         return self.file.fileno()
 
     def readline(self) -> str:
+        if self.first:
+            return self.first.pop(0)
         self.asked += 1
         if self.asked > 1:
             return ""  # stdin ends rather than leave a second question waiting for ever
@@ -1659,6 +1692,10 @@ class _Terminal:
         os.close(self.master)
 
 
+# What `pair begin` asks at a terminal before the SAS: the chat service, then the username.
+PROMPTS = "Chat service (telegram): Your username on Telegram: "
+
+
 def _events(cli: HostCli, event: str) -> list[dict[str, Any]]:
     lines = [json.loads(line) for line in cli.audit().splitlines()]
     return [line for line in lines if line.get("event") == event]
@@ -1666,13 +1703,12 @@ def _events(cli: HostCli, event: str) -> list[dict[str, Any]]:
 
 def test_pair_shows_the_sas_and_y_confirms(cli: HostCli) -> None:
     lucille = cli.lucille()
-    code = lucille.start()
     user = _User(cli, lambda _: "y\n")
     with collecting(lucille):
-        ran = cli.start("pair", code, stdin=user).wait()
+        ran = cli.begin(lucille, stdin=user).wait()
     assert ran.rc == 0, ran.text
-    lines = ran.out.splitlines()
-    assert [line.split(":", 1)[0] for line in lines[1:]] == [
+    lines = _connect_lines(ran)
+    assert [line.split(":", 1)[0] for line in lines[2:]] == [
         "accepted",
         "waiting",
         "sas_pending",
@@ -1681,12 +1717,12 @@ def test_pair_shows_the_sas_and_y_confirms(cli: HostCli) -> None:
     # Shown once the pair resolved, as Lucille's page shows it, before the question was asked.
     (asked,) = user.asked
     assert asked is not None and asked.shown_at is not None and asked.opened_at is None
-    assert lines[3] == (
+    assert lines[4] == (
         f"sas_pending: pair {lucille.name}: the SAS is {lucille.sas()}. If Lucille's page shows "
         f"the same, confirm it with `lucille-host pair confirm` before "
         f"{link.iso(asked.deadline or 0)}; if not, `lucille-host pair reject`"
     )
-    assert lines[4] == f"confirmed: pair {lucille.name} is confirmed on this computer"
+    assert lines[5] == f"confirmed: pair {lucille.name} is confirmed on this computer"
     found = cli.gate()
     assert found is not None and found.opened_at == cli.h.now
     assert [line["pair"] for line in _events(cli, "gate_opened")] == [lucille.name]
@@ -1697,14 +1733,13 @@ def test_pair_shows_the_sas_and_y_confirms(cli: HostCli) -> None:
 
 def test_other_answers_are_asked_again(cli: HostCli) -> None:
     lucille = cli.lucille()
-    code = lucille.start()
 
     def answers(n: int) -> str:
         # Typing the SAS itself is no answer either: the question is whether the two match.
         return ["maybe\n", lucille.sas() + "\n", "\n", " YES \n"][n - 1]
 
     with collecting(lucille):
-        ran = cli.start("pair", code, stdin=_User(cli, answers)).wait()
+        ran = cli.begin(lucille, stdin=_User(cli, answers)).wait()
     assert ran.rc == 0, ran.text
     asked_again = "type y if Lucille's page shows the same SAS, or n if it does not"
     assert ran.err.splitlines() == [asked_again] * 3
@@ -1716,18 +1751,17 @@ def test_what_was_typed_before_the_question_is_discarded(cli: HostCli) -> None:
     # A `y` typed while `pair` waits for Lucille, a whole line and a part of one, was typed before
     # the SAS was shown: it answers nothing. The answer typed once asked is the one taken.
     lucille = cli.lucille()
-    code = lucille.start()
     terminal = _Terminal(ahead="y\ny", answer="n\n")
     try:
         with collecting(lucille):
-            ran = cli.start("pair", code, stdin=terminal).wait()
+            ran = cli.begin(lucille, stdin=terminal).wait()
     finally:
         terminal.close()
     assert terminal.asked == 1
     assert ran.rc == 1, ran.text
     # Asked once, on the terminal, and answered by what was typed after.
     assert ran.err == (
-        "Does Lucille's page show the same SAS? Type y if it does, n if not: "
+        PROMPTS + "Does Lucille's page show the same SAS? Type y if it does, n if not: "
         f"rejected: pair {lucille.name} is forgotten on this computer; start again in Lucille. "
         "Lucille was told\n"
     )
@@ -1740,10 +1774,9 @@ def test_a_y_typed_while_pair_waits_for_lucille_is_discarded(cli: HostCli) -> No
     # yet. A `y` typed now is discarded right before the question, not only what was typed
     # before `pair` started.
     lucille = cli.lucille()
-    code = lucille.start()
     terminal = _Terminal(ahead="", answer="n\n")
     try:
-        running = cli.start("pair", code, stdin=terminal)
+        running = cli.begin(lucille, stdin=terminal)
         until(lambda: cli.listens > 0)
         assert cli.gate() is not None and cli.gate().shown_at is None
         terminal.type("y\n")
@@ -1754,7 +1787,7 @@ def test_a_y_typed_while_pair_waits_for_lucille_is_discarded(cli: HostCli) -> No
     assert terminal.asked == 1
     assert ran.rc == 1, ran.text
     assert ran.err == (
-        "Does Lucille's page show the same SAS? Type y if it does, n if not: "
+        PROMPTS + "Does Lucille's page show the same SAS? Type y if it does, n if not: "
         f"rejected: pair {lucille.name} is forgotten on this computer; start again in Lucille. "
         "Lucille was told\n"
     )
@@ -1766,7 +1799,6 @@ def test_y_for_a_pair_another_command_forgot_says_it_is_gone(cli: HostCli) -> No
     # The SAS is shown, and while the question waits, `forget` runs in another shell. The `y`
     # then finds no gate record: the pair is gone, not waiting for `pair reject`.
     lucille = cli.lucille()
-    code = lucille.start()
 
     def forgotten_first(_: int) -> str:
         config = state.load_host_config(cli.dirs)
@@ -1774,7 +1806,7 @@ def test_y_for_a_pair_another_command_forgot_says_it_is_gone(cli: HostCli) -> No
         return "y\n"
 
     with collecting(lucille):
-        ran = cli.start("pair", code, stdin=_User(cli, forgotten_first)).wait()
+        ran = cli.begin(lucille, stdin=_User(cli, forgotten_first)).wait()
     assert ran.rc == 1, ran.text
     assert ran.err == (
         f"none: pair {lucille.name} is gone from this computer: another command forgot it\n"
@@ -1787,7 +1819,6 @@ def test_pair_waits_as_long_as_the_hub_asks(cli: HostCli, monkeypatch: pytest.Mo
     # saying when to ask again. The library returns that as an unchecked resolve, not an error;
     # `pair` still waits as long as the hub asked, rather than its own 5 s (0.2 s here).
     lucille = cli.lucille()
-    code = lucille.start()
     busy = [True]
 
     class Busy(cli.client_class):  # type: ignore[misc,name-defined]
@@ -1810,10 +1841,10 @@ def test_pair_waits_as_long_as_the_hub_asks(cli: HostCli, monkeypatch: pytest.Mo
 
     monkeypatch.setattr("time.sleep", sleep)
     with collecting(lucille):
-        ran = cli.run("pair", "--code-stdin", stdin=code + "\n", timeout=20)
+        ran = cli.begin(lucille).wait(20)
     assert ran.rc == 0, ran.text
     assert waited[:1] == [0.7]
-    assert ran.out.splitlines()[-1].startswith(f"sas_pending: pair {lucille.name}: the SAS is ")
+    assert ran.out.splitlines()[-2].startswith(f"sas_pending: pair {lucille.name}: the SAS is ")
 
 
 def test_no_question_where_what_was_typed_cannot_be_discarded(
@@ -1824,11 +1855,10 @@ def test_no_question_where_what_was_typed_cannot_be_discarded(
 
     monkeypatch.setattr("termios.tcflush", fails)
     lucille = cli.lucille()
-    code = lucille.start()
     terminal = _Terminal(ahead="y\n", answer="y\n")
     try:
         with collecting(lucille):
-            ran = cli.start("pair", code, stdin=terminal).wait()
+            ran = cli.begin(lucille, stdin=terminal).wait()
     finally:
         terminal.close()
     # Nothing is asked, so nothing typed is taken: `pair confirm` answers later.
@@ -1843,9 +1873,8 @@ def test_no_question_where_what_was_typed_cannot_be_discarded(
 @pytest.mark.parametrize("no", ["n", "No"])
 def test_n_at_the_prompt_forgets(no: str, cli: HostCli) -> None:
     lucille = cli.lucille()
-    code = lucille.start()
     with collecting(lucille):
-        ran = cli.start("pair", code, stdin=_User(cli, lambda _: no + "\n")).wait()
+        ran = cli.begin(lucille, stdin=_User(cli, lambda _: no + "\n")).wait()
     assert ran.rc == 1
     assert ran.out.splitlines()[-1].startswith("sas_pending: ")
     assert ran.err == (
@@ -1861,13 +1890,12 @@ def test_n_at_the_prompt_forgets(no: str, cli: HostCli) -> None:
 
 def test_ctrl_c_at_the_prompt_keeps_the_pair(cli: HostCli) -> None:
     lucille = cli.lucille()
-    code = lucille.start()
 
     def interrupt(_: int) -> str:
         raise KeyboardInterrupt
 
     with collecting(lucille):
-        ran = cli.start("pair", code, stdin=_User(cli, interrupt)).wait()
+        ran = cli.begin(lucille, stdin=_User(cli, interrupt)).wait()
     assert ran.rc == 1
     assert ran.err == (
         f"interrupted: pair {lucille.name} is kept; `lucille-host pair status` shows its SAS "
@@ -1881,14 +1909,13 @@ def test_ctrl_c_at_the_prompt_keeps_the_pair(cli: HostCli) -> None:
 
 def test_y_past_the_deadline_forgets(cli: HostCli) -> None:
     lucille = cli.lucille()
-    code = lucille.start()
 
     def late(_: int) -> str:
         cli.h.advance(gate.WINDOW + 1)
         return "y\n"
 
     with collecting(lucille):
-        ran = cli.start("pair", code, stdin=_User(cli, late)).wait()
+        ran = cli.begin(lucille, stdin=_User(cli, late)).wait()
     assert ran.rc == 1
     assert ran.err.startswith("expired: the SAS was not confirmed in time"), ran.err
     assert "Lucille was told" in ran.err
@@ -1898,7 +1925,7 @@ def test_y_past_the_deadline_forgets(cli: HostCli) -> None:
 def test_pair_confirm_confirms_the_sas_shown(cli: HostCli) -> None:
     lucille = cli.lucille()
     ran = cli.paired(lucille)
-    assert f"the SAS is {lucille.sas()}." in ran.out.splitlines()[-1]
+    assert f"the SAS is {lucille.sas()}." in ran.out.splitlines()[-2]
     found = cli.gate()
     assert found is not None and found.opened_at is None
     # The `y` given later: it reads nothing, and compares nothing typed.
@@ -1915,7 +1942,7 @@ def test_pair_confirm_confirms_the_sas_shown(cli: HostCli) -> None:
 
 def test_pair_status_shows_the_sas_while_pending(cli: HostCli) -> None:
     lucille = cli.lucille()
-    cli.interrupted(lucille.start())
+    cli.interrupted(lucille)
     ran = cli.run("pair", "status")
     assert ran.rc == 0 and ran.out.startswith(f"waiting: pair {lucille.name}"), ran.text
     assert re.search(r"\d{4}-\d{4}", ran.text) is None
@@ -1941,7 +1968,7 @@ def test_pair_status_shows_the_sas_while_pending(cli: HostCli) -> None:
 
 def test_confirm_before_the_sas_is_shown_is_refused(cli: HostCli) -> None:
     lucille = cli.lucille()
-    cli.interrupted(lucille.start())
+    cli.interrupted(lucille)
     ran = cli.run("pair", "confirm")
     assert ran.rc == 1 and ran.err.startswith(f"waiting: pair {lucille.name}: "), ran.err
     assert lucille.collect().state == "paired"
@@ -1965,7 +1992,7 @@ def test_confirm_before_the_sas_is_shown_is_refused(cli: HostCli) -> None:
 
 def test_gate_deadline_from_when_the_sas_is_first_shown(cli: HostCli) -> None:
     lucille = cli.lucille()
-    cli.interrupted(lucille.start())
+    cli.interrupted(lucille)
     accepted = cli.h.now
     cli.h.advance(3600)
     assert lucille.collect().state == "paired"
@@ -1999,7 +2026,7 @@ def test_gate_deadline_from_when_the_sas_is_first_shown(cli: HostCli) -> None:
 def test_sas_in_json_starts_the_deadline(cli: HostCli) -> None:
     # Writing the SAS in JSON is showing it: the program that reads it shows it to the user.
     lucille = cli.lucille()
-    cli.interrupted(lucille.start())
+    cli.interrupted(lucille)
     assert lucille.collect().state == "paired"
     found = cli.gate()
     assert found is not None and found.shown_at is None and found.deadline is None
@@ -2103,7 +2130,7 @@ def test_a_pair_with_no_gate_record_is_never_confirmed(cli: HostCli) -> None:
     lucille = cli.lucille()
     # The record goes while `pair` waits: with nowhere to note that it showed the SAS, it shows
     # none, and asks nothing.
-    running = cli.start("pair", lucille.start(), stdin="y\n")
+    running = cli.begin(lucille, stdin=STDIN + "y\n")
     until(lambda: cli.listens > 0)
     gate.remove(cli.dirs.gate_file)
     assert lucille.collect().state == "paired"
@@ -2160,13 +2187,12 @@ def test_a_refused_or_failed_code_resets_nothing_it_should_not(
 ) -> None:
     _enable_and_add_a_folder(tmp_path)
     earlier = cli.policy()
-    lucille = cli.lucille()
-    code = lucille.start()
-    assert cli.run("pair", _recode(code, token="t")).rc == 1
+    ran = cli.connect(cli.lucille(), recode=lambda code: _recode(code, token="t"))
+    assert ran.rc == 1, ran.text
     assert cli.policy() == earlier
     # A code that fails at the hub was still a new pairing: the reset comes before the answer.
-    cli.h.advance(2 * 3600)
-    assert cli.run("pair", code).rc == 1
+    ran = cli.connect(cli.lucille(), ttl=60, before_post=lambda _code: cli.h.advance(1000))
+    assert ran.rc == 1 and "expired: " in ran.err, ran.text
     assert cli.policy() == policy.fresh()
     assert policy.load(cli.dirs.previous_policy_file) == earlier
 
@@ -2296,12 +2322,8 @@ def test_pairing_spawns_nothing(cli: HostCli) -> None:
         cli.paired(lucille)
         assert cli.run("pair", "status").rc == 0
         assert cli.run("pair", "reject").rc == 0
-        code = second.start()
-        with collecting(second):
-            assert cli.run("pair", code, stdin="n\n").rc == 1
-        code = third.start()
-        with collecting(third):
-            assert cli.run("pair", code, stdin="y\n").rc == 0
+        assert cli.connect(second, stdin=STDIN + "n\n").rc == 1
+        assert cli.connect(third, stdin=STDIN + "y\n").rc == 0
         assert cli.run("pair", "confirm").rc == 0
     assert _audit_hook.spawns(events) == []
 
@@ -2332,9 +2354,16 @@ def test_no_write_under_home_switchboard(store_file: bool, cli: HostCli) -> None
 def test_pairing_verbs_refuse_root_and_switchboard_settings(
     cli: HostCli, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    code = cli.lucille().start()
     monkeypatch.setenv("SWITCHBOARD_URL", "https://hub.example")
-    pairing_verbs = (["pair", code], ["pair", "status"], ["pair", "confirm"], ["pair", "reject"])
+    pairing_verbs = (
+        ["pair"],
+        ["pair", "begin"],
+        ["pair", "resume"],
+        ["pair", "cancel"],
+        ["pair", "status"],
+        ["pair", "confirm"],
+        ["pair", "reject"],
+    )
     # So do `run`, `status` and `forget`, the other verbs that open the pair's store.
     others = (["run"], ["status"], ["forget"])
     # `run` has exit codes of its own: 24 for a refused environment (spec/CLI.md section 13.3).
@@ -2343,7 +2372,7 @@ def test_pairing_verbs_refuse_root_and_switchboard_settings(
         assert ran.rc == (24 if argv == ["run"] else 1) and "SWITCHBOARD_URL is set" in ran.err
     monkeypatch.delenv("SWITCHBOARD_URL")
     monkeypatch.setattr("os.geteuid", lambda: 0)
-    for argv in (["pair", code], *others):
+    for argv in (["pair"], ["pair", "begin"], *others):
         ran = cli.run(*argv, timeout=15)
         assert ran.rc == (24 if argv == ["run"] else 1) and "root" in ran.err
     assert cli.gate() is None and not cli.dirs.host_file.exists()

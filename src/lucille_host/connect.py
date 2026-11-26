@@ -11,6 +11,8 @@ ends must compute alike, and how the computer judges one read of that room:
   room is the library's handshake room for ``K``, which the hub-facing code builds.
 - **The user's own username** (:func:`normalize_username`), typed before the code is shown, and
   the check that a delivery's signed account names it (:func:`names_user`, decisions/0002 §11.5).
+- **The note of a code delivered for a request** (:func:`note_for`, :func:`answers_request`): its
+  nonce, which the host requires of every code it answers, in every shell.
 - **One read of the drop room** (:func:`judge`): the host's hello, the deliveries that pass
   ``delivery.verify``, and the posts it ignores.
 
@@ -40,13 +42,16 @@ __all__ = [
     "READ_LIMIT",
     "SERVICES",
     "SYMBOLS",
+    "NOTE",
     "Read",
+    "answers_request",
     "draw_code",
     "epoch",
     "judge",
     "names_user",
     "nonce",
     "normalize_username",
+    "note_for",
     "parse_code",
     "shown",
     "stretch",
@@ -83,6 +88,8 @@ SERVICES: Final = frozenset({"telegram"})
 _READS_AS: Final = str.maketrans({"I": "1", "L": "1", "O": "0"})
 # A typed username once normalized: a letter, then up to 63 letters, digits and underscores.
 _USERNAME: Final = re.compile(r"[a-z][a-z0-9_]{0,63}")
+# The note Lucille gives the pairing it delivers: the request's nonce, in lowercase hex.
+NOTE: Final = re.compile(r"lucille-host/2 n=([0-9a-f]{32})")
 
 
 # --- The connect code -------------------------------------------------------------------------
@@ -188,6 +195,25 @@ def normalize_username(text: str, service: str) -> str | None:
             return None
     name = name.removeprefix("@").lower()
     return name if _USERNAME.fullmatch(name) else None
+
+
+def note_for(nonce: bytes) -> str:
+    """The note of the pairing Lucille delivers for the request whose nonce is ``nonce``."""
+    if len(nonce) != NONCE_BYTES:
+        raise ValueError(f"a nonce is {NONCE_BYTES} bytes")
+    return f"lucille-host/2 n={nonce.hex()}"
+
+
+def answers_request(code: _switchboard.Code, nonce: bytes) -> bool:
+    """Whether ``code`` answers the request whose nonce is ``nonce``: it has the library's hello,
+    and its note is :func:`note_for` the nonce, compared in constant time. A code with neither is
+    one the host was handed some other way, which it never answers (decisions/0002 §11.4)."""
+    if len(nonce) != NONCE_BYTES:
+        raise ValueError(f"a nonce is {NONCE_BYTES} bytes")
+    matched = NOTE.fullmatch(code.note)
+    if not code.hello or matched is None:
+        return False
+    return hmac.compare_digest(matched.group(1).encode("ascii"), nonce.hex().encode("ascii"))
 
 
 def names_user(found: delivery.Delivery, service: str, username: str) -> bool:

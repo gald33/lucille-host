@@ -69,7 +69,6 @@
             "busy",
             "lock_failed",
             "held",
-            "no_code",
             "bad_code",
             "wrong_hub",
             "code_has_token",

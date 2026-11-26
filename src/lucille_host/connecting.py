@@ -34,8 +34,6 @@ Each of these spends the request.
 from __future__ import annotations
 
 import hashlib
-import hmac
-import re
 from collections.abc import Callable, Mapping
 from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
@@ -85,8 +83,6 @@ _FIELDS: Final = frozenset(
         "unknown_key_seen",
     }
 )
-# The note Lucille gives the pairing it delivers: the request's nonce, in lowercase hex.
-_NOTE: Final = re.compile(r"lucille-host/2 n=([0-9a-f]{32})")
 
 # How a request ends. Each is an ``error`` code of the command line.
 INTERFERENCE: Final = "interference"
@@ -373,10 +369,9 @@ def redeemable(
         raise _end(path, INTERFERENCE, "the request expired before the code was answered")
     if request.used:
         raise Ended(NOT_THIS_MAC, "the request was used already")
-    matched = _NOTE.fullmatch(code.note)
-    if not code.hello or matched is None:
+    if not code.hello or connect.NOTE.fullmatch(code.note) is None:
         raise _end(path, NOT_THIS_MAC, "the code's note does not name a request")
-    if not hmac.compare_digest(matched.group(1).encode("ascii"), live.nonce.hex().encode("ascii")):
+    if not connect.answers_request(code, live.nonce):
         raise _end(path, NOT_THIS_MAC, "the code's note names another request")
     request = replace(request, used=True)
     save(path, request)

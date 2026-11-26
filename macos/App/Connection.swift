@@ -418,8 +418,8 @@ final class Connection: ObservableObject {
 
     private static let runVerb = ["run", "--json-events", "--exit-on-stdin-eof"]
     /// Connect from Lucille's chat (spec/CLI.md §7): `pair begin` reads the service and the
-    /// username on standard input; `pair resume` takes up the request the host kept. The app no
-    /// longer pastes a code (`pair --code-stdin`).
+    /// username on standard input; `pair resume` takes up the request the host kept. No pairing
+    /// code is pasted: the host takes none (decisions/0002 §11.4).
     private static let beginVerb = ["pair", "begin", "--json"]
     private static let resumeVerb = ["pair", "resume", "--json"]
     private static let statusVerb = ["--json", "status"]

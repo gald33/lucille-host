@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import collections
 import json
+import os
 import threading
 import time
 from collections.abc import Callable, Iterator
@@ -24,7 +25,7 @@ import pytest
 from switchboard import client, pairing, sharing, writekey
 from switchboard.testing import hub
 
-from lucille_host import _switchboard, gate, link, report, rooms, state, store
+from lucille_host import _switchboard, connect, gate, link, report, rooms, state, store
 from tests import _audit_hook
 from tests._host import HostEnv, lock_held
 from tests._lucille import FakeLucille
@@ -139,6 +140,13 @@ class Host:
         return lucille
 
 
+def _started(lucille: FakeLucille, name: str) -> tuple[str, bytes]:
+    """A pairing Lucille starts for a Connect request, as it does for the one ``pair begin`` keeps
+    (decisions/0002 §11.4): its code, whose note names the request's nonce, and that nonce."""
+    nonce = os.urandom(connect.NONCE_BYTES)
+    return lucille.start(name=name, note=connect.note_for(nonce)), nonce
+
+
 def _confirm(
     session: link.Session,
     lucille: FakeLucille,
@@ -147,8 +155,8 @@ def _confirm(
     *,
     open_gate: bool = True,
 ) -> str:
-    code = lucille.start(name=name)
-    pair = session.accept(session.check_code(code, config))
+    code, nonce = _started(lucille, name)
+    pair = session.accept(session.check_code(code, config), nonce=nonce)
     lucille.collect()
     assert session.resolve(pair).sas_known
     if open_gate:
@@ -1025,9 +1033,9 @@ def test_no_re_accept(host: Host, monkeypatch: pytest.MonkeyPatch) -> None:
     # pair. The library would keep it: the host takes it, finds it left before, and leaves it.
     host.lucille.forget()
     lucille = host.lucille
-    code = lucille.start(name=host.name)
+    code, nonce = _started(lucille, host.name)
     spy = Spy(monkeypatch)
-    host.s.accept(host.s.check_code(code, host.config))
+    host.s.accept(host.s.check_code(code, host.config), nonce=nonce)
     lucille.collect()
     assert host.s.resolve(host.name).sas_known
     _open(host.s, host.name, lucille)
@@ -1557,7 +1565,8 @@ def test_an_answer_refused_after_the_library_saved_the_pair_forgets_it(
     # the answer forgets it, under the record lock, as it deletes that record.
     host.s.forget()
     host.lucille.forget()
-    code = host.s.check_code(host.lucille.start(name=host.name), host.config)
+    started, nonce = _started(host.lucille, host.name)
+    code = host.s.check_code(started, host.config)
     real = _switchboard.Link.accept
 
     def kept_then_refused(opened: _switchboard.Link, given: _switchboard.Code) -> str:
@@ -1567,7 +1576,7 @@ def test_an_answer_refused_after_the_library_saved_the_pair_forgets_it(
 
     monkeypatch.setattr(_switchboard.Link, "accept", kept_then_refused)
     with pytest.raises(link.Stopped) as stopped:
-        host.s.accept(code)
+        host.s.accept(code, nonce=nonce)
     assert stopped.value.state == link.outcome(case)
     assert host.opened.names() == [] and host.gate() is None
 
@@ -1607,7 +1616,8 @@ def test_a_command_beside_a_call_that_drops_the_pair_says_it_is_gone(
     if verb == "answer":
         host.s.forget()
         host.lucille.forget()
-        code = host.s.check_code(host.lucille.start(name=host.name), host.config)
+        started, nonce = _started(host.lucille, host.name)
+        code = host.s.check_code(started, host.config)
         real_accept = _switchboard.Link.accept
 
         def leaked(opened: _switchboard.Link, given: _switchboard.Code) -> str:
@@ -1652,7 +1662,7 @@ def test_a_command_beside_a_call_that_drops_the_pair_says_it_is_gone(
         "status": calling.status,
         "confirm": calling.confirm,
         "wait": lambda: calling.wait(host.name),
-        "answer": lambda: calling.accept(code),
+        "answer": lambda: calling.accept(code, nonce=nonce),
     }
     first = turns._call("first", calls[verb])
     assert held.wait(10)
@@ -1743,7 +1753,8 @@ def test_a_forget_beside_an_answer_leaves_the_new_pairings_gate_record(
     assert host.opened.names() == [] and host.gate() is None and host.held() == [room]
     host.lucille.forget()
     s = host.restart()
-    code = s.check_code(host.lucille.start(name=host.name), host.config)
+    started, nonce = _started(host.lucille, host.name)
+    code = s.check_code(started, host.config)
     forgetting = link.Session(host.env.dirs, host.opened, say=lambda _: None)
     real_accept = _switchboard.Link.accept
     beside: list[threading.Thread] = []
@@ -1758,7 +1769,7 @@ def test_a_forget_beside_an_answer_leaves_the_new_pairings_gate_record(
         return real_accept(opened, given)
 
     monkeypatch.setattr(_switchboard.Link, "accept", answered_beside_a_forget)
-    name = s.accept(code)
+    name = s.accept(code, nonce=nonce)
     (thread,) = beside
     thread.join(10)
     assert not thread.is_alive()
@@ -1782,7 +1793,8 @@ def test_a_forget_beside_a_resolve_before_the_sas_waits_for_the_judgement(
     )
     s = link.Session(host_env.dirs, opened, say=lambda _: None)
     lucille = FakeLucille(h, tmp_path / "lucille-1", url=_switchboard.LUCILLE_HUB)
-    s.accept(s.check_code(lucille.start(name="lucille"), KEYRING))
+    code, nonce = _started(lucille, "lucille")
+    s.accept(s.check_code(code, KEYRING), nonce=nonce)
     other = _switchboard.open_link(
         host_env.dirs, KEYRING, client_class=h.client_class(), clock=lambda: h.now
     )

@@ -12,9 +12,9 @@ environment:
 
 - the host's own backend is built and checked, and a read of the pair item is
   :class:`store.KeyringUnusable`, naming the bus's error;
-- the commands: ``status`` reports the pair unreadable with ``store_error``; ``pair --code-stdin``
+- the commands: ``status`` reports the pair unreadable with ``store_error``; ``pair begin``
   gives ``store_error``; with ``--store-file`` it falls back to the file store, says so, and reaches
-  the code check.
+  the question of the chat service.
 
 Linux only, and only where ``dbus-daemon`` is installed. These containers run as root, which the
 host refuses; the child then stands in for the host's own root check only, never for the uid the
@@ -200,8 +200,8 @@ def test_the_commands_on_a_listed_secret_service_that_fails_to_start(
     assert done.returncode == 0, done.stderr
     found = json.loads(done.stdout)
     assert found["pair"] == {"state": "unreadable", "code": "store_error", "message": message}
-    # pair, without --store-file: the store error, and nothing else.
-    done = _run(COMMAND, "--json", "pair", "--code-stdin", env=env, stdin="not-a-code\n")
+    # pair begin, without --store-file: the store error, and nothing else.
+    done = _run(COMMAND, "--json", "pair", "begin", env=env, stdin="telegram\nada\n")
     assert done.returncode == 1, done.stderr
     assert json.loads(done.stdout.splitlines()[-1]) == {
         "v": 1,
@@ -210,14 +210,15 @@ def test_the_commands_on_a_listed_secret_service_that_fails_to_start(
         "message": message,
     }
     assert "Traceback" not in done.stderr
-    # With --store-file it falls back, says so and why, and reaches the code check.
+    # With --store-file it falls back, says so and why, and reaches the question of the chat
+    # service, which it refuses here before it reaches any hub.
     done = _run(
-        COMMAND, "--json", "pair", "--code-stdin", "--store-file", env=env, stdin="not-a-code\n"
+        COMMAND, "--json", "pair", "begin", "--store-file", env=env, stdin="not-a-service\n"
     )
     assert done.returncode == 1, done.stderr
     assert (
         f"lucille-host: warning: {message}; as --store-file asks, the pair is kept in a file "
         "instead\n"
     ) in done.stderr
-    assert json.loads(done.stdout.splitlines()[-1])["code"] == "bad_code"
+    assert json.loads(done.stdout.splitlines()[-1])["code"] == "bad_service"
     assert "Traceback" not in done.stderr

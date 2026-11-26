@@ -1,0 +1,26 @@
+{
+  "description": "pair begin, and a second hello in the request's drop room, where only the host posts one",
+  "argv": [
+    "pair",
+    "begin",
+    "--json"
+  ],
+  "exit": 1,
+  "stdout": [
+    {
+      "v": 1,
+      "type": "connect",
+      "state": "code",
+      "code": "7KQ4M-X2D9P",
+      "expires_at": "2026-11-01T12:00:00Z",
+      "service": "telegram",
+      "username": "ada"
+    },
+    {
+      "v": 1,
+      "type": "error",
+      "code": "interference",
+      "message": "Capsule couldn't read Lucille's answer, and the code may be known to someone else. Start again."
+    }
+  ]
+}

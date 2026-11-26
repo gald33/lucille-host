@@ -53,7 +53,7 @@ from lucille_host import (
 )
 from lucille_host.cli import INTERNAL_MESSAGE, main
 from lucille_host.ops import OPERATIONS, Operation
-from tests._cli import HostCli, collecting
+from tests._cli import STDIN, HostCli, collecting
 from tests._host import HostEnv, lock_held
 from tests._keyring import MemoryKeyring
 from tests._run import fast
@@ -76,6 +76,9 @@ SAMPLE_SAS = "1234-5678"
 SAMPLE_PAIR = "pair-abcdef"
 SAMPLE_GENERATION = 1
 SAMPLE_CONNECT_CODE = "7KQ4M-X2D9P"
+# The note of a code Lucille delivers names its request's nonce, which every run draws anew.
+SAMPLE_NOTE = "lucille-host/2 n=0123456789abcdef0123456789abcdef"
+NOTE = re.compile(r"lucille-host/2 n=[0-9a-f]{32}")
 TIME = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z")
 PROFILES = ("default", "mac-app")
 USAGE_MESSAGE = "the command line could not be parsed; standard error says why"
@@ -149,6 +152,11 @@ class World:
         # The connect code of the Connect request a set-up kept, as the user sees it.
         self.connect_code: str | None = None
         self.stdin = ""
+        # When set, the command is a `pair begin` that keeps a Connect request: called with the
+        # request once it is kept, as Lucille answers it. Called once.
+        self.answer: Callable[[connecting.Request], None] | None = None
+        # Whether Lucille collects the answer while that command runs.
+        self.collect = False
         # A standard input with a file descriptor behind it, for `run`'s lifeline.
         self.stdin_file: Any = None
         self.during: Callable[[], contextlib.AbstractContextManager[Any]] = contextlib.nullcontext
@@ -182,6 +190,23 @@ class World:
         assert ran.rc == 0, (argv, ran.err)
         return ran
 
+    def main(self, *argv: str) -> Ran:
+        """The command line a case is about, from its set-up: with ``during`` around it, and,
+        when the set-up asked, Lucille answering the Connect request the command keeps."""
+        with self.during():
+            if self.answer is None:
+                return self.run(*argv, stdin=self.stdin)
+            answer, self.answer = self.answer, None
+            self.capsys.readouterr()
+            running = self.host.start(*argv, stdin=self.stdin)
+            request = self.host.waiting(running)
+            if request is not None:
+                self.connect_code = connect.shown(request.code)
+                answer(request)
+            with collecting(self.lucille) if self.collect else contextlib.nullcontext():
+                ran = running.wait()
+            return Ran(ran.rc, ran.out, ran.err)
+
     def every_executable(self, missing: tuple[str, ...] = ()) -> None:
         """Every operation's executable present here, but those named ``missing``."""
         self.monkeypatch.setattr(Operation, "available", lambda op, _family: op.name not in missing)
@@ -208,9 +233,16 @@ class World:
 
     # --- pairing --------------------------------------------------------------------------
 
-    def code(self) -> str:
-        self.lucille = self.host.lucille()
-        return self.lucille.start()
+    def deliver(self, **delivery: Any) -> None:
+        """The command is `pair begin`, reading the service and the username, and Lucille
+        delivers a pairing code for its request (``delivery`` goes to FakeLucille.deliver)."""
+        lucille = self.lucille = self.host.lucille()
+        self.stdin = STDIN
+
+        def answer(request: connecting.Request) -> None:
+            lucille.deliver(connect.shown(request.code), self.host.signer, **delivery)
+
+        self.answer = answer
 
     def paired(self, *, confirm: bool = False) -> None:
         self.lucille = self.host.lucille()
@@ -219,7 +251,8 @@ class World:
             self.ok("pair", "confirm")
 
     def interrupted(self) -> None:
-        self.host.interrupted(self.code())
+        self.lucille = self.host.lucille()
+        self.host.interrupted(self.lucille)
 
     def connect_request(self) -> None:
         """A Connect request kept, as `pair begin` keeps one, its hello in the drop room."""
@@ -286,18 +319,29 @@ def _status_paired(w: World) -> None:
 
 
 def _leaked(w: World) -> None:
-    code = w.code()
-    other = pairing.PairStore(w.root / "other", env={})
-    pairing.accept(code, None, store=other, connect=w.host.h.client_class(), now=w.host.h.now)
-    w.stdin = code + "\n"
+    def answered_first(code: str) -> None:
+        # Another computer answers the code Lucille delivers before this one reads it.
+        other = pairing.PairStore(w.root / "other", env={})
+        pairing.accept(code, None, store=other, connect=w.host.h.client_class(), now=w.host.h.now)
+
+    w.deliver(before_post=answered_first)
 
 
-def _pair_code_stdin(w: World) -> None:
+def _pair_begin(w: World) -> None:
     w.every_executable()
     w.ok("ops", "enable", "host.sleep")
-    w.stdin = w.code() + "\n"
-    lucille = w.lucille
-    w.during = lambda: collecting(lucille)
+    w.deliver()
+    w.collect = True
+
+
+def _interference(w: World) -> None:
+    # A second hello in the request's drop room, where only the host posts one.
+    w.stdin = STDIN
+
+    def answer(request: connecting.Request) -> None:
+        w.host.lucille().drop(connect.stretch(request.code, request.epoch), connect.HELLO)
+
+    w.answer = answer
 
 
 def _sas_pending(w: World) -> None:
@@ -540,8 +584,9 @@ SETUPS: dict[str, Callable[[World], None]] = {
     "status-paired": _status_paired,
     "log": _log,
     "forget": lambda w: w.paired(confirm=True),
-    "pair-code-stdin": _pair_code_stdin,
-    "pair-code-stdin-leaked": _leaked,
+    "pair-begin": _pair_begin,
+    "pair-begin-leaked": _leaked,
+    "pair-begin-interference": _interference,
     "pair-status-waiting": lambda w: w.interrupted(),
     "pair-status-sas-pending": _sas_pending,
     "pair-status-confirmed": lambda w: w.paired(confirm=True),
@@ -574,8 +619,9 @@ HUB_CASES = frozenset(
     {
         "status-paired",
         "forget",
-        "pair-code-stdin",
-        "pair-code-stdin-leaked",
+        "pair-begin",
+        "pair-begin-leaked",
+        "pair-begin-interference",
         "pair-status-waiting",
         "pair-status-sas-pending",
         "pair-status-confirmed",
@@ -637,6 +683,7 @@ def _sampled(value: Any, w: World, key: str | None = None) -> Any:
         return SAMPLE_SIZES[key]
     if not isinstance(value, str):
         return value
+    value = NOTE.sub(SAMPLE_NOTE, value)
     if TIME.fullmatch(value):
         return SAMPLE_TIME
     if value == __version__:
@@ -683,9 +730,7 @@ def _run_case(
         root, stack, capsys, monkeypatch, with_hub=case in HUB_CASES, live=case in LIVE_CASES
     )
     SETUPS.get(case, lambda _w: None)(world)
-    with world.during():
-        ran = world.run(*_real_argv(argv, world), stdin=world.stdin)
-    return ran, world
+    return world.main(*_real_argv(argv, world)), world
 
 
 # --- the verbs each error code belongs to, from spec/CLI.md ---------------------------------------
@@ -719,6 +764,9 @@ def verb_codes() -> dict[str, set[str]]:
     return table
 
 
+PAIR_ACTIONS = ("begin", "resume", "cancel", "status", "confirm", "reject")
+
+
 def verb_of(argv: list[str]) -> str:
     """The key of the table row an argv belongs to."""
     words: list[str] = []
@@ -743,9 +791,11 @@ def verb_of(argv: list[str]) -> str:
             key += " --suggest-alias"
         return key
     if verb == "pair":
-        if len(words) > 1 and words[1] in ("status", "confirm", "reject"):
+        # `pair` alone is `pair begin`; with a word that is no action, it is refused, as its row
+        # in the table says.
+        if len(words) > 1 and words[1] in PAIR_ACTIONS:
             return f"pair {words[1]}"
-        return "pair --code-stdin"
+        return "pair"
     return verb
 
 
@@ -1315,7 +1365,8 @@ def test_json_flag_anywhere_before_double_dash(
         ("pair", "status"),
         ("pair", "confirm"),
         ("pair", "reject"),
-        ("pair", "--code-stdin"),
+        ("pair", "begin"),
+        ("pair", PASTED),
         ("status",),
         ("log", "--limit", "1"),
         ("forget",),
@@ -1389,18 +1440,21 @@ def test_json_usage_errors_exit_2(
         ["--json", "log", "--limit", "many"],
         ["--json", "--no-such-flag"],
         ["--json", "pair", "status", "extra"],
+        # The paste form is gone.
+        ["--json", "pair", "--code-stdin"],
+        ["--json", "pair", "begin", "--code-stdin"],
+        ["--json", "pair", "--code-stdin", PASTED],
     ):
         ran = w.run(*argv)
         text = w.run(*_without_json(argv))
         assert (ran.rc, text.rc) == (2, 2), argv
         assert ran.objects == usage, argv
         assert text.out == "" and ran.err == text.err and "error:" in ran.err, argv
-    # Forms the contract does not have: run's JSON form is --json-events, not --json; pair reads
-    # its code only with --code-stdin; and the options of run belong to run alone.
+    # Forms the contract does not have: run's JSON form is --json-events, not --json; and the
+    # options of run belong to run alone.
     for argv in (
         ["--json", "run"],
         ["run", "--json"],
-        ["pair", "--json"],
         ["--json", "pair", "--exit-on-stdin-eof"],
         ["--json", "status", "--json-events"],
         ["status", "--json-events"],
@@ -1477,7 +1531,7 @@ def test_every_failure_has_a_code(
                 continue  # how a Connect request ended, checked below
             assert isinstance(given, ast.Constant), f"{name}:{node.lineno}: no literal code"
             literal.append((f"{name}:{node.lineno}", given.value))
-    # `rejected` is the interactive `n`, which `pair --code-stdin` never asks.
+    # `rejected` is the interactive `n`, which `pair begin --json` never asks.
     assert [(where, code) for where, code in literal if code not in enum | {"rejected"}] == []
     assert len(literal) > 40
     assert {link.outcome(word) for word in ("aborted", "expired", "ended", "unknown")} <= enum
@@ -1622,17 +1676,29 @@ def _state_made(w: World) -> None:
 
 
 def _not_a_code(w: World) -> None:
-    w.stdin = "not a code\n"
+    """Lucille delivers a code, and the host's decoder refuses it. A delivery whose code does not
+    decode is not one (delivery.verify), so only a decoder that disagrees with that check gives
+    `bad_code`: it is stubbed here."""
+
+    def refused(_text: str) -> Any:
+        raise _switchboard.BadCode("this is not a pairing code")
+
+    w.monkeypatch.setattr(_switchboard, "decode_code", refused)
+    w.deliver()
 
 
 def _held(w: World) -> None:
     w.paired()
-    w.stdin = w.code() + "\n"
+    w.stdin = STDIN
+
+
+def _recode(code: str, **changes: Any) -> str:
+    return dataclasses.replace(pairing.PairingCode.decode(code), **changes).encode()
 
 
 def _recoded(w: World, **changes: Any) -> None:
-    code = w.code()
-    w.stdin = dataclasses.replace(pairing.PairingCode.decode(code), **changes).encode() + "\n"
+    """Lucille delivers a code for the request, with ``changes`` made to it."""
+    w.deliver(recode=lambda code: _recode(code, **changes))
 
 
 def _no_gate(w: World) -> None:
@@ -1666,7 +1732,7 @@ def _accept_fails(raised: BaseException) -> Callable[[World], None]:
             raise raised
 
         w.monkeypatch.setattr(_switchboard.Link, "accept", failing)
-        w.stdin = w.code() + "\n"
+        w.deliver()
 
     return setup
 
@@ -1696,7 +1762,7 @@ def _held_in_the_file_store(w: World) -> None:
     w.host.paired(w.lucille, "--store-file")
     # The profile set back to the keyring, which holds nothing: the pair is in the other store.
     state.save_host_config(w.dirs, state.HostConfig())
-    w.stdin = w.code() + "\n"
+    w.deliver()
 
 
 def _two_pairs(w: World) -> None:
@@ -1722,6 +1788,10 @@ TEXT_WORDS = {
     "pair_unusable": "error",
     "several_pairs": "error",
 }
+
+# What a user told to paste a pairing code might pass `pair`, which takes none.
+PASTED = "swbp1_eyJ2IjoxLCJ1IjoiaHR0cHM6Ly9zd2l0Y2hib2FyZC5sdWNpbGxlLWFpLmNvbSJ9"
+LOOPBACK = "http://127.0.0.1:8765"
 
 # (case, needs the hub, set-up, argv, the code it fails with)
 FAILURES: list[tuple[str, bool, Callable[[World], None] | None, list[str], str]] = [
@@ -1783,18 +1853,27 @@ FAILURES: list[tuple[str, bool, Callable[[World], None] | None, list[str], str]]
         ["--json", "pair", "status", "--hub", "http://127.0.0.1:8765"],
         "bad_options",
     ),
-    ("code-in-argv", False, None, ["--json", "pair", "--code-stdin", "swbp1_x"], "code_in_argv"),
+    ("code-in-argv", False, None, ["--json", "pair", PASTED], "code_in_argv"),
+    (
+        "code-in-argv-hub",
+        False,
+        None,
+        ["--json", "pair", PASTED, "--hub", LOOPBACK],
+        "code_in_argv",
+    ),
     (
         "bad-hub",
         False,
         None,
-        ["--json", "pair", "--code-stdin", "--hub", "https://hub.example"],
+        ["--json", "pair", "begin", "--hub", "https://hub.example"],
         "bad_hub",
     ),
-    ("busy", False, _busy, ["--json", "pair", "--code-stdin"], "busy"),
-    ("lock-failed", False, _pair_lock_fails, ["--json", "pair", "--code-stdin"], "lock_failed"),
-    ("no-code", False, None, ["--json", "pair", "--code-stdin"], "no_code"),
-    ("bad-code", False, _not_a_code, ["--json", "pair", "--code-stdin"], "bad_code"),
+    ("bad-hub-bare", False, None, ["--json", "pair", "--hub", "https://hub.example"], "bad_hub"),
+    ("busy", False, _busy, ["--json", "pair", "begin"], "busy"),
+    ("busy-bare", False, _busy, ["--json", "pair"], "busy"),
+    ("lock-failed", False, _pair_lock_fails, ["--json", "pair", "begin"], "lock_failed"),
+    ("no-service", False, None, ["--json", "pair", "begin"], "bad_service"),
+    ("bad-code", True, _not_a_code, ["--json", "pair", "begin"], "bad_code"),
     ("none-confirm", False, None, ["--json", "pair", "confirm"], "none"),
     ("none-reject", False, None, ["--json", "pair", "reject"], "none"),
     (
@@ -1819,19 +1898,19 @@ FAILURES: list[tuple[str, bool, Callable[[World], None] | None, list[str], str]]
         ["--json", "pause"],
         "unsupported_platform",
     ),
-    ("held", True, _held, ["--json", "pair", "--code-stdin"], "held"),
+    ("held", True, _held, ["--json", "pair", "begin"], "held"),
     (
         "wrong-hub",
         True,
         lambda w: _recoded(w, url="https://hub.example"),
-        ["--json", "pair", "--code-stdin"],
+        ["--json", "pair", "begin"],
         "wrong_hub",
     ),
     (
         "code-has-token",
         True,
         lambda w: _recoded(w, token="sb_a_hub_token"),
-        ["--json", "pair", "--code-stdin"],
+        ["--json", "pair", "begin"],
         "code_has_token",
     ),
     ("waiting", True, lambda w: w.interrupted(), ["--json", "pair", "confirm"], "waiting"),
@@ -1846,22 +1925,22 @@ FAILURES: list[tuple[str, bool, Callable[[World], None] | None, list[str], str]]
     (
         "wrong-hub-loopback",
         True,
-        lambda w: _recoded(w, url="http://127.0.0.1:8765"),
-        ["--json", "pair", "--code-stdin"],
+        lambda w: _recoded(w, url=LOOPBACK),
+        ["--json", "pair", "begin"],
         "wrong_hub",
     ),
     (
         "hub-error",
         True,
         _accept_fails(_switchboard.HubError("the hub is out of reach")),
-        ["--json", "pair", "--code-stdin"],
+        ["--json", "pair", "begin"],
         "hub_error",
     ),
     (
         "answer-failed",
         True,
         _accept_fails(_switchboard.PairFailed("aborted_here", "refused")),
-        ["--json", "pair", "--code-stdin"],
+        ["--json", "pair", "begin"],
         "answer_failed",
     ),
     ("pair-unusable", True, _resolve_fails, ["--json", "pair", "status"], "pair_unusable"),
@@ -1869,7 +1948,7 @@ FAILURES: list[tuple[str, bool, Callable[[World], None] | None, list[str], str]]
         "held-in-the-other-store",
         True,
         _held_in_the_file_store,
-        ["--json", "pair", "--code-stdin", "--store-file"],
+        ["--json", "pair", "begin", "--store-file"],
         "held",
     ),
     ("several-pairs-forget", False, _two_pairs, ["--json", "forget"], "several_pairs"),
@@ -1907,7 +1986,7 @@ def test_json_failure_ends_with_error_object(
         w = World(tmp_path / where, stack, capsys, monkeypatch, with_hub=with_hub)
         if setup is not None:
             setup(w)
-        runs.append((w, w.run(*_real_argv(line, w), stdin=w.stdin)))
+        runs.append((w, w.main(*_real_argv(line, w))))
     (json_world, ran), (text_world, text) = runs
     assert ran.rc == 1, ran.err
     objects = assert_objects(ran)
@@ -1927,6 +2006,9 @@ def test_json_failure_ends_with_error_object(
         assert objects[-1]["message"] == f"a profile name is {rule}"
     if code == "bad_alias":
         assert objects[-1]["message"] == f"an alias is {rule}"
+    # A pairing code given to `pair` is never repeated, in JSON or in text.
+    for found in (ran, text):
+        assert PASTED not in found.out + found.err
     assert text.rc == 1
     word = TEXT_WORDS.get(code, "lucille-host")
     assert text.err.splitlines()[-1].startswith(f"{word}: "), text.err
@@ -2062,6 +2144,20 @@ NO_CRYPTOGRAPHY = (
 UNREPEATED = "the pairing library refused it for a reason this host does not repeat"
 
 
+def _without(call: Callable[..., Any], name: str, value: Any) -> Callable[..., Any]:
+    """``call``, run with the pairing library's ``name`` set to ``value`` for that call only."""
+
+    def run(*args: Any, **kwargs: Any) -> Any:
+        before = getattr(pairing, name)
+        setattr(pairing, name, value)
+        try:
+            return call(*args, **kwargs)
+        finally:
+            setattr(pairing, name, before)
+
+    return run
+
+
 def test_a_refused_answer_says_why_in_the_hosts_words(
     tmp_path: Path,
     host_env: HostEnv,
@@ -2073,14 +2169,18 @@ def test_a_refused_answer_says_why_in_the_hosts_words(
     # the message says why, in JSON and on standard error alike.
     said = f"the code was not answered (error): {NO_CRYPTOGRAPHY}"
     for where, argv in (
-        ("json", ["--json", "pair", "--code-stdin"]),
-        ("text", ["pair", "--code-stdin"]),
+        ("json", ["--json", "pair", "begin"]),
+        ("text", ["pair", "begin"]),
     ):
         w = World(tmp_path / where, stack, capsys, monkeypatch, with_hub=True)
-        code = w.code()
+        delivered: list[str] = []
+        w.deliver(before_post=delivered.append)
         with monkeypatch.context() as patch:
-            patch.setattr(pairing, "AVAILABLE", False)
-            ran = w.run(*argv, stdin=code + "\n")
+            # The library answers the code as it does without `cryptography`. Lucille's side and
+            # the host's read of the drop room need it, so it is gone at the answer only.
+            patch.setattr(pairing, "accept", _without(pairing.accept, "AVAILABLE", False))
+            ran = w.main(*argv)
+        (code,) = delivered
         assert ran.rc == 1, ran.err
         assert ran.err.splitlines()[-1] == f"error: {said}", where
         assert code not in ran.out + ran.err
@@ -2273,13 +2373,15 @@ def test_no_text_of_the_library_reaches_a_message(
             raise refused
 
         texts: list[str] = []
-        # At an answer: `pair` stops with `answer_failed`.
+        # At an answer: `pair begin` stops with `answer_failed`.
         w = World(tmp_path / f"{index}-answer", stack, capsys, monkeypatch, with_hub=True)
-        code = w.code()
-        for argv in (["--json", "pair", "--code-stdin"], ["pair", "--code-stdin"]):
+        for argv in (["--json", "pair", "begin"], ["pair", "begin"]):
+            w.deliver()
             with monkeypatch.context() as patch:
-                patch.setattr(pairing, "_need_crypto", refuse)
-                ran = w.run(*argv, stdin=code + "\n")
+                # At the answer only: Lucille's side and the host's read of the drop room use the
+                # library too.
+                patch.setattr(pairing, "accept", _without(pairing.accept, "_need_crypto", refuse))
+                ran = w.main(*argv)
             said = f"the code was not answered (error): {UNREPEATED}"
             assert ran.rc == 1 and ran.err.splitlines()[-1] == f"error: {said}", sentence
             texts.append(ran.out + ran.err)
@@ -2381,12 +2483,14 @@ def test_a_file_nested_too_deep_is_an_invalid_one(
     (status,) = assert_objects(w.ok("--json", "status"))
     assert status["policy"] == {"state": "invalid", "error": said}
     assert status["pair"] == {"state": "none"}
-    # `pair` sets such a policy aside, as it does any invalid one, and the pairing goes ahead.
-    code = w.code()
-    with collecting(w.lucille):
-        ran = w.ok("--json", "pair", "--code-stdin", stdin=code + "\n")
+    # `pair begin` sets such a policy aside, as it does any invalid one, and the pairing goes
+    # ahead.
+    w.deliver()
+    w.collect = True
+    ran = w.main("--json", "pair", "begin")
+    assert ran.rc == 0, ran.err
     found = assert_objects(ran)
-    assert [obj["type"] for obj in found[:2]] == ["pair_code", "policy_reset"]
+    assert [obj["type"] for obj in found[:4]] == ["connect", "connect", "pair_code", "policy_reset"]
     assert found[-1]["state"] == "sas_pending"
     assert policy.load(w.dirs.policy_file) == policy.fresh()
     # Each state file of the host's own, with the pair held: `status` stops with state_invalid.

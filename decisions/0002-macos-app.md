@@ -64,7 +64,8 @@ developing the app. Its builds stay ad hoc signed, for the repository owner's ow
   kept request through `pair resume --json` after a relaunch, shows the SAS from `sas_pending`, and the user
   clicks **They Match** (`pair confirm --json`) only if Lucille shows the same number in the chat, or **They
   Differ** (`pair reject --json`). It replaced the app's paste flow (§11.3), built first on 2026-11-02 on
-  [0001](0001-host-design.md)'s gate. The typed gate (§11.2), decided on 2026-11-21, is not built yet.
+  [0001](0001-host-design.md)'s gate; the host no longer takes a pasted code at all. The typed gate (§11.2),
+  decided on 2026-11-21, is not built yet.
 - **Supervision of `run`** (§9): `run --json-events --exit-on-stdin-eof` as the app's child, with the
   lifeline; the exit table; restarts with back-off, and the stop after five crashes in ten minutes; Quit and
   logout with the drain ladder and **Stop now**; paused at the next launch after a `kill`, and never resumed
@@ -81,7 +82,7 @@ developing the app. Its builds stay ad hoc signed, for the repository owner's ow
   offered only for `policy_lock_failed`.
 - **Set Up** (§3.1 steps 8 to 10, §11.6): the first time the status line says Connected after **They Match**
   was clicked in this run of the app, one window with pages opens by itself. **Add back what you had
-  before?** comes first only when this run's own `pair --code-stdin` child, for the attempt They Match
+  before?** comes first only when this run's own `pair begin` or `pair resume` child, for the attempt They Match
   confirmed, wrote `policy_reset`, and `policy previous --json` says the policy was set aside at or after
   the second that attempt started. It offers the folders and operations of the policy set aside that the
   menu's own gates can add, as unchecked boxes: the whole disk is shown with no box, whatever that policy
@@ -177,8 +178,7 @@ developing the app. Its builds stay ad hoc signed, for the repository owner's ow
   on macOS 26 and 27, without the end-to-end check (§18, §19). Logs and UI snapshots are uploaded on every
   run. The disk image is uploaded only by a manual run whose every check passed, and kept 3 days.
 
-Not built yet: the typed gate (§11.2; decided on 2026-11-21), Connect in the app (§11.4: the host's
-`pair begin`, `pair resume` and `pair cancel` are built, and the paste flow still works), the check
+Not built yet: the typed gate (§11.2; decided on 2026-11-21), the check
 after a folder is added from the menu, and at launch (`roots check`, §12; Set Up's Folders page runs it),
 the Welcome and main windows, updates, **Remove Capsule…** (section 17), Copy
 Diagnostics (§15), Developer ID signing and notarization, ripgrep (`Helpers/rg`; the pins hold an empty
@@ -202,8 +202,7 @@ made for the first build", says why for most of them:
   pair, so a command run on profile `mac-app` from Terminal between that read and the confirm is not excluded;
   the app's own store verbs run one at a time. After **They Differ**, They Match stays off for that pair only
   while the app stays open: it keeps no memory of its own. A click gate does not protect the computer's side
-  against an attacker who can rewrite Lucille's page, which §11.2 is for: one more reason the paste form stays
-  on the owner's Mac (§11.1);
+  against an attacker who can rewrite Lucille's page, which §11.2 is for;
 - a profile that holds more than one pair (`several_pairs`) gets no Disconnect: `forget` refuses it too.
   The app says it cannot end them, and `macos/README.md` gives the repair by hand (§9);
 - the app reads `pair status --json` only while its pairing window is open (§11.3);
@@ -250,7 +249,7 @@ made for the first build", says why for most of them:
 - a run the app stopped waiting for is counted as stuck, and said to hold up every change to folders and
   abilities, only when its verb takes the host's settings lock: of the short runs, `ops enable` and
   `ops disable`, `roots add` but the alias suggestion, `roots remove` and `policy reset`
-  (`pair --code-stdin` takes it too, but runs as a long-lived child, never as a short run). A run that only
+  (`pair begin` and `pair resume` take it too, but run as long-lived children, never as short runs). A run that only
   reads, left behind, is not counted, so no later change is blamed on it. Its own result still shows the
   menu's line that a folder check is stuck: such a read waits on a drive that stopped answering, and a
   change, which loads the same settings and looks at each folder, may wait on it too.
@@ -348,10 +347,8 @@ nothing ([macos/README.md](../macos/README.md), What CI does not check, the Keyc
 one, and nobody is told to work around the warning.
 
 The first signed builds go only to the repository owner, as draft releases that are never published (§18).
-They pair by pasting the code: on Lucille's page **Add computer**, **Copy**, then the user pastes it into the
-app's code field (⌘V, or Edit › Paste). The app never reads the pasteboard itself (§11.3). The typed number of
-step 6 is the same; there is no account check, because such a code carries no account hint. That form is
-never published, because anyone can make a code that passes the host's code checks (§11.1).
+They connect from Lucille's chat, as above (§11.4). The paste form they were first built with (§11.3) is gone:
+the host refuses every pairing code that does not answer a Connect request of its own, in every shell.
 
 ### 3.3 Mistakes, and how they are undone
 
@@ -888,8 +885,9 @@ ripgrep.
   The app reads every verb it runs through the JSON contract ([spec/CLI.md](../spec/CLI.md)), and shows
   the lines on standard error only as details: those of a usage error, and of a run that wrote no `error`
   object.
-- **Secrets never go on a command line.** A pairing code goes to `pair --code-stdin` on standard input,
-  and the Gmail window's app password to `credential set --value-stdin` on standard input. With the typed gate
+- **Secrets never go on a command line.** No pairing code goes to the host at all: it arrives in the Connect
+  request's drop room (§11.4). The Gmail window's app password goes to `credential set --value-stdin` on
+  standard input. With the typed gate
   (§11.2), the typed digits go to `pair confirm` on standard input.
 - **URLs come from the core.** The releases page and the hub are constants in the core. So is the list of chat
   accounts that are Lucille's, which the app names beside a connect code (§11.4). The Swift source holds one
@@ -911,8 +909,8 @@ ripgrep.
 | `roots check [<alias>]` | opens the folder and reads one entry: `ok`, `denied_by_macos` (EPERM), `denied` (EACCES) or `missing`. Sends nothing anywhere |
 | `policy reset` | moves an invalid policy file aside and writes the fresh policy (§10) |
 | `policy previous` | lists, read only, the folders and operations of the last policy a pairing set aside (§11.6) |
-| `pair --code-stdin`, `pair status`, `pair confirm`, `pair reject` | non-interactive pairing (§11) |
-| `pair begin` | the Connect request: a connect code, then the wait for Lucille's pairing (§11.4) |
+| `pair status`, `pair confirm`, `pair reject` | non-interactive pairing (§11) |
+| `pair begin`, `pair resume`, `pair cancel` | the Connect request: a connect code, then the wait for Lucille's pairing (§11.4) |
 | `run --json-events --exit-on-stdin-eof` | supervision (§9) |
 | `status`, `log --limit N`, `forget` | as 0001 lists them, with JSON |
 | `uninstall-data --yes`, `diagnostics` | section 17, §15 |
@@ -1111,8 +1109,9 @@ This changes 0001's "Local policy and upgrades", and is built (spec/CLI.md §13.
 So a "paste a code" app, published, would be a ready-made tool for a scam: a page makes a code, tells the user
 to paste it, and shows the matching number. The design answers that in four parts: the final form redeems only
 a pairing that answers a request the computer made (§11.4), and only one Lucille signed with the key the
-release pins (§11.5); the computer's gate is typed (§11.2); and the paste form is never published (§3.2, §18).
-The maintainer decided §11.2, §11.4 and §11.5 on 2026-11-21, in the forms below. None is built yet.
+release pins (§11.5); the computer's gate is typed (§11.2); and the paste form was never published, and is
+gone (§11.3). The maintainer decided §11.2, §11.4 and §11.5 on 2026-11-21, in the forms below. §11.4 and §11.5
+are built; §11.2 is not yet.
 
 ### 11.2 The computer's gate: four digits of Lucille's number, typed
 
@@ -1230,17 +1229,20 @@ Remove this computer in Lucille and start again" and "The code expired. Click Ad
 in place of §11.2's typed number ("What is built today"). After `sas_pending`, the app shows the number and
 asks whether Lucille's page shows the same; **They Match** runs `pair confirm --json`, and **They Differ**
 runs `pair reject --json`. The app reads `pair status --json` only while its pairing window is open: every
-5 s while the pair is `waiting`, and at the deadline. `macos/README.md`, "Connecting to Lucille", says
-what each screen does.
+5 s while the pair is `waiting`, and at the deadline.
+
+**Removed with Connect (§11.4).** The app's code field went with the Connect screens, and the host then
+stopped taking a pasted code: `pair --code-stdin` and `pair <code>` are gone, and the core refuses every code
+that does not answer a Connect request of its own, in every shell (`link.Session.accept`).
 
 ### 11.4 The final form: Connect from Lucille's chat
 
 **Decided by the maintainer on 2026-11-21. The host's side is built: `connect.py` (the connect code, `K` and
 `N`, the typed username, how one read of the drop room is judged), `connecting.py` (the request, its reads,
 its expiry and the checks before the code is answered), and `pair begin`, `pair resume`, `pair cancel` and
-`pair status` (spec/CLI.md §7), and the app's Connect screens (`macos/README.md`, "Connecting to Lucille").
-Not yet: refusing every code without its own request's nonce, so the paste flow (§11.3) still works from the
-command line.** It replaces this record's earlier proposal, a
+`pair status` (spec/CLI.md §7), the app's Connect screens (`macos/README.md`, "Connecting to Lucille"), and
+refusing every code without its own request's nonce, in every shell, so the paste flow (§11.3) is gone.
+Capsule names no Lucille account beside the code yet: the core lists none (§11.7).** It replaces this record's earlier proposal, a
 connect page on Lucille's website reached through a URL scheme: there is no website step. The two ends are
 Lucille's chat (for example in Telegram) and Capsule.
 
@@ -1296,7 +1298,7 @@ command line and any future shell get it.
    clock more than about 20 minutes off makes Lucille miss the epoch, and answer that no Capsule is waiting,
    a matter of availability. If the hub cannot be reached, `begin` says so and keeps no request.
 5. **The host then waits for Lucille's pairing, with no code pasted.** `pair begin --json` stays running and
-   reads the drop room every 5 s, as `pair --code-stdin --json` waits today (§11.3). It stops when a
+   reads the drop room every 5 s, as `pair --code-stdin --json` waited (§11.3). It stops when a
    delivery arrives, the request expires, or the user cancels. Three rules end it with the interference
    warning, "Capsule couldn't read Lucille's answer, and the code may be known to someone else. Start
    again.", and not with plain "The code expired":
@@ -1469,8 +1471,8 @@ command line and any future shell get it.
 - the rate limit on `connect`, and its value;
 - the chat's words when a second delivery is refused, and when an account has no username.
 
-From the release that adds `pair begin`, the core refuses every code without its own nonce, in every shell.
-The conformance suite's and the end-to-end tests' fake Lucille must do what Lucille does: read the connect
+The core refuses every code without its own nonce, in every shell (`link.Session.accept`, built). The
+conformance suite's and the end-to-end tests' fake Lucille must do what Lucille does: read the connect
 code from `pair begin`, and deliver into the drop room a code whose note holds the nonce.
 
 **What the connect code carries, and why ten symbols.**
@@ -2307,8 +2309,8 @@ and the test suite. So on those jobs M6's `.pth` half reads the installed `RECOR
 Planned:
 - the conformance suite against the bundled host (a `--host-command` option names it);
 - end to end through the bundle with the typed digits (§11.2), once they are built, and with the app's own
-  `pair --code-stdin` reaching the SAS (the built check pairs through the command line, with `--hub` and
-  `--store-file`, which the app never passes);
+  `pair begin` reaching the SAS (the built check connects through the command line, with `--hub`,
+  `--test-key` and `--store-file`, which the app never passes);
 - the Keychain for real, through a temporary default keychain;
 - `lsof` sampling: no listener anywhere, no connection from the app, only the hub from the host;
 - crafted deliveries in the drop room (no nonce, a wrong one, two at once, an option-shaped code, a 1 MiB
@@ -2497,8 +2499,7 @@ in 10 minutes or less.
 - **0001 "Packaging, releases and verification"**: the Mac app as a second channel beside PyPI, built from the
   same wheel. "There is no auto-update" stays.
 - **0001 and THREAT_MODEL.md, the pairing-code threats**: against a code an attacker made, the SAS agrees and
-  does not help. Until the Connect release, the bound is that the paste form is not published. From it, the
-  nonce and the pinned key (§11.5) refuse such a code in every shell, and the residual is §11.7's look-alike
+  does not help. The nonce and the pinned key (§11.5) refuse such a code in every shell, and the residual is §11.7's look-alike
   that passes the code on to the real Lucille, which the signed `from` names.
 - **THREAT_MODEL.md, who the host trusts**: adds the embedded runtime (pinned by sha256), ripgrep (pinned
   commit), and Apple's notarization as a second trust root for a first install. The malicious-release threat adds
@@ -2590,7 +2591,7 @@ those writes itself first (`pause`, then `resume`).
 | Threat | What bounds it | What is left |
 |---|---|---|
 | A website or another app hands the app a code | the app registers no URL scheme and never reads the pasteboard itself (§11.3, §11.5); the core refuses a code without its own nonce | none known beyond §11.7 |
-| A scam that hands the user a code made with the public library | the paste form is never published; from the Connect release, the nonce refuses it in every shell | a user talked into reading out codes |
+| A scam that hands the user a code made with the public library | the nonce refuses it in every shell; the paste form was never published, and is gone (§11.3) | a user talked into reading out codes |
 | A connect code or a pairing code intercepted, in the chat or the drop room | Lucille's signature, which only a holder of the pinned key can make (§11.5): the interceptor cannot deliver a code the computer takes, and the commitment's collision gives it no lever; the typed digits against a key holder in the middle of the user's chat with the real Lucille (§11.2) | spending the request; redeeming Lucille's code first, which exposes Lucille's side, not the computer (§11.7); with Lucille's key too, 1 in 10,000 per Connect, or 2 in 10,000 with a collision |
 | A look-alike chat account is sent the connect code, and delivers its own | the pinned key: the host refuses a code Lucille did not sign, before any number (§11.5) | none from the look-alike itself |
 | A look-alike, or anyone who learns the code, sends it to the real Lucille from its own account | the username the user types before connecting, which the signed `from` and `handle` must name, or the Connect ends (§11.5); Lucille binding the pair to that account and refusing a second delivery (Lucille policy); Capsule naming Lucille's chat accounts (§11.7) | a user talked into typing the attacker's username by the attacker, since neither a screen nor the host's log shows it (§11.5); an attacker who holds the user's own chat account |

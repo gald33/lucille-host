@@ -16,7 +16,7 @@ import base64
 import contextlib
 import hashlib
 import json
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -138,30 +138,44 @@ class FakeLucille:
         sender: str = "telegram:123456789",
         handle: str = "@ada",
         note: str | None = None,
+        text: str | None = None,
+        recode: Callable[[str], str] | None = None,
+        before_post: Callable[[str], None] | None = None,
         **options: Any,
     ) -> str:
         """Answer ``connect <shown>`` as Lucille does (decisions/0002 §11.4, step 6): stretch the
         code for the epoch (this hub clock's, unless ``at_epoch`` names one), start a pairing
         whose note names the request's nonce, and post its code into the drop room, signed by
-        ``signer``. Returns the pairing code delivered."""
+        ``signer``. Returns the pairing code delivered.
+
+        ``options`` go to the library's ``start``. ``text``, when given, is delivered in place of
+        a pairing started here, signed as one would be; ``recode``, when given, makes the text
+        delivered from the code started, as somebody who held it could. ``before_post``, when
+        given, is called
+        with the code just before it is posted, so that a test can act on it before the host
+        can read it."""
         code = connect.parse_code(shown)
         assert code is not None, shown
         at = connect.epoch(self.h.now) if at_epoch is None else at_epoch
         key = connect.stretch(code, at)
         nonce = connect.nonce(key)
-        options.setdefault("with_token", False)
-        options.setdefault("ttl", 900)
-        started = pairing.start(
-            self.base,
-            **self._with(
-                store=self.pairs,
-                note=f"lucille-host/2 n={nonce.hex()}" if note is None else note,
-                **options,
-            ),
-        )
-        self.name = started.name
-        self.drop(key, signer.delivery(started.code, nonce, sender=sender, handle=handle))
-        return started.code
+        if text is None:
+            options.setdefault("with_token", False)
+            options.setdefault("ttl", 900)
+            started = pairing.start(
+                self.base,
+                **self._with(
+                    store=self.pairs,
+                    note=connect.note_for(nonce) if note is None else note,
+                    **options,
+                ),
+            )
+            self.name = started.name
+            text = started.code if recode is None else recode(started.code)
+        if before_post is not None:
+            before_post(text)
+        self.drop(key, signer.delivery(text, nonce, sender=sender, handle=handle))
+        return text
 
     def collect(self) -> Any:
         assert self.name is not None
