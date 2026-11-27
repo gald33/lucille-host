@@ -1,0 +1,16 @@
+{
+  "description": "verify, in the repository's development build, which is not a release",
+  "argv": [
+    "--json",
+    "verify"
+  ],
+  "exit": 1,
+  "stdout": [
+    {
+      "v": 1,
+      "type": "error",
+      "code": "not_a_release",
+      "message": "this lucille-host is a development build, not a release, so PyPI holds nothing to check it against; `lucille-host --version` names it"
+    }
+  ]
+}

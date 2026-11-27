@@ -12,7 +12,10 @@ operation, off by default, that reads one GitHub REST API endpoint with a creden
 four Gmail operations, off by default, that list, search and read a Gmail account over IMAP with a Google
 app password stored here (`gmail.check`, `gmail.mailboxes`, `gmail.search`, `gmail.read`).
 Those are tested against Switchboard's in-process hub and a stand-in for Lucille, not against Lucille
-itself. Do not install it.
+itself. It also holds `verify`, which checks that the host installed is a release PyPI serves, attested
+by this repository's release workflow, and that its files are the release's
+([VERIFYING.md](VERIFYING.md), step 2); with no release to check, it is tested with PyPI and sigstore
+stood in for. Do not install it.
 
 ## What it will be
 
@@ -107,6 +110,10 @@ can install.
 3. **Control.** `lucille-host pause`, `kill` and `forget` work on the computer, even offline. Nothing
    Lucille sends can unpause the host or widen its policy. `lucille-host status` and `log` show what the
    host holds and what it did.
+4. **Checking.** `lucille-host verify`, installed with the `[verify]` extra, checks that the host is a
+   release PyPI serves, attested by this repository's release workflow, and that the files installed are
+   the release's. It is the installed code checking itself: [VERIFYING.md](VERIFYING.md) says how to
+   check from a fresh install, and what it cannot show.
 
 `0.1.0.dev0` has these verbs, but no release exists yet.
 

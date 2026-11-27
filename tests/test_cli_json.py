@@ -54,6 +54,7 @@ from lucille_host import (
 from lucille_host.cli import INTERNAL_MESSAGE, main
 from lucille_host.ops import OPERATIONS, Operation
 from tests._cli import STDIN, HostCli, collecting
+from tests._fake_pypi import FakeRelease
 from tests._host import HostEnv, lock_held
 from tests._keyring import MemoryKeyring
 from tests._run import fast
@@ -85,6 +86,9 @@ USAGE_MESSAGE = "the command line could not be parsed; standard error says why"
 # The sizes and the duration a `request` object reports, which depend on the version string, the
 # clock and each system's own tool: the samples the fixtures hold in their place.
 SAMPLE_SIZES = {"duration_ms": 5, "stdout_bytes": 100, "stderr_bytes": 2, "reply_bytes": 300}
+# The sha256 a `verify` object reports for each file of the stood-in release, which depends on how
+# each Python writes a zip file: the sample the fixtures hold in its place.
+SAMPLE_SHA256 = "0123456789abcdef" * 4
 
 # What a test patched away, so that a second set-up in the same test starts from the real thing.
 _OPEN_LINK = _switchboard.open_link
@@ -551,6 +555,27 @@ def _digest_key_damaged(w: World) -> None:
     (w.dirs.state / policy.KEY_FILE).write_bytes(b"abc")
 
 
+def _release(w: World, change: Callable[[FakeRelease], None] | None = None) -> None:
+    """A release, 1.2.3, on a PyPI and a sigstore stood in for, installed under the home: what
+    `verify` checks in place of the host that runs."""
+    release = FakeRelease(Path(w.path("/home/me/venv/lib/python3/site-packages")))
+    if change is not None:
+        change(release)
+    w.monkeypatch.setattr("lucille_host.verify.installed", release.where)
+    w.monkeypatch.setattr("lucille_host.verify.fetch_url", release.fetch)
+    w.monkeypatch.setattr("lucille_host.verify.sigstore_verifier", lambda: release.verify)
+
+
+def _cli_changed(release: FakeRelease) -> None:
+    (release.site / "lucille_host" / "cli.py").write_text("import os\n")
+
+
+def _not_attested(release: FakeRelease) -> None:
+    release.provenance[release.wheel_name]["attestation_bundles"][0]["publisher"]["workflow"] = (
+        "other.yml"
+    )
+
+
 def _not_toml(w: World) -> None:
     paths.ensure_dir(w.dirs.config)
     w.dirs.policy_file.write_text("this is not toml\n")
@@ -613,6 +638,9 @@ SETUPS: dict[str, Callable[[World], None]] = {
     "run-events-expired": lambda w: _expired(w),
     "run-events-ended": lambda w: _ended(w),
     "run-events-leaked": lambda w: _resolve_leaks(w),
+    "verify": _release,
+    "verify-files-differ": lambda w: _release(w, _cli_changed),
+    "verify-not-attested": lambda w: _release(w, _not_attested),
 }
 # The cases whose set-up pairs, or whose command reaches the hub.
 HUB_CASES = frozenset(
@@ -681,6 +709,8 @@ def _sampled(value: Any, w: World, key: str | None = None) -> Any:
         return SAMPLE_GENERATION
     if key in SAMPLE_SIZES and isinstance(value, int) and not isinstance(value, bool):
         return SAMPLE_SIZES[key]
+    if key == "sha256" and isinstance(value, str):
+        return SAMPLE_SHA256
     if not isinstance(value, str):
         return value
     value = NOTE.sub(SAMPLE_NOTE, value)
@@ -1506,14 +1536,14 @@ def test_every_failure_has_a_code(
     enum = error_codes()
     source = REPO_ROOT / "src" / "lucille_host"
     literal: list[tuple[str, str]] = []
-    for name in ("cli.py", "link.py", "loop.py"):
+    for name in ("cli.py", "link.py", "loop.py", "verify.py"):
         tree = ast.parse((source / name).read_text())
         for node in ast.walk(tree):
             if not isinstance(node, ast.Call):
                 continue
             called = node.func.attr if isinstance(node.func, ast.Attribute) else None
             called = called or (node.func.id if isinstance(node.func, ast.Name) else None)
-            if called not in ("_Refused", "Stopped", "Failed"):
+            if called not in ("_Refused", "Stopped", "Failed", "Unverified"):
                 continue
             keyword = {k.arg: k.value for k in node.keywords}
             given = keyword.get("code")

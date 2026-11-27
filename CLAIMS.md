@@ -11,8 +11,8 @@ what the host holds and what `run` last saw, with no hub call; `log` prints the 
 the pair on the computer. With `--json`, every verb but `run` writes the objects of
 [spec/CLI.md](spec/CLI.md) instead of its text, and `run --json-events` writes `run`'s events, for an app
 that supervises it with `--exit-on-stdin-eof`. Some tests named below do not exist yet: the conformance suite's
-and `files.search`'s. The release workflow's provenance checks exist and are tested, and have not run,
-since no release exists.
+and `files.search`'s. The release workflow's provenance checks, and `lucille-host verify`, exist and are
+tested, and have not run against a release, since no release exists.
 
 **How to read it.**
 - **Code** names the file that makes the sentence true. "Not written yet" means the code does not exist.
@@ -403,7 +403,8 @@ asks for, with the token you saved for it."
   name resolves to must be on the proxy's fixed list (`address_allowed`), and the connection goes to a
   vetted address with TLS checked for `api.github.com` against certifi's bundle; no redirect is
   followed, and no proxy setting is read. `tools/guards/ast_lint.py`: among the host's modules, only
-  `proxy.py` may import `socket`, `ssl`, `http.client`, `ipaddress` or `certifi`.
+  `proxy.py` may import `socket`, `ssl`, `http.client`, `ipaddress` or `certifi`, but for `verify.py`,
+  which may import `ssl`, `http.client` and `certifi` for `lucille-host verify`, which `run` never calls.
 - Tests: `tests/test_proxy.py` (`test_refused_addresses`, `test_allowed_addresses`,
   `test_one_refused_address_refuses_the_whole_request`, `test_a_redirect_is_reported_never_followed`,
   `test_it_connects_to_vetted_addresses_only_in_order`); `tests/test_jobs.py`
@@ -651,8 +652,11 @@ reachable then."
   GitHub-hosted runners only, and every action is pinned by commit SHA); `tests/test_release.py`
   (`release.yml` builds from a tag on `main` that names the package's version, publishes only from
   environment `pypi`, and then checks that PyPI serves those bytes, attested to this repository,
-  `release.yml` and `pypi`, at that tag, from a GitHub-hosted runner); and the provenance check in
-  [VERIFYING.md](VERIFYING.md), step 2 (pending; no release exists).
+  `release.yml` and `pypi`, at that tag, from a GitHub-hosted runner); `tests/test_verify.py`
+  (`lucille-host verify` passes only a release PyPI lists and serves exactly, not yanked, each file
+  attested by this repository, `release.yml` and `pypi`, at its tag, from a GitHub-hosted runner, whose
+  installed files are the attested wheel's, with PyPI and sigstore stood in for); and the provenance check
+  in [VERIFYING.md](VERIFYING.md), step 2 (pending; no release exists).
 
 ## Guards that back no single sentence
 
