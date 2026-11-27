@@ -15,8 +15,8 @@ What it does not cover: the operations whose entries copy more of the host's env
 their child (``github.read`` and the ``gmail.`` operations, which get what the keyring needs).
 They reach the network, which the suite does not.
 
-This needs Linux's ``/proc``. Where there is none (macOS), the scenario fails, saying that it
-could not check, rather than pass.
+This needs Linux's ``/proc``. Where there is none (macOS), the scenario is skipped, with that
+reason: never a pass.
 """
 
 from __future__ import annotations
@@ -26,7 +26,7 @@ import time
 
 from lucille_host.conformance import _procfs
 from lucille_host.conformance._restore import restore, scenario, until_describe
-from lucille_host.conformance._scenarios import Context, Failed, _short, check
+from lucille_host.conformance._scenarios import Context, Failed, Skipped, _short, check
 
 # The child's whole environment, as decisions/0001 ("Execution rules") states it. The suite
 # states it again rather than importing the host's own constant, so that a change to the host
@@ -84,7 +84,8 @@ def child_env_built_and_no_key(ctx: Context) -> None:
     RIPGREP_CONFIG_PATH, has exactly PATH, LANG and LC_ALL with their fixed
     values, only its three standard streams, and standard input on /dev/null (Linux; read from
     /proc)."""
-    check(_procfs.available(), "not checked: this computer has no /proc to read a child from")
+    if not _procfs.available():
+        raise Skipped("this computer has no /proc to read a child's environment from")
     ctx.host.enable("host.sleep")
     ctx.host.restart(env=PLANTED)
     try:

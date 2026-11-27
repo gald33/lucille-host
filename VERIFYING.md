@@ -509,10 +509,13 @@ signing its pairing code with a throwaway key it passes to `--test-key` (never L
 policy with the host's own `ops enable` and `roots add`, as you would. Then it plays a hostile Lucille:
 it starts `run`, offers a work room, and posts the requests of the first row of "Host invariants and
 their tests" in the design record, "Nothing Lucille sends can widen what the host permits", and a
-positive control. It prints one line per scenario, `PASS` or `FAIL` with the reason, and exits 0 only
-when at least one scenario ran and every one passed. The host refuses to run as root, and so does the
-suite: run it as an ordinary user. What each scenario asserts is in the docstrings of
-`lucille_host/conformance/_scenarios.py`.
+positive control; then those of two more rows, "No shell; one spawn site; children get a built
+environment and no key" and "An upgrade never runs a changed op under old consent". It prints one line per scenario: `PASS`, `FAIL` with the reason, or `SKIP`
+with the reason when the scenario cannot check on this computer (the child's environment is read from
+Linux's `/proc`, which macOS does not have). It exits 0 only when at least one scenario passed and none
+failed; a skipped scenario is never a pass. The host refuses to run as root, and so does the suite: run it
+as an ordinary user. What each scenario asserts is in the docstrings of
+`lucille_host/conformance/_scenarios.py` and of the modules beside it.
 
 Run it with the virtual environment's own `python`, as above. The conformance lint lets the suite name
 the programs it starts by their path beside that interpreter, so that it tests the `lucille-host`

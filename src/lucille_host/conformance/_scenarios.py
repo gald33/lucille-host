@@ -2,8 +2,10 @@
 
 A scenario is a function of one :class:`Context`, registered with :func:`scenario`. It passes when
 it returns, and fails when it raises :class:`Failed` (what the host did is not what the spec says)
-or anything else (the suite counts that as a failure too, never as a pass). Scenarios run in the
-order they are registered, against one host, paired once, with one ``run`` reading one work room.
+or anything else (the suite counts that as a failure too, never as a pass). It raises
+:class:`Skipped` when it cannot check on this computer: that is reported, and is neither.
+Scenarios run in the order they are registered, against one host, paired once, with one ``run``
+reading one work room.
 
 What a scenario is given (``ctx``):
 
@@ -63,6 +65,11 @@ REPLY_WAIT = 60.0
 
 class Failed(Exception):
     """The host did not do what the spec says."""
+
+
+class Skipped(Exception):
+    """The scenario cannot check on this computer (Linux's ``/proc`` on macOS, say); the reason.
+    It is reported on its own line and in the summary, and is never a pass."""
 
 
 def check(ok: bool, message: str) -> None:
@@ -379,9 +386,9 @@ def file_named_version(ctx: Context) -> None:
 @scenario
 def caps_above_host(ctx: Context) -> None:
     """Request caps far above the host's own are not refused: the request runs, and each
-    stream of the reply measures within the host's own cap. This output is short, so this
-    shows the request is not refused and does not show the host's cap holding against longer
-    output; caps_below_output shows the lower cap is the one applied."""
+    stream of the reply measures within the host's own cap. caps_below_output shows the lower
+    cap is the one applied. The suite does not yet show that the host's cap holds against longer
+    output; tests/test_exec.py shows it."""
     caps = {"stdout_bytes": 2147483647, "stderr_bytes": 2147483647}
     reply = ctx.request(ctx.body("files.sha256", {"root": ROOT, "path": "hello.txt"}, caps=caps))
     _digest_line(reply, HELLO, "hello.txt")
