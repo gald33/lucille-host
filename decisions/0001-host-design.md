@@ -15,8 +15,9 @@ while it is invalid, `policy reset`, and refusing a downgrade); "Choices made in
 what that build chose.
 On 2026-11-26: `files.search`, and the release workflow, `release.yml`, which runs on each release's
 tag; it has not run yet, and `v0.1.0` is the first. On
-2026-11-27: the conformance suite, with the scenarios of the first row of "Host invariants and their
-tests" and a positive control; the other rows that name conformance have no scenario yet. Not built:
+2026-11-27: the conformance suite, with a positive control and scenarios for some rows of "Host
+invariants and their tests"; [CLAIMS.md](../CLAIMS.md) names each, and a row with none is still pending.
+Not built:
 `lucille-host verify`.
 
 This record describes the program in this repository, and it governs the host's code. A pull request that

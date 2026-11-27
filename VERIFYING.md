@@ -507,12 +507,12 @@ It runs offline, against a local Switchboard hub it starts on 127.0.0.1. It pair
 `lucille-host`, in a home of its own under a temporary folder, through the real `pair begin` flow,
 signing its pairing code with a throwaway key it passes to `--test-key` (never Lucille's), and sets the
 policy with the host's own `ops enable` and `roots add`, as you would. Then it plays a hostile Lucille:
-it starts `run`, offers a work room, and posts the requests of the first row of "Host invariants and
-their tests" in the design record, "Nothing Lucille sends can widen what the host permits", and a
-positive control. It prints one line per scenario, `PASS` or `FAIL` with the reason, and exits 0 only
+it starts `run`, offers a work room, and posts the requests of its scenarios, each aimed at a row of
+"Host invariants and their tests" in the design record, and a positive control. [CLAIMS.md](CLAIMS.md)
+names the scenario behind each claim. It prints one line per scenario, `PASS` or `FAIL` with the reason, and exits 0 only
 when at least one scenario ran and every one passed. The host refuses to run as root, and so does the
-suite: run it as an ordinary user. What each scenario asserts is in the docstrings of
-`lucille_host/conformance/_scenarios.py`.
+suite: run it as an ordinary user. What each scenario asserts is in its docstring, in
+`lucille_host/conformance/`.
 
 Run it with the virtual environment's own `python`, as above. The conformance lint lets the suite name
 the programs it starts by their path beside that interpreter, so that it tests the `lucille-host`

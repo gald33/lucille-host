@@ -11,9 +11,8 @@ what the host holds and what `run` last saw, with no hub call, and then this cla
 the pair on the computer. With `--json`, every verb but `run` writes the objects of
 [spec/CLI.md](spec/CLI.md) instead of its text, and `run --json-events` writes `run`'s events, for an app
 that supervises it with `--exit-on-stdin-eof`. The conformance suite (`python -m lucille_host.conformance`)
-runs the scenarios of the design record's first invariant, "Nothing Lucille sends can widen what the host
-permits", against the installed host. Some tests named below do not exist yet: the conformance scenarios
-of the other invariants. The release workflow's provenance checks are tested, and run on each release's
+runs its scenarios against the installed host; each item below names the scenarios behind it. Some tests
+named below do not exist yet: the items that say "pending, conformance" have no scenario. The release workflow's provenance checks are tested, and run on each release's
 tag; they have not run yet, and `v0.1.0` is the first.
 
 **How to read it.**
