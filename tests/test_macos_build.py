@@ -707,19 +707,29 @@ def test_the_abilities_menu_says_the_cores_words() -> None:
         assert "abilityTitles" not in source and "abilityDetails" not in source, path.name
     assert "    var title: String { summary ?? name }\n" in text
     assert "    var detail: String? { sends }\n" in text
-    # The menu leaves out the operations meant for testing, by the core's `diagnostic`, and
-    # host.describe, which is on from the start and is described in the menu instead.
+    # The menu leaves out the operations meant for testing, by the core's `diagnostic`;
+    # host.describe, which is on from the start and is described in the menu instead; and
+    # credential.ask, whose ask the app cannot show yet (decisions/0003, "Entry"), which Set Up
+    # leaves out too.
     assert _swift_string_set(text, "unlistedAbilities") == {"host.describe"}
+    assert _swift_string_set(text, "answeredInATerminal") == {"credential.ask"}
     assert (
         "    var isShown: Bool {\n"
         "        !diagnostic && state != .notInCatalog"
         " && !HostText.unlistedAbilities.contains(name)\n"
+        "            && !HostText.answeredInATerminal.contains(name)\n"
         "    }\n"
     ) in text
+    assert (
+        "    var isOnSetUpPage: Bool {\n"
+        "        !diagnostic && state != .notInCatalog"
+        " && !HostText.answeredInATerminal.contains(name)\n"
+        "    }\n"
+    ) in _swift("Setup.swift")
     listed = {
         name: op.about
         for name, op in OPERATIONS.items()
-        if not op.about.diagnostic and name != "host.describe"
+        if not op.about.diagnostic and name not in {"host.describe", "credential.ask"}
     }
     assert set(listed) == {
         "files.sha256",
@@ -733,6 +743,7 @@ def test_the_abilities_menu_says_the_cores_words() -> None:
     # What the ui check looks for in the menu is the core's words for each listed ability.
     assert check_app.ABILITY_TITLES == {name: about.summary for name, about in listed.items()}
     assert check_app.ABILITY_DETAILS == {name: about.sends for name, about in listed.items()}
+    assert check_app.OPERATIONS_SUMMARY_ASK == OPERATIONS["credential.ask"].about.summary
     # The one visible change: the sentence under "Check a file's fingerprint" is the core's.
     assert check_app.ABILITY_DETAILS["files.sha256"] == (
         "Lucille gets a code that identifies the file's exact contents, not the contents."
@@ -1208,14 +1219,14 @@ def test_content_sending_ops_ask_first() -> None:
     stub = json.loads(
         (check_app.CLI_FIXTURES / "ops-list-sends-file-content.json").read_text(encoding="utf-8")
     )
-    assert [op["sends_file_content"] for op in stub["stdout"]] == [False, False, True] + [False] * 5
+    assert [op["sends_file_content"] for op in stub["stdout"]] == [False, False, True] + [False] * 6
     selftest = _SELF_TEST.read_text(encoding="utf-8")
     assert "ops-list-sends-file-content" in selftest
     assert "let questionOn: [Bool] = content.map { $0.asksFirst(turningOn: true) }" in selftest
     assert (
-        "questionOn == [false, false, true, false, false, false, false, false]\n"
+        "questionOn == [false, false, true, false, false, false, false, false, false]\n"
         "                          && questionOff == "
-        "[false, false, false, false, false, false, false, false]" in selftest
+        "[false, false, false, false, false, false, false, false, false]" in selftest
     )
 
 

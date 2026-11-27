@@ -111,9 +111,10 @@ struct RestoreOffer: Equatable, Sendable {
 
 extension Ability {
     /// Whether Set Up's What Lucille may do page has a switch for it: every operation but those
-    /// meant for testing and a name this release does not have; `host.describe` too, as it is.
+    /// meant for testing, one the app cannot answer yet (`HostText.answeredInATerminal`) and a name
+    /// this release does not have; `host.describe` too, as it is.
     var isOnSetUpPage: Bool {
-        !diagnostic && state != .notInCatalog
+        !diagnostic && state != .notInCatalog && !HostText.answeredInATerminal.contains(name)
     }
 }
 

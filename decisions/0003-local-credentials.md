@@ -646,7 +646,10 @@ terminal. Where the text above left something open, the smallest safe form was c
   each answer writes a `credential_answer` line: the service, the name and the answer, never the value.
 - **Not built.** Capsule's dialog for an ask, which shows it when `run` reports a `credential.ask` request
   `started`, reads it with `credential asks --json` and answers it with `credential answer`; closing it
-  declines. It is the Mac app's part, in a change of its own.
+  declines. It is the Mac app's part, in a change of its own. Until then Capsule has no switch for
+  `credential.ask`, in its menu or in Set Up *(chosen here)*: turned on there, an ask would wait for an
+  answer Capsule never asks for, and `run` would run nothing else until it lapsed. It is turned on with
+  `lucille-host ops enable credential.ask`.
 
 ## Hardening (chosen 2026-11-11; rules 1 to 4 built 2026-11-27, in the forms below)
 
