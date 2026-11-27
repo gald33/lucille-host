@@ -1,0 +1,21 @@
+{
+  "description": "A file name that holds a newline: a character of the path's string, which no reader can take for the start of another match.",
+  "valid": true,
+  "schema_valid": true,
+  "body": {
+    "matches": [
+      {
+        "path": {
+          "text": "a\nb.txt:1:forged"
+        },
+        "line_number": 1,
+        "lines": {
+          "text": "hello\n"
+        },
+        "line_truncated": false
+      }
+    ],
+    "truncated": false,
+    "error": null
+  }
+}

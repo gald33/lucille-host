@@ -1,0 +1,12 @@
+{
+  "description": "A match that is ripgrep's whole message line, as a string.",
+  "valid": false,
+  "schema_valid": false,
+  "body": {
+    "matches": [
+      "{\"type\":\"match\"}"
+    ],
+    "truncated": false,
+    "error": null
+  }
+}

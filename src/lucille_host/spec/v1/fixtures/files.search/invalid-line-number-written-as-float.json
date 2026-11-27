@@ -1,0 +1,22 @@
+{
+  "description": "A line number written 3.0 (rule integers).",
+  "valid": false,
+  "schema_valid": true,
+  "prose_rule": "integers",
+  "body": {
+    "matches": [
+      {
+        "path": {
+          "text": "notes/todo.txt"
+        },
+        "line_number": 3.0,
+        "lines": {
+          "text": "hello world\n"
+        },
+        "line_truncated": false
+      }
+    ],
+    "truncated": false,
+    "error": null
+  }
+}

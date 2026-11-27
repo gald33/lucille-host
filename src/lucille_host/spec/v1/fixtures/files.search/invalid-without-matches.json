@@ -1,0 +1,9 @@
+{
+  "description": "A document without matches.",
+  "valid": false,
+  "schema_valid": false,
+  "body": {
+    "truncated": false,
+    "error": null
+  }
+}

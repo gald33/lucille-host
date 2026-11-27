@@ -220,7 +220,7 @@ HASHES = {
     "host.describe": "734b854a4e4e0fb7128dc9cce6147de7e7386c20a92b44cf77086031240cc0c4",
     "host.sleep": "868830c4433044a8d4cb3e3a39ab7985d44a6cce394362a23ae7fcfaa79a5e8d",
     "files.sha256": "1c29598400572d7e1f93e5cc3ee6df17edfad5be1a78c7e33432a2704bfdddea",
-    "files.search": "13acde1fd970f540daa02d79d1e54cbd34657c40f1a5e7028ee40ec7409773de",
+    "files.search": "21a5d4e7eb4919ec3c4dedbdbb8efe152ebccc5716cfd4d613ebee4a7ff772d9",
     "github.read": "7f32ad23f86007c7a605027655ff2edd341b2395e9a9554ba08cddaedff60906",
     "gmail.check": "ec32dd5a84cdb7e9049d53f9d45856f91ad485f035e730891c6c31f0b4262d3f",
     "gmail.mailboxes": "6e83854a220198786480f5351698afeb31772b063b85d6d36ec27a869a652c7a",
@@ -230,7 +230,7 @@ HASHES = {
 VERSION_BEFORE_WORDS = "06fe2f327b0916227970e377eaad94b064a7631bd7ff2696b3cef675bd607f35"
 VERSION_WITH_GITHUB_READ = "49f81c2d24e04c15a0b38268434523da60ee4cb5bbb8283c8f4f725e15711652"
 VERSION_WITH_GMAIL = "dc430cc7c08f0f36be46233c2d807ddb7ec7de07746ddb990e3247a950ca2bd0"
-VERSION_WITH_FILES_SEARCH = "620825c2441ec25e011fce28caab849eec23a1a7ce36a358b3860b754f7fe3fb"
+VERSION_WITH_FILES_SEARCH = "fbb41771c2e57bd99a0873ac65bf852a3bff6d529efa9636ae4d5a9b330e97bc"
 
 
 def _with_about(op: Operation, **changes: Any) -> Operation:

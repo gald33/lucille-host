@@ -30,6 +30,7 @@ from tests.spec import _support
 REQUEST_FIXTURES = spec.fixture_paths("request")
 REPLY_FIXTURES = spec.fixture_paths("reply")
 DESCRIBE_FIXTURES = spec.fixture_paths("host.describe")
+SEARCH_FIXTURES = spec.fixture_paths("files.search")
 DECODE_FIXTURES = spec.fixture_paths("decode")
 FAKE_JOB_ID = re.compile(r"00000000-0000-4000-8000-[0-9]{12}\Z")
 # The two fake job ids with a letter in every group, one in a valid request and one in a valid
@@ -65,6 +66,7 @@ def test_there_are_fixtures_of_every_kind() -> None:
     assert len(REQUEST_FIXTURES) >= 60
     assert len(REPLY_FIXTURES) >= 30
     assert len(DESCRIBE_FIXTURES) >= 10
+    assert len(SEARCH_FIXTURES) >= 10
     assert len(DECODE_FIXTURES) >= 5
 
 
@@ -105,6 +107,38 @@ def test_host_describe_fixture_is_labelled_correctly(path: Path) -> None:
     fixture = spec.load_fixture(path)
     schema = spec.load_schema("host.describe")
     assert _support.label_errors("host.describe", fixture, schema) == []
+
+
+@pytest.mark.parametrize("path", SEARCH_FIXTURES, ids=_ids(SEARCH_FIXTURES))
+def test_files_search_fixture_is_labelled_correctly(path: Path) -> None:
+    fixture = spec.load_fixture(path)
+    schema = spec.load_schema("files.search")
+    assert _support.label_errors("files.search", fixture, schema) == []
+
+
+def test_files_search_fixtures_hold_each_bound_and_both_forms() -> None:
+    fixtures = _all()["files.search"]
+    valid = [f["body"] for f in fixtures.values() if f["valid"]]
+    matches = [match for body in valid for match in body["matches"]]
+    for key in ("path", "lines"):
+        assert {next(iter(match[key])) for match in matches} == {"text", "bytes"}, key
+    assert max(len(body["matches"]) for body in valid) == 1000
+    assert any(body["error"] == "unreadable_output" for body in valid)
+    assert {"invalid-too-many-matches", "invalid-line-past-most", "invalid-path-past-most"} <= set(
+        fixtures
+    )
+
+
+def test_files_search_reply_carries_its_document_in_stdout() -> None:
+    fixtures = [f for f in _all()["reply"].values() if f.get("op") == "files.search"]
+    assert fixtures, "a fixture of files.search's reply"
+    for fixture in fixtures:
+        body = fixture["body"]
+        assert fixture["valid"] and body["status"] == "done"
+        document = json.loads(body["stdout"])
+        assert _support.schema_accepts("files.search", document)
+        assert body["stdout_truncated"] is document["truncated"]
+        assert _support.serialized_size(body["stdout"]) <= _support.STREAM_LIMIT
 
 
 def test_the_largest_document_fixture_is_the_largest_the_schema_allows() -> None:
@@ -232,7 +266,7 @@ def test_fixture_job_ids_are_obviously_fake_and_distinct() -> None:
 
 
 def test_fixture_keys_come_in_the_order_the_spec_lists_them() -> None:
-    for kind in ("request", "reply", "host.describe"):
+    for kind in ("request", "reply", "host.describe", "files.search"):
         for name, fixture in _all()[kind].items():
             assert list(fixture) == [k for k in KEY_ORDER if k in fixture], f"{kind}/{name}"
 

@@ -9,8 +9,9 @@ host's own environment is another way in: ripgrep reads ``RIPGREP_CONFIG_PATH`` 
 to, so one scenario plants a configuration that would follow links and search hidden files.
 
 Each refused case checks the exact code, that nothing started, and that the policy digest did
-not change. Each case that runs checks the exact matches ripgrep reported, so that a flag that
-took effect (``--files`` lists files instead of matching lines) shows up as a difference.
+not change. Each case that runs checks the exact matches the reply's document reports, so that a
+flag that took effect (``--files`` lists files instead of matching lines) shows up as a
+difference.
 
 The scenarios add a folder of their own as alias ``search`` and enable ``files.search``, then put
 the policy (and ``run``, where restarted) back as the baseline found them. Where this computer has
@@ -20,6 +21,8 @@ reason: never a pass.
 
 from __future__ import annotations
 
+import base64
+import json
 from pathlib import Path
 from typing import Any
 
@@ -44,10 +47,34 @@ FLAG_PATTERNS = (
 PLAIN = "nothing to see"
 
 
+def _text(value: Any) -> str:
+    """A path or line of the document: its text, or its bytes (base64) decoded with any byte
+    that is not UTF-8 replaced."""
+    if isinstance(value, dict) and isinstance(value.get("text"), str):
+        return value["text"]
+    if isinstance(value, dict) and isinstance(value.get("bytes"), str):
+        return base64.b64decode(value["bytes"]).decode("utf-8", "replace")
+    raise Failed(f"a match holds neither text nor bytes: {value!r}")
+
+
 def matches(reply: dict[str, Any]) -> list[str]:
-    """The matches a ``files.search`` reply reports, one ``path:line:text`` string each, in the
-    order given: the lines of its ``stdout``, in ripgrep's form for the catalog's flags."""
-    return [line for line in str(reply.get("stdout", "")).split("\n") if line]
+    """The matches a ``files.search`` reply reports, one ``path:line:text`` string each (the
+    line without its ending), in the order given. Its stdout is the document
+    ``files.search.schema.json`` describes; a document with an error, or that says it is
+    truncated, fails the scenario, since none of these searches should come near a cap."""
+    stdout = str(reply.get("stdout", ""))
+    try:
+        document = json.loads(stdout)
+    except ValueError as error:
+        raise Failed(f"files.search's stdout is not its document: {stdout[:200]!r}") from error
+    check(isinstance(document, dict), f"files.search's document is {document!r}")
+    check(document.get("error") is None, f"files.search's document has error {document!r}")
+    check(document.get("truncated") is False, f"files.search's document is truncated: {document!r}")
+    found = []
+    for match in document.get("matches", []):
+        line = _text(match.get("lines")).removesuffix("\n").removesuffix("\r")
+        found.append(f"{_text(match.get('path'))}:{match.get('line_number')}:{line}")
+    return found
 
 
 def plant(workdir: Path) -> tuple[Path, Path]:

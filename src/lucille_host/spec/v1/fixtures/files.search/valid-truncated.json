@@ -1,0 +1,21 @@
+{
+  "description": "Not every match is here: the list was cut, and the reply's stdout_truncated is true too.",
+  "valid": true,
+  "schema_valid": true,
+  "body": {
+    "matches": [
+      {
+        "path": {
+          "text": "notes/todo.txt"
+        },
+        "line_number": 3,
+        "lines": {
+          "text": "hello world\n"
+        },
+        "line_truncated": false
+      }
+    ],
+    "truncated": true,
+    "error": null
+  }
+}

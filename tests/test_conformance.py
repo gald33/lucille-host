@@ -174,3 +174,10 @@ def test_an_expectation_that_does_not_hold_fails_the_suite(
     assert "FAIL ran-not-refused: expected refused not_enabled, got " in out
     assert '"status": "done"' in out
     assert "1 passed, 2 failed" in out
+
+
+def test_the_output_scenarios_run_before_policy_unchanged() -> None:
+    names = [found.name for found in _scenarios.REGISTRY]
+    mine = ["output-bounded", "replies-path-free", "failures-codes-only"]
+    assert all(name in names for name in mine)
+    assert all(names.index(name) < names.index("policy-unchanged") for name in mine)
