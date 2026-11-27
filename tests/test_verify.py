@@ -82,11 +82,12 @@ def test_a_development_build_is_refused_before_anything_is_fetched(
     assert release.requests == []
 
 
-def test_the_running_host_is_checked_by_default() -> None:
+def test_the_running_host_is_checked_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
     version, site = verify.installed()
     assert version == verify.__version__
     assert (site / "lucille_host" / "verify.py").is_file()
-    # The checkout's build is a development one.
+    # check() asks installed() which release it is, when not told.
+    monkeypatch.setattr(verify, "installed", lambda: ("0.2.0.dev0", site))
     with pytest.raises(verify.Unverified) as raised:
         verify.check(fetch=lambda *_: pytest.fail("fetched"), verify=lambda *_: {})
     assert raised.value.code == "not_a_release"

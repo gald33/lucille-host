@@ -1,5 +1,5 @@
 {
-  "description": "verify, in the repository's development build, which is not a release",
+  "description": "verify, with the running host stubbed to be a development build, 0.2.0.dev0, which is not a release",
   "argv": [
     "--json",
     "verify"

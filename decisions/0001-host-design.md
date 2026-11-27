@@ -13,11 +13,12 @@ in building pairing and the read loop" lists what that build chose. On 2026-11-0
 events, the lifeline on standard input, its exit codes, reloading the policy as it changes and idling
 while it is invalid, `policy reset`, and refusing a downgrade); "Choices made in supervising run" lists
 what that build chose.
-On 2026-11-26: the release workflow, `release.yml`, which has not run yet, and `files.search`. On
-2026-11-27: the conformance suite, with the scenarios of the first row of "Host invariants and their
-tests" and a positive control; the other rows that name conformance have no scenario yet; and
-`lucille-host verify`, which has no release to check yet ("Choices made in building verify" lists what
-that build chose).
+On 2026-11-26: `files.search`, and the release workflow, `release.yml`, which runs on each release's
+tag; it has not run yet, and `v0.1.0` is the first. On
+2026-11-27: the conformance suite, with a positive control and scenarios for some rows of "Host
+invariants and their tests"; [CLAIMS.md](../CLAIMS.md) names each, and a row with none is still pending.
+Also on 2026-11-27, after `0.1.0`: `lucille-host verify`, in no release yet; "Choices made in building
+verify" lists what that build chose.
 
 This record describes the program in this repository, and it governs the host's code. A pull request that
 changes the design updates this record in the same pull request.
@@ -789,8 +790,12 @@ commit SHA:
 
 A workflow-lint test rejects any `self-hosted` label, and any action not pinned by SHA.
 
-**Before anyone other than the repository owner pairs a computer,** a later release adds a rebuild job
-that compares sha256s.
+**Before anyone other than the repository owner pairs a computer,** a later release adds:
+- a rebuild job that compares sha256s;
+- `lucille-host verify` (built, below; `0.1.0` does not hold it);
+- conformance scenarios for every row of "Host invariants and their tests" that names conformance, not
+  only the first;
+- exact dependency pins in a user's install, not only in CI's (THREAT_MODEL.md, "Known gaps").
 
 **`lucille-host verify`** checks the release whose code is running, and stops at the first check that
 fails:

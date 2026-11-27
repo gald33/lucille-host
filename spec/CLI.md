@@ -3,7 +3,8 @@
 What a program that drives lucille-host (a "shell": the Mac app, a later Linux or Windows app, a script)
 can rely on: the verbs it calls, the JSON objects each one writes, and the exit codes.
 
-**Version 1.0, draft.** No released host implements it yet. This document, the JSON Schemas and the golden
+**Version 1.1, draft.** lucille-host `0.1.0` implements 1.0; the release after it implements 1.1. It stays a draft, and can still change, until the
+release that opens pairing to anyone other than the repository owner. This document, the JSON Schemas and the golden
 fixtures are the contract together. It is separate from the protocol between Lucille and the host
 ([PROTOCOL.md](PROTOCOL.md)), and has its own version.
 
@@ -184,7 +185,7 @@ can be unknown. Arrays are written in the order each type states.
 | Field | Type | |
 |---|---|---|
 | `host_version` | string | This release's version, as `lucille-host --version` prints it. |
-| `contract` | string, `1.<minor>` | The version of this contract this release writes, `1.0` here. |
+| `contract` | string, `1.<minor>` | The version of this contract this release writes, `1.1` here. |
 
 ### `op`: one catalog operation, or a policy entry this release does not have
 
@@ -917,8 +918,8 @@ Each fixture is one command line and what it writes:
   exit code and standard error are the same.
 - The `verify` fixtures are written with a release, `1.2.3`, installed in a folder under the home, and
   PyPI and sigstore stood in for. Each `sha256` of a `verify` object is a sample: the stand-in wheel's
-  bytes depend on how each Python writes a zip file. `verify-dev-build` runs the repository's own
-  development build.
+  bytes depend on how each Python writes a zip file. `verify-dev-build` stubs the running host's
+  version to a development build's.
 - `ops-list-sends-file-content` is written with a catalog entry stubbed to send file contents, so that a
   shell's decoder sees `sends_file_content` true on an entry whose words it knows.
 - Every `stopped` reason has a fixture of `run`, except `forgotten`. It comes only while `run` serves the
@@ -1345,12 +1346,13 @@ Each line is one JSON object, of at most 1,024 bytes:
 
 ## Changes
 
-- **1.0** (no release yet): the first version, with `run`'s event stream and exit codes, `policy reset`,
+- **1.1** (the release after `0.1.0`, still a draft): `verify`, with its type `verify` and the codes
+  `not_a_release`, `no_verifier`, `yanked`, `not_attested` and `files_differ`; `unreachable` is given by
+  `verify` too.
+- **1.0** (`0.1.0`, still a draft): the first version, with `run`'s event stream and exit codes, `policy reset`,
   and `credential` with `--json` (its types `credential`, `credential_removed` and `credential_test`), for
   the Mac app's Gmail window; and Connect from Lucille's chat: `pair begin`, `pair resume`, `pair cancel`,
   the `connect` type, and its error codes. The paste form is gone: `pair` takes no pairing code, on its
   command line or with `--code-stdin`, and answers only a code delivered for its own Connect request.
-  And `verify`, with its type `verify` and the codes `not_a_release`, `no_verifier`, `yanked`,
-  `not_attested` and `files_differ`.
-  A build of the repository's development version is not a release, and writes contract 1.0 whatever it
-  holds.
+- A build of the repository's development version is not a release, and writes the latest contract
+  recorded here, whatever it holds.

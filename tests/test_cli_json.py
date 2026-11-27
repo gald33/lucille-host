@@ -639,6 +639,9 @@ SETUPS: dict[str, Callable[[World], None]] = {
     "run-events-ended": lambda w: _ended(w),
     "run-events-leaked": lambda w: _resolve_leaks(w),
     "verify": _release,
+    "verify-dev-build": lambda w: w.monkeypatch.setattr(
+        "lucille_host.verify.installed", lambda: ("0.2.0.dev0", Path(w.path("/home/me/venv")))
+    ),
     "verify-files-differ": lambda w: _release(w, _cli_changed),
     "verify-not-attested": lambda w: _release(w, _not_attested),
 }
@@ -1445,7 +1448,7 @@ def test_version_json_either_order(capsys: pytest.CaptureFixture[str]) -> None:
         ran = run(*argv)
         assert ran.rc == 0, argv
         assert assert_objects(ran) == [
-            {"v": 1, "type": "version", "host_version": __version__, "contract": "1.0"}
+            {"v": 1, "type": "version", "host_version": __version__, "contract": "1.1"}
         ]
     # --version ends the line at once, as before.
     for argv in (["--version", "ops"], ["--version", "bogus"]):

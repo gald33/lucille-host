@@ -1,15 +1,15 @@
-# Verifying lucille-host (DRAFT)
+# Verifying lucille-host
 
-**DRAFT.** No release exists yet. Step 1 works on this repository today. Steps 2 to 4 need a release and
-cannot be done yet. This file is finished with the first release. Then someone who did not build that
-release follows it once, on a clean machine, and reports each step they could not complete.
+Each step works on `0.1.0`, the first release. Nobody who did not build it has followed this file yet on a
+clean machine; until someone has, and has reported each step they could not complete, treat it as
+untested by a third party.
 
 ## 1. Read the source, and what CI enforces on it
 
 **What to read.**
 - `src/lucille_host/ops/` is the complete list of operations Lucille can ask the host to run. In
-  `0.1.0.dev0` it holds `host.describe`, `host.sleep` and `files.sha256`; `lucille-host ops list` prints
-  them. `src/lucille_host/_exec.py` is the one place a process starts.
+  `0.1.0` it holds `host.describe`, `host.sleep`, `files.sha256`, `files.search`, `github.read`,
+  `gmail.check`, `gmail.mailboxes`, `gmail.search` and `gmail.read`; `lucille-host ops list` prints them. `src/lucille_host/_exec.py` is the one place a process starts.
 - [CLAIMS.md](CLAIMS.md) maps each sentence of the privacy claim to the code and test behind it.
 - [decisions/0001-host-design.md](decisions/0001-host-design.md) is the design.
 - [spec/PROTOCOL.md](spec/PROTOCOL.md) is the protocol between Lucille and the host, `lucille.exec/1`:
@@ -466,7 +466,7 @@ uv run python tools/guards/switchboard_lint.py .
 uv run python tools/guards/macos_lint.py .
 ```
 
-## 2. Check provenance (needs a release)
+## 2. Check provenance
 
 Every file of a release on PyPI must carry a PEP 740 attestation:
 - its publisher names repository `gald33/lucille-host`, workflow `release.yml` and environment `pypi`;
@@ -480,6 +480,8 @@ which also checks that PyPI serves exactly the bytes the workflow built), and th
 it.
 
 **`lucille-host verify`** makes the same check on an installed host, and then checks the installed files.
+`0.1.0` does not hold it: the release after `0.1.0` is the first that does. For `0.1.0`, use the
+`pypi-attestations` check below, which its `[verify]` extra installs.
 It needs the `[verify]` extra, which installs `pypi-attestations`. Install the release with it into a
 fresh virtual environment, then run it:
 
@@ -529,7 +531,7 @@ and verifies its attestation with sigstore.
 A release is called "reproducible" only when a rebuild from the tagged source produced the same sha256s.
 No rebuild job exists yet.
 
-## 3. Run the conformance suite (needs a release)
+## 3. Run the conformance suite
 
 Install the release with its `[conformance]` extra into a fresh virtual environment, then run the suite:
 
@@ -543,18 +545,18 @@ It runs offline, against a local Switchboard hub it starts on 127.0.0.1. It pair
 `lucille-host`, in a home of its own under a temporary folder, through the real `pair begin` flow,
 signing its pairing code with a throwaway key it passes to `--test-key` (never Lucille's), and sets the
 policy with the host's own `ops enable` and `roots add`, as you would. Then it plays a hostile Lucille:
-it starts `run`, offers a work room, and posts the requests of the first row of "Host invariants and
-their tests" in the design record, "Nothing Lucille sends can widen what the host permits", and a
-positive control. It prints one line per scenario, `PASS` or `FAIL` with the reason, and exits 0 only
+it starts `run`, offers a work room, and posts the requests of its scenarios, each aimed at a row of
+"Host invariants and their tests" in the design record, and a positive control. [CLAIMS.md](CLAIMS.md)
+names the scenario behind each claim. It prints one line per scenario, `PASS` or `FAIL` with the reason, and exits 0 only
 when at least one scenario ran and every one passed. The host refuses to run as root, and so does the
-suite: run it as an ordinary user. What each scenario asserts is in the docstrings of
-`lucille_host/conformance/_scenarios.py`.
+suite: run it as an ordinary user. What each scenario asserts is in its docstring, in
+`lucille_host/conformance/`.
 
 Run it with the virtual environment's own `python`, as above. The conformance lint lets the suite name
 the programs it starts by their path beside that interpreter, so that it tests the `lucille-host`
 installed with it, not one that happens to be first on your `PATH`.
 
-## 4. Watch (needs a release)
+## 4. Watch
 
 `lucille-host log` shows every request received, every local decision, and a fingerprint of everything
 sent. `lucille-host status` shows the pair, its work rooms, and when the host last reached the hub.

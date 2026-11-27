@@ -1,8 +1,8 @@
 # Privacy
 
-**Status: no release exists.** The claim below is what the first release must meet. Until a release
-ships, it describes no program you can install. [CLAIMS.md](CLAIMS.md) says which of its sentences the
-code and tests of the development version back so far.
+**Status: `0.1.0`, the first release, for the repository owner's own use.** The claim below is the one
+`0.1.0` makes. [CLAIMS.md](CLAIMS.md) says which code and tests back each of its sentences, and which
+tests are still pending.
 
 ## The claim
 

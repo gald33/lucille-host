@@ -129,7 +129,7 @@ ALREADY_PAIRING: Final = (
 # How many lines ``log`` prints unless told otherwise.
 LOG_LINES: Final = 20
 # The version of the --json contract this release writes (spec/CLI.md).
-CONTRACT: Final = "1.0"
+CONTRACT: Final = "1.1"
 # The message of every usage error with --json: argparse's own words, which can quote the command
 # line, a pairing code included, stay on stderr.
 USAGE_MESSAGE: Final = "the command line could not be parsed; standard error says why"
