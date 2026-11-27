@@ -949,7 +949,7 @@ def test_ops_list_json_enabled_and_sends_file_content(
     }
     # sends_file_content and diagnostic are booleans from the entry, never from its words.
     for name in OPERATIONS:
-        assert listed[name]["sends_file_content"] is False
+        assert listed[name]["sends_file_content"] is (name == "files.search")
         assert listed[name]["diagnostic"] is (name == "host.sleep")
     w.about("files.sha256", sends_file_content=True)
     assert _ops(w)["files.sha256"]["sends_file_content"] is True

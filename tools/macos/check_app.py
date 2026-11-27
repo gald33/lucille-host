@@ -398,6 +398,7 @@ FORBIDDEN_LIBRARIES: Final = (
 APP_NAME: Final = build_app.load_pins().app_name
 ABILITY_TITLES: Final = {
     "files.sha256": "Check a file's fingerprint",
+    "files.search": "Search the files in a folder",
     "github.read": "Read from GitHub with a token kept here",
     "gmail.check": "Check that Gmail can be read",
     "gmail.mailboxes": "List your Gmail mailboxes",
@@ -407,6 +408,11 @@ ABILITY_TITLES: Final = {
 ABILITY_DETAILS: Final = {
     "files.sha256": (
         "Lucille gets a code that identifies the file's exact contents, not the contents."
+    ),
+    "files.search": (
+        "Lucille gets the lines that match its search in the files of one folder you added, with "
+        "each file's path inside that folder, up to 200 lines a file. Hidden files are never "
+        "searched."
     ),
     "github.read": (
         "Lucille gets GitHub's reply to one read it names: your repositories, issues, pull "

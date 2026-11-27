@@ -44,9 +44,9 @@ __all__ = [
 PROTOCOL = "lucille.exec/1"
 MAJOR = 1
 # The schema files of this major: ``<name>.schema.json``.
-SCHEMA_NAMES = ("request", "reply", "host.describe")
+SCHEMA_NAMES = ("request", "reply", "host.describe", "files.search")
 # The fixture directories of this major: ``fixtures/<kind>/*.json``.
-FIXTURE_KINDS = ("request", "reply", "host.describe", "decode")
+FIXTURE_KINDS = ("request", "reply", "host.describe", "files.search", "decode")
 
 # The command line's contract (spec/CLI.md): its major, and the type of every object it writes,
 # each with a schema file ``cli/v<major>/<type>.schema.json``: those of its section 6, in its

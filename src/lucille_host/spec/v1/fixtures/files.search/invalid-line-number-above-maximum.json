@@ -1,0 +1,21 @@
+{
+  "description": "A line number past its most, 2^53.",
+  "valid": false,
+  "schema_valid": false,
+  "body": {
+    "matches": [
+      {
+        "path": {
+          "text": "notes/todo.txt"
+        },
+        "line_number": 9007199254740992,
+        "lines": {
+          "text": "hello world\n"
+        },
+        "line_truncated": false
+      }
+    ],
+    "truncated": false,
+    "error": null
+  }
+}

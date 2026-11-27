@@ -42,10 +42,9 @@ The source is public so that anyone can check that the program does what it clai
 ## What lucille-host claims
 
 The text below is the claim the first release must meet. The same text is in [PRIVACY.md](PRIVACY.md).
-`lucille-host status` is meant to print it from the first release on; the development version's does not.
-[CLAIMS.md](CLAIMS.md) maps each sentence to the code and test behind it, or marks it "Lucille policy as
-of <date>; not proven by this repository". Until a release exists, none of it describes a program you
-can install.
+`lucille-host status` prints it. [CLAIMS.md](CLAIMS.md) maps each sentence to the code and test behind
+it, or marks it "Lucille policy as of <date>; not proven by this repository". Until a release exists,
+none of it describes a program you can install.
 
 > lucille-host does only what you switch on, on your computer. It can run only the operations built into
 > this release (listed in `src/lucille_host/ops/` and by `lucille-host ops list`), and only on folders
@@ -129,7 +128,7 @@ This repository proves only the host's side. The full design is
 | `src/lucille_host/ops/` | The complete list of operations a release can run: `host.describe`, `host.sleep` and `files.sha256` in `0.1.0.dev0`. |
 | `src/lucille_host/_exec.py` | The only place in the runtime (the program without its conformance suite) allowed to start a process. |
 | `src/lucille_host/_switchboard.py` | The only module in the runtime allowed to import or use `switchboard`. |
-| `src/lucille_host/conformance/` | A test suite that plays a hostile Lucille against the installed program. No scenarios yet. |
+| `src/lucille_host/conformance/` | A test suite that plays a hostile Lucille against the installed program: `python -m lucille_host.conformance`. |
 | [spec/](spec/) | The protocol between Lucille and the host, `lucille.exec/1`: [PROTOCOL.md](spec/PROTOCOL.md) and its changelog. And the contract between the command line and any app that drives it, `--json`: [CLI.md](spec/CLI.md). Drafts; no release implements them yet. |
 | `src/lucille_host/spec/` | The JSON Schemas and golden fixtures of the protocol and of the command line's `--json` contract, which ship in the wheel. |
 | `tools/spec/` | Writes the protocol fixtures for each place in each schema pattern; a test checks that the committed fixtures are what it writes. |

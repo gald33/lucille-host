@@ -171,9 +171,10 @@ enforces.
        `stat`, `sys`, `tempfile`, `termios`, `textwrap`, `threading`, `time`, `tomllib`, `types`,
        `typing`, `keyring`, `switchboard` and `lucille_host` itself. `src/lucille_host/_exec.py` may
        also import `subprocess`, and `src/lucille_host/verify.py`, the checks of `lucille-host
-       verify`, `certifi`, `http`, `ssl`, `zipfile` and `pypi_attestations`. An import anywhere in a file counts. A submodule comes with its
-       module (`os.path`, `logging.handlers`), and what the rules above refuse stays refused inside
-       an allowed module (`os.system`, `logging.config`). A module an allowed module re-exports is
+       verify`, `certifi`, `http`, `ssl`, `zipfile` and `pypi_attestations`. An import anywhere in
+       a file counts. A submodule comes with its module (`os.path`, `logging.handlers`), and what
+       the rules above refuse stays refused inside an allowed module (`os.system`,
+       `logging.config`). A module an allowed module re-exports is
        checked as itself, by the same list: `from logging.handlers import socket` imports `socket`,
        and `enum.bltns` is `builtins`. The runtime may not import or use `lucille_host.conformance`,
        which is not held to the list. `platform`, `uuid`, `string` and `socket` are left off on
@@ -247,7 +248,7 @@ enforces.
    "The runtime package" is `src/lucille_host/` without `src/lucille_host/conformance/`, which is
    excluded by name: from the import allowlist, from the process rule above, and from the single-import
    rule of the Switchboard lint. The conformance package has a rule of its own: only
-   `src/lucille_host/conformance/_spawn.py`, which does not exist yet, may start a process, and only
+   `src/lucille_host/conformance/_spawn.py` may start a process, and only
    by calling a subprocess launcher with an argv list literal, or `asyncio.create_subprocess_exec` with
    literal arguments, whose first element is the local hub (`switchboard`, then `serve`) or
    the installed `lucille-host`, named literally or by a constant assigned once to
@@ -538,9 +539,16 @@ verify-env/bin/pip install 'lucille-host[conformance]==<version>'
 verify-env/bin/python -m lucille_host.conformance
 ```
 
-It runs offline, against a local Switchboard hub it starts on 127.0.0.1. It plays a hostile Lucille and
-attempts each widening listed under "Host invariants and their tests" in the design record. In
-`0.1.0.dev0` it has no scenarios. It says so and exits 1, so it cannot be mistaken for a pass.
+It runs offline, against a local Switchboard hub it starts on 127.0.0.1. It pairs the installed
+`lucille-host`, in a home of its own under a temporary folder, through the real `pair begin` flow,
+signing its pairing code with a throwaway key it passes to `--test-key` (never Lucille's), and sets the
+policy with the host's own `ops enable` and `roots add`, as you would. Then it plays a hostile Lucille:
+it starts `run`, offers a work room, and posts the requests of the first row of "Host invariants and
+their tests" in the design record, "Nothing Lucille sends can widen what the host permits", and a
+positive control. It prints one line per scenario, `PASS` or `FAIL` with the reason, and exits 0 only
+when at least one scenario ran and every one passed. The host refuses to run as root, and so does the
+suite: run it as an ordinary user. What each scenario asserts is in the docstrings of
+`lucille_host/conformance/_scenarios.py`.
 
 Run it with the virtual environment's own `python`, as above. The conformance lint lets the suite name
 the programs it starts by their path beside that interpreter, so that it tests the `lucille-host`
