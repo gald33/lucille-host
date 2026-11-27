@@ -9,9 +9,11 @@ Each claim is one row of "Host invariants and their tests" in decisions/0001:
 - "Failures cross the wire as codes only": a sentinel in what a refused request carries never
   appears in a sent body (:func:`failures_codes_only`).
 
-They are registered after the scenarios of ``_scenarios.py`` (the package imports this module
-after that one). :func:`output_bounded` and :func:`replies_path_free` turn ``files.search`` on and
-put the policy back as they found it, checked against the baseline digest, before they return.
+They are registered after the scenarios of ``_scenarios.py``, all but its last,
+``policy-unchanged``, which checks the policy after every other scenario and so is moved back to
+the end once these are registered. :func:`output_bounded` and :func:`replies_path_free` turn
+``files.search`` on and put the policy back as they found it, checked against the baseline digest,
+before they return.
 """
 
 from __future__ import annotations
@@ -24,6 +26,7 @@ from pathlib import Path
 from typing import Any
 
 from lucille_host.conformance._scenarios import (
+    REGISTRY,
     ROOT,
     STREAM_CAP,
     Context,
@@ -40,6 +43,10 @@ MIB = 1024 * 1024
 SEARCH = "files.search"
 # Text no request or file of the suite holds but the ones that carry it on purpose.
 SENTINEL = "SENTINEL-c0nf0rmance-7f3a91"
+# The same, in an operation name's form, so that the request reaches the catalog lookup.
+OP_SENTINEL = "host.sentinel_c0nf0rmance_7f3a91"
+# What to look for in a body: either, in any case.
+MARKS = (SENTINEL.lower(), OP_SENTINEL)
 FILL = "conformance-fill"
 
 
@@ -134,20 +141,35 @@ def replies_path_free(ctx: Context) -> None:
 
 @scenario
 def failures_codes_only(ctx: Context) -> None:
-    """Refused requests that carry a sentinel (in the op's name, a path, an extra envelope key
-    and an extra argument) are each refused with a code alone: the sentinel is in no body the
-    host posted."""
+    """Refused requests that carry a sentinel (in an op's name, of an op name's form and not,
+    a path, a folder alias, an extra envelope key and an extra argument) are each refused with a
+    code alone: the sentinel is in no body the host posted."""
+
+    def holds(reply: dict[str, Any]) -> bool:
+        text = _text(reply).lower()
+        return any(mark in text for mark in MARKS)
+
     refusals = [
-        (ctx.body(f"host.{SENTINEL.lower()}"), "unknown_op"),
+        (ctx.body(OP_SENTINEL), "unknown_op"),
+        (ctx.body(f"host.{SENTINEL}"), "bad_request"),
         (ctx.body("host.sleep", {"n": 1}, note=SENTINEL), "bad_request"),
         (ctx.body("files.sha256", {"root": ROOT, "path": f"../{SENTINEL}"}), "path_outside_root"),
         (ctx.body("files.sha256", {"root": ROOT, "path": "hello.txt", SENTINEL: 1}), "bad_args"),
-        (ctx.body("files.sha256", {"root": SENTINEL, "path": "hello.txt"}), "path_outside_root"),
+        (
+            ctx.body("files.sha256", {"root": SENTINEL.lower(), "path": "hello.txt"}),
+            "path_outside_root",
+        ),
+        (ctx.body("files.sha256", {"root": SENTINEL, "path": "hello.txt"}), "bad_args"),
     ]
     for body, code in refusals:
         reply = expect_refused(ctx, body, code)
-        check(SENTINEL.lower() not in _text(reply).lower(), f"a {code} refusal holds the sentinel")
+        check(not holds(reply), f"a {code} refusal holds the sentinel")
     sent = ctx.lucille.replies(ctx.room)
     check(sent, "the host posted nothing")
-    leaked = [r.get("job_id") for r in sent if SENTINEL.lower() in _text(r).lower()]
+    leaked = [r.get("job_id") for r in sent if holds(r)]
     check(not leaked, f"bodies the host posted hold the sentinel: {leaked}")
+
+
+# policy-unchanged checks after every other scenario: keep it last.
+LAST = "policy-unchanged"
+REGISTRY.sort(key=lambda found: found.name == LAST)

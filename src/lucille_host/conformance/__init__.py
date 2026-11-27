@@ -48,6 +48,10 @@ from collections.abc import Iterator, Sequence
 from pathlib import Path
 from typing import TextIO
 
+# Imported here, wherever the package is, so that its scenarios are registered whenever
+# _scenarios' are: by the suite, and by the tests that read the registry.
+from lucille_host.conformance import scenarios_output  # noqa: F401
+
 __all__ = ["main", "run_scenarios"]
 
 WORK_ROOM = "conformance"
@@ -121,11 +125,7 @@ def _own_environment(runtime: Path) -> Iterator[None]:
 def main(argv: Sequence[str] | None = None, *, scenarios: Sequence[object] | None = None) -> int:
     """Run the suite; the exit code. ``scenarios``, for the suite's own tests, replaces the
     registered ones."""
-    from lucille_host.conformance import (
-        _scenarios,
-        _spawn,
-        scenarios_output,  # noqa: F401 - registers its scenarios
-    )
+    from lucille_host.conformance import _scenarios, _spawn
     from lucille_host.conformance._host import HarnessError
 
     out = sys.stdout
