@@ -25,12 +25,12 @@ document is fit to the stream's cap (rule ``stream-size``), measured as its JSON
 by leaving out the last matches. ``truncated`` is true when not every match ripgrep wrote, or would
 have written, is in the document.
 
-Redaction (spec/PROTOCOL.md section 13) runs on each path and each line, after the cut, on its
-bytes read as Latin-1, so that it works the same on bytes that are not UTF-8: every pattern it
-looks for is ASCII. A private-key block a path or a line opens and does not end runs on into
-whatever ripgrep wrote after it, as it would over the raw text: the match is kept with its line
-redacted (left out, when it was the path that opened it), no later match is kept, and
-``truncated`` is true.
+Redaction (spec/PROTOCOL.md section 13) runs on each path and each line before the cut, so that a
+key the cut would split is redacted whole. It reads the bytes as Latin-1, so that it works the same
+on bytes that are not UTF-8: every pattern it looks for is ASCII. A private-key block a path or a
+line opens and does not end runs on into whatever ripgrep wrote after it, as it would over the raw
+text: the match is kept with its line redacted (left out, when it was the path that opened it), no
+later match is kept, and ``truncated`` is true.
 """
 
 from __future__ import annotations
@@ -231,8 +231,9 @@ def document(raw: bytes, cap: int, *, cut: bool) -> tuple[str, bool]:
             if path_ends:
                 truncated = True
                 break
-            text, line_cut = _cut(text, text_is_text)
+            # Redacted before the cut, so that a key the cut would split is still known whole.
             text, text_ends = _redact(text)
+            text, line_cut = _cut(text, text_is_text)
             match = {
                 "path": _value(path, path_text),
                 "line_number": number,

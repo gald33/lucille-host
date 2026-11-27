@@ -715,7 +715,8 @@ For example (one match, in `notes/todo.txt`, line 3):
   stream's cap (`stream-size`: 64 KiB, or a request's lower cap), measured as the JSON-encoded `stdout`
   string, by leaving out the last matches. The host reads at most ripgrep's first 4 MiB (`raw-ceiling`):
   a last line that cut leaves without its end is dropped.
-- §13's redaction runs on each path and each line, on its bytes. A private-key block that a path or a
+- §13's redaction runs on each path and each line, on its bytes, before a line is cut, so that a key
+  the cut would split is redacted whole. A private-key block that a path or a
   line opens and does not end takes the rest of the output, as over a stream: the match is kept with its
   line redacted (or left out, when its path opened it), and no later match is kept.
 - `truncated` is true when not every match ripgrep wrote, or would have written, is in the document:

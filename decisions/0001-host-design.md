@@ -501,7 +501,8 @@ is Lucille policy as of 2026-10-27; not proven by this repository.
     line cut at 1,000 bytes by the host, since `--max-columns` does nothing under `--json`; a match whose
     path passes 4,096 bytes is left out; the document fit to the 64 KiB stream cap, or a request's lower
     one, by leaving out the last matches. The document's `truncated` says when not all is there, and the
-    reply's `stdout_truncated` is the same. Redaction runs on each path and line.
+    reply's `stdout_truncated` is the same. Redaction runs on each path and line, before the line
+    is cut, so that a key the cut would split is redacted whole.
   - A folder that holds one of the host's own folders is refused `path_outside_root`: the search walks
     the whole folder, which a path check cannot bound.
   - The `rg` executable is one absolute path per OS, the one each OS's packages use: `/usr/bin/rg` on

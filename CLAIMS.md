@@ -289,8 +289,8 @@ a search pattern), and what an enabled operation returns, up to 64 KiB of output
   folder, directly or through a link, is refused. With made-up output: only `match` messages are kept;
   a line that is not one of ripgrep's messages, or a match with an absolute or `..` path, gives
   `unreadable_output` and no match; a message nested past 8 levels is refused before the parser; a cut
-  last line; at most 1000 matches; redaction of each path and line; the child's stdin is `/dev/null`.
-  Each document is held to its schema. `tests/test_catalog.py`: its words, and that
+  last line; at most 1000 matches; redaction of each path and line, before a line is cut
+  (`test_redaction_runs_before_the_line_is_cut`); the child's stdin is `/dev/null`. Each document is held to its schema. `tests/test_catalog.py`: its words, and that
   `sends_file_content` is in its definition hash.
 
 **C9.** "Lucille also learns the host's version, OS family, enabled operation names and folder aliases (never

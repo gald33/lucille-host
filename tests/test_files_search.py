@@ -386,6 +386,21 @@ def test_redaction_runs_on_each_path_and_line() -> None:
     assert [m["line_number"] for m in found["matches"]] == [1] and found["truncated"]
 
 
+def test_redaction_runs_before_the_line_is_cut() -> None:
+    # A token that straddles the 1000-byte cut: cut first, its first part would be too short for
+    # the redaction to know it, and would be sent. Redacted first, none of it is.
+    token = "ghp_" + "a" * 36
+    before = "x" * (_ripgrep.LINE_MOST - 21) + " "  # the token starts a word
+    (match,) = _read(_rg(_rg_match(line={"text": before + token + "\n"})))["matches"]
+    assert match["lines"] == {"text": before + "[redacted]\n"}
+    assert not match["line_truncated"]
+    raw = b"\xff" + before.encode() + token.encode() + b"y" * 2000
+    (match,) = _read(_rg(_rg_match(line={"bytes": _b64(raw)})))["matches"]
+    kept = base64.b64decode(match["lines"]["bytes"])
+    assert kept.startswith(b"\xff" + before.encode() + b"[redacted]") and b"ghp_" not in kept
+    assert len(kept) == _ripgrep.LINE_MOST and match["line_truncated"]
+
+
 def test_the_childs_stdin_is_dev_null(tmp_path: Path) -> None:
     # ripgrep given no path searches standard input when it is a file or a pipe; the executor
     # gives every child /dev/null, a device, so ripgrep searches its folder and can read no
