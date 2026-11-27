@@ -510,9 +510,10 @@ policy with the host's own `ops enable` and `roots add`, as you would. Then it p
 it starts `run`, offers a work room, and posts the requests of the first row of "Host invariants and
 their tests" in the design record, "Nothing Lucille sends can widen what the host permits", and a
 positive control; then those of two more rows, "No shell; one spawn site; children get a built
-environment and no key" and "An upgrade never runs a changed op under old consent". It prints one line per scenario: `PASS`, `FAIL` with the reason, or `SKIP`
+environment and no key" and "An upgrade never runs a changed op under old consent", and `files.search`'s
+traversal and flag injection. It prints one line per scenario: `PASS`, `FAIL` with the reason, or `SKIP`
 with the reason when the scenario cannot check on this computer (the child's environment is read from
-Linux's `/proc`, which macOS does not have). It exits 0 only when at least one scenario passed and none
+Linux's `/proc`, which macOS does not have; `files.search` needs ripgrep where the catalog says). It exits 0 only when at least one scenario passed and none
 failed; a skipped scenario is never a pass. The host refuses to run as root, and so does the suite: run it
 as an ordinary user. What each scenario asserts is in the docstrings of
 `lucille_host/conformance/_scenarios.py` and of the modules beside it.

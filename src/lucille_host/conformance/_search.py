@@ -14,8 +14,8 @@ took effect (``--files`` lists files instead of matching lines) shows up as a di
 
 The scenarios add a folder of their own as alias ``search`` and enable ``files.search``, then put
 the policy (and ``run``, where restarted) back as the baseline found them. Where this computer has
-no ripgrep at the catalog's path, ``files.search`` is not enabled, and they fail, saying that they
-could not check, rather than pass.
+no ripgrep at the catalog's path, ``files.search`` cannot run, and they are skipped with that
+reason: never a pass.
 """
 
 from __future__ import annotations
@@ -24,7 +24,7 @@ from pathlib import Path
 from typing import Any
 
 from lucille_host.conformance._restore import refused_here, restore, scenario, until_describe
-from lucille_host.conformance._scenarios import Context, Failed, _short, check
+from lucille_host.conformance._scenarios import Context, Failed, Skipped, _short, check
 
 OP = "files.search"
 ALIAS = "search"
@@ -82,6 +82,9 @@ def args(pattern: str, *, fixed_strings: bool = True, **extra: Any) -> dict[str,
 def _set_up(ctx: Context, env: dict[str, str] | None = None) -> tuple[Path, Path]:
     """Plant the folders, add the root, enable the operation (restarting ``run`` with ``env``
     if given), and check that a plain search finds the one plain line: the control."""
+    listed = [o for o in ctx.host.cli("ops", "list") if o.get("name") == OP]
+    if listed and listed[0].get("state") == "unavailable":
+        raise Skipped(f"{OP} cannot run here: {listed[0].get('missing_executable')} is missing")
     root, outside = plant(ctx.workdir)
     ctx.host.add_root(ALIAS, root)
     ctx.host.enable(OP)
@@ -95,7 +98,7 @@ def _set_up(ctx: Context, env: dict[str, str] | None = None) -> tuple[Path, Path
     spawns = ctx.spawn_count()
     reply = ctx.request(ctx.body(OP, args(PLAIN)))
     if (reply.get("status"), reply.get("code")) == ("refused", "not_enabled"):
-        raise Failed(f"not checked: {OP} cannot run here (no ripgrep where the catalog says)")
+        raise Failed(f"{OP} is listed as available here, yet refused not_enabled")
     check(reply.get("status") == "done", f"control: a plain search was not done: {_short(reply)}")
     check(matches(reply) == [f"plain.txt:1:{PLAIN}"], f"control: matches {matches(reply)!r}")
     check(ctx.spawn_count() == spawns + 1, "control: run did not count the search it started")
