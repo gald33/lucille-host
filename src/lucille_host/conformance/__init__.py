@@ -48,6 +48,10 @@ from collections.abc import Iterator, Sequence
 from pathlib import Path
 from typing import TextIO
 
+# Imported here, wherever the package is, so that its scenarios are registered whenever
+# _scenarios' are: by the suite, and by the tests that read the registry.
+from lucille_host.conformance import scenarios_output  # noqa: F401
+
 __all__ = ["main", "run_scenarios"]
 
 WORK_ROOM = "conformance"

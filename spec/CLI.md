@@ -292,6 +292,9 @@ still filled in. A file of the host's own that holds something else still stops 
 does one that holds a value the host never writes there: a time or a skew that is not a finite number in
 its range, or a pid out of range.
 
+The text of `lucille-host status` ends with the claim of [PRIVACY.md](../PRIVACY.md), as this release ships
+it. The object leaves it out: it is the same in every `status` of a release, and is not a state to read.
+
 `policy`:
 - `{"state": "ok", "file": <path or null>, "enabled": [...], "disabled": [...], "folders": [...]}`. `file`
   is null when there is no policy file yet, and the policy is the fresh one. `enabled` lists the operations

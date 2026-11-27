@@ -1,0 +1,10 @@
+{
+  "description": "No match: ripgrep found none.",
+  "valid": true,
+  "schema_valid": true,
+  "body": {
+    "matches": [],
+    "truncated": false,
+    "error": null
+  }
+}

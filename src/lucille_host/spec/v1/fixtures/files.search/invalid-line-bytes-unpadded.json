@@ -1,0 +1,21 @@
+{
+  "description": "A line of bytes that is not standard padded base64: no padding.",
+  "valid": false,
+  "schema_valid": false,
+  "body": {
+    "matches": [
+      {
+        "path": {
+          "text": "notes/todo.txt"
+        },
+        "line_number": 3,
+        "lines": {
+          "bytes": "YQ"
+        },
+        "line_truncated": false
+      }
+    ],
+    "truncated": false,
+    "error": null
+  }
+}

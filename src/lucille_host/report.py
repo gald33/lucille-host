@@ -23,7 +23,10 @@ name (``pair: confirmed: ...``, ``clock: skewed: ...``):
   more than :data:`_switchboard.SKEW_WINDOW` seconds from its own (a reply it posted, or a write the
   library made for it in a touch, an accept or a leave), or when a skew past that was measured; or
   ``unknown`` before any reply was posted. A record of ``run``'s that is older than
-  :data:`STALE_AFTER` was left by a ``run`` that stopped without saying so.
+  :data:`STALE_AFTER` was left by a ``run`` that stopped without saying so;
+- last, after a blank line and a heading, the claim this release makes (:data:`CLAIM_FILE`), word
+  for word as PRIVACY.md and the README give it, each line indented. ``--json`` leaves it out: it is
+  the same in every ``status`` of a release, and the text is where a person reads it.
 
 A file of the host's own that holds something else stops the command, as it stops every other verb.
 A store that cannot be read does not: the pair is reported as ``unreadable``, and the rest as it is,
@@ -36,12 +39,29 @@ same values read once (:func:`collect`), so that they cannot disagree.
 from __future__ import annotations
 
 import time
+from pathlib import Path
 from typing import Any, Final
 
 from lucille_host import __version__, _switchboard, link, loop, paths, policy, rooms, state, store
 from lucille_host.controls import Controls
 
-__all__ = ["STALE_AFTER", "collect", "run_record", "snapshot", "status", "unreadable"]
+__all__ = [
+    "CLAIM_FILE",
+    "CLAIM_HEADING",
+    "STALE_AFTER",
+    "claim",
+    "collect",
+    "run_record",
+    "snapshot",
+    "status",
+    "unreadable",
+]
+
+# The claim, as the quoted block under "The claim" in PRIVACY.md and under "What lucille-host
+# claims" in the README gives it, with the quoting taken off. It ships in the package, as the
+# docs do not; tests/test_claim.py holds the three to the same text.
+CLAIM_FILE: Final = Path(__file__).with_name("claim.txt")
+CLAIM_HEADING: Final = "claim: what this release claims, word for word as in PRIVACY.md:"
 
 # A running ``run`` writes its record at least every minute: one older than this was left by a
 # ``run`` that stopped without saying so.
@@ -268,6 +288,16 @@ def _run(seen: dict[str, Any] | None, live: bool) -> tuple[list[str], dict[str, 
     ], {"run": run, "last_hub_contact": contact_at, "clock": clock_found}
 
 
+def claim() -> str:
+    """The claim this release makes (:data:`CLAIM_FILE`): ASCII lines, each ended by a newline, and
+    a blank line between paragraphs."""
+    return CLAIM_FILE.read_text(encoding="ascii")
+
+
+def _claim_lines() -> list[str]:
+    return ["", CLAIM_HEADING, *(f"  {line}" if line else "" for line in claim().splitlines())]
+
+
 def unreadable(exc: BaseException) -> tuple[str, str] | None:
     """The code and the sentence for a store that cannot be read, which ``status`` reports in its
     ``pair`` rather than stopping; None for any other error."""
@@ -302,8 +332,8 @@ def collect(
     failure: BaseException | None = None,
 ) -> tuple[list[str], dict[str, Any]]:
     """The lines ``lucille-host status`` prints, and the ``status`` object of ``--json``, from the
-    same values. ``session`` is None when the store could not be opened (``failure`` says why).
-    Makes no hub call."""
+    same values; the lines end with the claim, which the object leaves out. ``session`` is None
+    when the store could not be opened (``failure`` says why). Makes no hub call."""
     lines = [f"lucille-host {__version__}"]
     policy_lines, policy_found = _policy(dirs)
     lines += policy_lines
@@ -350,6 +380,7 @@ def collect(
     lines += room_lines
     run_lines, run_found = _run(seen, live)
     lines += run_lines
+    lines += _claim_lines()
     found = {
         "host_version": __version__,
         "policy": policy_found,
