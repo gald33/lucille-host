@@ -13,7 +13,7 @@ in building pairing and the read loop" lists what that build chose. On 2026-11-0
 events, the lifeline on standard input, its exit codes, reloading the policy as it changes and idling
 while it is invalid, `policy reset`, and refusing a downgrade); "Choices made in supervising run" lists
 what that build chose.
-On 2026-11-26: the release workflow, `release.yml`, which has not run yet, and `files.search`. On
+On 2026-11-26: the release workflow, `release.yml`, which runs first on `0.1.0`'s tag, and `files.search`. On
 2026-11-27: the conformance suite, with the scenarios of the first row of "Host invariants and their
 tests" and a positive control; the other rows that name conformance have no scenario yet. Not built:
 `lucille-host verify`.

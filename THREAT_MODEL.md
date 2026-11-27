@@ -7,12 +7,12 @@ with it the envelope checks, dedupe and expiry; the private `XDG_RUNTIME_DIR` ag
 socket; `forget`; and supervising `run`: its lifeline on standard input, the policy reloaded as it changes
 and acted on not at all while invalid, and the refusal of a downgrade; the release workflow
 (`release.yml`), with its checks of the attestations PyPI holds for the release and for the Switchboard
-release the lock pins, which has not run yet, since no release exists; `files.search`, with no hidden
+release the lock pins, which runs on each release's tag, `0.1.0` first; `files.search`, with no hidden
 file searched, no ignore or configuration file read, no link followed, and no folder searched that holds
 the host's own; and the conformance suite, with the scenarios of the design record's first invariant,
 "Nothing Lucille sends can widen what the host permits", only. Protected tags and the `pypi` environment's
-required reviewer are repository settings, which no file here can show. No other protection below is built yet. Each protection not yet built is one the first
-release must have. The full design is [decisions/0001-host-design.md](decisions/0001-host-design.md).
+required reviewer are repository settings, which no file here can show. No other protection below is built yet. `0.1.0` is for the repository owner's own use:
+[decisions/0001](decisions/0001-host-design.md) lists what a later release adds before anyone else pairs. The full design is [decisions/0001-host-design.md](decisions/0001-host-design.md).
 
 ## What the host protects
 
