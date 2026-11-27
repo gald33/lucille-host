@@ -1,0 +1,21 @@
+{
+  "description": "An empty path of bytes.",
+  "valid": false,
+  "schema_valid": false,
+  "body": {
+    "matches": [
+      {
+        "path": {
+          "bytes": ""
+        },
+        "line_number": 3,
+        "lines": {
+          "text": "hello world\n"
+        },
+        "line_truncated": false
+      }
+    ],
+    "truncated": false,
+    "error": null
+  }
+}

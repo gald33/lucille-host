@@ -1,0 +1,21 @@
+{
+  "description": "One match whose path and line are UTF-8 text, as ripgrep's --json gives them.",
+  "valid": true,
+  "schema_valid": true,
+  "body": {
+    "matches": [
+      {
+        "path": {
+          "text": "notes/todo.txt"
+        },
+        "line_number": 3,
+        "lines": {
+          "text": "hello world\n"
+        },
+        "line_truncated": false
+      }
+    ],
+    "truncated": false,
+    "error": null
+  }
+}

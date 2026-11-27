@@ -30,6 +30,11 @@ that embeds the host (``library.py``) does not, so there it is unavailable. An e
 name, per OS, variables of the host's own environment that its child gets beside
 :data:`CHILD_ENV` (:attr:`Operation.env_copy`).
 
+An entry that runs a child may name a form its standard output is read in other than text
+(:attr:`Operation.output`): ``files.search``'s is ``ripgrep_json``, ripgrep's ``--json``
+messages, which the host reads after the child exits and turns into a document of its own
+(``_ripgrep.py``). Any other entry's output is text, decoded, redacted and capped.
+
 Each entry's :attr:`Operation.definition_hash` covers everything that decides what the entry does
 when it is enabled. The local policy stores it beside each enabled entry, and an upgrade that
 changes an enabled entry disables it until the user enables it again.
@@ -98,6 +103,7 @@ __all__ = [
     "MAX_TIMEOUT_S",
     "OPERATIONS",
     "OS_FAMILIES",
+    "OUTPUTS",
     "Operation",
     "Result",
     "Stopped",
@@ -112,6 +118,9 @@ __all__ = [
 
 # The operating systems this release runs on, by the names host.describe reports.
 OS_FAMILIES: Final = ("linux", "macos")
+
+# The forms of a child's standard output the host reads beside text (:attr:`Operation.output`).
+OUTPUTS: Final = ("ripgrep_json",)
 
 # A child's time limit: this by default, and never more than MAX_TIMEOUT_S.
 DEFAULT_TIMEOUT_S: Final = 30
@@ -266,8 +275,14 @@ class Operation:
     in_process: InProcess | None = None
     # A rule beyond the schema that its args must hold to (:data:`ARGS_RULES`), by name, or None.
     args_rule: str | None = None
+    # How the host reads its child's standard output (:data:`OUTPUTS`): None for text, decoded,
+    # redacted and capped (spec/PROTOCOL.md section 13); "ripgrep_json" for ripgrep's --json
+    # messages, which the host turns into files.search's document (``_ripgrep.document``).
+    output: str | None = None
 
     def __post_init__(self) -> None:
+        if self.output is not None and (self.output not in OUTPUTS or self.argv is None):
+            raise ValueError(f"{self.name}: an output form is one of a child's: {OUTPUTS}")
         if self.in_process is None:
             return
         if self.argv is not None:
@@ -386,9 +401,10 @@ class Operation:
         """SHA-256 over what decides what this entry does when enabled: its name, parameter
         schema, argv templates and file operands, its time limit and the cap on it, where its
         child runs (the folder's real path, or ``/``), and the child's environment; for an
-        in-process entry, its function and each source file on its code path; and, when a
-        reply can carry the contents of a file, that it can. The words a shell shows are not in
-        it."""
+        in-process entry, its function and each source file on its code path; the form its
+        child's output is read in, when it is not text (the name of the form, not the host's
+        code that reads it, as for text); and, when a reply can carry the contents of a file,
+        that it can. The words a shell shows are not in it."""
         return _sha256_json(self._definition())
 
     def _definition(self) -> dict[str, Any]:
@@ -411,6 +427,8 @@ class Operation:
             ),
             # Written only when there is one, for the same reason.
             **({"args_rule": self.args_rule} if self.args_rule else {}),
+            # Written only when it is not text, for the same reason.
+            **({"output": self.output} if self.output else {}),
             # Written only when true, so that the hashes of entries that send no file contents
             # are the ones they had before the field existed.
             **({"sends_file_content": True} if self.about.sends_file_content else {}),
@@ -473,6 +491,7 @@ def _entry(
     file_operands: tuple[str, ...] = (),
     env_copy: dict[str, tuple[str, ...]] | None = None,
     args_rule: str | None = None,
+    output: str | None = None,
 ) -> Operation:
     return Operation(
         name=name,
@@ -485,6 +504,7 @@ def _entry(
         file_operands=file_operands,
         env_copy=None if env_copy is None else MappingProxyType(env_copy),
         args_rule=args_rule,
+        output=output,
     )
 
 
@@ -503,22 +523,19 @@ _NO_NUL: Final = "^[^\\u0000]*$"
 _RIPGREP: Final = {"linux": "/usr/bin/rg", "macos": "/opt/homebrew/bin/rg"}
 # Run in the folder with no path, so every path it prints is relative to it. No configuration
 # file, and no ignore file (a .ignore or .gitignore can name a hidden file to search, so with
-# them hidden files would not always be skipped); hidden files are skipped by name; no link is
-# followed; one line a match, by path, in a fixed form, each cut at 1,000 bytes.
+# them hidden files would not always be skipped); hidden files (a name that starts with a dot)
+# are skipped by name; no link is followed; one JSON message a line, by path, which the host
+# reads (``_ripgrep``): --json gives each path and line as text or base64, so no name can make
+# a line of output, and the host cuts each line at 1,000 bytes, since --max-columns does nothing
+# under --json.
 _SEARCH_FLAGS: Final = (
+    "--json",
     "--no-config",
     "--no-ignore",
     "--no-follow",
-    "--no-heading",
-    "--with-filename",
     "--line-number",
-    "--color",
-    "never",
     "--sort",
     "path",
-    "--max-columns",
-    "1000",
-    "--max-columns-preview",
     "{fixed_strings?--fixed-strings:--no-fixed-strings}",
     "--max-count",
     "{max_count}",
@@ -678,6 +695,7 @@ _ENTRIES = (
             ),
             sends_file_content=True,
         ),
+        output="ripgrep_json",
     ),
     # Reads one GitHub REST API endpoint with a credential stored on this computer
     # (decisions/0003, "First use"). Its program is the host's own interpreter running
