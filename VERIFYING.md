@@ -246,7 +246,7 @@ enforces.
    "The runtime package" is `src/lucille_host/` without `src/lucille_host/conformance/`, which is
    excluded by name: from the import allowlist, from the process rule above, and from the single-import
    rule of the Switchboard lint. The conformance package has a rule of its own: only
-   `src/lucille_host/conformance/_spawn.py`, which does not exist yet, may start a process, and only
+   `src/lucille_host/conformance/_spawn.py` may start a process, and only
    by calling a subprocess launcher with an argv list literal, or `asyncio.create_subprocess_exec` with
    literal arguments, whose first element is the local hub (`switchboard`, then `serve`) or
    the installed `lucille-host`, named literally or by a constant assigned once to
@@ -504,8 +504,12 @@ verify-env/bin/python -m lucille_host.conformance
 ```
 
 It runs offline, against a local Switchboard hub it starts on 127.0.0.1. It plays a hostile Lucille and
-attempts each widening listed under "Host invariants and their tests" in the design record. In
-`0.1.0.dev0` it has no scenarios. It says so and exits 1, so it cannot be mistaken for a pass.
+is to attempt each widening listed under "Host invariants and their tests" in the design record. It
+pairs the installed host with a fake Lucille through that hub, signing with a throwaway key the host
+takes only on a loopback hub its local configuration names, and prints one line per scenario and a
+summary. It exits 0 only when at least one scenario ran and every one passed. So far it has one
+scenario, which shows that an allowed operation runs end to end; the widening scenarios are not
+written yet. It refuses to run as root, as the host does.
 
 Run it with the virtual environment's own `python`, as above. The conformance lint lets the suite name
 the programs it starts by their path beside that interpreter, so that it tests the `lucille-host`

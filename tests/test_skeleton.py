@@ -1,10 +1,7 @@
-"""What this release builds on and still leaves to later ones: every part of Switchboard the host
-may use exists in the pinned library, and the conformance suite has no scenarios yet."""
+"""What this release builds on: every part of Switchboard the host may use exists in the pinned
+library."""
 
 from __future__ import annotations
-
-import subprocess
-import sys
 
 from switchboard import client, config, crypto, pairing, sharing, signing
 
@@ -44,14 +41,3 @@ def test_switchboard_surface_names_exist_in_the_pinned_library() -> None:
         (signing.SigningIdentity, "generate"),
     ]:
         assert callable(getattr(owner, method)), f"{owner.__name__}.{method}"
-
-
-def test_conformance_suite_without_scenarios_fails() -> None:
-    result = subprocess.run(
-        [sys.executable, "-m", "lucille_host.conformance"],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    assert result.returncode == 1
-    assert "no conformance scenarios" in result.stderr
