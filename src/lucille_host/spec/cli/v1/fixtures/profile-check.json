@@ -1,0 +1,18 @@
+{
+  "description": "profile check of a profile whose folders and files are all the user's",
+  "argv": [
+    "--json",
+    "profile",
+    "check"
+  ],
+  "exit": 0,
+  "stdout": [
+    {
+      "v": 1,
+      "type": "profile_check",
+      "state": "ok",
+      "config_folder": "/home/me/.config/lucille-host/default",
+      "state_folder": "/home/me/.local/state/lucille-host/default"
+    }
+  ]
+}

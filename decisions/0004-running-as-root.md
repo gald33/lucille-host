@@ -4,7 +4,9 @@
 [a comment on PR #78](https://github.com/gald33/lucille-host/pull/78#issuecomment-7032741923):
 "The host refuses uid 0 for every verb except `--version` and `--help`, and a Home Assistant add-on runs the
 host as its own unprivileged user. The items in §5 stay open." **Built:** the refusal is in
-`cli.main`, before the profile's paths are resolved (see "How it was built", the end of 4.3). Sections 1 to 3 describe the host
+`cli.main`, before the profile's paths are resolved (see "How it was built", the end of 4.3), and the
+repair verb of 4.3 and section 5, as `lucille-host profile check` (see "The repair verb, as built", after
+it). Sections 1 to 3 describe the host
 as it was before that change, on `main` at the commit named below, with the file and line of each
 claim, what was run, and what could not be checked. Section 4 weighs the options, records the rule decided and lists the code it
 changes. It extends [0001](0001-host-design.md), which says the host "refuses to run as uid 0"
@@ -396,29 +398,70 @@ no `XDG_*_HOME` set).
   `HOME`); relative `XDG_*_HOME` values, which the host ignores (`paths.py:143-145`) and relative `HOME`
   (`paths.py:138-140`); symlinked profile folders or symlinked `~/.local` or `~/.config`; macOS (a different
   layout, `paths.py:160-162`, and no Linux tools); anything outside `HOME`. In those cases a person has to look.
-- *What the host says, and what would be built.* Today: the sentences above. Proposed, for the code after the
-  ruling and as part of option A, not here: a host verb, run as the user, that resolves the profile paths
+- *What the host says, and what would be built.* Before the verb was built: the sentences above. Proposed,
+  for the code after the ruling and as part of option A, not here: a host verb, run as the user, that resolves the profile paths
   exactly as `paths.py` does (including a custom or relative `XDG_*_HOME`, the macOS layout and symlinks),
   reports each root-owned folder or file it finds between the profile and the first folder the user owns, and
   prints the exact repair for that case. The refusal a user sees when the profile is not theirs would point to
   that verb, or, until it exists, to the default-layout advice above. That verb is new code, built and
   tested in the implementation change (nothing compares owners today, 1.2). Without it, A only stops new
-  damage.
+  damage. **Built** as `profile check`: see "The repair verb, as built", below.
 
 **How it was built** (the implementation change, [PR #80](https://github.com/gald33/lucille-host/pull/80), after the ruling): `cli.main` refuses uid 0 for every verb
 but `--version`, `--help` and a command with no verb, after the command line parses and before `_dirs`;
 `run` refuses at the top of `_serve`'s caller (`cli._run`), before a lifeline, a signal handler, the
 profile or a lock. The message is `cli.ROOT_REFUSED`: the sentence of `state.startup_checks`, with a pointer
-to the default-layout advice above (the repair verb of section 5 is not built). The code is `startup_refused`
+to the default-layout advice above (since the repair verb was built, below, a pointer to `lucille-host
+profile check`, run as the user). The code is `startup_refused`
 (exit 1, 24 for `run`; an `error` object, or `stopped` under `--json-events`), so spec section 10 and the
 schemas needed no new name. `state.startup_checks`, and with it `library.start`, is unchanged, and so is
-`runs.py:133`, kept as a second guard. Tests: `tests/test_root_refused.py`. Not built: the repair verb, the
-file-held store, add-on pairing, the privilege drop and `sudo` handling (section 5). The check reads the
+`runs.py:133`, kept as a second guard. Tests: `tests/test_root_refused.py`. Not built: the file-held store,
+add-on pairing, the privilege drop and `sudo` handling (section 5); none of them is decided. (The repair
+verb, listed here at first, is built: below.) The check reads the
 *effective* uid, `os.geteuid()`, as `state.startup_checks` does: a process whose real uid is 0 and whose effective
 uid is not is not refused (not tested). That covers a setuid program and `sudo` alike: what counts is the
 effective uid the process holds when it starts, and `sudo` handling stays open (section 5). A command with no
 verb is not refused either: it only shows the version, as `--version` does, so the ruling's "every verb"
 covers it, since it runs no verb.
+
+**The repair verb, as built** (`src/lucille_host/owners.py`, `cli._profile_check`; spec/CLI.md section 17
+and the type `profile_check`; `tests/test_profile_check.py`). Section 5 left open whether the detection
+and repair belong in the host at all. It is built in the smallest form that answers 4.3 and changes
+nothing on its own:
+- `lucille-host profile check`, run as the user, **finds and says**; it never repairs. The repair needs
+  root, which the host never is (as root, the verb is refused like every other). It takes no lock, sends
+  nothing, and writes nothing but its line in the run record, and it exits 0 whatever it finds.
+- It resolves the profile's folders with `paths.dirs`, as every verb does (an absolute `XDG_*_HOME`, a
+  relative one ignored, a relative `HOME`, the macOS layout, where the state folder is inside the config
+  folder and is looked at once), then follows every symbolic link (`os.path.realpath`), since the host
+  follows them too.
+- For each folder it looks up the chain, from the profile to the first folder the user owns, never at the
+  home folder or above, and reports the highest folder another uid owns, which `chown -R` of repairs the
+  rest (4.3: "the highest folder shown owned by root is the one to repair"). A folder the user cannot look
+  at is reported as `unreadable` only when no folder above it is another uid's (4.3: below a root-owned
+  folder that is "expected and is not a second finding"). Where the profile folder is the user's, it looks
+  at every folder and file inside it (`policy.toml` among them), not following a symbolic link.
+- Inside the home folder, each finding carries two command lines for a person to run as root: `ls -lR`
+  (`ls -l` for a file) first, as "Look first" asks, then `chown -R <uid>` (`chown` for a file). The path is
+  always in single quotes. The user is named by **uid**, not by name: that needs no user database (the
+  runtime's import allowlist has no `pwd`), and is exact. The group is left as it is, which 4.3 says does
+  no harm.
+- **Outside the home folder** (a custom `XDG_*_HOME` there, or a link that points there) it reports what it
+  finds with **no** command (`outside_home`). 4.3 lists "anything outside `HOME`" as not checked, and
+  nothing tells the host whether another program needs such a folder as it is: a person decides.
+- The verbs other than `run` that a profile's permissions refuse (a `PermissionError` on one of its folders,
+  on a folder above one, or on a file inside one, or a `PolicyError` or `StateError` raised from one) add a
+  pointer to the verb to their message: "if an earlier run as root left it so, `lucille-host profile check`
+  names what to repair". The code is unchanged. `run`'s `stopped` objects carry no message, so `run` has
+  none.
+- Tests: planted owners, since only root can make a root-owned file and the suite never runs as root (it
+  replaces the two functions that read an owner); a real folder with no permissions for the folders the
+  user cannot look into. They cover a root-owned file, a root-owned profile folder and a root-owned
+  ancestor, the default layout, a custom `XDG_STATE_HOME` inside and outside the home folder, a relative
+  `XDG_CONFIG_HOME` and a relative `HOME`, symbolic links inside and outside the home folder and inside the
+  profile, the macOS layout, a quote in a path, and a profile the user owns, which passes. Not run: a real
+  root-owned profile on a real system (nothing here runs as root). Run by hand on macOS; CI runs the tests on
+  Linux and macOS.
 
 For B or C, add to the above: a privilege drop in `_exec.py:235-243` and its tests; a root-aware
 `policy.is_broad` (or a rule that a root caller's "home" is every home); the path conditions in `paths.py`;
@@ -435,6 +478,8 @@ and a new row in `CLAIMS.md` that says what the host promises when run as root.
 - For the ruling: whether the detection and repair for a profile root has touched belong in the host, as
   one verb run as the user, built and tested in the implementation change after the ruling (4.3), or are
   left to the default-layout advice in 4.3 and a person's judgement. This record gives that advice for the
-  default layout only and lists, in 4.3, what is not checked.
+  default layout only and lists, in 4.3, what is not checked. **Built since**, in its smallest form: the
+  detection, with the repair printed for a person and never run (`profile check`, "The repair verb, as
+  built", 4.3). Not ruled on: whether the host should ever do more than print it.
 - Whether to document `sudo` use (`sudo` may keep the user's `HOME`, in which case the files would be the
   user's but made by root). Not tested.

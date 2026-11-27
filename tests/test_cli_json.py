@@ -43,6 +43,7 @@ from lucille_host import (
     connecting,
     gate,
     link,
+    owners,
     paths,
     policy,
     rooms,
@@ -556,6 +557,32 @@ def _not_toml(w: World) -> None:
     w.dirs.policy_file.write_text("this is not toml\n")
 
 
+def _owned(w: World, planted: tuple[Path, ...] = ()) -> None:
+    """The owners the check reads: root (uid 0) for the paths ``planted``, as only root could make
+    them, and the uid every test is given (conftest.py) for the files this suite made."""
+    roots = {os.path.realpath(path) for path in planted}
+    mine = os.getuid()
+
+    def planting(real: Callable[[Path], int | None]) -> Callable[[Path], int | None]:
+        def owner(path: Path) -> int | None:
+            if os.path.realpath(path) in roots:
+                return 0
+            found = real(path)
+            return os.geteuid() if found == mine else found
+
+        return owner
+
+    w.monkeypatch.setattr(owners, "_owner", planting(owners._owner))
+    w.monkeypatch.setattr(owners, "_own_owner", planting(owners._own_owner))
+
+
+def _root_owned(w: World) -> None:
+    """The policy file and the state folder owned by root."""
+    w.policy_file({})
+    paths.ensure_dir(w.dirs.state)
+    _owned(w, (w.dirs.policy_file, w.dirs.state))
+
+
 SETUPS: dict[str, Callable[[World], None]] = {
     "ops-list": lambda w: w.every_executable(),
     "ops-list-every-state": _ops_every_state,
@@ -596,6 +623,8 @@ SETUPS: dict[str, Callable[[World], None]] = {
     "pair-status-connect": lambda w: w.connect_request(),
     "policy-previous": _policy_previous,
     "policy-reset": _not_toml,
+    "profile-check": _owned,
+    "profile-check-not-yours": _root_owned,
     "run-events-requests": _run_requests,
     "run-events-no-gate": lambda w: _no_gate(w),
     "run-events-already-running": _run_locked,
@@ -785,7 +814,7 @@ def verb_of(argv: list[str]) -> str:
     if not words or words[0] == "--version":
         return "--version"
     verb = words[0]
-    if verb in ("ops", "roots", "policy", "credential"):
+    if verb in ("ops", "roots", "policy", "credential", "profile"):
         key = f"{verb} {words[1]}"
         if key == "roots add" and any(w.startswith("--suggest-alias") for w in words):
             key += " --suggest-alias"

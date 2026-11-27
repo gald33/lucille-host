@@ -28,6 +28,7 @@ __all__ = [
     "UnsupportedPlatform",
     "dirs",
     "ensure_dir",
+    "home",
     "os_family",
     "valid_profile",
 ]
@@ -140,9 +141,12 @@ class Dirs:
         return tuple(folders)
 
 
-def _home(environ: Mapping[str, str]) -> Path:
-    home = environ.get("HOME")
-    return Path(home) if home and os.path.isabs(home) else Path.home()
+def home(environ: Mapping[str, str] | None = None) -> Path:
+    """The home folder the profile's folders are under: ``$HOME`` where it is an absolute path,
+    and otherwise :meth:`Path.home`."""
+    env = os.environ if environ is None else environ
+    value = env.get("HOME")
+    return Path(value) if value and os.path.isabs(value) else Path.home()
 
 
 def _xdg(environ: Mapping[str, str], name: str, default: Path) -> Path:
@@ -161,12 +165,12 @@ def dirs(
         raise ValueError(f"a profile name matches {_PROFILE.pattern}")
     env = os.environ if environ is None else environ
     family = os_family() if family is None else family
-    home = _home(env)
+    home_folder = home(env)
     if family == "macos":
-        base = home / "Library" / "Application Support" / APP / profile
+        base = home_folder / "Library" / "Application Support" / APP / profile
         return Dirs(config=base, state=base / "state")
-    config = _xdg(env, "XDG_CONFIG_HOME", home / ".config") / APP / profile
-    state = _xdg(env, "XDG_STATE_HOME", home / ".local" / "state") / APP / profile
+    config = _xdg(env, "XDG_CONFIG_HOME", home_folder / ".config") / APP / profile
+    state = _xdg(env, "XDG_STATE_HOME", home_folder / ".local" / "state") / APP / profile
     return Dirs(config=config, state=state)
 
 
