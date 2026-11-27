@@ -84,22 +84,28 @@ def _planted(folder: Path, files: dict[str, bytes]) -> Iterator[None]:
 
 @scenario
 def output_bounded(ctx: Context) -> None:
-    """A files.search whose output passes 1 MiB comes back done, its stdout truncated and
-    flagged and within the host's 64 KiB stream cap, and the serialized reply measures under
-    256 KiB."""
+    """A files.search whose output passes 1 MiB comes back done, its stdout truncated, flagged
+    and within the host's 64 KiB stream cap, and the serialized reply measures under 256 KiB:
+    asked with no caps, and asked with caps far above the host's own, which must not raise it."""
     line = (FILL + " " + "x" * 100 + "\n").encode("ascii")
     # files.search returns at most 200 lines a file, so the output is spread over many files.
     files = {f"fill-{index:03}.txt": line * 200 for index in range(60)}
     check(sum(len(content) for content in files.values()) > MIB, "the planted output is small")
+    args = {"root": ROOT, "pattern": FILL, "fixed_strings": True, "max_count": 200}
+    high = {"stdout_bytes": 2147483647, "stderr_bytes": 2147483647}
     with _search_on(ctx), _planted(ctx.root / "bounded", files):
-        args = {"root": ROOT, "pattern": FILL, "fixed_strings": True, "max_count": 200}
-        reply = ctx.request(ctx.body(SEARCH, args))
-    check(reply.get("status") == "done", f"expected done, got {reply.get('status')}")
-    check(reply.get("stdout_truncated") is True, "1 MiB of output is not flagged truncated")
-    check(measure(reply["stdout"]) <= STREAM_CAP, "stdout measures past the host's cap")
-    check(measure(reply["stderr"]) <= STREAM_CAP, "stderr measures past the host's cap")
-    size = measure(reply)
-    check(size < REPLY_CAP, f"the serialized reply measures {size} bytes, not under 256 KiB")
+        replies = {
+            "no caps": ctx.request(ctx.body(SEARCH, args)),
+            "caps above the host's": ctx.request(ctx.body(SEARCH, args, caps=high)),
+        }
+    for asked, reply in replies.items():
+        check(reply.get("status") == "done", f"{asked}: expected done, got {reply.get('status')}")
+        check(reply.get("stdout_truncated") is True, f"{asked}: 1 MiB is not flagged truncated")
+        for stream in ("stdout", "stderr"):
+            size = measure(reply[stream])
+            check(size <= STREAM_CAP, f"{asked}: {stream} measures {size}, past the host's cap")
+        size = measure(reply)
+        check(size < REPLY_CAP, f"{asked}: the reply measures {size} bytes, not under 256 KiB")
 
 
 def _forbidden(ctx: Context) -> list[str]:
