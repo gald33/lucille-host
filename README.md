@@ -47,9 +47,9 @@ The source is public so that anyone can check that the program does what it clai
 ## What lucille-host claims
 
 The text below is the claim `0.1.0` makes. The same text is in [PRIVACY.md](PRIVACY.md).
-`lucille-host status` is meant to print it from the first release on; the development version's does not.
-[CLAIMS.md](CLAIMS.md) maps each sentence to the code and test behind it, or marks it "Lucille policy as
-of <date>; not proven by this repository", and says which tests are still pending.
+`lucille-host status` prints it. [CLAIMS.md](CLAIMS.md) maps each sentence to the code and test behind
+it, or marks it "Lucille policy as of <date>; not proven by this repository", and says which tests are
+still pending.
 
 > lucille-host does only what you switch on, on your computer. It can run only the operations built into
 > this release (listed in `src/lucille_host/ops/` and by `lucille-host ops list`), and only on folders
