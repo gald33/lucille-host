@@ -13,8 +13,10 @@ in building pairing and the read loop" lists what that build chose. On 2026-11-0
 events, the lifeline on standard input, its exit codes, reloading the policy as it changes and idling
 while it is invalid, `policy reset`, and refusing a downgrade); "Choices made in supervising run" lists
 what that build chose.
-On 2026-11-26: the release workflow, `release.yml`, which has not run yet, and `files.search`. Not built:
-the conformance suite and `lucille-host verify`.
+On 2026-11-26: the release workflow, `release.yml`, which has not run yet, and `files.search`. On
+2026-11-27: the conformance suite, with the scenarios of the first row of "Host invariants and their
+tests" and a positive control; the other rows that name conformance have no scenario yet. Not built:
+`lucille-host verify`.
 
 This record describes the program in this repository, and it governs the host's code. A pull request that
 changes the design updates this record in the same pull request.
@@ -860,9 +862,15 @@ The schemas and fixtures ship in the wheel as package data; `tests/spec/test_pac
 an installed wheel. The prose stays in `spec/` at the root and is not in the wheel.
 
 **`src/lucille_host/conformance/`** is a hostile fake Lucille. It drives a real local hub: `switchboard
-serve` on 127.0.0.1 for the scenarios, and the in-process `switchboard.testing` hub for the vendored Store
-template test, which needs that hub's injected clock. It may spawn only the local hub and the installed
-`lucille-host`, under a lint of its own. The runtime package's lints exempt this directory explicitly.
+serve` on 127.0.0.1 for the scenarios, and (not built yet) the in-process `switchboard.testing` hub for the
+vendored Store template test, which needs that hub's injected clock. For the scenarios it gives the
+installed `lucille-host` a home of its own in a temporary folder, pairs it through `pair begin --hub
+--store-file --test-key` with a throwaway key and `pair confirm`, sets the policy with the host's own `ops
+enable` and `roots add`, starts `run --json-events`, offers a work room and posts the requests. It observes
+the host from outside: the replies Lucille reads, `run`'s `request` events (a process start is its `started`
+event), `status --json`, the policy file and `host.describe`. It may spawn only the local hub and the
+installed `lucille-host`, under a lint of its own. The runtime package's lints exempt this directory
+explicitly.
 
 **Docs:** `PRIVACY.md` (the claim plus the must-not-claim list), `CLAIMS.md`, `THREAT_MODEL.md`,
 `VERIFYING.md`, `SECURITY.md` (GitHub private vulnerability reporting), `decisions/`.
@@ -904,7 +912,7 @@ template test, which needs that hub's injected clock. It may spawn only the loca
 
 | Invariant | Test |
 |---|---|
-| Nothing Lucille sends can widen what the host permits | Conformance tries each of these: an unknown op, a not-enabled op, extra keys (`exe`, `argv`, `env`, `cwd`, `timeout`), policy- and update-shaped fields, traversal, an absolute path, a symlink escape, a file named `--version`, and oversize args. Each is refused with the right code, the policy digest is unchanged, and the spawn count is 0. `caps` above the host's own are not refused, but the effective cap never exceeds the host's own |
+| Nothing Lucille sends can widen what the host permits | Conformance tries each of these: an unknown op, a not-enabled op, extra keys (`exe`, `argv`, `env`, `cwd`, `timeout`), policy- and update-shaped fields, traversal, an absolute path, a symlink escape, a file named `--version`, and oversize args. Each is refused with the right code, the policy digest is unchanged, and the spawn count is 0; the file named `--version` is not refused but hashed, not read as an option. `caps` above the host's own are not refused, but the effective cap never exceeds the host's own. The suite shows that such `caps` are not refused and that a request cap below the output is applied. It does not yet show that the host's cap holds against longer output; `tests/test_exec.py` (`test_request_caps_never_raise_the_host_cap`) shows it |
 | No shell; one spawn site; children get a built environment and no key | The AST lint. A fixture that dumps its environment shows only allowlisted keys |
 | Nothing runs before the local SAS confirmation | A fake Lucille offers a room and posts a request before the user confirms the SAS: no touch, no accept, no spawn, no reply; `pair confirm` before the host has shown the SAS confirms nothing; once the SAS is shown and confirmed, the request runs. At `pair`'s prompt on a terminal, a `y` typed before the question is discarded. `pair confirm` after the code has expired still opens the gate. `n`, `pair reject` and the deadline each forget the pair, and a confirmation made in time is never expired by `run` or `pair status` judging the gate beside it |
 | One run per job id, never after `not_after` | A duplicated request runs once. A second `run` of the profile refuses while one runs, and two processes writing the journal at once never both take a job id. An expired request is refused with no spawn. A restart between a decision to run and sent gives `failed interrupted`, with no second run; a refusal not yet sent is re-posted unchanged |
