@@ -12,8 +12,9 @@ the pair on the computer. With `--json`, every verb but `run` writes the objects
 [spec/CLI.md](spec/CLI.md) instead of its text, and `run --json-events` writes `run`'s events, for an app
 that supervises it with `--exit-on-stdin-eof`. The conformance suite (`python -m lucille_host.conformance`)
 runs the scenarios of the design record's first invariant, "Nothing Lucille sends can widen what the host
-permits", against the installed host. Some tests named below do not exist yet: the conformance scenarios
-of the other invariants. The release workflow's provenance checks exist and are tested, and have not run,
+permits", and of two more ("No shell; one spawn site; children get a built environment and no key", on
+Linux, and "An upgrade never runs a changed op under old consent"), against the installed host. Some tests
+named below do not exist yet: the conformance scenarios of the other invariants. The release workflow's provenance checks exist and are tested, and have not run,
 since no release exists.
 
 **How to read it.**

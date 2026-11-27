@@ -20,7 +20,7 @@ import pytest
 
 import lucille_host.conformance as conformance
 from lucille_host.conformance import _scenarios, _spawn
-from lucille_host.conformance._scenarios import Failed, Scenario
+from lucille_host.conformance._scenarios import Failed, Scenario, Skipped
 
 AS_ROOT = os.geteuid() == 0
 ROOT_REASON = "the host refuses to run as root; CI runs this test as an ordinary user"
@@ -74,14 +74,33 @@ def test_each_scenario_gets_a_line_and_any_error_fails() -> None:
     def breaks(ctx: object) -> None:
         raise KeyError("stdout")
 
+    def cannot(ctx: object) -> None:
+        raise Skipped("needs Linux's /proc")
+
     out = io.StringIO()
-    chosen = [Scenario("passes", passes), Scenario("fails", fails), Scenario("breaks", breaks)]
-    assert conformance.run_scenarios(chosen, object(), out) == (1, 2)
+    chosen = [
+        Scenario("passes", passes),
+        Scenario("fails", fails),
+        Scenario("breaks", breaks),
+        Scenario("cannot", cannot),
+    ]
+    assert conformance.run_scenarios(chosen, object(), out) == (1, 2, 1)
     assert out.getvalue().splitlines() == [
         "PASS passes",
         "FAIL fails: expected refused not_enabled, got done [details on stderr]",
         "FAIL breaks: KeyError: 'stdout'",
+        "SKIP cannot: needs Linux's /proc",
     ]
+
+
+def test_skipped_alone_is_not_a_pass() -> None:
+    def cannot(ctx: object) -> None:
+        raise Skipped("needs Linux's /proc")
+
+    out = io.StringIO()
+    passed, failed, skipped = conformance.run_scenarios([Scenario("cannot", cannot)], object(), out)
+    assert (passed, failed, skipped) == (0, 0, 1)
+    assert conformance.verdict(passed, failed) == 1
 
 
 def test_scenarios_are_registered_once_each_with_a_description() -> None:

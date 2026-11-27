@@ -63,15 +63,22 @@ _OWN_ENV_DROPPED = (
 )
 
 
-def run_scenarios(scenarios: Sequence[object], context: object, out: TextIO) -> tuple[int, int]:
-    """Run each scenario on ``context``, printing one line for each; (passed, failed)."""
-    from lucille_host.conformance._scenarios import Failed, Scenario
+def run_scenarios(
+    scenarios: Sequence[object], context: object, out: TextIO
+) -> tuple[int, int, int]:
+    """Run each scenario on ``context``, printing one line for each; (passed, failed, skipped).
+    A scenario that raises :class:`~lucille_host.conformance._scenarios.Skipped` could not check
+    on this computer: it is reported with its reason and is neither a pass nor a failure."""
+    from lucille_host.conformance._scenarios import Failed, Scenario, Skipped
 
-    passed = failed = 0
+    passed = failed = skipped = 0
     for found in scenarios:
         assert isinstance(found, Scenario)
         try:
             found.run(context)  # type: ignore[arg-type]
+        except Skipped as reason:
+            skipped += 1
+            print(f"SKIP {found.name}: {_one_line(str(reason))}", file=out, flush=True)
         except Failed as failure:
             failed += 1
             print(f"FAIL {found.name}: {_one_line(str(failure))}", file=out, flush=True)
@@ -85,11 +92,12 @@ def run_scenarios(scenarios: Sequence[object], context: object, out: TextIO) -> 
         else:
             passed += 1
             print(f"PASS {found.name}", file=out, flush=True)
-    return passed, failed
+    return passed, failed, skipped
 
 
 def verdict(passed: int, failed: int) -> int:
-    """The exit code: 0 only when at least one scenario ran and none failed."""
+    """The exit code: 0 only when at least one scenario passed and none failed. Skipped
+    scenarios count for neither."""
     return 0 if passed > 0 and failed == 0 else 1
 
 
@@ -162,7 +170,7 @@ def main(argv: Sequence[str] | None = None, *, scenarios: Sequence[object] | Non
             try:
                 with _harness(folder) as context:
                     print(f"lucille-host conformance: {len(chosen)} scenarios", file=out)
-                    passed, failed = run_scenarios(chosen, context, out)
+                    passed, failed, skipped = run_scenarios(chosen, context, out)
             except HarnessError as error:
                 print(f"lucille-host conformance: the harness failed: {error}", file=out)
                 return 1
@@ -176,7 +184,8 @@ def main(argv: Sequence[str] | None = None, *, scenarios: Sequence[object] | Non
                 return 1
     seconds = time.monotonic() - started
     print(
-        f"lucille-host conformance: {passed} passed, {failed} failed, in {seconds:.0f} s",
+        f"lucille-host conformance: {passed} passed, {failed} failed, {skipped} skipped, "
+        f"in {seconds:.0f} s",
         file=out,
     )
     return verdict(passed, failed)
