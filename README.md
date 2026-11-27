@@ -129,8 +129,8 @@ This repository proves only the host's side. The full design is
 | `src/lucille_host/ops/` | The complete list of operations a release can run: `host.describe`, `host.sleep`, `files.sha256`, `files.search`, `github.read`, `gmail.check`, `gmail.mailboxes`, `gmail.search` and `gmail.read` in `0.1.0`. |
 | `src/lucille_host/_exec.py` | The only place in the runtime (the program without its conformance suite) allowed to start a process. |
 | `src/lucille_host/_switchboard.py` | The only module in the runtime allowed to import or use `switchboard`. |
-| `src/lucille_host/conformance/` | A test suite that plays a hostile Lucille against the installed program ([VERIFYING.md](VERIFYING.md) step 3). |
-| [spec/](spec/) | The protocol between Lucille and the host, `lucille.exec/1`: [PROTOCOL.md](spec/PROTOCOL.md) and its changelog. And the contract between the command line and any app that drives it, `--json`: [CLI.md](spec/CLI.md). `0.1.0` implements both. |
+| `src/lucille_host/conformance/` | A test suite that plays a hostile Lucille against the installed program: `python -m lucille_host.conformance` ([VERIFYING.md](VERIFYING.md) step 3). |
+| [spec/](spec/) | The protocol between Lucille and the host, `lucille.exec/1`: [PROTOCOL.md](spec/PROTOCOL.md) and its changelog. And the contract between the command line and any app that drives it, `--json`: [CLI.md](spec/CLI.md). Drafts, which `0.1.0` implements. |
 | `src/lucille_host/spec/` | The JSON Schemas and golden fixtures of the protocol and of the command line's `--json` contract, which ship in the wheel. |
 | `tools/spec/` | Writes the protocol fixtures for each place in each schema pattern; a test checks that the committed fixtures are what it writes. |
 | `tools/guards/` | Checks CI runs on every change. They catch accidental and casual violations; they are not a sandbox or a defence against a determined author, and maintainer review of every pull request is the backstop. [VERIFYING.md](VERIFYING.md) describes each one and what it cannot see. |
