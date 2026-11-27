@@ -1,0 +1,153 @@
+"""Scenarios for what a reply may carry: its size, the paths it never holds, and the text a
+failure never sends.
+
+Each claim is one row of "Host invariants and their tests" in decisions/0001:
+
+- "Output is bounded, decodable and path-free": a 1 MiB output comes back truncated and flagged,
+  and the serialized reply stays under 256 KiB (:func:`output_bounded`); no reply contains a
+  root's realpath or ``$HOME`` (:func:`replies_path_free`);
+- "Failures cross the wire as codes only": a sentinel in what a refused request carries never
+  appears in a sent body (:func:`failures_codes_only`).
+
+They are registered after the scenarios of ``_scenarios.py`` (the package imports this module
+after that one). :func:`output_bounded` and :func:`replies_path_free` turn ``files.search`` on and
+put the policy back as they found it, checked against the baseline digest, before they return.
+"""
+
+from __future__ import annotations
+
+import contextlib
+import json
+import os
+from collections.abc import Iterator
+from pathlib import Path
+from typing import Any
+
+from lucille_host.conformance._scenarios import (
+    ROOT,
+    STREAM_CAP,
+    Context,
+    check,
+    expect_refused,
+    measure,
+    scenario,
+)
+
+# The reply cap of spec/PROTOCOL.md section 13: a serialized reply stays under it.
+REPLY_CAP = 256 * 1024
+# The output a search must exceed, as the invariant names it.
+MIB = 1024 * 1024
+SEARCH = "files.search"
+# Text no request or file of the suite holds but the ones that carry it on purpose.
+SENTINEL = "SENTINEL-c0nf0rmance-7f3a91"
+FILL = "conformance-fill"
+
+
+def _text(reply: dict[str, Any]) -> str:
+    """A reply as text, every string in it as written (no escapes), to search it."""
+    return json.dumps(reply, ensure_ascii=False)
+
+
+@contextlib.contextmanager
+def _search_on(ctx: Context) -> Iterator[None]:
+    """``files.search`` on for the block, then off again, with the baseline digest back."""
+    assert ctx.baseline is not None
+    ctx.host.enable(SEARCH)
+    try:
+        yield
+    finally:
+        ctx.host.cli("ops", "disable", SEARCH)
+    check(ctx.policy_digest() == ctx.baseline.digest, "the policy did not come back to baseline")
+
+
+@contextlib.contextmanager
+def _planted(folder: Path, files: dict[str, bytes]) -> Iterator[None]:
+    """``files`` written in ``folder`` for the block, then removed."""
+    folder.mkdir()
+    try:
+        for name, content in files.items():
+            (folder / name).write_bytes(content)
+        yield
+    finally:
+        for name in files:
+            with contextlib.suppress(FileNotFoundError):
+                (folder / name).unlink()
+        folder.rmdir()
+
+
+@scenario
+def output_bounded(ctx: Context) -> None:
+    """A files.search whose output passes 1 MiB comes back done, its stdout truncated and
+    flagged and within the host's 64 KiB stream cap, and the serialized reply measures under
+    256 KiB."""
+    line = (FILL + " " + "x" * 100 + "\n").encode("ascii")
+    # files.search returns at most 200 lines a file, so the output is spread over many files.
+    files = {f"fill-{index:03}.txt": line * 200 for index in range(60)}
+    check(sum(len(content) for content in files.values()) > MIB, "the planted output is small")
+    with _search_on(ctx), _planted(ctx.root / "bounded", files):
+        args = {"root": ROOT, "pattern": FILL, "fixed_strings": True, "max_count": 200}
+        reply = ctx.request(ctx.body(SEARCH, args))
+    check(reply.get("status") == "done", f"expected done, got {reply.get('status')}")
+    check(reply.get("stdout_truncated") is True, "1 MiB of output is not flagged truncated")
+    check(measure(reply["stdout"]) <= STREAM_CAP, "stdout measures past the host's cap")
+    check(measure(reply["stderr"]) <= STREAM_CAP, "stderr measures past the host's cap")
+    size = measure(reply)
+    check(size < REPLY_CAP, f"the serialized reply measures {size} bytes, not under 256 KiB")
+
+
+def _forbidden(ctx: Context) -> list[str]:
+    """The paths no reply may hold: the root's and the host's home, as given and as real paths."""
+    found = {str(ctx.root), os.path.realpath(ctx.root)}
+    home = ctx.host.home
+    found |= {str(home), os.path.realpath(home)}
+    return sorted(found)
+
+
+@scenario
+def replies_path_free(ctx: Context) -> None:
+    """No reply holds the root's path, its real path, or the host's `$HOME`: host.describe, a
+    files.sha256 and a files.search that run in the root, and refusals of requests that name
+    those paths themselves."""
+    forbidden = _forbidden(ctx)
+    replies = [
+        ctx.request(ctx.body("host.describe")),
+        ctx.request(ctx.body("files.sha256", {"root": ROOT, "path": "hello.txt"})),
+    ]
+    with _search_on(ctx):
+        args = {"root": ROOT, "pattern": "hello", "fixed_strings": True, "max_count": 10}
+        searched = ctx.request(ctx.body(SEARCH, args))
+        check(searched.get("status") == "done", f"files.search was {searched.get('status')}")
+        check("hello.txt" in searched.get("stdout", ""), "files.search found no hello.txt")
+        replies.append(searched)
+    for path in forbidden:
+        named = os.path.join(path, "hello.txt")
+        replies.append(
+            expect_refused(
+                ctx, ctx.body("files.sha256", {"root": ROOT, "path": named}), "path_outside_root"
+            )
+        )
+    for reply in replies:
+        text = _text(reply)
+        for path in forbidden:
+            check(path not in text, f"a {reply.get('status')} reply holds {path!r}")
+
+
+@scenario
+def failures_codes_only(ctx: Context) -> None:
+    """Refused requests that carry a sentinel (in the op's name, a path, an extra envelope key
+    and an extra argument) are each refused with a code alone: the sentinel is in no body the
+    host posted."""
+    refusals = [
+        (ctx.body(f"host.{SENTINEL.lower()}"), "unknown_op"),
+        (ctx.body("host.sleep", {"n": 1}, note=SENTINEL), "bad_request"),
+        (ctx.body("files.sha256", {"root": ROOT, "path": f"../{SENTINEL}"}), "path_outside_root"),
+        (ctx.body("files.sha256", {"root": ROOT, "path": "hello.txt", SENTINEL: 1}), "bad_args"),
+        (ctx.body("files.sha256", {"root": SENTINEL, "path": "hello.txt"}), "path_outside_root"),
+    ]
+    for body, code in refusals:
+        reply = expect_refused(ctx, body, code)
+        check(SENTINEL.lower() not in _text(reply).lower(), f"a {code} refusal holds the sentinel")
+    sent = ctx.lucille.replies(ctx.room)
+    check(sent, "the host posted nothing")
+    leaked = [r.get("job_id") for r in sent if SENTINEL.lower() in _text(r).lower()]
+    check(not leaked, f"bodies the host posted hold the sentinel: {leaked}")

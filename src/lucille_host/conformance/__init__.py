@@ -121,7 +121,11 @@ def _own_environment(runtime: Path) -> Iterator[None]:
 def main(argv: Sequence[str] | None = None, *, scenarios: Sequence[object] | None = None) -> int:
     """Run the suite; the exit code. ``scenarios``, for the suite's own tests, replaces the
     registered ones."""
-    from lucille_host.conformance import _scenarios, _spawn
+    from lucille_host.conformance import (
+        _scenarios,
+        _spawn,
+        scenarios_output,  # noqa: F401 - registers its scenarios
+    )
     from lucille_host.conformance._host import HarnessError
 
     out = sys.stdout
