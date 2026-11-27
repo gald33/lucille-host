@@ -2,7 +2,7 @@
 
 This file takes each sentence of the claim in [PRIVACY.md](PRIVACY.md) and says what backs it.
 
-**Status: no release exists.** Version `0.1.0.dev0` has the catalog, the executor, the local policy, the
+**Status: `0.1.0`, the first release, for the repository owner's own use.** It has the catalog, the executor, the local policy, the
 audit log, the local controls, the stores and Switchboard client set-up, and pairing: `lucille-host pair`
 answers Lucille's code and keeps the local gate. `lucille-host run` keeps the pair once the gate is open,
 takes the work rooms Lucille offers over it by the host's accept policy, and reads and answers Lucille's
@@ -652,7 +652,7 @@ reachable then."
   (`release.yml` builds from a tag on `main` that names the package's version, publishes only from
   environment `pypi`, and then checks that PyPI serves those bytes, attested to this repository,
   `release.yml` and `pypi`, at that tag, from a GitHub-hosted runner); and the provenance check in
-  [VERIFYING.md](VERIFYING.md), step 2 (pending; no release exists).
+  [VERIFYING.md](VERIFYING.md), step 2, which the workflow's `provenance` job runs on each release.
 
 ## Guards that back no single sentence
 
