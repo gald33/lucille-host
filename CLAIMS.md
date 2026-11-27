@@ -271,7 +271,11 @@ a search pattern), and what an enabled operation returns, up to 64 KiB of output
   of output comes back truncated and flagged, its JSON string exactly 64 KiB;
   `test_exec_raw_ceiling_drops_the_rest_and_flags_it`; `test_request_caps_never_raise_the_host_cap`); `tests/test_output.py`; invariant "Output is
   bounded, decodable and path-free" (conformance scenario `output-bounded`: a `files.search` whose output
-  passes 1 MiB comes back truncated and flagged, and the serialized reply measures under 256 KiB);
+  passes 1 MiB comes back truncated and flagged, and the serialized reply measures under 256 KiB; and
+  conformance scenario `output-decodable`: a `files.search` over a line and a file name that are not
+  UTF-8, a long line of two-byte characters and a line holding NUL comes back with no U+0000 and no
+  unpaired surrogate in the reply or its document, the bytes that are not UTF-8 exactly, and the long
+  line cut within 1000 bytes at a character's end and flagged);
   invariant "Failures cross the wire as codes only" (conformance scenario `failures-codes-only`: requests
   that carry a sentinel, in the op's name, a path, a folder alias, an extra envelope key or an extra
   argument, are each refused with a code alone, and the sentinel is in no body the host posted. The
