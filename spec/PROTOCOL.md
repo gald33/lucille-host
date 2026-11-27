@@ -3,7 +3,8 @@
 The protocol between Lucille's backend and lucille-host: how Lucille asks a paired computer to run one
 operation from the host's closed catalog, and how the computer answers.
 
-**Version 1.0, draft.** No released host implements it yet. This document, the JSON Schemas and the golden
+**Version 1.0, draft.** lucille-host `0.1.0` implements it. It stays a draft, and can still change, until the
+release that opens pairing to anyone other than the repository owner. This document, the JSON Schemas and the golden
 fixtures are the spec together. Changes are recorded in [PROTOCOL-CHANGELOG.md](PROTOCOL-CHANGELOG.md).
 
 ## Contents

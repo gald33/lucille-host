@@ -1,30 +1,38 @@
 # lucille-host
 
-## Status: no release yet
+## Status: 0.1.0, the first release, for its owner's own use
 
-There is no release. This repository holds version `0.1.0.dev0`: the guards, CI, the draft protocol spec
-([spec/PROTOCOL.md](spec/PROTOCOL.md)), the draft `--json` contract of the command line for apps that
-drive it ([spec/CLI.md](spec/CLI.md)), the catalog, the executor, the local policy, the audit log,
+`0.1.0` is the first release, on PyPI as `lucille-host`. It is for the repository owner's own computers:
+[decisions/0001](decisions/0001-host-design.md) lists what a later release adds before anyone else pairs
+one. That nobody else pairs until then is Lucille policy as of 2026-10-27, not something this program
+enforces. Capsule, the Mac app, is not released. A package called `lucille-host` on PyPI came from this repository only if it carries the
+attestations [VERIFYING.md](VERIFYING.md) step 2 checks.
+
+This release holds the guards, CI, the protocol spec ([spec/PROTOCOL.md](spec/PROTOCOL.md)), the
+`--json` contract of the command line for apps that drive it ([spec/CLI.md](spec/CLI.md)), the catalog,
+the executor, the local policy, the audit log,
 `pause`, `resume` and `kill`, and the parts that reach Lucille: `pair`, `run`, `status`, `log` and
 `forget`, with `run`'s event stream and exit codes for an app that supervises it, `policy reset`, and
 `credential`, which stores credentials for online services on this computer, `github.read`, an
 operation, off by default, that reads one GitHub REST API endpoint with a credential stored here, and
 four Gmail operations, off by default, that list, search and read a Gmail account over IMAP with a Google
-app password stored here (`gmail.check`, `gmail.mailboxes`, `gmail.search`, `gmail.read`).
-Those are tested against Switchboard's in-process hub and a stand-in for Lucille, not against Lucille
-itself. Do not install it.
+app password stored here (`gmail.check`, `gmail.mailboxes`, `gmail.search`, `gmail.read`), and
+`files.search`, off by default, which searches the files of one folder with ripgrep. Those are tested
+against Switchboard's in-process hub and a stand-in for Lucille, not against Lucille itself. The
+conformance suite plays a hostile Lucille against the installed program; the release workflow runs it on
+the built wheel before publishing, and again from PyPI after.
 
-## What it will be
+## What it is
 
-lucille-host will be a small program you install on your own computer. It will let your own Lucille
-account run a closed set of named operations on that computer, and nothing else.
+lucille-host is a small program you install on your own computer. It lets your own Lucille account run
+a closed set of named operations on that computer, and nothing else.
 
-- It will pair with your Lucille account through Switchboard pairing. Switchboard is an open-source
+- It pairs with your Lucille account through Switchboard pairing. Switchboard is an open-source
   message hub and client ([agent-switchboard](https://github.com/gald33/switchboard), MIT).
-- The operations will be built into each release. You will choose which ones are switched on, and on
-  which folders.
-- It will run no AI model and open no listening port. It will never run code, a shell or a command line
-  sent by Lucille.
+- The operations are built into each release. You choose which ones are switched on, and on which
+  folders.
+- It runs no AI model and opens no listening port. It never runs code, a shell or a command line sent
+  by Lucille.
 
 The source is public so that anyone can check that the program does what it claims.
 
@@ -38,10 +46,10 @@ The source is public so that anyone can check that the program does what it clai
 
 ## What lucille-host claims
 
-The text below is the claim the first release must meet. The same text is in [PRIVACY.md](PRIVACY.md).
+The text below is the claim `0.1.0` makes. The same text is in [PRIVACY.md](PRIVACY.md).
 `lucille-host status` prints it. [CLAIMS.md](CLAIMS.md) maps each sentence to the code and test behind
-it, or marks it "Lucille policy as of <date>; not proven by this repository". Until a release exists,
-none of it describes a program you can install.
+it, or marks it "Lucille policy as of <date>; not proven by this repository", and says which tests are
+still pending.
 
 > lucille-host does only what you switch on, on your computer. It can run only the operations built into
 > this release (listed in `src/lucille_host/ops/` and by `lucille-host ops list`), and only on folders
@@ -107,7 +115,7 @@ none of it describes a program you can install.
    Lucille sends can unpause the host or widen its policy. `lucille-host status` and `log` show what the
    host holds and what it did.
 
-`0.1.0.dev0` has these verbs, but no release exists yet.
+`0.1.0` has these verbs.
 
 What Lucille does in these steps is Lucille policy as of 2026-10-27; not proven by this repository.
 This repository proves only the host's side. The full design is
@@ -118,11 +126,11 @@ This repository proves only the host's side. The full design is
 | Path | What it is |
 |---|---|
 | `src/lucille_host/` | The program: the `lucille-host` command and everything it runs. |
-| `src/lucille_host/ops/` | The complete list of operations a release can run: `host.describe`, `host.sleep` and `files.sha256` in `0.1.0.dev0`. |
+| `src/lucille_host/ops/` | The complete list of operations a release can run: `host.describe`, `host.sleep`, `files.sha256`, `files.search`, `github.read`, `gmail.check`, `gmail.mailboxes`, `gmail.search` and `gmail.read` in `0.1.0`. |
 | `src/lucille_host/_exec.py` | The only place in the runtime (the program without its conformance suite) allowed to start a process. |
 | `src/lucille_host/_switchboard.py` | The only module in the runtime allowed to import or use `switchboard`. |
-| `src/lucille_host/conformance/` | A test suite that plays a hostile Lucille against the installed program: `python -m lucille_host.conformance`. |
-| [spec/](spec/) | The protocol between Lucille and the host, `lucille.exec/1`: [PROTOCOL.md](spec/PROTOCOL.md) and its changelog. And the contract between the command line and any app that drives it, `--json`: [CLI.md](spec/CLI.md). Drafts; no release implements them yet. |
+| `src/lucille_host/conformance/` | A test suite that plays a hostile Lucille against the installed program: `python -m lucille_host.conformance` ([VERIFYING.md](VERIFYING.md) step 3). |
+| [spec/](spec/) | The protocol between Lucille and the host, `lucille.exec/1`: [PROTOCOL.md](spec/PROTOCOL.md) and its changelog. And the contract between the command line and any app that drives it, `--json`: [CLI.md](spec/CLI.md). Drafts, which `0.1.0` implements. |
 | `src/lucille_host/spec/` | The JSON Schemas and golden fixtures of the protocol and of the command line's `--json` contract, which ship in the wheel. |
 | `tools/spec/` | Writes the protocol fixtures for each place in each schema pattern; a test checks that the committed fixtures are what it writes. |
 | `tools/guards/` | Checks CI runs on every change. They catch accidental and casual violations; they are not a sandbox or a defence against a determined author, and maintainer review of every pull request is the backstop. [VERIFYING.md](VERIFYING.md) describes each one and what it cannot see. |
@@ -142,7 +150,7 @@ You need `uv` and Python 3.11 or later. The lock file, `uv.lock`, pins every dep
 ```sh
 uv sync --locked --extra conformance
 uv run pytest
-uv run lucille-host --version    # prints: lucille-host 0.1.0.dev0
+uv run lucille-host --version    # prints: lucille-host 0.1.0
 ```
 
 The guards catch accidental and casual violations; they are not a sandbox or a defence against a
