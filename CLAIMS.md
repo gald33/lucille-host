@@ -245,8 +245,8 @@ operations: each reads a credential you saved for it, and gets `HOME` (macOS) or
 - Code: the reply is built only from an operation's output and the fields of `host.describe`: the reply
   schema, `src/lucille_host/spec/v1/reply.schema.json`, allows three closed shapes and no other field;
   `reply_body` in `src/lucille_host/jobs.py` builds them; `src/lucille_host/ops/`.
-- Tests: invariant "Nothing Lucille sends can widen what the host permits" (pending: a refused request
-  spawns nothing); `tests/spec/test_fixtures.py` (a reply carrying any other field, such as error text,
+- Tests: invariant "Nothing Lucille sends can widen what the host permits" (its conformance scenarios,
+  listed under C2: each refused request starts no process, by `run`'s own `started` events); `tests/spec/test_fixtures.py` (a reply carrying any other field, such as error text,
   is invalid; this tests the spec); `tests/test_jobs.py` (`test_replies_of_each_shape_hold_to_the_schema`:
   the replies the host builds hold to that schema).
 - Partly proven by review only. No test can show that no other code path sends a file. A reader checks
