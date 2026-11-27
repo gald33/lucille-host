@@ -580,8 +580,9 @@ def _asked(body: dict[str, Any]) -> tuple[str | None, str | None, str | None]:
     """What a request asked for, as its ``received`` object says it: the op, when it has an
     operation name's form and the request is within the protocol's size; the folder alias and the
     path, when the op is in the catalog, works in a folder, and its arguments hold to its schema.
-    A path that starts with ``/``, or holds a character a terminal must not show, is never
-    written: it is None."""
+    The path is None for an op that takes none (``files.search`` works in a whole folder). A path
+    that starts with ``/``, or holds a character a terminal must not show, is never written: it
+    is None."""
     if envelope.size(body) > envelope.REQUEST_LIMIT:
         return None, None, None
     op = body.get("op")
@@ -591,8 +592,8 @@ def _asked(body: dict[str, Any]) -> tuple[str | None, str | None, str | None]:
     args = body.get("args")
     if operation is None or not operation.uses_root or not args_valid(operation, args):
         return op, None, None
-    path = args["path"]
-    if path.startswith("/") or link.has_unsafe(path):
+    path = args.get("path")
+    if path is None or path.startswith("/") or link.has_unsafe(path):
         return op, args["root"], None
     return op, args["root"], path
 
