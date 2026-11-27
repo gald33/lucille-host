@@ -106,7 +106,7 @@ def test_installed_files_equal_the_source(built: dict[str, Any]) -> None:
 def test_installed_fixtures_validate_as_labelled(built: dict[str, Any]) -> None:
     report = built["report"]
     errors = {}
-    for kind in ("request", "reply", "host.describe"):
+    for kind in ("request", "reply", "host.describe", "files.search"):
         schema = report["schemas"][kind]
         for name, fixture in report["fixtures"][kind].items():
             found = _support.label_errors(kind, fixture, schema)

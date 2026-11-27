@@ -1,0 +1,21 @@
+{
+  "description": "A path and a line that are not UTF-8: their bytes, in base64, as ripgrep's --json gives them.",
+  "valid": true,
+  "schema_valid": true,
+  "body": {
+    "matches": [
+      {
+        "path": {
+          "bytes": "YmFk/25hbWUudHh0"
+        },
+        "line_number": 1,
+        "lines": {
+          "bytes": "aGVsbG8g/v8K"
+        },
+        "line_truncated": false
+      }
+    ],
+    "truncated": false,
+    "error": null
+  }
+}

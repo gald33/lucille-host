@@ -1,0 +1,10 @@
+{
+  "description": "An error this version does not name.",
+  "valid": false,
+  "schema_valid": false,
+  "body": {
+    "matches": [],
+    "truncated": true,
+    "error": "timeout"
+  }
+}

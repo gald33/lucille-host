@@ -477,15 +477,43 @@ is Lucille policy as of 2026-10-27; not proven by this repository.
   1..200}`. Off by default.
   - It runs ripgrep with `cwd` set to the root's realpath and no path argument, so every path in its
     output is relative.
-  - Flags: `--no-config`, `--no-ignore` and `--no-follow`; hidden files are never searched; the pattern
-    after `--`. Ignore files are not read because a `.ignore` or `.gitignore` in or above the folder can
-    name a hidden file to search (`!.env`), so with them hidden files would not always be skipped.
+  - Flags: `--json`, `--no-config`, `--no-ignore` and `--no-follow`; hidden files are never searched;
+    the pattern after `--`. Ignore files are not read because a `.ignore` or `.gitignore` in or above
+    the folder can name a hidden file to search (`!.env`), so with them hidden files would not always be
+    skipped. "Hidden" is ripgrep's rule: a file or folder whose name starts with a dot, not one the OS
+    marks hidden in another way (macOS's `hidden` flag, say), which ripgrep does not skip for that.
+  - Its child's stdin is `/dev/null`, as every child's is, so ripgrep, given no path, searches its
+    folder and never reads a pattern or data from standard input.
+  - **The reply is structured.** ripgrep's `--json` writes one message a line, and gives each path and
+    each line as `{"text": ...}` when it is UTF-8 and as `{"bytes": <base64>}` when it is not. Its text
+    output could not carry a path whose name holds a newline: that name wrote a line that read as a
+    match (`--null` would not help, since the host's decoding drops NUL). So the catalog entry names the
+    form of its output, `ripgrep_json`, and the host reads it once the child has ended
+    (`src/lucille_host/_ripgrep.py`): it keeps only the `match` messages, each one's path, line number
+    and line, in ripgrep's two forms, and returns them as a document in `stdout`
+    (`files.search.schema.json`, spec/PROTOCOL.md §11). Any line it does not read as one of ripgrep's
+    messages (not JSON, nested past 8 levels, which the host checks before any parser runs, a kind
+    ripgrep does not write, an absolute path or one with a `..` part) gives the document with no matches
+    and `error` `unreadable_output`; nothing of such output is passed on. This is the one catalog
+    mechanism added for it: an entry names a form other than text, and the host's code for that form
+    does the reading. The form's name is in the entry's definition hash; the code that reads it is not,
+    as the code that decodes and caps text is not.
+  - Bounds: at most 4 MiB of ripgrep's output is read (rule `raw-ceiling`); at most 1,000 matches; each
+    line cut at 1,000 bytes by the host, since `--max-columns` does nothing under `--json`; a match whose
+    path passes 4,096 bytes is left out; the document fit to the 64 KiB stream cap, or a request's lower
+    one, by leaving out the last matches. The document's `truncated` says when not all is there, and the
+    reply's `stdout_truncated` is the same. Redaction runs on each path and line, before the line
+    is cut, so that a key the cut would split is redacted whole.
   - A folder that holds one of the host's own folders is refused `path_outside_root`: the search walks
     the whole folder, which a path check cannot bound.
   - The `rg` executable is one absolute path per OS, the one each OS's packages use: `/usr/bin/rg` on
     Linux, Homebrew's `/opt/homebrew/bin/rg` on macOS. The op is unavailable where it is not there. It
     is never a `PATH` lookup. (A set of paths the policy picks from, and a policy switch for hidden
     files, were designed first; v0.1 has neither.)
+  - Homebrew's `/opt/homebrew/bin/rg` is writable by the user who owns the Homebrew prefix, usually the
+    Mac's own user. A process running as that user could replace it, and the host would run what it put
+    there; the `start` audit line's SHA-256 would show the change, and nothing stops it. So on macOS
+    the program is no stronger than the user's own account. (Linux's `/usr/bin/rg` belongs to root.)
   - **Its output carries lines of file content.** The claim says so, and the catalog entry's
     `sends_file_content` is true, so a shell asks the user to acknowledge it before it is enabled.
 
