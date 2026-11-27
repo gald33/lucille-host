@@ -30,6 +30,7 @@ from tools.guards import macos_lint
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 PLACEHOLDER = re.compile(r"\{[a-z_][a-z0-9_]*\}")
+CHOICE = re.compile(r"\{([a-z_][a-z0-9_]*)\?--[a-z][a-z0-9-]*:--[a-z][a-z0-9-]*\}")
 
 
 def _resolved(value: Any, defs: dict[str, Any]) -> Any:
@@ -55,6 +56,7 @@ def test_catalog_entries() -> None:
         "host.describe",
         "host.sleep",
         "files.sha256",
+        "files.search",
         "github.read",
         "gmail.check",
         "gmail.mailboxes",
@@ -136,6 +138,12 @@ def test_catalog_entries() -> None:
                     assert "--" in template[:index], (op.name, family, element)
                 else:
                     assert kind == "integer" and properties[element[1:-1]]["minimum"] >= 1
+            # A boolean picks one of two of the template's own flags, before "--".
+            for index, element in enumerate(template):
+                choice = CHOICE.fullmatch(element)
+                if choice is not None:
+                    assert properties[choice.group(1)]["type"] == "boolean"
+                    assert "--" in template[index:], (op.name, family, element)
 
     assert re.fullmatch(r"[0-9a-f]{64}", CATALOG_VERSION)
 
@@ -212,6 +220,7 @@ HASHES = {
     "host.describe": "734b854a4e4e0fb7128dc9cce6147de7e7386c20a92b44cf77086031240cc0c4",
     "host.sleep": "868830c4433044a8d4cb3e3a39ab7985d44a6cce394362a23ae7fcfaa79a5e8d",
     "files.sha256": "1c29598400572d7e1f93e5cc3ee6df17edfad5be1a78c7e33432a2704bfdddea",
+    "files.search": "13acde1fd970f540daa02d79d1e54cbd34657c40f1a5e7028ee40ec7409773de",
     "github.read": "7f32ad23f86007c7a605027655ff2edd341b2395e9a9554ba08cddaedff60906",
     "gmail.check": "ec32dd5a84cdb7e9049d53f9d45856f91ad485f035e730891c6c31f0b4262d3f",
     "gmail.mailboxes": "6e83854a220198786480f5351698afeb31772b063b85d6d36ec27a869a652c7a",
@@ -221,6 +230,7 @@ HASHES = {
 VERSION_BEFORE_WORDS = "06fe2f327b0916227970e377eaad94b064a7631bd7ff2696b3cef675bd607f35"
 VERSION_WITH_GITHUB_READ = "49f81c2d24e04c15a0b38268434523da60ee4cb5bbb8283c8f4f725e15711652"
 VERSION_WITH_GMAIL = "dc430cc7c08f0f36be46233c2d807ddb7ec7de07746ddb990e3247a950ca2bd0"
+VERSION_WITH_FILES_SEARCH = "620825c2441ec25e011fce28caab849eec23a1a7ce36a358b3860b754f7fe3fb"
 
 
 def _with_about(op: Operation, **changes: Any) -> Operation:
@@ -229,8 +239,11 @@ def _with_about(op: Operation, **changes: Any) -> Operation:
 
 def test_copy_fields_outside_definition_hash() -> None:
     assert {name: op.definition_hash for name, op in OPERATIONS.items()} == HASHES
-    assert CATALOG_VERSION == VERSION_WITH_GMAIL == catalog_version(tuple(OPERATIONS.values()))
-    before_gmail = tuple(op for op in OPERATIONS.values() if not op.name.startswith("gmail."))
+    assert CATALOG_VERSION == VERSION_WITH_FILES_SEARCH
+    assert CATALOG_VERSION == catalog_version(tuple(OPERATIONS.values()))
+    before_search = tuple(op for op in OPERATIONS.values() if op.name != "files.search")
+    assert catalog_version(before_search) == VERSION_WITH_GMAIL
+    before_gmail = tuple(op for op in before_search if not op.name.startswith("gmail."))
     assert catalog_version(before_gmail) == VERSION_WITH_GITHUB_READ
     first_three = tuple(op for op in before_gmail if op.name != "github.read")
     assert catalog_version(first_three) == VERSION_BEFORE_WORDS
@@ -257,6 +270,10 @@ def test_copy_fields_outside_definition_hash() -> None:
     assert flipped.definition_hash != sha.definition_hash
     others = tuple(op for op in OPERATIONS.values() if op.name != sha.name)
     assert catalog_version((*others, flipped)) != CATALOG_VERSION
+    # files.search sends lines of files, so its definition says so.
+    search = OPERATIONS["files.search"]
+    assert search._definition()["sends_file_content"] is True
+    assert _with_about(search, sends_file_content=False).definition_hash != search.definition_hash
     # What decides what the entry does is still in it.
     assert dataclasses.replace(sha, timeout_s=31).definition_hash != sha.definition_hash
 
@@ -280,9 +297,9 @@ def test_catalog_copy_must_not_claim() -> None:
     assert sha.sends == (
         "Lucille gets a code that identifies the file's exact contents, not the contents."
     )
-    # host.sleep is the one diagnostic entry, and no entry in this release sends file contents.
+    # host.sleep is the one diagnostic entry, and files.search the one that sends file contents.
     assert [n for n, op in OPERATIONS.items() if op.about.diagnostic] == ["host.sleep"]
-    assert not any(op.about.sends_file_content for op in OPERATIONS.values())
+    assert [n for n, op in OPERATIONS.items() if op.about.sends_file_content] == ["files.search"]
 
 
 def test_the_spec_and_the_catalog_say_the_same_words() -> None:
@@ -355,7 +372,7 @@ def test_args_valid_refuses_what_json_schema_lets_through() -> None:
 
 SPEC_STEPS_HERE = {"paused", "unknown_op", "not_enabled", "bad_args", "path_outside_root"}
 # Operations the spec has and this release's catalog does not yet.
-SPEC_ONLY = frozenset({"files.search"})
+SPEC_ONLY: frozenset[str] = frozenset()
 
 
 def _fixture_context(
@@ -398,15 +415,26 @@ def test_the_fixtures_decided_here_cover_steps_5_to_9() -> None:
     assert SPEC_STEPS_HERE <= codes
 
 
+_AVAILABLE = Operation.available
+
+
+def _available_here(op: Operation, os_family: str, interpreter: str | None = None) -> bool:
+    return op.name == "files.search" or _AVAILABLE(op, os_family, interpreter)
+
+
 @pytest.mark.parametrize("path", DECIDED_HERE, ids=lambda p: p.stem)
 def test_steps_5_to_9_hold_to_the_request_fixtures(
-    path: Path, tmp_path: Path, make_context: MakeContext
+    path: Path, tmp_path: Path, make_context: MakeContext, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The fixtures this release decides alone. The others are the read loop's (steps 1 to 4,
     dedupe and the messages the host does not answer) or those of an operation in SPEC_ONLY."""
     fixture = spec.load_fixture(path)
     expect = fixture["expect"]["reply"]
     body = fixture["body"]
+    # These are the decisions of steps 5 to 9, which hold wherever a catalog program is: a
+    # computer without ripgrep at files.search's place (the Mac app's bundled-runtime run of
+    # this suite, say) would refuse every files.search not_enabled before them.
+    monkeypatch.setattr(Operation, "available", _available_here)
     state = {**spec.default_host_state(), **fixture.get("host_state", {})}
     ctx = _fixture_context(state, tmp_path, make_context)
     job = Job(job_id=body["job_id"], op=body["op"], args=body["args"], caps=body.get("caps"))
