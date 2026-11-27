@@ -133,9 +133,8 @@ backstop ([VERIFYING.md](VERIFYING.md) says what each guard cannot see).
   what the host permits", through the installed host: conformance scenarios `policy-shaped-fields` and
   `update-shaped-fields` (refused `bad_request`, the policy digest unchanged) and `policy-unchanged`;
   `caps-above-host` (`caps` far above the host's own are not refused) and `caps-below-output` (a lower
-  request cap is applied). That `caps` above the host's own never raise the effective cap is shown by
-  `tests/test_exec.py` (`test_request_caps_never_raise_the_host_cap`), not by the suite: no operation it
-  can run offline writes past the host's cap; `tests/test_policy.py` (`test_upgrade_disables_changed_entry`,
+  request cap is applied). The conformance suite does not yet show that the host's cap holds against
+  longer output; `tests/test_exec.py` (`test_request_caps_never_raise_the_host_cap`) shows it; `tests/test_policy.py` (`test_upgrade_disables_changed_entry`,
   `test_invalid_policy_fails_closed`); `tests/test_read_loop.py`
   (`test_invalid_policy_idles`: with a policy file that is not valid TOML, `run` accepts no room, writes
   down, decides, runs and posts nothing for a request Lucille sends, never rewrites the file, and goes on
