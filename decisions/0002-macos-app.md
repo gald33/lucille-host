@@ -75,6 +75,13 @@ developing the app. Its builds stay ad hoc signed, for the repository owner's ow
 - **Activity…** (§15): a window with what Lucille asked this Mac to do since the app opened, from `run`'s
   `request` events, in words, newest first, kept in memory only and at most 500; and, behind **Show the
   Host's Log**, the last 200 lines of `log --json --limit 200`, as the host wrote them.
+- **Copy Diagnostics…** (§15), always in the menu: it reads `--json --version` and `status --json` again,
+  and shows in a note the text it would copy, under a sentence that says leaving things out is best
+  effort. The text holds the app's version, the host's and the contract's, the macOS version, and
+  `status`'s fields of a closed shape, its folders by alias only, each checked against its shape and
+  written as `unknown` when it fails. Only the note's **Copy**, the default, writes the pasteboard: that
+  text, as plain text, through a text view's own Copy, so the app's code still names no pasteboard.
+  **Cancel** writes nothing, and nothing is kept.
 - **Reset Settings…** (§10, §14), offered only while the host cannot read the settings file: in the note
   behind the menu's line that says so, in the one behind `run`'s Needs attention line for `policy`
   `invalid`, and, while connected, in the Settings submenu. It asks first, with Cancel the default, then runs `policy reset --json`, which sets the file
@@ -162,7 +169,7 @@ developing the app. Its builds stay ad hoc signed, for the repository owner's ow
   can carry a file's contents is turned on only after a question, though no operation in this release
   sends file contents), Set Up Folders and Abilities… while Set Up's window was closed before its last
   page, Add a Folder… (its name dialog starting from the alias the host suggests), the folders with
-  Remove, Activity…, Gmail… (the Gmail window, decisions/0003 "Second use", connected or not), while
+  Remove, Activity…, Copy Diagnostics…, Gmail… (the Gmail window, decisions/0003 "Second use", connected or not), while
   connected the Settings submenu, the pairing items (Connect to Lucille…,
   Finish Connecting…, Stop Connecting…, Disconnect from Lucille…), and Quit Capsule;
   while a request's process runs, Stop What's Running; and, while Lucille needs a newer release, the
@@ -180,8 +187,8 @@ developing the app. Its builds stay ad hoc signed, for the repository owner's ow
 
 Not built yet: the typed gate (§11.2; decided on 2026-11-21), the check
 after a folder is added from the menu, and at launch (`roots check`, §12; Set Up's Folders page runs it),
-the Welcome and main windows, updates, **Remove Capsule…** (section 17), Copy
-Diagnostics (§15), Developer ID signing and notarization, ripgrep (`Helpers/rg`; the pins hold an empty
+the Welcome and main windows, updates, **Remove Capsule…** (section 17), the core's `diagnostics`
+verb and so the audit lines in Copy Diagnostics (§15), Developer ID signing and notarization, ripgrep (`Helpers/rg`; the pins hold an empty
 ripgrep commit until then, and `Resources/licenses/` has no ripgrep licence), and the release jobs. The
 first build also departs from this record in these ways, among others; `macos/README.md`, under "Choices
 made for the first build", says why for most of them:
@@ -218,8 +225,14 @@ made for the first build", says why for most of them:
   is not in version 1 (spec/CLI.md §6, §14). A request whose `run` ended before it finished reads "Stopped
   when Capsule's helper program stopped." (§15);
 - Activity is a window of its own that the menu opens, not a part of a main window, and nothing in it can
-  be selected, so nothing in it can be copied: the app adds no copy of its own until Copy Diagnostics
+  be selected, so nothing in it can be copied: the app's one copy of its own is Copy Diagnostics' Copy
   (§15), and the pairing field's Command-C and Command-X are AppKit's, for the user's own text;
+- Copy Diagnostics is made by the app, from `--version` and `status`, not by the core's `diagnostics` verb,
+  which is not built (spec/CLI.md §14). So it holds no audit line, and none of the host's words for
+  people (a `message`, a refusal's words, which may name a path): of a refusal of `status`, its `code`
+  alone. Besides what §15 leaves out, it leaves out the pair's name, the rooms, process ids, the settings
+  file's path, and `status`'s `store`, `hub` and `offers_waiting`. Until the verb is built, the copy is the
+  app's alone, and Terminal has no command that writes the same text (§15);
 - Stop What's Running is not offered while `run` drains for a quit or a Disconnect, whose own ladder stops
   the operation: Stop now during a quit, `kill` after 330 s during a Disconnect. The menu offers it from a
   request's `started` to its `finished` (§14);
@@ -2404,8 +2417,10 @@ in 10 minutes or less.
     `["-I", "-B", "-X", "utf8", "-m", "lucille_host"]`, outside its comments. The lint sees that they are
     written there, not that the `Process` gets them; a build test pins the lines where it does;
   - no read of a pasteboard, or of what is dropped on the app (the user pastes into a field, §11.3; writing,
-    for Copy Diagnostics, is allowed by this rule). Until Copy Diagnostics is built, a build test and
-    `check_app.py links` refuse `NSPasteboard` altogether; the change that adds it lifts both;
+    for Copy Diagnostics, is allowed by this rule). Copy Diagnostics writes through a text view's own Copy,
+    so a build test and `check_app.py links` still refuse `NSPasteboard` altogether, and a build test holds
+    every call of a view's `copy(_:)` or `cut(_:)` by the app's code to that one, in
+    `macos/App/DiagnosticsPanel.swift`;
   - no `http://`, `https://`, `ws://`, `wss://` or `ftp://` in Swift, but for the one web page below, as
     one exact string literal in the opener's file and nowhere else;
   - one exception for the app's one opener, added with Open Date & Time Settings, Open Privacy Settings and

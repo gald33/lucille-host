@@ -255,6 +255,7 @@ struct HostItems: View {
             }
         }
         Button(ConnectionText.activityItem) { connection.activityChosen() }
+        Button(DiagnosticsText.menuItem) { connection.diagnosticsChosen() }
         // The Gmail window, connected or not, so that Gmail can be set up before pairing.
         Button(GmailText.menuItem) { model.gmailChosen() }
         // While connected: Open at Login, whose switch shows what macOS says (decisions/0002 §9),

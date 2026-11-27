@@ -145,6 +145,7 @@ them under its question. Whether it does, and whether that question names Capsul
 | Add a Folder… | See below. |
 | Folders | `roots list --json`. Each folder has a **Remove** item, which runs `roots remove <alias>` with `--json`. Removing one that is already gone shows no note. |
 | Activity… | Opens the Activity window (see [Activity](#activity)), and reads `ops list --json` for the words each request is said in. |
+| Copy Diagnostics… | `--json --version` and `status --json`, then a note with the text it would copy, and **Copy** (see [Copy Diagnostics](#copy-diagnostics)). |
 | Gmail… | Opens the Gmail window (see [Gmail](#gmail)), and reads `credential list --json`. Shown whether or not this Mac is connected. |
 | Settings | Shown while this Mac is connected. **Open at Login** has a checkmark while macOS will open Capsule when you log in, read again from macOS each time the menu opens; choosing it turns that on or off (see [Open at Login](#open-at-login)). **Reset Settings…** is in it too while the host cannot read its settings file (see [Reset Settings](#reset-settings)). |
 | Connect to Lucille… | Opens the pairing window (see [Connecting to Lucille](#connecting-to-lucille)). Shown while this Mac has no connection. |
@@ -292,6 +293,46 @@ cut at 2000 characters, under "As the host wrote it. Anything running as you can
 log is a file in your own folder, which proves nothing, and its format is not part of the contract. It is
 read again each time it is shown.
 
+## Copy Diagnostics
+
+**Copy Diagnostics…** in the menu reads `--json --version` and `status --json` again, then shows a note with
+the text it would copy and the sentence "This is what Capsule copies when you click Copy, and nothing goes
+anywhere until you paste it. It leaves out paths, file contents, keys, codes and the names of connections
+and rooms, as best it can: read it before you send it to anyone." The text is one `name: value` line each,
+named as in `status --json`:
+
+```text
+Capsule diagnostics, 2026-11-01T12:00:00Z
+app_version: 0.1.0
+host_version: 0.1.0.dev0
+contract: 1.0
+macos_version: 15.4.1
+status:
+  host_version: 0.1.0.dev0
+  paused: false
+  policy: ok
+  folders: docs
+  enabled: host.describe
+  pair: confirmed
+  run: stopped
+  last_hub_contact: 2026-11-01T12:00:00Z
+  last_left_because: none
+  clock: ok, skew_s 1.5
+audit: left out; this host has no diagnostics command yet
+```
+
+Each value is checked against the shape the contract gives it (a version, an alias, an operation's name, a
+closed list of states), and one that fails is written as `unknown`; a folder or ability that fails is
+counted, never written. The pair and `run`'s record are given by their state alone, with no name, deadline
+or process id; a `status` the host refused, by its `code` alone; and no text the host wrote for people is
+copied. The host has no `diagnostics` command yet (decisions/0002 §15), so the text holds no audit line.
+
+Only **Copy**, the default, writes the pasteboard: the whole text, as plain text, through a text view's own
+Copy, so the app's code never names the pasteboard. **Cancel** writes nothing. Nothing in the note can be
+selected, and nothing is kept: the text is made again each time. The words and the checks are in
+[`App/Diagnostics.swift`](App/Diagnostics.swift), which the self-test runs, and the note in
+[`App/DiagnosticsPanel.swift`](App/DiagnosticsPanel.swift).
+
 ## Connecting to Lucille
 
 The app connects through Lucille's chat (decisions/0002 §11.4), then on
@@ -310,7 +351,8 @@ you still compare the number and click They Match.
 2. **Continue** writes the service and the username on the standard input of `pair begin --json`, never on
    its command line. The window shows "Getting a code from Lucille…", then the code the host made: "Send
    this to Lucille in your chat: connect 7KQ4M-X2D9P. It works once, within 20 minutes." The code can be
-   selected and copied; the app writes nothing to the pasteboard and never reads it. The host does every
+   selected and copied; the app writes nothing to the pasteboard but Copy Diagnostics' text, and never
+   reads it. The host does every
    real check. Each refusal is said in a plain sentence, with the host's words as details. The ones that
    end a request (the code expired, it was sent from another account, it was not started on this Mac, and
    the others of spec/CLI.md §7) offer **Start Over**. A code sent from another account never shows which.
@@ -698,8 +740,9 @@ Two checks keep it so, and neither is a proof:
   link, the sharing services, Apple events), a button pressed by code (`performClick`), a function
   reached by its symbol, and loading a bundle's code.
   `tests/test_macos_build.py` pins the lines where `HostCLI.swift` gives that path and those arguments
-  to the `Process`, and fails if a file names the pasteboard at all, passes `--hub` or `--store-file`, or
-  imports anything but Foundation, AppKit and SwiftUI, and ServiceManagement in `LoginItem.swift` alone
+  to the `Process`, and fails if a file names the pasteboard at all, if any file but
+  `DiagnosticsPanel.swift` calls a view's `copy(_:)` or `cut(_:)` itself, or if a file passes `--hub` or
+  `--store-file`, or imports anything but Foundation, AppKit and SwiftUI, and ServiceManagement in `LoginItem.swift` alone
   (Foundation and the C library alone, for the files the self-test runs).
 - `check_app.py links` reads what the built app's executable imports (`nm -u`). It fails on the C
   functions that start a process or open a socket, on the classes that do either, on Launch Services'
@@ -967,6 +1010,11 @@ best-effort folder in Documents, and it connects through a test harness with a h
 need a Mac and a person. Where the maintainer reported one done, in whole or in part, on their Mac on
 2026-11-09, it says so; none of those reports is in a CI log:
 
+- **Copy Diagnostics' note and its Copy.** The `ui` check sees the item in the menu and does not choose
+  it: its Copy would write over the pasteboard that the pairing step reads. The self-test checks the text,
+  and the build tests the note's source. That a text view no window shows copies its whole text, as plain
+  text only, was seen once outside CI, on a Mac with macOS 26.2 on 2026-11-27, through a private
+  pasteboard.
 - **Whether a person's Mac loads the native code of an ad hoc build without the hardened runtime, and
   pairs.** The maintainer reported it once, for cryptography: on their Mac on 2026-11-09, the disk image of run
   42531994220 imported cryptography's x25519 module, and paired ([Signing](#signing)). On Linux that
@@ -1229,7 +1277,8 @@ a downloaded, quarantined copy run from Terminal is not yet tested on a Mac.
 - **Connecting for anyone but the owner.** The typed digits (decisions/0002 §11.2) and Connect from
   Lucille's chat (§11.4) are decided but not built. Until they are built, connecting by pasting a code is
   for the owner's own Mac only.
-- **What comes after connecting**: About, Copy Diagnostics, and a check of each folder at launch and
+- **What comes after connecting**: About, the core's `diagnostics` command, so that Copy Diagnostics
+  carries the last audit lines, and a check of each folder at launch and
   after Add a Folder… in the menu (Set Up's Folders page checks them).
 - **Set Up's rough edges** (see [Set Up](#set-up)): its pages do not scroll; the next row it adds back
   does not wait for an ability's answer, nor for a panel or dialog the menu's own steps reopened; and it
@@ -1254,6 +1303,12 @@ a downloaded, quarantined copy run from Terminal is not yet tested on a Mac.
 
 The design ([decisions/0002-macos-app.md](../decisions/0002-macos-app.md)) may change each of these.
 
+- **Copy Diagnostics is made by the app, with no audit lines.** The design has the core's `diagnostics`
+  command write it, so that every shell leaves out the same things, with the last 20 audit lines, each
+  path rewritten to an alias. That command is not built, and rewriting the host's log lines in the app
+  would be a second redaction to keep in step with the core's. So the app copies only what it already
+  reads as typed fields, `--version` and `status`, each held to its shape, and says that the audit lines
+  are left out (see [Copy Diagnostics](#copy-diagnostics)).
 - **The app runs python-build-standalone's own interpreter, renamed `lucille-host-runtime`.** A small
   native launcher that embeds Python, so that the bundle holds no general-purpose interpreter, is an
   option the design has not decided.

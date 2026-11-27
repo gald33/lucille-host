@@ -293,6 +293,7 @@ LOGIC_SOURCES: Final = (
     "LoginRules.swift",
     "PlaceRules.swift",
     "Gmail.swift",
+    "Diagnostics.swift",
 )
 # The host's golden fixtures (spec/CLI.md section 11), which the self-test reads through the
 # app's JSON reader and its pairing, supervision and Set Up state machines.
@@ -3003,12 +3004,17 @@ LONGEST_LOG_LINE: Final = 2000
 STOP_WHATS_RUNNING: Final = "Stop What's Running"
 STOPPED_AND_PAUSED: Final = "Stopped, and paused. Resume when you're ready."
 RESUME_ITEM: Final = "Resume Lucille"
+# Copy Diagnostics, as in App/Diagnostics.swift (tests/test_macos_build.py checks that they
+# agree): the menu's item, which is always there. The ui check does not choose it: its Copy
+# would write the runner's pasteboard, which the pairing check's own text is on.
+DIAGNOSTICS_ITEM: Final = "Copy Diagnostics…"
 # The items the menu shows while the app's profile holds no pair, besides its first line.
 MENU_ITEMS: Final = (
     "Abilities",
     "Add a Folder…",
     "Folders",
     ACTIVITY_ITEM,
+    DIAGNOSTICS_ITEM,
     CONNECT_ITEM,
     f"Quit {APP_NAME}",
 )
