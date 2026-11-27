@@ -141,8 +141,17 @@ def test_suite_passes_against_the_installed_host() -> None:
     )
     shown = f"stdout:\n{done.stdout}\nstderr:\n{done.stderr}"
     assert done.returncode == 0, shown
-    lines = [line for line in done.stdout.splitlines() if line.startswith(("PASS ", "FAIL "))]
-    assert lines == [f"PASS {found.name}" for found in _scenarios.REGISTRY], shown
+    lines = [
+        line for line in done.stdout.splitlines() if line.startswith(("PASS ", "FAIL ", "SKIP "))
+    ]
+    names = [found.name for found in _scenarios.REGISTRY]
+    # Each scenario once, in order, passed or skipped (a scenario that cannot check here: no /proc
+    # on macOS, no ripgrep where the catalog says), never failed. Where everything can be checked,
+    # Linux with ripgrep at the catalog's path, as CI's Linux runners are, every one passes.
+    assert [line.split(" ", 2)[1].rstrip(":") for line in lines] == names, shown
+    assert not [line for line in lines if line.startswith("FAIL ")], shown
+    if sys.platform.startswith("linux") and Path("/usr/bin/rg").is_file():
+        assert lines == [f"PASS {name}" for name in names], shown
 
 
 def _refused_as_unknown_op(ctx: _scenarios.Context) -> None:
