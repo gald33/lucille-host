@@ -269,7 +269,8 @@ a search pattern), and what an enabled operation returns, up to 64 KiB of output
   byte over it is not; these test the spec, not the host); `tests/test_exec.py` (`test_exec_caps`: 1 MiB
   of output comes back truncated and flagged, its JSON string exactly 64 KiB;
   `test_exec_raw_ceiling_drops_the_rest_and_flags_it`; `test_request_caps_never_raise_the_host_cap`); `tests/test_output.py`; invariant "Output is
-  bounded, decodable and path-free" (pending, conformance: the serialized reply stays under 256 KiB).
+  bounded, decodable and path-free" (conformance scenario `output-bounded`: a `files.search` whose output
+  passes 1 MiB comes back truncated and flagged, and the serialized reply measures under 256 KiB).
 
 **C8.** "`files.search` returns lines of the files it searches."
 - Code: the `files.search` catalog entry (`src/lucille_host/ops/__init__.py`), which runs ripgrep with
@@ -305,8 +306,9 @@ changes, and, to within a day, when lucille-host was last running and when your 
   (`test_host_describe_document_in_stdout`: `host.describe` returns aliases, never the root's path, its
   real path or `$HOME`); `tests/test_policy.py` (`test_policy_digest_not_plain_hash`);
   `tests/test_exec.py` (`test_files_sha256_runs_in_the_root`: the reply holds no root path); invariant
-  "Output is bounded, decodable and path-free" (pending, conformance: no reply contains a root's realpath
-  or `$HOME`); `tests/test_rooms.py` (`test_resolves_at_least_daily`: with nothing else asking, the
+  "Output is bounded, decodable and path-free" (conformance scenario `replies-path-free`: no reply to
+  `host.describe`, `files.sha256` or `files.search`, nor a refusal of a request naming those paths, holds
+  the root's path or real path or the host's `$HOME`); `tests/test_rooms.py` (`test_resolves_at_least_daily`: with nothing else asking, the
   session resolves the pair again a day after the last resolve).
 
 **C8a.** "`github.read` returns GitHub's reply to the read it names. ... Lucille learns the names of the
