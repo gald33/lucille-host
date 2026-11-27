@@ -3,7 +3,8 @@
 What a program that drives lucille-host (a "shell": the Mac app, a later Linux or Windows app, a script)
 can rely on: the verbs it calls, the JSON objects each one writes, and the exit codes.
 
-**Version 1.0, draft.** No released host implements it yet. This document, the JSON Schemas and the golden
+**Version 1.0, draft.** lucille-host `0.1.0` implements it. It stays a draft, and can still change, until the
+release that opens pairing to anyone other than the repository owner. This document, the JSON Schemas and the golden
 fixtures are the contract together. It is separate from the protocol between Lucille and the host
 ([PROTOCOL.md](PROTOCOL.md)), and has its own version.
 
@@ -1305,7 +1306,7 @@ Each line is one JSON object, of at most 1,024 bytes:
 
 ## Changes
 
-- **1.0** (no release yet): the first version, with `run`'s event stream and exit codes, `policy reset`,
+- **1.0** (`0.1.0`, still a draft): the first version, with `run`'s event stream and exit codes, `policy reset`,
   and `credential` with `--json` (its types `credential`, `credential_removed` and `credential_test`), for
   the Mac app's Gmail window; and Connect from Lucille's chat: `pair begin`, `pair resume`, `pair cancel`,
   the `connect` type, and its error codes. The paste form is gone: `pair` takes no pairing code, on its
