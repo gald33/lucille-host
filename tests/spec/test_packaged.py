@@ -1,5 +1,5 @@
 """The schemas and fixtures ship in the wheel, and load from an installed copy of it: the
-protocol's, and the command line contract's (spec/CLI.md).
+protocol's, and the command line contract's (spec/CLI.md); and so does the claim ``status`` prints.
 
 This test builds the sdist and the wheel from this checkout with ``uv build`` (the wheel is built
 from the sdist, as a release builds it), installs the wheel with no dependencies into a fresh
@@ -145,3 +145,10 @@ def test_cli_spec_packaged(built: dict[str, Any]) -> None:
             if not _support.schema_accepts(found["type"], found, schema):
                 errors[f"{name}[{index}]"] = found
     assert errors == {}
+
+
+def test_the_claim_is_packaged(built: dict[str, Any]) -> None:
+    assert "lucille_host/claim.txt" in built["wheel_names"]
+    assert built["report"]["claim"] == (SOURCE_SPEC.parent / "claim.txt").read_text(
+        encoding="ascii"
+    )
