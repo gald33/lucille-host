@@ -18,7 +18,9 @@ is exactly ``{name}`` for an argument ``name``; it is replaced by that argument'
 whole argv element, never spliced into a string. A string argument comes after ``--``. An integer
 argument may come before it: it is rendered with ``str()`` from an integer the schema bounds below
 by 1, so it cannot begin with ``-``. (``host.sleep`` needs that: macOS's ``/bin/sleep`` takes no
-``--``.)
+``--``.) A boolean argument picks one of two flags: an element ``{name?--on:--off}`` is replaced by
+``--on`` when the argument is true and by ``--off`` when it is false. Both are literal flags of the
+catalog's, never a request's text, and the element comes before ``--``.
 
 Three elements of a template are filled by the host, never from a request (decisions/0003,
 "First use"): :data:`HOST_PYTHON`, the interpreter the host runs on; :data:`HOST_STATE`, the
@@ -120,6 +122,8 @@ _OBJECT_KEYWORDS = frozenset({"type", "additionalProperties", "required", "prope
 _VALUE_KEYWORDS = frozenset({"type", "minimum", "maximum", "minLength", "maxLength", "pattern"})
 
 _PLACEHOLDER = re.compile(r"\{([a-z_][a-z0-9_]*)\}", re.ASCII)
+# A boolean argument's choice between two of the catalog's own flags: {name?--on:--off}.
+_CHOICE = re.compile(r"\{([a-z_][a-z0-9_]*)\?(--[a-z][a-z0-9-]*):(--[a-z][a-z0-9-]*)\}", re.ASCII)
 
 # Template elements the host fills itself, never from a request: the interpreter it runs on, the
 # profile's state folder and the profile's name. The template holds these markers, which are what
@@ -282,8 +286,16 @@ class Operation:
 
     @property
     def uses_root(self) -> bool:
-        """Whether the operation works inside a folder alias: it takes ``root`` and ``path``."""
+        """Whether the operation works inside a folder alias: it takes ``root``, and ``path`` too
+        unless it works on the whole folder (:attr:`walks_root`)."""
         return "root" in self.params()["properties"]
+
+    @property
+    def walks_root(self) -> bool:
+        """Whether the operation works on the whole folder ``root`` names, from its top: it takes
+        ``root`` and no ``path``. Its child runs in the folder, and is given no path."""
+        properties = self.params()["properties"]
+        return "root" in properties and "path" not in properties
 
     @property
     def runs_host_python(self) -> bool:
@@ -345,6 +357,13 @@ class Operation:
                 if not filled:
                     raise ValueError(f"{self.name}: the host gives no value for {element}")
                 built.append(filled)
+                continue
+            choice = _CHOICE.fullmatch(element)
+            if choice is not None:
+                value = args[choice.group(1)]
+                if type(value) is not bool:
+                    raise ValueError(f"{self.name}: {choice.group(1)} is not a boolean")
+                built.append(choice.group(2) if value else choice.group(3))
                 continue
             match = _PLACEHOLDER.fullmatch(element)
             if match is None:
@@ -478,6 +497,34 @@ _GMAIL_CREDENTIAL: Final = {
     "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$",
 }
 _NO_NUL: Final = "^[^\\u0000]*$"
+# files.search's program, ripgrep, at the one place each OS's packages put it: Debian's, Ubuntu's
+# and Fedora's /usr/bin, and Homebrew's on Apple silicon. Where it is not there, the operation is
+# unavailable; the host never looks it up on PATH.
+_RIPGREP: Final = {"linux": "/usr/bin/rg", "macos": "/opt/homebrew/bin/rg"}
+# Run in the folder with no path, so every path it prints is relative to it. No configuration
+# file, and no ignore file (a .ignore or .gitignore can name a hidden file to search, so with
+# them hidden files would not always be skipped); hidden files are skipped by name; no link is
+# followed; one line a match, by path, in a fixed form, each cut at 1,000 bytes.
+_SEARCH_FLAGS: Final = (
+    "--no-config",
+    "--no-ignore",
+    "--no-follow",
+    "--no-heading",
+    "--with-filename",
+    "--line-number",
+    "--color",
+    "never",
+    "--sort",
+    "path",
+    "--max-columns",
+    "1000",
+    "--max-columns-preview",
+    "{fixed_strings?--fixed-strings:--no-fixed-strings}",
+    "--max-count",
+    "{max_count}",
+    "--",
+    "{pattern}",
+)
 _DATE: Final = "^[0-9]{4}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])$"
 
 
@@ -608,6 +655,30 @@ _ENTRIES = (
         ),
         file_operands=("path",),
     ),
+    # Searches the whole folder a root names, from its top, with ripgrep (decisions/0001, "The
+    # closed operation set"). Its output carries lines of the files it searched.
+    _entry(
+        "files.search",
+        _object(
+            ["root", "pattern", "fixed_strings", "max_count"],
+            {
+                "root": _ROOT,
+                "pattern": _text(256),
+                "fixed_strings": {"type": "boolean"},
+                "max_count": {"type": "integer", "minimum": 1, "maximum": 200},
+            },
+        ),
+        {family: (rg, *_SEARCH_FLAGS) for family, rg in _RIPGREP.items()},
+        About(
+            summary="Search the files in a folder",
+            sends=(
+                "Lucille gets the lines that match its search in the files of one folder you "
+                "added, with each file's path inside that folder, up to 200 lines a file. "
+                "Hidden files are never searched."
+            ),
+            sends_file_content=True,
+        ),
+    ),
     # Reads one GitHub REST API endpoint with a credential stored on this computer
     # (decisions/0003, "First use"). Its program is the host's own interpreter running
     # lucille_host.proxy, which reads the credential, checks the address, makes the call and
@@ -730,8 +801,28 @@ def _patterns(name: str, params_json: str) -> Mapping[str, re.Pattern[str]]:
     )
 
 
+def _check_argv(op: Operation) -> None:
+    """Each boolean choice in ``op``'s templates names a boolean argument and comes before
+    ``--``; a boolean argument is never placed any other way."""
+    properties = op.params()["properties"]
+    for family, template in (op.argv or {}).items():
+        end = template.index("--") if "--" in template else len(template)
+        for index, element in enumerate(template):
+            choice = _CHOICE.fullmatch(element)
+            plain = _PLACEHOLDER.fullmatch(element)
+            if choice is not None:
+                key = choice.group(1)
+                if properties.get(key, {}).get("type") != "boolean":
+                    raise RuntimeError(f"{op.name} {family}: {key} is not a boolean argument")
+                if index >= end or choice.group(2) == choice.group(3):
+                    raise RuntimeError(f"{op.name} {family}: a choice of two flags before --")
+            elif plain is not None and properties[plain.group(1)]["type"] == "boolean":
+                raise RuntimeError(f"{op.name} {family}: a boolean is placed only as a choice")
+
+
 for _op in _ENTRIES:
     _patterns(_op.name, _op.params_json)
+    _check_argv(_op)
 
 
 GMAIL_ID_MAX: Final = 2**64 - 1

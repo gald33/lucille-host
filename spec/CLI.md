@@ -216,7 +216,7 @@ can be unknown. Arrays are written in the order each type states.
 - `summary` is a few plain words for what it does. `sends` says what Lucille gets when it runs.
 - `sends_file_content` is true when a reply can carry the contents of a file, as a search's matching lines
   do. A shell asks the user to acknowledge that before it enables such an operation, and decides so on this
-  field, never on the words of `sends`. No operation in this release sends file contents.
+  field, never on the words of `sends`. In this release, `files.search` is the one operation that does.
 - `diagnostic` is true for an operation meant for testing (`host.sleep`). A shell may hide it.
 - Section 8 says where `summary`, `sends`, `sends_file_content` and `diagnostic` come from.
 
@@ -708,6 +708,7 @@ list of what this project must never claim; a test checks them against it.
 | `host.describe` | Describe this computer's host | Lucille gets the host's version and protocol, the operating system family, which release's catalog it has, which operations are on, the names you gave your folders (never where they are), and a fingerprint of the local policy. | false | false |
 | `host.sleep` | Wait up to 4 minutes, for testing | Lucille gets how long the wait took and how it ended. | false | true |
 | `files.sha256` | Check a file's fingerprint | Lucille gets a code that identifies the file's exact contents, not the contents. | false | false |
+| `files.search` | Search the files in a folder | Lucille gets the lines that match its search in the files of one folder you added, with each file's path inside that folder, up to 200 lines a file. Hidden files are never searched. | true | false |
 | `github.read` | Read from GitHub with a token kept here | Lucille gets GitHub's reply to one read it names: your repositories, issues, pull requests, commits or a README. The token goes only to api.github.com; Lucille learns only its name. | false | false |
 | `gmail.check` | Check that Gmail can be read | Lucille learns whether the app password kept here still signs in to Gmail. | false | false |
 | `gmail.mailboxes` | List your Gmail mailboxes | Lucille gets the names of your Gmail mailboxes and labels. | false | false |
@@ -876,7 +877,7 @@ Each fixture is one command line and what it writes:
   command line and compare. They also run it without `--json`, from the same set-up, and check that the
   exit code and standard error are the same.
 - `ops-list-sends-file-content` is written with a catalog entry stubbed to send file contents, so that a
-  shell's decoder sees `sends_file_content` true. No operation in this release does.
+  shell's decoder sees `sends_file_content` true on an entry whose words it knows.
 - Every `stopped` reason has a fixture of `run`, except `forgotten`. It comes only while `run` serves the
   pair, when another command forgets it, or when a touch of `run`'s, coming after a resolve, finds that this
   computer's side ended the pair (section 13.3): at a moment one command line does not fix. A pair forgotten

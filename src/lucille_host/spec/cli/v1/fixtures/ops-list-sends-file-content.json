@@ -1,5 +1,5 @@
 {
-  "description": "ops list with files.sha256 stubbed to say that a reply carries file contents, as an operation that returns lines of files will; no operation in this release does",
+  "description": "ops list with files.sha256 stubbed to say that a reply carries file contents, beside files.search, which does",
   "argv": [
     "--json",
     "ops",
@@ -37,6 +37,17 @@
       "enabled": false,
       "summary": "Check a file's fingerprint",
       "sends": "Lucille gets a code that identifies the file's exact contents, not the contents.",
+      "sends_file_content": true,
+      "diagnostic": false
+    },
+    {
+      "v": 1,
+      "type": "op",
+      "name": "files.search",
+      "state": "disabled",
+      "enabled": false,
+      "summary": "Search the files in a folder",
+      "sends": "Lucille gets the lines that match its search in the files of one folder you added, with each file's path inside that folder, up to 200 lines a file. Hidden files are never searched.",
       "sends_file_content": true,
       "diagnostic": false
     },
