@@ -544,6 +544,12 @@ drain: a signal (`SIGTERM`, `SIGHUP` or Ctrl-C), the end of standard input, or a
 | `name` | string | |
 | `host` | string | The host it signed in to: `imap.gmail.com`. |
 
+### `uninstalled`
+
+| Field | Type | |
+|---|---|---|
+| `profile` | string, `^[a-z][a-z0-9_-]{0,31}$` | The profile whose keyring items, then folders, were deleted (section 7, `uninstall-data`). |
+
 ## 7. Verbs
 
 Each verb writes the objects below on success, and an `error` object (section 5) on failure, with one of
@@ -579,6 +585,7 @@ line with no verb never give it).
 | `credential list` | one `credential` per credential, by service then name; none when none is saved | `insecure_keyring`, `store_error` |
 | `credential remove <service> <name>` | one `credential_removed` | `no_such_credential`, `bad_credential`, `insecure_keyring`, `store_error` |
 | `credential test <service> <name>` | one `credential_test` | `no_test`, `no_such_credential`, `paused`, `bad_credential`, `unreachable`, `limit_reached`, `sign_in_refused`, `insecure_keyring`, `store_error` |
+| `uninstall-data --yes` | one `uninstalled` | `busy`, `lock_failed`, `policy_lock_failed`, `held`, `insecure_keyring`, `store_error`, `runtime_folder`, `state_invalid` |
 
 Notes:
 - **`pair`** takes no pairing code. `pair` alone is `pair begin`; a word that is not an action (`begin`,
@@ -673,6 +680,19 @@ Notes:
   standard input, and only with `--value-stdin` (without it, a usage error). No object holds a value.
   `credential list` writes no object, and exits 0, when none is saved; standard error says so.
   `credential test` exits 1 with an `error` whose `message` is the child's own fixed line (section 15).
+- **`uninstall-data --yes`** deletes what the host keeps for the profile `--profile` names, and for no
+  other: first every keyring item its stores keep for that profile (the pair's, service `lucille-host`,
+  and the credentials', service `lucille-host.credentials`, each with the profile's name as its user
+  name), checking that a read of each then finds nothing; then the profile's folders, its config folder
+  and its state folder, with its settings, its state, its run record and its audit log. An item or a
+  folder that is not there is no failure, so the verb can be run again after one that stopped part way,
+  and on a profile that holds nothing. It refuses with `busy` while `run` or `pair` of the profile runs
+  (it takes their locks without waiting, then the policy lock, waiting for it), and with `held` while
+  the profile holds a pair, confirmed or not, or work rooms over a pair already gone: `forget` first,
+  which tells Lucille when the hub can be reached, so that a pair is never dropped here without it. It
+  deletes nothing then. `--yes` is required, and without it the line is a usage error: the verb asks
+  nothing. It keeps nothing of what it deleted; a shell that wants a copy of the audit log reads `log`
+  first.
 - **`run --json-events`** writes no `error` object but for a usage error. Every other way it ends is a
   `stopped` object and an exit code of section 13.3.
 
@@ -802,9 +822,9 @@ limit, as it runs every verb, and stops it when the limit passes.
 | `bad_options` | `pair status`, `pair confirm` and `pair reject` take no options. |
 | `code_in_argv` | `pair` was given something other than an action; a pairing code is never taken. |
 | `bad_hub` | `--hub` names a hub that is not `http://127.0.0.1:<port>` or `http://localhost:<port>`. |
-| `busy` | Another `pair` of this profile is running. |
-| `lock_failed` | The lock that keeps one `pair` per profile could not be taken on this filesystem. |
-| `held` | This computer already holds a pair: disconnect first. |
+| `busy` | Another `pair` of this profile is running; for `uninstall-data`, a `run` or a `pair` of it. |
+| `lock_failed` | The lock that keeps one `pair` per profile could not be taken on this filesystem; for `uninstall-data`, that lock or `run`'s. |
+| `held` | This computer already holds a pair: disconnect first. For `uninstall-data`, also work rooms over a pair already gone, which `forget` leaves. |
 | `bad_code` | That is not a pairing code. |
 | `wrong_hub` | The code is for another hub, not Lucille's (or for a loopback hub `--hub` did not name). |
 | `code_has_token` | The code carries a hub token, and the host takes only codes that do not. |
@@ -1150,8 +1170,7 @@ leaves it out of `enabled_ops` (decisions/0003, "First use").
 
 ## 14. Not in version 1
 
-- `diagnostics` and removing the host's data ([decisions/0002-macos-app.md](../decisions/0002-macos-app.md)
-  §8).
+- `diagnostics` ([decisions/0002-macos-app.md](../decisions/0002-macos-app.md) §8, §15).
 - The typed pairing gate (decisions/0002 §11.2): decided on 2026-11-21, not built. Connect from Lucille's
   chat (§11.4 and §11.5) is built as `pair begin`, `pair resume` and `pair cancel` (section 7), and is the
   only way to pair.
@@ -1308,7 +1327,8 @@ Each line is one JSON object, of at most 1,024 bytes:
 - **1.0** (no release yet): the first version, with `run`'s event stream and exit codes, `policy reset`,
   and `credential` with `--json` (its types `credential`, `credential_removed` and `credential_test`), for
   the Mac app's Gmail window; and Connect from Lucille's chat: `pair begin`, `pair resume`, `pair cancel`,
-  the `connect` type, and its error codes. The paste form is gone: `pair` takes no pairing code, on its
+  the `connect` type, and its error codes; and `uninstall-data --yes`, with its type `uninstalled`, for the
+  Mac app's Remove Capsule… (decisions/0002 section 17). The paste form is gone: `pair` takes no pairing code, on its
   command line or with `--code-stdin`, and answers only a code delivered for its own Connect request.
   A build of the repository's development version is not a release, and writes contract 1.0 whatever it
   holds.

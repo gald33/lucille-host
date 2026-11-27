@@ -467,6 +467,9 @@ enum HostObject: Equatable, Sendable {
     /// Where a Connect request from Lucille's chat is (`pair begin`, `pair resume`, `pair status`,
     /// `pair cancel`).
     case connectState(ConnectState)
+    /// The profile whose keyring items and folders `uninstall-data` deleted (Remove, decisions/0002
+    /// section 17).
+    case uninstalled(String)
     case unknown(type: String)
 
     /// The types this release reads. Every other type decodes as `unknown`.
@@ -474,7 +477,7 @@ enum HostObject: Equatable, Sendable {
         "pair_code", "policy_reset", "pair", "error", "status", "forget", "controls", "ready",
         "state", "request", "host_too_old", "stopped", "log_line", "version", "op", "op_removed",
         "root", "root_removed", "root_check", "alias_suggestion", "previous_policy",
-        "credential", "credential_removed", "credential_test", "connect",
+        "credential", "credential_removed", "credential_test", "connect", "uninstalled",
     ]
 }
 
@@ -707,6 +710,11 @@ extension HostObject {
                 return nil
             }
             self = .connectState(state)
+        case "uninstalled":
+            guard let profile = fields.string("profile") else {
+                return nil
+            }
+            self = .uninstalled(profile)
         default:
             self = .unknown(type: type)
         }
@@ -1287,6 +1295,19 @@ enum VerbOutcome: Equatable, Sendable {
         for object in objects {
             if case .forget(let result) = object {
                 return result
+            }
+        }
+        return nil
+    }
+
+    /// The profile `uninstall-data --json` deleted the data of.
+    var uninstalled: String? {
+        guard case .done(let objects) = self else {
+            return nil
+        }
+        for object in objects {
+            if case .uninstalled(let profile) = object {
+                return profile
             }
         }
         return nil

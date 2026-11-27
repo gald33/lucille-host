@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/gald33/lucille-host/blob/main/src/lucille_host/spec/cli/v1/uninstalled.schema.json",
+  "title": "lucille-host --json: uninstalled",
+  "description": "The profile's keyring items, then its folders, were deleted from this computer.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "v",
+    "type",
+    "profile"
+  ],
+  "properties": {
+    "v": {
+      "const": 1
+    },
+    "type": {
+      "const": "uninstalled"
+    },
+    "profile": {
+      "$ref": "#/$defs/profile"
+    }
+  },
+  "$defs": {
+    "profile": {
+      "description": "A profile's name: lowercase letters, digits, '-' and '_', starting with a letter, at most 32.",
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 32,
+      "pattern": "^[a-z][a-z0-9_-]{0,31}$"
+    }
+  }
+}

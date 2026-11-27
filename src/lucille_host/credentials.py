@@ -8,7 +8,9 @@
   has none, and so may be sent nowhere. It is a separate item from the pair's (``store.py``), so a
   damaged credential item never puts the pair at risk, and ``forget`` (which ends the pair) does
   not delete the user's credentials. ``forget`` is not the way to delete them:
-  :meth:`CredentialStore.remove` is.
+  :meth:`CredentialStore.remove` is, or ``uninstall-data``, which deletes the whole item with the
+  rest of the profile's data (``store.delete_items``), and names it by
+  :data:`store.CREDENTIALS_SERVICE` so as not to import this module.
 - The value is entered on this computer, by the user, with ``lucille-host credential set``. Nothing
   Lucille sends can write or list this item, and only one operation reads it: no request handler
   or reply refers to this module, the command line names it only in the ``credential`` verb's own
@@ -56,7 +58,7 @@ __all__ = [
     "hosts_of",
 ]
 
-SERVICE: Final = "lucille-host.credentials"
+SERVICE: Final = store.CREDENTIALS_SERVICE
 VERSION: Final = 1
 LOCK: Final = ".credentials.lock"
 # Lower-case service and credential names, the same rule Lucille checks: ``gmail``, ``github.com``.

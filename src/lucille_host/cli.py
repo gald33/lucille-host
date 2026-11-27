@@ -44,7 +44,10 @@ verbs:
 - ``policy previous``: the operations and folders of the last policy a pairing set aside (a
   pairing sets aside only a policy that is not the fresh one); ``policy reset``: set an invalid
   policy file aside, and start from the fresh policy;
-- ``pause``, ``resume`` and ``kill``: the local controls.
+- ``pause``, ``resume`` and ``kill``: the local controls;
+- ``uninstall-data --yes``: delete the profile's keyring items, then its folders, once it holds
+  no pair and no work room (decisions/0002 section 17). It refuses while ``run`` or ``pair`` of
+  the profile runs: it takes their locks without waiting, and the policy lock.
 
 Each verb is dispatched by name; one with no handler is refused, never run as another verb.
 ``--profile <name>`` selects a separate config and state directory, so that two computers can be
@@ -74,6 +77,7 @@ import contextlib
 import json
 import os
 import re
+import shutil
 import sys
 import termios
 import threading
@@ -95,6 +99,7 @@ from lucille_host import (
     paths,
     policy,
     report,
+    rooms,
     runs,
     store,
 )
@@ -686,6 +691,23 @@ def build_parser() -> argparse.ArgumentParser:
         policy_verbs.add_parser(
             "reset", help="set aside an invalid policy file, and start from the fresh policy"
         )
+    )
+
+    uninstall = verbs.add_parser(
+        "uninstall-data",
+        help="delete this profile's keyring items and folders, once it holds no pair",
+        description=(
+            "Deletes every keyring item the host's stores keep for this profile (the pair's, "
+            "and the credentials'), then this profile's folders: its settings, its state and its "
+            "audit log. Only this profile's: another profile, `default` among them, is left "
+            "alone. It refuses while `run` or `pair` runs for the profile, and while the profile "
+            "holds a pair, or work rooms over one: run `forget` first, which tells Lucille when "
+            "the hub can be reached. --yes is required: nothing asks."
+        ),
+    )
+    _json_option(uninstall)
+    uninstall.add_argument(
+        "--yes", action="store_true", required=True, help="delete without asking (required)"
     )
 
     _json_option(verbs.add_parser("pause", help="start nothing until resume; refuse new requests"))
@@ -1771,6 +1793,57 @@ def _forget(args: argparse.Namespace, dirs: paths.Dirs, out: _Out) -> None:
     )
 
 
+# What ``uninstall-data`` says while another command of the profile holds a lock it takes.
+UNINSTALL_RUNNING: Final = (
+    "`lucille-host run` is running for this profile: stop it first, then uninstall its data"
+)
+UNINSTALL_PAIRING: Final = (
+    "another `lucille-host pair` is running for this profile: let it end, or stop it, first"
+)
+UNINSTALL_HELD: Final = (
+    "this profile holds a pair ({name}): disconnect first: run `forget`, which tells Lucille "
+    "when the hub can be reached. Nothing was removed"
+)
+UNINSTALL_ROOMS: Final = (
+    "this profile still holds work rooms over pair {name}, which is gone from this computer: "
+    "run `forget`, which leaves them. Nothing was removed"
+)
+
+
+def _uninstall_data(args: argparse.Namespace, dirs: paths.Dirs, out: _Out) -> None:
+    """``uninstall-data --yes`` (decisions/0002 section 17): delete this profile's keyring items,
+    then its folders. Under the profile's run lock, its pairing lock and its policy lock, so that
+    no ``run``, ``pair`` or policy change of the profile works on what is being deleted; and only
+    once the profile holds no pair and no work room, so that a pair is never dropped here without
+    ``forget``, which tells Lucille when it can. A profile with nothing left is no failure: the verb
+    can be run again after one that stopped part way."""
+    host_state.startup_checks()
+    state_dir = paths.ensure_dir(dirs.state)
+    with (
+        loop.one_at_a_time(state_dir / loop.RUN_LOCK, UNINSTALL_RUNNING, "`uninstall-data`"),
+        loop.one_at_a_time(state_dir / PAIR_LOCK, UNINSTALL_PAIRING, "`uninstall-data`"),
+        _policy_lock(dirs),
+    ):
+        session = link.open_session(dirs, host_state.load_host_config(dirs), say=_say, warn=_warn)
+        held = session.held()
+        if held:
+            raise _Refused("held", UNINSTALL_HELD.format(name=", ".join(held)))
+        record = rooms.load(dirs.rooms_file)
+        if record.pair is not None and (record.held or record.accepting is not None):
+            raise _Refused("held", UNINSTALL_ROOMS.format(name=record.pair))
+        store.delete_items(dirs.profile)
+        folders = [dirs.state, dirs.config]
+        for folder in folders:
+            if folder.exists() or folder.is_symlink():
+                shutil.rmtree(folder)
+    out.say(
+        f"uninstalled: profile {dirs.profile}'s keyring items and folders are removed from this "
+        "computer",
+        "uninstalled",
+        profile=dirs.profile,
+    )
+
+
 def _controls(verb: str, dirs: paths.Dirs, out: _Out | None = None) -> None:
     if verb not in ("pause", "resume", "kill"):
         raise _Refused("internal", f"{verb} is not a control")
@@ -2077,6 +2150,7 @@ VERBS: Final[dict[str, Callable[..., Any]]] = {
     "resume": _control("resume"),
     "kill": _control("kill"),
     "credential": _credential,
+    "uninstall-data": _uninstall_data,
 }
 
 # What --json calls each failure that carries no code of its own, the first class that matches

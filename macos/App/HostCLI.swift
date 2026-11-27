@@ -134,10 +134,11 @@ struct HostCLI: Sendable {
 
     /// The verbs of the app's short runs that take the host's policy lock while they run
     /// (src/lucille_host/cli.py, `_policy_lock`), by their verb and action: every change to
-    /// abilities and folders, and Reset Settings. `pair begin` and `pair resume` take it too, once
+    /// abilities and folders, Reset Settings, and Remove's `uninstall-data --yes`, written with the
+    /// flag it requires. `pair begin` and `pair resume` take it too, once
     /// Lucille's answer passes, but run as a long-lived child (`spawn`), never through `run`. A run of another verb, left behind, holds
     /// nothing up.
-    static let policyLockVerbs: Set<String> = ["ops enable", "ops disable", "roots add", "roots remove", "policy reset"]
+    static let policyLockVerbs: Set<String> = ["ops enable", "ops disable", "roots add", "roots remove", "policy reset", "uninstall-data --yes"]
 
     /// Whether `verb` takes the policy lock: its verb and action, among the words before `--` with
     /// `--json` left out, are in `policyLockVerbs`, and it is not an alias suggestion, which takes
@@ -166,6 +167,29 @@ struct HostCLI: Sendable {
     /// `PlacedToken` to give (`Placement.judge`), and the app opens the latch once, as it starts.
     static func allowSpawns(_ token: PlacedToken) {
         latch.open()
+    }
+
+    /// Remove has begun (decisions/0002 section 17): until `endRemoval`, `spawn` starts only the
+    /// verbs of `RemoveRules.removalVerbs`, so that nothing else writes into the profile's folders
+    /// while `uninstall-data` deletes them.
+    static func beginRemoval() {
+        latch.narrow(to: RemoveRules.removalVerbs)
+    }
+
+    /// Remove stopped before the host's data was deleted: every verb may start again.
+    static func endRemoval() {
+        latch.narrow(to: nil)
+    }
+
+    /// Remove deleted the host's data: nothing starts again in this run of the app, which would
+    /// make the profile's folders anew.
+    static func closeAfterRemoval() {
+        latch.narrow(to: [])
+    }
+
+    /// Whether `spawn` would start `verb` now, the latch open: always, but during a Remove.
+    static func mayStart(_ verb: [String]) -> Bool {
+        latch.allows(verb)
     }
 
     /// Run one verb and wait for it, up to the time limit (`timeout`, or this command line's) or
@@ -270,6 +294,9 @@ struct HostCLI: Sendable {
         /// The latch is closed: this copy of the app is not the one at /Applications/<name>.app,
         /// or has not yet said it is (`allowSpawns`).
         case notPlaced
+        /// A Remove runs, and this verb is not one of its own, or Remove has deleted the host's
+        /// data (`beginRemoval`, `closeAfterRemoval`).
+        case removing
     }
 
     /// A child that started: its process, and the pipes the app keeps until the child has ended.
@@ -303,6 +330,9 @@ struct HostCLI: Sendable {
         defer { HostCLI.spawnLock.unlock() }
         guard HostCLI.latch.isOpen else {
             throw SpawnError.notPlaced
+        }
+        guard HostCLI.latch.allows(verb) else {
+            throw SpawnError.removing
         }
         let process = Process()
         process.executableURL = python
@@ -479,10 +509,13 @@ private final class LeftBehind: @unchecked Sendable {
 }
 
 /// Whether this copy of the app may start anything: closed until `HostCLI.allowSpawns` opens it,
-/// and never closed again.
+/// and never closed again. While a Remove runs it starts only that Remove's verbs, and none once
+/// Remove has deleted the host's data (`narrow`).
 private final class SpawnLatch: @unchecked Sendable {
     private let lock = NSLock()
     private var opened = false
+    /// The only verbs that may start, while a Remove runs; nil otherwise.
+    private var only: [[String]]?
 
     var isOpen: Bool {
         lock.lock()
@@ -494,6 +527,18 @@ private final class SpawnLatch: @unchecked Sendable {
         lock.lock()
         opened = true
         lock.unlock()
+    }
+
+    func narrow(to verbs: [[String]]?) {
+        lock.lock()
+        only = verbs
+        lock.unlock()
+    }
+
+    func allows(_ verb: [String]) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return only.map { $0.contains(verb) } ?? true
     }
 }
 

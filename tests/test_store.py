@@ -1165,13 +1165,18 @@ def test_what_is_not_a_regular_file_is_never_read(
 
 # Where, in src/lucille_host/, an item may be read or written: the pair's item's one read and one
 # write, and the credential item's (credentials.py), each through the backend the same check
-# returned. Nothing deletes an item, and nothing asks keyring for its backend.
+# returned; and uninstall-data's delete of each item, with the read that checks it is gone
+# (store._delete_item). Nothing else deletes an item, and nothing asks keyring for its backend.
 KEYRING_USES = {
     # The host builds its backend itself, and never asks keyring for one (or to find one).
     "get_keyring": set(),
-    "get_password": {"store.Item._load", "credentials.CredentialStore._load"},
+    "get_password": {
+        "store.Item._load",
+        "store._delete_item",
+        "credentials.CredentialStore._load",
+    },
     "set_password": {"store.Item._save", "credentials.CredentialStore._save"},
-    "delete_password": set(),
+    "delete_password": {"store._delete_item"},
     # Two more ways to the item that bypass the check: a credential read, and a chain's members,
     # which hand out live backends (and load every backend keyring's entry points name). A chain is
     # refused without being asked what it holds.

@@ -36,6 +36,7 @@ LINES: dict[str, list[str]] = {
     "status": ["status"],
     "log": ["log"],
     "forget": ["forget"],
+    "uninstall-data": ["uninstall-data", "--yes"],
     "pair": ["pair"],
     "pair code": ["pair", "ABC-DEF"],
     "pair store-file": ["pair", "--store-file", "ABC-DEF"],

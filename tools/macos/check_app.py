@@ -293,6 +293,7 @@ LOGIC_SOURCES: Final = (
     "LoginRules.swift",
     "PlaceRules.swift",
     "Gmail.swift",
+    "Removal.swift",
 )
 # The host's golden fixtures (spec/CLI.md section 11), which the self-test reads through the
 # app's JSON reader and its pairing, supervision and Set Up state machines.
@@ -3009,12 +3010,17 @@ LONGEST_LOG_LINE: Final = 2000
 STOP_WHATS_RUNNING: Final = "Stop What's Running"
 STOPPED_AND_PAUSED: Final = "Stopped, and paused. Resume when you're ready."
 RESUME_ITEM: Final = "Resume Lucille"
+# Remove <name>… (decisions/0002 section 17), the last item of the Settings submenu, which the
+# menu shows connected or not; as App/Removal.swift spells it. No check chooses it: it would put
+# the app under test in the Trash.
+REMOVE_ITEM: Final = f"Remove {APP_NAME}…"
 # The items the menu shows while the app's profile holds no pair, besides its first line.
 MENU_ITEMS: Final = (
     "Abilities",
     "Add a Folder…",
     "Folders",
     ACTIVITY_ITEM,
+    "Settings",
     CONNECT_ITEM,
     f"Quit {APP_NAME}",
 )
@@ -3312,8 +3318,9 @@ SIGNALED_LINE: Final = "run ended by signal"
 # item or checks it at launch, with each state macOS can give; the note after Done when macOS needs
 # the user's OK, the one when it couldn't, and the button that opens System Settings, which the
 # checks never press; the note at launch while paired and the item waits for approval, and its
-# button that takes the item away; the sentence Disconnect's note adds; and the menu's submenu
-# while connected. Then the note the app shows after Done for each state, none while enabled.
+# button that takes the item away; the sentence Disconnect's note adds; and the menu's submenu,
+# with the switch it holds while connected. Then the note the app shows after Done for each
+# state, none while enabled.
 OPEN_AT_LOGIN_BOX: Final = f"Open {APP_NAME} when you log in"
 OPEN_AT_LOGIN_NOTICE: Final = (
     f"macOS will show a notice that {APP_NAME} can now open when you log in."
@@ -3329,6 +3336,7 @@ LAUNCH_OFF_TITLE: Final = f"{APP_NAME} won't start when you log in"
 KEEP_IT_OFF: Final = "Keep It Off"
 OFF_AFTER_DISCONNECT: Final = f"{APP_NAME} won't open when you log in."
 SETTINGS_MENU: Final = "Settings"
+OPEN_AT_LOGIN_ITEM: Final = "Open at Login"
 LOGIN_NOTE_AFTER_DONE: Final = {
     "enabled": None,
     "requiresApproval": NEEDS_APPROVAL_TITLE,
@@ -3537,6 +3545,13 @@ def _drive_menu(checker: Checker, screens: Path, flag: Path) -> bool:
     )
     listed = abilities.splitlines() if worked else []
     print(f"the Abilities submenu shows: {listed if worked else abilities}")
+    # The menu is still open: read the Settings submenu too before closing it.
+    worked_settings, settings = _system_events(
+        f"{LINES}return (name of every menu item of menu 1 of menu item "
+        f'"{SETTINGS_MENU}" of {MENU}) as text'
+    )
+    in_settings = settings.splitlines() if worked_settings else []
+    print(f"the {SETTINGS_MENU} submenu shows: {in_settings if worked_settings else settings}")
     _system_events("key code 53")
     checker.expect(
         shown[:1] == [f"{APP_NAME} {version}"],
@@ -3561,6 +3576,12 @@ def _drive_menu(checker: Checker, screens: Path, flag: Path) -> bool:
         worked and set(ABILITY_DETAILS.values()) <= set(listed),
         "under each ability, a sentence says what Lucille gets",
         abilities,
+    )
+    checker.expect(
+        worked_settings and REMOVE_ITEM in in_settings and OPEN_AT_LOGIN_ITEM not in in_settings,
+        f"while not connected, {SETTINGS_MENU} holds {REMOVE_ITEM!r}, and not "
+        f"{OPEN_AT_LOGIN_ITEM!r}",
+        settings,
     )
     if flag.exists():
         print("note: the host was paused before this check, so Pause and Resume were not tried")
@@ -8507,8 +8528,8 @@ class _PairingCheck:
         """Disconnect drains ``run``, then forgets the pair, and says whether Lucille was told.
         The login item goes with the pair (decisions/0002 section 9): the app says
         ``login item: notRegistered`` on standard error, and its note adds that it won't open at
-        login exactly when it had one, as the last state it said before shows. While
-        connected the menu holds Settings, and once disconnected it does not."""
+        login exactly when it had one, as the last state it said before shows. The menu holds
+        Settings while connected, and still once disconnected, for Remove <name>… (section 17)."""
         run = _value_within(self.run_pid, 60)
         self.need(run is not None, "run is running")
         found, shown = _menu_until(lambda items: DISCONNECT_ITEM in items, 60)
@@ -8565,7 +8586,7 @@ class _PairingCheck:
             found, f"the menu then says {NOT_CONNECTED!r}, and offers {CONNECT_ITEM!r}", f"{shown}"
         )
         self.checker.expect(
-            SETTINGS_MENU not in shown, f"and no longer holds {SETTINGS_MENU!r}", f"{shown}"
+            SETTINGS_MENU in shown, f"and still holds {SETTINGS_MENU!r}, for Remove", f"{shown}"
         )
 
     def tidy(self) -> None:

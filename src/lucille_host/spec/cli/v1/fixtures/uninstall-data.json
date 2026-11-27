@@ -1,0 +1,18 @@
+{
+  "description": "uninstall-data --yes on the mac-app profile, which holds a policy, a credential and no pair",
+  "argv": [
+    "--profile",
+    "mac-app",
+    "--json",
+    "uninstall-data",
+    "--yes"
+  ],
+  "exit": 0,
+  "stdout": [
+    {
+      "v": 1,
+      "type": "uninstalled",
+      "profile": "mac-app"
+    }
+  ]
+}

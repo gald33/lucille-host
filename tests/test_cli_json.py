@@ -406,6 +406,13 @@ def _gmail_saved(w: World) -> None:
     w.ok(*GMAIL_SET, stdin=GMAIL_VALUE + "\n")
 
 
+def _mac_app_data(w: World) -> None:
+    """The mac-app profile with a credential, a folder and a pause, and no pair."""
+    w.ok("--profile", "mac-app", *GMAIL_SET, stdin=GMAIL_VALUE + "\n")
+    w.ok("--profile", "mac-app", "roots", "add", "docs", w.folder("Documents"))
+    w.ok("--profile", "mac-app", "pause")
+
+
 def _set_gmail(w: World) -> None:
     w.stdin = GMAIL_VALUE + "\n"
 
@@ -584,6 +591,8 @@ SETUPS: dict[str, Callable[[World], None]] = {
     "status-paired": _status_paired,
     "log": _log,
     "forget": lambda w: w.paired(confirm=True),
+    "uninstall-data": _mac_app_data,
+    "uninstall-data-held": lambda w: w.paired(confirm=True),
     "pair-begin": _pair_begin,
     "pair-begin-leaked": _leaked,
     "pair-begin-interference": _interference,
@@ -619,6 +628,7 @@ HUB_CASES = frozenset(
     {
         "status-paired",
         "forget",
+        "uninstall-data-held",
         "pair-begin",
         "pair-begin-leaked",
         "pair-begin-interference",
@@ -796,6 +806,9 @@ def verb_of(argv: list[str]) -> str:
         if len(words) > 1 and words[1] in PAIR_ACTIONS:
             return f"pair {words[1]}"
         return "pair"
+    if verb == "uninstall-data":
+        # Its row names its one form, with the flag it requires.
+        return "uninstall-data --yes"
     return verb
 
 
