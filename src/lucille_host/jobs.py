@@ -50,7 +50,7 @@ from typing import Any, Final
 
 from lucille_host import __version__, _exec, _output, store
 from lucille_host.audit import AuditLog
-from lucille_host.containment import contain
+from lucille_host.containment import contain, holds_own
 from lucille_host.controls import Controls
 from lucille_host.ops import (
     CATALOG_VERSION,
@@ -204,8 +204,10 @@ def check(job: Job, ctx: Context) -> str | Ready:
         root = ctx.policy.roots.get(job.args["root"])
         if root is None:
             return "path_outside_root"
-        cwd = contain(root.path, job.args["path"], own=ctx.own_dirs)
-        if cwd is None:
+        # An operation on the whole folder walks it from its top, so the folder must hold none of
+        # the host's own folders.
+        cwd = contain(root.path, job.args.get("path", ""), own=ctx.own_dirs)
+        if cwd is None or (operation.walks_root and holds_own(cwd, ctx.own_dirs)):
             return "path_outside_root"
     argv = (
         operation.build_argv(ctx.os_family, job.args, _host_filled(ctx))
