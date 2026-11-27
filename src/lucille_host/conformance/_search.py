@@ -6,7 +6,9 @@ after ``--`` (decisions/0001, "The closed operation set"; spec/PROTOCOL.md secti
 Lucille could try to widen it are its ``root`` alias, keys added to ``args``, a pattern shaped like
 a flag, and what sits in the folder: links out of it, hidden files, files named like flags. The
 host's own environment is another way in: ripgrep reads ``RIPGREP_CONFIG_PATH`` unless told not
-to, so one scenario plants a configuration that would follow links and search hidden files.
+to, so one scenario plants a configuration that would follow links and search hidden files. The
+child's built environment never carries that variable, so that scenario shows the environment
+holding; it would pass without ``--no-config`` too, and does not show that flag.
 
 Each refused case checks the exact code, that nothing started, and that the policy digest did
 not change. Each case that runs checks the exact matches the reply's document reports, so that a
