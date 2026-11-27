@@ -29,7 +29,8 @@ sentence to the code and test behind it, or marks it as Lucille policy that this
 > of up to 50 of them, and `gmail.read` returns one
 > message's headers, up to 32 KiB of its text, and its attachments' names, types and sizes, never their
 > contents. Lucille learns the names of the credentials it asks these operations to use, never their
-> values.
+> values. `credential.ask` returns only whether you saved the credential it asked you for or declined:
+> you type it on this computer, and it is never sent to Lucille.
 > Lucille also learns the host's version, OS family, enabled operation names and folder aliases (never
 > folder paths), each run's exit code and duration, a fingerprint that changes when your local policy
 > changes, and, to within a day, when lucille-host was last running and when your computer last

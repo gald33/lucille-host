@@ -43,7 +43,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Final
 
-from lucille_host import nesting, paths, store
+from lucille_host import nesting, paths, services, store
 
 __all__ = [
     "REFUSAL",
@@ -61,7 +61,7 @@ VERSION: Final = 1
 LOCK: Final = ".credentials.lock"
 # Lower-case service and credential names, the same rule Lucille checks: ``gmail``, ``github.com``.
 # Matched whole (``fullmatch``): ``$`` would also match before a newline at the end.
-NAME: Final = re.compile(r"[a-z0-9][a-z0-9._-]{0,63}")
+NAME: Final = services.NAME
 # A password, a token or a small JSON document; well above any of them.
 MAX_VALUE_CHARS: Final = 64 * 1024
 # A host a credential is bound to: a DNS name of two labels or more, lowercase ASCII (a name in

@@ -1,14 +1,16 @@
 # 0003: Local credentials (draft)
 
 **Status: storage, entry from the command line, the first use, `github.read`, and the second use, Gmail
-over IMAP with an app password, with Capsule's Gmail window, built; entry at Lucille's request chosen, not
-built.** `src/lucille_host/credentials.py` can save, list, read and
-remove a credential for an online service, kept only on this computer. `lucille-host credential set`,
-`list` and `remove` write to it from the command line, each credential bound to the hosts it may be
+over IMAP with an app password, with Capsule's Gmail window, built; entry at Lucille's request,
+`credential.ask`, built on the host's side, and Hardening's service templates, risk tiers and warnings
+built; Capsule's dialog for an ask, and Hardening's rules 5 to 7, not built.**
+`src/lucille_host/credentials.py` can save, list, read and remove a credential for an online service,
+kept only on this computer. `lucille-host credential set`, `list` and `remove` write to it from the command line, each credential bound to the hosts it may be
 sent to (spec/CLI.md §15). Five operations use a stored credential, each off by default: `github.read`,
 whose child process reads the one credential a request names and sends it to `api.github.com` alone
 ("First use", below), and the four `gmail.` operations, whose child sends it to `imap.gmail.com` alone
-("Second use"). Nothing Lucille sends can list or change a credential, nor read one any other way. This
+("Second use"). Nothing Lucille sends can list or change a credential, nor read one any other way; with
+`credential.ask` on, Lucille can ask the user to save one, which the user types here ("Entry"). This
 record says what was built, and what is still to be decided before a credential kept here can be used
 for anything else.
 
@@ -58,12 +60,15 @@ This repository builds only the first. The other two belong to Lucille's backend
   `test_only_the_credential_verb_and_the_proxy_import_it`,
   `test_importing_the_command_line_does_not_load_it`, `test_the_credential_verb_never_reads_a_value`;
   `tests/test_credential_verb.py`, `test_no_request_can_reach_credential_test`). No request or reply can
-  write or list it, and only those five operations can have one read.
+  write or list it, and only those five operations can have one read. `credential.ask`'s child,
+  `asks.py`, does not import it either: the value an ask collects is saved by the user's own
+  `credential answer`, in the verb's function (`tests/test_asks.py`,
+  `test_the_child_imports_no_credential_store_and_no_network`).
 
 ## What was open, and how it was decided
 
-1. **How a credential gets in.** Decided 2026-11-11: see "Entry: Lucille asks, the user types it here"
-   below. The value is entered on the computer and never passes through Lucille.
+1. **How a credential gets in.** Decided 2026-11-11, built 2026-11-27: see "Entry: Lucille asks, the user
+   types it here" below. The value is entered on the computer and never passes through Lucille.
 2. **Whether Lucille learns the names.** Decided 2026-11-11: yes. Lucille may learn a credential's
    service, name and bound hosts, never its value. The claim gains the sentence: "Lucille learns the names
    of the credentials you saved here, never their values."
@@ -573,7 +578,7 @@ merge:
 runtime, and that the Keychain gives the child the value without a prompt, is checked with a dedicated
 test account on the repository owner's Mac, with the implementation's first build.
 
-## Entry: Lucille asks, the user types it here (chosen 2026-11-11, not built)
+## Entry: Lucille asks, the user types it here (chosen 2026-11-11; the host's side built 2026-11-27)
 
 Lucille may ask the host to collect a credential. For example: "ask the user for `gmail/app-password`,
 for hosts `imap.gmail.com` and `smtp.gmail.com`". The request carries no value. The user can also add
@@ -599,10 +604,90 @@ What stays true: the value is typed only on this computer, into this program, an
 it. What does not: a user who approves a host they should not have will send their password there. The
 dialog's job is to make that choice plain, and it cannot make it for them.
 
-## Hardening (chosen 2026-11-11, not built)
+**What is built (2026-11-27).** The host's side: the operation, its child, the command line's prompt and
+the actions a shell answers through. Capsule's dialog is not built; until it is, an ask is answered in a
+terminal. Where the text above left something open, the smallest safe form was chosen, and is marked
+*(chosen here)*.
+
+- **The operation.** `credential.ask {service, name, reason?}`, off by default, like every operation that
+  touches a credential (spec/PROTOCOL.md §10, §11). It carries no value. Its child,
+  `src/lucille_host/asks.py`, runs as `github.read`'s does (`<the host's interpreter> -I -B -W ignore -X
+  utf8 -m lucille_host.asks --state <state folder> --profile <profile> -- <args>`), with `CHILD_ENV` and
+  nothing copied: it reads and writes no credential, does not import `credentials`, and connects to
+  nothing. It writes the ask to `credential-asks.json` in the state folder, under a lock of its own, waits
+  for the answer, and writes `{"answer": "saved"}` or `{"answer": "declined"}`, exit 0. That is all Lucille
+  learns.
+- **No hosts in the request** *(chosen here)*. The example above has Lucille propose hosts. Instead, an ask
+  names only a service the host has a template for (`src/lucille_host/services.py`, rule 4 of
+  "Hardening": `github` and `gmail`), and the credential is bound to that template's hosts and no other
+  (`api.github.com`, `imap.gmail.com`). The host still lists them, as the user's decision. A credential for
+  any other host can be bound only by the user's own `credential set`. So "your bank password, bound to a
+  host Lucille controls" cannot be asked for at all: the risk this section names is closed for asks, not
+  only made plain. A host Lucille needs later comes with a template, in a release.
+- **Only the template's form is saved** *(chosen here)*. `credential answer` refuses a value not in the
+  form its service's template says (`bad_value`), so an account's own password typed by mistake is not
+  saved, and the ask still waits.
+- **The prompt.** `lucille-host credential asks` shows each waiting ask, and `lucille-host credential answer
+  <id>` answers one at a terminal: the service, the name, the hosts, what to type and where to make one,
+  whether it replaces one saved, and how long it waits, laid out by the host; then, last, `Lucille says:`
+  and Lucille's words; then "Type yes to save it", where anything but `yes` declines, and the value, typed
+  twice, unseen. A shell answers with `--value-stdin` or `--decline`, having shown the ask itself
+  (spec/CLI.md §15). A `run` in a terminal does not interrupt itself to ask: the user runs `credential
+  asks` *(chosen here)*.
+- **Lucille's words** *(chosen here)*: at most 300 characters, and rule `credential-ask-args` refuses
+  (`bad_args`) a reason with a control character, a line break, a character that reorders text or one of
+  no width, or only white space, so Lucille's words cannot draw a line that looks like the host's.
+- **Declining is the default.** An ask waits 240 s, inside the operation's 270 s time limit, then is
+  declined *(chosen here)*. Rate limit *(chosen here)*: one ask waits at a time, and an ask for a
+  credential whose last ask ended less than 10 minutes ago is declined at once; neither is shown. While an
+  ask waits, `run` runs no other request: it runs one at a time *(accepted here: the user is at the
+  computer, and Lucille waits on the answer anyway)*.
+- **Logged like a use.** The request is in the audit log as any request is (`received`, `execution`), and
+  each answer writes a `credential_answer` line: the service, the name and the answer, never the value.
+- **Not built.** Capsule's dialog for an ask, which shows it when `run` reports a `credential.ask` request
+  `started`, reads it with `credential asks --json` and answers it with `credential answer`; closing it
+  declines. It is the Mac app's part, in a change of its own.
+
+## Hardening (chosen 2026-11-11; rules 1 to 4 built 2026-11-27, in the forms below)
 
 The proxy and the entry prompt protect the value. These narrow what a request can do with it, who
 else on the computer can reach it, and what a bad update could do.
+
+**What is built, rule by rule (2026-11-27).** Where a rule left its form open, the smallest safe one was
+chosen:
+
+- **1, risk tiers:** every operation that uses a credential reads and changes nothing, so each runs on its
+  own once enabled. The tier comes from the service template, never from Lucille: a template lists its
+  operations as `reads`, and `services.Service` refuses, when it is defined, a template that lists any
+  operation that changes something (`changes`), since the prompt before each use that such an operation
+  needs is not built. A test holds that every operation reading a credential is a read of exactly one
+  template (`tests/test_asks.py`).
+- **2, narrow credentials:** each template names where the user makes the narrowest credential its
+  service offers (a fine-grained GitHub token; a Google app password), which `credential asks` and the
+  warnings show. `credential set` warns, on standard error and never naming the value, when the value is
+  not in its template's form (which is what an account's own password looks like here: the children never
+  send it), when the hosts leave out the template's, and when the service has no template, so nothing
+  uses it. It is saved all the same: it is the user's own act. An ask refuses such a value instead.
+  OAuth sign-in on the computer is not built: no service here uses OAuth.
+- **3, no local network:** built with the first use: `hosts_of` refuses IP literals, `localhost` and the
+  local suffixes, and each child checks every resolved address against its fixed list and connects only
+  to a vetted one ("First use", step 2 and 3). The children speak only TLS.
+- **4, service templates:** `src/lucille_host/services.py`. A template holds the service's hosts, the
+  operations that use it, and the form of its value, which the children check (`proxy.TOKEN` and
+  `gmail.VALUE` are the template's). The request shapes each allows are the operation's own: `github.read`'s
+  path list and the Gmail operations' commands. A service with no template cannot be used, and cannot be
+  asked for.
+- **5, the keychain item opens only for this app:** not built. It needs a stable signature, which ad hoc
+  builds do not have.
+- **6, pause, expiry, notifications:** `pause` (and `kill`) stops every use, from the computer, and was
+  built already. Not built: approvals that lapse after 30 days, notifications on a first use and on
+  unusual volume, and a per-credential cap for `github.read` (the Gmail operations have theirs, 60
+  sign-ins in 10 minutes). Lapsing approvals and notifications need Capsule to renew and to notify; built
+  on the host alone, a lapse would turn a credential off with no way in the app to renew it.
+- **7, updates:** not built. The host installs no update; a warning before an update that changes the
+  credential or proxy code belongs to whatever installs one.
+
+**As chosen:**
 
 **With the first use PR:**
 

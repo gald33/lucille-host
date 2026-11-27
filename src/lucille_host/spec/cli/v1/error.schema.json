@@ -95,6 +95,7 @@
             "no_test",
             "paused",
             "sign_in_refused",
+            "no_such_ask",
             "unreachable",
             "limit_reached",
             "bad_service",

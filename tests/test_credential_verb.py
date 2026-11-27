@@ -699,7 +699,7 @@ def test_an_unknown_action_is_named_as_such_and_not_repeated(
     assert err.startswith("usage: lucille-host credential "), err
     assert err.endswith(
         "lucille-host credential: error: unknown credential subcommand: "
-        "it is set, list, remove or test\n"
+        "it is set, list, remove, test, asks or answer\n"
     ), err
     assert _shown(err) == []
 
@@ -1044,7 +1044,7 @@ def test_a_usage_error_raised_by_the_credential_verbs_parsers_is_gated_by_its_pa
     said = cli._usage_said(
         parser, parser.forms["credential"], [], f"argument ACTION: invalid choice: {W!r}"
     )
-    assert said == "unknown credential subcommand: it is set, list, remove or test"
+    assert said == "unknown credential subcommand: it is set, list, remove, test, asks or answer"
 
 
 def test_a_usage_error_of_a_line_that_names_the_verb_is_gated_by_its_words() -> None:

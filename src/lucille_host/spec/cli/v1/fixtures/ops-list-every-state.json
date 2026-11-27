@@ -99,6 +99,17 @@
     {
       "v": 1,
       "type": "op",
+      "name": "credential.ask",
+      "state": "disabled",
+      "enabled": false,
+      "summary": "Ask you to save a credential here",
+      "sends": "Lucille learns only whether you saved the credential it asked for or declined. You type it on this computer; it is never sent to Lucille.",
+      "sends_file_content": false,
+      "diagnostic": false
+    },
+    {
+      "v": 1,
+      "type": "op",
       "name": "host.nothing",
       "state": "not_in_catalog",
       "enabled": false

@@ -48,6 +48,7 @@ CATALOG = (
     "gmail.mailboxes",
     "gmail.search",
     "gmail.read",
+    "credential.ask",
 )
 REFUSED_CODES = (
     "unknown_op",
@@ -74,6 +75,7 @@ PROSE_RULES = (
     "stream-size",
     "not-after-range",
     "gmail-args",
+    "credential-ask-args",
 )
 GMAIL_ID_MAX = 2**64 - 1
 _CONTROL = re.compile(r"[\x00-\x1f\x7f]")
@@ -98,6 +100,25 @@ def gmail_args_broken(op: Any, args: Any) -> bool:
         if key == "id" and value.isascii() and value.isdigit() and int(value) > GMAIL_ID_MAX:
             return True
     return False
+
+
+# What rule credential-ask-args refuses in credential.ask's reason: C0 and C1 controls and DEL, the
+# characters that reorder text, those of no width, and the line and paragraph separators.
+_UNSHOWABLE = frozenset(
+    [*range(0x00, 0x20), *range(0x7F, 0xA0), 0x061C, *range(0x200B, 0x2010)]
+    + [*range(0x2028, 0x202F), 0x2060, *range(0x2066, 0x206A), 0xFEFF]
+)
+
+
+def credential_ask_args_broken(op: Any, args: Any) -> bool:
+    """Rule credential-ask-args (spec/PROTOCOL.md section 10): credential.ask's reason holding a
+    character that would move or hide text where the host shows it, or only white space."""
+    if op != "credential.ask" or not isinstance(args, dict):
+        return False
+    reason = args.get("reason")
+    if not isinstance(reason, str):
+        return False
+    return any(ord(char) in _UNSHOWABLE for char in reason) or not reason.strip()
 
 
 def ecma_regex(pattern: str) -> re.Pattern[str]:
@@ -208,6 +229,12 @@ def prose_violations(
         and gmail_args_broken(body.get("op"), body.get("args"))
     ):
         broken.append("gmail-args")
+    if (
+        kind == "request"
+        and isinstance(body, dict)
+        and credential_ask_args_broken(body.get("op"), body.get("args"))
+    ):
+        broken.append("credential-ask-args")
     return broken
 
 
@@ -286,7 +313,7 @@ def _bad_args(op: str, args: Any) -> bool:
     schema["$ref"] = f"#/$defs/args.{op}"
     if not validator_for(schema).is_valid(args):
         return True
-    if gmail_args_broken(op, args):
+    if gmail_args_broken(op, args) or credential_ask_args_broken(op, args):
         return True
     return any(isinstance(v, float) for v in walk(args))
 
