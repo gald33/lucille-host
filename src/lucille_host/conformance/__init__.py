@@ -121,7 +121,7 @@ def _own_environment(runtime: Path) -> Iterator[None]:
 def _register_all() -> None:
     """Import the modules that hold scenarios beside ``_scenarios.py``. Each registers its own
     before ``policy-unchanged``, which stays last, and puts back what it changes."""
-    from lucille_host.conformance import _child_env, _upgrade  # noqa: F401
+    from lucille_host.conformance import _child_env, _search, _upgrade  # noqa: F401
 
 
 def main(argv: Sequence[str] | None = None, *, scenarios: Sequence[object] | None = None) -> int:
