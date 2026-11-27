@@ -203,7 +203,12 @@ def test_conformance_jobs_install_ripgrep_where_files_search_looks(job: str) -> 
     install = names.index("Install ripgrep where files.search looks for it")
     assert install < names.index("Run the conformance suite")
     runs = _steps(job)[install]["run"]
-    assert "sudo apt-get install -y -q --no-install-recommends ripgrep" in runs
+    # A package source of the image's own that fails does not stop it; the install still must work.
+    assert (
+        'sudo apt-get update -q || echo "apt-get update failed for a package source; '
+        'installing from the lists it fetched"\n'
+        "  sudo apt-get install -y -q --no-install-recommends ripgrep\n" in runs
+    )
     assert "/usr/bin/rg --version" in runs
     assert "brew install ripgrep" in runs
     assert "/opt/homebrew/bin/rg --version" in runs
