@@ -7,12 +7,20 @@ with it the envelope checks, dedupe and expiry; the private `XDG_RUNTIME_DIR` ag
 socket; `forget`; and supervising `run`: its lifeline on standard input, the policy reloaded as it changes
 and acted on not at all while invalid, and the refusal of a downgrade; the release workflow
 (`release.yml`), with its checks of the attestations PyPI holds for the release and for the Switchboard
-release the lock pins, which runs on each release's tag, `0.1.0` first; `files.search`, with no hidden
+release the lock pins, which runs on each release's tag (it has not run yet, and `v0.1.0` is the first);
+`github.read`, off by default, with its `GET`-only listed paths on `api.github.com` and a credential bound
+to that host; the four `gmail.` operations, off by default, with a credential bound to `imap.gmail.com`,
+read-only IMAP commands, their bounds on what one request returns, and the hiding of HTML elements marked
+hidden; Connect, the pairing flow of [decisions/0002](decisions/0002-macos-app.md) §11.4 and §11.5,
+against an intercepted or phished pairing code; `files.search`, with no hidden
 file searched, no ignore or configuration file read, no link followed, and no folder searched that holds
 the host's own; and the conformance suite, with the scenarios of the design record's first invariant,
 "Nothing Lucille sends can widen what the host permits", only. Protected tags and the `pypi` environment's
-required reviewer are repository settings, which no file here can show. No other protection below is built yet. `0.1.0` is for the repository owner's own use:
-[decisions/0001](decisions/0001-host-design.md) lists what a later release adds before anyone else pairs. The full design is [decisions/0001-host-design.md](decisions/0001-host-design.md).
+required reviewer are repository settings, which no file here can show. No other protection below is
+built yet. [decisions/0001](decisions/0001-host-design.md) lists what a later release adds before anyone
+other than the repository owner pairs a computer. That nobody else pairs until then is Lucille policy as of
+2026-10-27, not a property of this program, and not proven by this repository. The full design is
+[decisions/0001-host-design.md](decisions/0001-host-design.md).
 
 ## What the host protects
 

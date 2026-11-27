@@ -13,7 +13,8 @@ in building pairing and the read loop" lists what that build chose. On 2026-11-0
 events, the lifeline on standard input, its exit codes, reloading the policy as it changes and idling
 while it is invalid, `policy reset`, and refusing a downgrade); "Choices made in supervising run" lists
 what that build chose.
-On 2026-11-26: the release workflow, `release.yml`, which runs first on `0.1.0`'s tag, and `files.search`. On
+On 2026-11-26: `files.search`, and the release workflow, `release.yml`, which runs on each release's
+tag; it has not run yet, and `v0.1.0` is the first. On
 2026-11-27: the conformance suite, with the scenarios of the first row of "Host invariants and their
 tests" and a positive control; the other rows that name conformance have no scenario yet. Not built:
 `lucille-host verify`.
@@ -762,7 +763,10 @@ A workflow-lint test rejects any `self-hosted` label, and any action not pinned 
 
 **Before anyone other than the repository owner pairs a computer,** a later release adds:
 - a rebuild job that compares sha256s;
-- `lucille-host verify`.
+- `lucille-host verify`;
+- conformance scenarios for every row of "Host invariants and their tests" that names conformance, not
+  only the first;
+- exact dependency pins in a user's install, not only in CI's (THREAT_MODEL.md, "Known gaps").
 
 That nobody else pairs until then is Lucille policy as of 2026-10-27; not proven by this repository.
 

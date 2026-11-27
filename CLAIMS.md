@@ -14,7 +14,7 @@ that supervises it with `--exit-on-stdin-eof`. The conformance suite (`python -m
 runs the scenarios of the design record's first invariant, "Nothing Lucille sends can widen what the host
 permits", against the installed host. Some tests named below do not exist yet: the conformance scenarios
 of the other invariants. The release workflow's provenance checks are tested, and run on each release's
-tag; `0.1.0` is the first.
+tag; they have not run yet, and `v0.1.0` is the first.
 
 **How to read it.**
 - **Code** names the file that makes the sentence true. "Not written yet" means the code does not exist.

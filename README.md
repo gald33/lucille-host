@@ -4,8 +4,8 @@
 
 `0.1.0` is the first release, on PyPI as `lucille-host`. It is for the repository owner's own computers:
 [decisions/0001](decisions/0001-host-design.md) lists what a later release adds before anyone else pairs
-one (a rebuild job that compares sha256s, and `lucille-host verify`). Capsule, the Mac app, is not
-released. A package called `lucille-host` on PyPI came from this repository only if it carries the
+one. That nobody else pairs until then is Lucille policy as of 2026-10-27, not something this program
+enforces. Capsule, the Mac app, is not released. A package called `lucille-host` on PyPI came from this repository only if it carries the
 attestations [VERIFYING.md](VERIFYING.md) step 2 checks.
 
 This release holds the guards, CI, the protocol spec ([spec/PROTOCOL.md](spec/PROTOCOL.md)), the
