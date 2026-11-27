@@ -97,7 +97,9 @@ backstop ([VERIFYING.md](VERIFYING.md) says what each guard cannot see).
   refused; no path through `/proc`; no path into the host's own files, hard links and linked
   folders included); `tests/test_jobs.py` (`test_unheld_root_is_path_outside_root`); invariant "Nothing Lucille sends can widen what the
   host permits" (conformance scenarios `unknown-op`, `not-enabled-op`, `traversal`, `absolute-path`,
-  `symlink-escape` and `unknown-root`: each is refused with its code through the installed host, with no
+  `symlink-escape`, `unknown-root`, `oversize-path` (a path of 1025 characters, `bad_args`) and
+  `oversize-request` (a request over 16 KiB, `bad_request`): each is refused with its code through the
+  installed host, with no
   `started` event from `run`, which the control `control-enabled-op-runs` shows is written when a process
   starts).
 - Limit: the AST lint reads the forms written out in a file. Its rules for the whole repository are a
@@ -269,7 +271,11 @@ a search pattern), and what an enabled operation returns, up to 64 KiB of output
   of output comes back truncated and flagged, its JSON string exactly 64 KiB;
   `test_exec_raw_ceiling_drops_the_rest_and_flags_it`; `test_request_caps_never_raise_the_host_cap`); `tests/test_output.py`; invariant "Output is
   bounded, decodable and path-free" (conformance scenario `output-bounded`: a `files.search` whose output
-  passes 1 MiB comes back truncated and flagged, and the serialized reply measures under 256 KiB).
+  passes 1 MiB comes back truncated and flagged, and the serialized reply measures under 256 KiB);
+  invariant "Failures cross the wire as codes only" (conformance scenario `failures-codes-only`: requests
+  that carry a sentinel, in the op's name, a path, a folder alias, an extra envelope key or an extra
+  argument, are each refused with a code alone, and the sentinel is in no body the host posted. The
+  sentinel is one the request carries; the scenario puts none in an operation's stderr).
 
 **C8.** "`files.search` returns lines of the files it searches."
 - Code: the `files.search` catalog entry (`src/lucille_host/ops/__init__.py`), which runs ripgrep with

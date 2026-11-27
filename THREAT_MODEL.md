@@ -14,7 +14,9 @@ read-only IMAP commands, their bounds on what one request returns, and the hidin
 hidden; Connect, the pairing flow of [decisions/0002](decisions/0002-macos-app.md) §11.4 and §11.5,
 against an intercepted or phished pairing code; `files.search`, with no hidden
 file searched, no ignore or configuration file read, no link followed, and no folder searched that holds
-the host's own; and the conformance suite, with scenarios for some of the design record's invariants:
+the host's own; Capsule's build pins, for an app not released (its Python runtime by sha256, and the build
+backend and the locked wheels by hash: `tools/macos/pins.toml` and `tools/macos/build-constraints.txt`);
+and the conformance suite, with scenarios for some of the design record's invariants:
 [CLAIMS.md](CLAIMS.md) names each, and the claims with none still say "pending, conformance". Protected tags and the `pypi` environment's
 required reviewer are repository settings, which no file here can show. No other protection below is
 built yet. [decisions/0001](decisions/0001-host-design.md) lists what a later release adds before anyone
