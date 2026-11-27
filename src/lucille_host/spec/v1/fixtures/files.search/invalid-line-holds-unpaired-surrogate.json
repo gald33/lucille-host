@@ -1,0 +1,22 @@
+{
+  "description": "A line of text that holds an unpaired surrogate (rule strings).",
+  "valid": false,
+  "schema_valid": true,
+  "prose_rule": "strings",
+  "body": {
+    "matches": [
+      {
+        "path": {
+          "text": "notes/todo.txt"
+        },
+        "line_number": 3,
+        "lines": {
+          "text": "a\ud800b\n"
+        },
+        "line_truncated": false
+      }
+    ],
+    "truncated": false,
+    "error": null
+  }
+}

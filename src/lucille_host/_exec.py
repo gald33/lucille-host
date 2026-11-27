@@ -22,7 +22,9 @@ The rules :func:`run` follows:
   too;
 - output is read as it comes, by one reader thread per stream (a selector would need a method the
   Switchboard-surface lint refuses everywhere), keeping at most ``_output.RAW_CEILING`` bytes of
-  each stream, and is then decoded, redacted and capped by ``_output.render``.
+  each stream, and is then decoded, redacted and capped by ``_output.render``; or, for a command
+  whose caller reads standard output itself (:attr:`Command.raw_stdout`, ``files.search``'s
+  ripgrep JSON), standard output is handed back as the bytes kept, for the caller to bound.
 
 A process that leaves the child's process group (by calling ``setpgid`` or ``setsid`` itself) is
 out of reach: it is not killed, and if it keeps a stream open the host stops waiting for its
@@ -77,6 +79,9 @@ class Command:
     stderr_cap: int = _output.STREAM_CAP
     # The child's whole environment, or None for :data:`CHILD_ENV` alone.
     env: Mapping[str, str] | None = None
+    # True when the caller reads standard output itself: the result's ``stdout`` is then empty,
+    # ``stdout_raw`` holds the bytes kept, and ``stdout_truncated`` says whether any were not.
+    raw_stdout: bool = False
 
 
 @dataclass(frozen=True)
@@ -97,6 +102,8 @@ class Result:
     # Raw bytes read from each stream, kept or not.
     stdout_bytes: int
     stderr_bytes: int
+    # The bytes kept of standard output, for a command with ``raw_stdout``; else None.
+    stdout_raw: bytes | None = None
 
 
 class NotStarted(Exception):
@@ -266,7 +273,10 @@ def run(
             stream.close()
     out_raw, out_dropped, out_total = readers[0].taken()
     err_raw, err_dropped, err_total = readers[1].taken()
-    stdout, stdout_truncated = _output.render(out_raw, command.stdout_cap, dropped=out_dropped)
+    if command.raw_stdout:
+        stdout, stdout_truncated = "", out_dropped
+    else:
+        stdout, stdout_truncated = _output.render(out_raw, command.stdout_cap, dropped=out_dropped)
     stderr, stderr_truncated = _output.render(err_raw, command.stderr_cap, dropped=err_dropped)
     duration_ms = min(max(int((finished - started) * 1000), 0), _MAX_DURATION_MS)
     return Result(
@@ -280,4 +290,5 @@ def run(
         executable_sha256=executable_sha256,
         stdout_bytes=out_total,
         stderr_bytes=err_total,
+        stdout_raw=out_raw if command.raw_stdout else None,
     )

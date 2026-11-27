@@ -1,0 +1,22 @@
+{
+  "description": "A key a match does not list: ripgrep's submatches, which the host leaves out.",
+  "valid": false,
+  "schema_valid": false,
+  "body": {
+    "matches": [
+      {
+        "path": {
+          "text": "notes/todo.txt"
+        },
+        "line_number": 3,
+        "lines": {
+          "text": "hello world\n"
+        },
+        "line_truncated": false,
+        "submatches": []
+      }
+    ],
+    "truncated": false,
+    "error": null
+  }
+}

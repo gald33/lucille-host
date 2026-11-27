@@ -259,15 +259,25 @@ a search pattern), and what an enabled operation returns, up to 64 KiB of output
   bounded, decodable and path-free" (pending, conformance: the serialized reply stays under 256 KiB).
 
 **C8.** "`files.search` returns lines of the files it searches."
-- Code: the `files.search` catalog entry (`src/lucille_host/ops/__init__.py`), which runs ripgrep in the
-  folder with no path, and `jobs.check`, which refuses a folder holding one of the host's own
-  (`containment.holds_own`). Its entry says `sends_file_content`, so a shell asks before turning it on.
-- Tests: `tests/test_files_search.py`, with the real ripgrep: each matching line comes back with its
-  path relative to the folder, never the folder's own path (`test_matches_come_back_with_paths_relative_to_the_folder`);
-  `max_count` and `fixed_strings`; a pattern or a file named like a flag; no hidden file is searched
+- Code: the `files.search` catalog entry (`src/lucille_host/ops/__init__.py`), which runs ripgrep with
+  `--json` in the folder with no path, and `jobs.check`, which refuses a folder holding one of the
+  host's own (`containment.holds_own`); `src/lucille_host/_ripgrep.py`, which turns ripgrep's `match`
+  messages into the reply's document (`files.search.schema.json`). Its entry says
+  `sends_file_content`, so a shell asks before turning it on.
+- Tests: `tests/test_files_search.py`, with the real ripgrep: each matching line comes back as a match
+  with its path relative to the folder, never the folder's own path
+  (`test_matches_come_back_with_paths_relative_to_the_folder`); a name and a line that are not UTF-8
+  come back as their bytes (Linux only: macOS refuses such names); a newline in a file's name makes no
+  other match (`test_a_newline_in_a_file_name_cannot_forge_a_match`); `max_count` and `fixed_strings`; a
+  pattern or a file named like a flag; no hidden file (a name that starts with a dot) is searched
   whatever a `.ignore`, `.gitignore` or `.rgignore` in or above the folder says; no link is followed out
-  of the folder; no configuration file is read; a long line is cut; a folder holding the host's own
-  folder, directly or through a link, is refused. `tests/test_catalog.py`: its words, and that
+  of the folder; no configuration file is read; a long line is cut at 1000 bytes; a search with more than
+  fits comes back fit to the cap, or a request's lower cap, and flagged; a folder holding the host's own
+  folder, directly or through a link, is refused. With made-up output: only `match` messages are kept;
+  a line that is not one of ripgrep's messages, or a match with an absolute or `..` path, gives
+  `unreadable_output` and no match; a message nested past 8 levels is refused before the parser; a cut
+  last line; at most 1000 matches; redaction of each path and line; the child's stdin is `/dev/null`.
+  Each document is held to its schema. `tests/test_catalog.py`: its words, and that
   `sends_file_content` is in its definition hash.
 
 **C9.** "Lucille also learns the host's version, OS family, enabled operation names and folder aliases (never

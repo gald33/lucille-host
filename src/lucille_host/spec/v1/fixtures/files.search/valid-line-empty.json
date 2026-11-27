@@ -1,0 +1,21 @@
+{
+  "description": "An empty line: a match at the end of a file that does not end with a newline, of a pattern that matches nothing.",
+  "valid": true,
+  "schema_valid": true,
+  "body": {
+    "matches": [
+      {
+        "path": {
+          "text": "notes/todo.txt"
+        },
+        "line_number": 3,
+        "lines": {
+          "text": ""
+        },
+        "line_truncated": false
+      }
+    ],
+    "truncated": false,
+    "error": null
+  }
+}

@@ -48,7 +48,7 @@ from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Any, Final
 
-from lucille_host import __version__, _exec, _output, store
+from lucille_host import __version__, _exec, _output, _ripgrep, store
 from lucille_host.audit import AuditLog
 from lucille_host.containment import contain, holds_own
 from lucille_host.controls import Controls
@@ -287,6 +287,7 @@ def execute(ready: Ready, ctx: Context) -> Outcome:
         stdout_cap=stdout_cap,
         stderr_cap=stderr_cap,
         env=ready.operation.child_env(ctx.os_family, ctx.environ or {}),
+        raw_stdout=ready.operation.output is not None,
     )
 
     def started(executable_sha256: str) -> None:
@@ -323,6 +324,15 @@ def execute(ready: Ready, ctx: Context) -> Outcome:
     abandoned = result.ended == "killed" and stop()
     if result.ended == "killed" and not abandoned:
         ctx.controls.kill_done()
+    stdout, stdout_truncated = result.stdout, result.stdout_truncated
+    if ready.operation.output == "ripgrep_json":
+        # Read once the child has ended, from the bytes kept: cut short when the host kept no
+        # more, or the child did not exit on its own.
+        stdout, stdout_truncated = _ripgrep.document(
+            result.stdout_raw or b"",
+            stdout_cap,
+            cut=result.stdout_truncated or result.ended != "exited",
+        )
     fields: dict[str, Any] = {
         "op": ready.operation.name,
         "child": True,
@@ -341,15 +351,15 @@ def execute(ready: Ready, ctx: Context) -> Outcome:
     if http_status is not None:
         fields["http_status"] = http_status
     if ctx.policy.log_results:
-        fields["stdout"] = result.stdout
+        fields["stdout"] = stdout
         fields["stderr"] = result.stderr
     ctx.audit.execution(job_id, **fields)
     if abandoned:
         raise Abandoned
     streams = {
         "exit_code": result.exit_code,
-        "stdout": result.stdout,
-        "stdout_truncated": result.stdout_truncated,
+        "stdout": stdout,
+        "stdout_truncated": stdout_truncated,
         "stderr": result.stderr,
         "stderr_truncated": result.stderr_truncated,
         "duration_ms": result.duration_ms,

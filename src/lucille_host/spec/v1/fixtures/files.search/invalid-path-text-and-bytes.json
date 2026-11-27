@@ -1,0 +1,22 @@
+{
+  "description": "A path given both as text and as bytes.",
+  "valid": false,
+  "schema_valid": false,
+  "body": {
+    "matches": [
+      {
+        "path": {
+          "text": "a",
+          "bytes": "YQ=="
+        },
+        "line_number": 3,
+        "lines": {
+          "text": "hello world\n"
+        },
+        "line_truncated": false
+      }
+    ],
+    "truncated": false,
+    "error": null
+  }
+}
