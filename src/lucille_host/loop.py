@@ -591,8 +591,9 @@ def _asked(body: dict[str, Any]) -> tuple[str | None, str | None, str | None]:
     args = body.get("args")
     if operation is None or not operation.uses_root or not args_valid(operation, args):
         return op, None, None
-    path = args["path"]
-    if path.startswith("/") or link.has_unsafe(path):
+    # An op that works in a whole folder names no path in it (files.search): it has none.
+    path = args.get("path")
+    if not isinstance(path, str) or path.startswith("/") or link.has_unsafe(path):
         return op, args["root"], None
     return op, args["root"], path
 

@@ -2915,6 +2915,40 @@ def test_events_on_a_pipe_are_ascii(
     assert found[0]["path"] == "R\u00e9sum\u00e9.txt"
 
 
+def test_a_search_of_a_whole_folder_is_answered_and_run_goes_on(
+    host: RunHost, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # files.search works in a folder and names no path in it: its `received` object has the
+    # folder alias and no path, and `run` answers it and keeps running (it once stopped with
+    # `internal`, reading a path the arguments do not have).
+    docs = tmp_path / "Documents"
+    docs.mkdir()
+    (docs / "notes.txt").write_text("a line to find\n")
+    host.enable("files.search")
+    folder(host.dirs, "docs", docs)
+    run = Supervised(monkeypatch, EVENTS, host=host)
+    run.ready()
+    run.offer("work-1")
+    args = {"root": "docs", "pattern": "to find", "fixed_strings": True, "max_count": 5}
+    sent = body(op="files.search", args=args)
+    assert host.reply("work-1", host.request("work-1", sent))["body"]["status"] == "done"
+    until(lambda: "finished" in _phases(run.requests(sent["job_id"])), what="finished")
+    assert run.running
+    received = run.requests(sent["job_id"])[0]
+    assert (received["op"], received["root"], received["path"]) == ("files.search", "docs", None)
+    run.close_stdin()
+    assert run.wait() == 0
+
+
+def test_asked_names_no_path_for_an_op_without_one() -> None:
+    from lucille_host import loop
+
+    args = {"root": "docs", "pattern": "x", "fixed_strings": True, "max_count": 1}
+    assert loop._asked(body(op="files.search", args=args)) == ("files.search", "docs", None)
+    sha = {"root": "docs", "path": "a.txt"}
+    assert loop._asked(body(op="files.sha256", args=sha)) == ("files.sha256", "docs", "a.txt")
+
+
 def test_writes_on_the_stdout_descriptor_stay_off_the_events(
     host: RunHost, monkeypatch: pytest.MonkeyPatch
 ) -> None:
