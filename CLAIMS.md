@@ -10,9 +10,9 @@ requests there, tested against Switchboard's in-process hub and a stand-in for L
 what the host holds and what `run` last saw, with no hub call; `log` prints the audit log; `forget` ends
 the pair on the computer. With `--json`, every verb but `run` writes the objects of
 [spec/CLI.md](spec/CLI.md) instead of its text, and `run --json-events` writes `run`'s events, for an app
-that supervises it with `--exit-on-stdin-eof`. Some tests named below do not exist yet: the conformance suite's
-and `files.search`'s. The release workflow's provenance checks exist and are tested, and have not run,
-since no release exists.
+that supervises it with `--exit-on-stdin-eof`. Some tests named below do not exist yet: the conformance suite's.
+The release workflow's provenance checks exist and are tested, and have not run, since no
+release exists.
 
 **How to read it.**
 - **Code** names the file that makes the sentence true. "Not written yet" means the code does not exist.
@@ -259,8 +259,16 @@ a search pattern), and what an enabled operation returns, up to 64 KiB of output
   bounded, decodable and path-free" (pending, conformance: the serialized reply stays under 256 KiB).
 
 **C8.** "`files.search` returns lines of the files it searches."
-- Code: the `files.search` catalog entry (not written yet).
-- Tests: `test_search_returns_file_lines` (pending: a search reply carries the matching line).
+- Code: the `files.search` catalog entry (`src/lucille_host/ops/__init__.py`), which runs ripgrep in the
+  folder with no path, and `jobs.check`, which refuses a folder holding one of the host's own
+  (`containment.holds_own`). Its entry says `sends_file_content`, so a shell asks before turning it on.
+- Tests: `tests/test_files_search.py`, with the real ripgrep: each matching line comes back with its
+  path relative to the folder, never the folder's own path (`test_matches_come_back_with_paths_relative_to_the_folder`);
+  `max_count` and `fixed_strings`; a pattern or a file named like a flag; no hidden file is searched
+  whatever a `.ignore`, `.gitignore` or `.rgignore` in or above the folder says; no link is followed out
+  of the folder; no configuration file is read; a long line is cut; a folder holding the host's own
+  folder, directly or through a link, is refused. `tests/test_catalog.py`: its words, and that
+  `sends_file_content` is in its definition hash.
 
 **C9.** "Lucille also learns the host's version, OS family, enabled operation names and folder aliases (never
 folder paths), each run's exit code and duration, a fingerprint that changes when your local policy

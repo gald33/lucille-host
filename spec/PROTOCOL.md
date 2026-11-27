@@ -492,7 +492,7 @@ change ([§21](#21-versioning)).
 | `host.describe` | `{}` | No arguments. Runs no process. Its reply is in [§11](#11-replies). |
 | `host.sleep` | `{n}`: an integer from 1 to 240 | Sleeps `n` seconds. Diagnostic. Its catalog timeout is `n` + 30 s. |
 | `files.sha256` | `{root, path}` | The SHA-256 digest of one file. `root` is a folder alias; `path` is a string of 1 to 1024 characters with no U+0000. |
-| `files.search` | `{root, pattern, fixed_strings, max_count}` | Searches the files under `root`. `pattern` is a string of 1 to 256 characters with no U+0000; `fixed_strings` is a boolean; `max_count` is an integer from 1 to 200, the most matches per file. All four are required. Its reply carries lines of the files it searched. |
+| `files.search` | `{root, pattern, fixed_strings, max_count}` | Searches the files under `root`. `pattern` is a string of 1 to 256 characters with no U+0000; `fixed_strings` is a boolean; `max_count` is an integer from 1 to 200, the most matches per file. All four are required. The host searches the whole folder from its top, with no path: each path in the reply is relative to the folder. It skips hidden files, reads no ignore or configuration file, and follows no link. A folder that holds the host's own configuration or state folders is refused `path_outside_root`. The host refuses it `not_enabled` while it cannot run it (its program, ripgrep, is not where the catalog says). Its reply carries lines of the files it searched. |
 | `github.read` | `{credential, path}` | Reads one GitHub REST API endpoint with a credential stored on the computer, which the host sends to `api.github.com` alone and never to Lucille. `credential` is a credential's name, 1 to 64 characters matching `^[a-z0-9][a-z0-9._-]{0,63}$`; the host uses the one it stores as `github/<credential>`. `path` is a string of 1 to 1024 characters matching the schema's pattern: one of the listed read endpoints, with only the listed query keys (below). Both are required. Its reply carries GitHub's response. |
 | `gmail.check` | `{credential}` | Signs in to Gmail over IMAP with an app password stored on the computer, and out again; reads no mailbox and no message. `credential` is a credential's name, as `github.read`'s; the host uses the one it stores as `gmail/<credential>`, and sends its app password to `imap.gmail.com` alone, never to Lucille. |
 | `gmail.mailboxes` | `{credential}` | The account's mailboxes (Gmail's labels), at most 500. `credential` as `gmail.check`'s. |
@@ -532,7 +532,7 @@ change ([§21](#21-versioning)).
 - **Paths and roots.** The schema checks a path's type, length and characters. Containment is the host's
   check, decided before anything runs, and every escape gets the one code `path_outside_root`: an absolute
   path, a path with a `..` segment, a path whose realpath is outside the root, a path into the host's own
-  configuration or state folders, a path through Linux's `/proc`, a path naming something other than a
+  configuration or state folders, a `files.search` folder that holds one of them, a path through Linux's `/proc`, a path naming something other than a
   file or a folder (a FIFO, a socket or a device), and a `root` alias the host's local policy does not hold. A root that is `$HOME`, holds it,
   or is `/` needs an explicit local flag; a host may not recognise every way a folder can hold `$HOME`
   (through another filesystem's view of it, say).

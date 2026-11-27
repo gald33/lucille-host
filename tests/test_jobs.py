@@ -94,7 +94,7 @@ def test_a_root_whose_folder_is_gone_is_path_outside_root(
         (True, "files.delete", [], {}, [], "paused"),
         (True, "files.sha256", [], {"root": "x", "path": "/a"}, [], "paused"),
         (False, "files.delete", [], {"bogus": 1}, [], "unknown_op"),
-        (False, "files.search", [], {"bogus": 1}, [], "unknown_op"),
+        (False, "files.move", [], {"bogus": 1}, [], "unknown_op"),
         (False, "files.sha256", [], {"root": "docs", "path": ""}, ["docs"], "not_enabled"),
         (False, "files.sha256", ["files.sha256"], {"root": "nope", "path": ""}, [], "bad_args"),
         (
