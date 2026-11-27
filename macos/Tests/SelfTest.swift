@@ -1699,7 +1699,7 @@ extension SelfTest {
         // core's words, the folders, and what each change answered (spec/CLI.md §7).
         for name in ["version", "version-json-after", "version-no-verb"] {
             let objects = fixtures[name]?.objects ?? []
-            report.expect(objects == [.version(hostVersion: "0.1.0.dev0", contract: "1.0")]
+            report.expect(objects == [.version(hostVersion: "0.1.0.dev0", contract: "1.1")]
                               && VerbOutcome.done(objects).hostVersion == "0.1.0.dev0",
                           "\(name) gives the host's version", "\(objects)")
         }
