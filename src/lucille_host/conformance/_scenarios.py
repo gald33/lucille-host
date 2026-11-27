@@ -379,9 +379,9 @@ def file_named_version(ctx: Context) -> None:
 @scenario
 def caps_above_host(ctx: Context) -> None:
     """Request caps far above the host's own are not refused: the request runs, and each
-    stream of the reply measures within the host's own cap. This output is short, so this
-    shows the request is not refused and does not show the host's cap holding against longer
-    output; caps_below_output shows the lower cap is the one applied."""
+    stream of the reply measures within the host's own cap. caps_below_output shows the lower
+    cap is the one applied. The suite does not yet show that the host's cap holds against longer
+    output; tests/test_exec.py shows it."""
     caps = {"stdout_bytes": 2147483647, "stderr_bytes": 2147483647}
     reply = ctx.request(ctx.body("files.sha256", {"root": ROOT, "path": "hello.txt"}, caps=caps))
     _digest_line(reply, HELLO, "hello.txt")
