@@ -13,8 +13,8 @@ in building pairing and the read loop" lists what that build chose. On 2026-11-0
 events, the lifeline on standard input, its exit codes, reloading the policy as it changes and idling
 while it is invalid, `policy reset`, and refusing a downgrade); "Choices made in supervising run" lists
 what that build chose.
-On 2026-11-26: `files.search`. Not built: the conformance suite, the release workflow and
-`lucille-host verify`.
+On 2026-11-26: the release workflow, `release.yml`, which has not run yet, and `files.search`. Not built:
+the conformance suite and `lucille-host verify`.
 
 This record describes the program in this repository, and it governs the host's code. A pull request that
 changes the design updates this record in the same pull request.
@@ -748,11 +748,13 @@ where there is one (`waiting`, `sas_pending`, `confirmed`, `leaked`, `expired`, 
 **`release.yml`** runs on protected `v*` tags, on GitHub-hosted runners only, with every action pinned by
 commit SHA:
 1. **Build**, with a tag-equals-version guard, an exact-pinned build backend, and `SOURCE_DATE_EPOCH`.
-2. **Publish**, in environment `pypi`, which needs the repository owner's approval. It uses PyPI Trusted
+2. **Conformance before publishing:** install the built wheel with `[conformance]` into a fresh venv and
+   run the suite. An upload to PyPI cannot be undone, so a suite that fails stops the release here.
+3. **Publish**, in environment `pypi`, which needs the repository owner's approval. It uses PyPI Trusted
    Publishing through `pypa/gh-action-pypi-publish`, which uploads PEP 740 attestations.
-3. **Post-publish:** download from PyPI, install `lucille-host[conformance]` into a fresh venv, and run
-   the conformance suite.
-4. **GitHub Release**, with `SHA256SUMS`.
+4. **Post-publish:** check what PyPI serves and attests; download from PyPI, install
+   `lucille-host[conformance]` into a fresh venv, and run the conformance suite again.
+5. **GitHub Release**, with `SHA256SUMS`.
 
 A workflow-lint test rejects any `self-hosted` label, and any action not pinned by SHA.
 
@@ -796,8 +798,10 @@ That nobody else pairs until then is Lucille policy as of 2026-10-27; not proven
    - its signing certificate's Runner Environment extension reads `github-hosted`.
 
    The same check works for the pinned `agent-switchboard` release: its publisher is `gald33/switchboard`,
-   `publish.yml`, environment `pypi`, `refs/tags/v2.6.0`. That certificate was decoded on 2026-10-19,
-   not cryptographically verified.
+   `publish.yml`, environment `pypi`, `refs/tags/v2.6.0`. That certificate was decoded on 2026-10-19;
+   since 2026-11-26 `release.yml` verifies it with sigstore before it builds a release
+   (`tools/release/check_release.py dependency agent-switchboard`), and after publishing it verifies the
+   host's own files the same way (`check_release.py published`).
 3. **Run** the suite: install `lucille-host[conformance]==X` into a fresh venv, then run
    `python -m lucille_host.conformance` offline, against a local Switchboard hub it starts. It attempts
    each widening listed under "Host invariants".
