@@ -4,7 +4,7 @@ Author: lucille-host maintainers. First written 2026-10-15; revised 2026-10-19 a
 for this public repository 2026-10-27; the protocol it describes was written out as
 [spec/PROTOCOL.md](../spec/PROTOCOL.md) on 2026-10-28. Status: **draft.** Built so far: the package
 skeleton, the guards, CI, the protocol spec (its prose, schemas and fixtures), and, on 2026-10-29: "The
-closed operation set" without `files.search` or limits tightened in the policy; "Execution rules";
+closed operation set" without limits tightened in the policy (`files.search` came on 2026-11-26); "Execution rules";
 "Local policy and upgrades"; "Audit log"; and, of "Pause, kill and shutdown", `pause`, `resume`, `kill`
 and drain. On 2026-10-30: "Pairing" and its stores, "The read loop" (with the envelope checks, dedupe,
 expiry, restarts and reply posting), what the host does on removal on the Lucille side, and `status`,
@@ -13,8 +13,8 @@ in building pairing and the read loop" lists what that build chose. On 2026-11-0
 events, the lifeline on standard input, its exit codes, reloading the policy as it changes and idling
 while it is invalid, `policy reset`, and refusing a downgrade); "Choices made in supervising run" lists
 what that build chose.
-On 2026-11-26: the release workflow, `release.yml`, which has not run yet. Not built: the conformance
-suite, `files.search` and `lucille-host verify`.
+On 2026-11-26: the release workflow, `release.yml`, which has not run yet, and `files.search`. Not built:
+the conformance suite and `lucille-host verify`.
 
 This record describes the program in this repository, and it governs the host's code. A pull request that
 changes the design updates this record in the same pull request.
@@ -474,11 +474,17 @@ is Lucille policy as of 2026-10-27; not proven by this repository.
   1..200}`. Off by default.
   - It runs ripgrep with `cwd` set to the root's realpath and no path argument, so every path in its
     output is relative.
-  - Flags: `--no-config` and `--no-follow`; no hidden files unless the policy allows them; the pattern
-    after `--`.
-  - The `rg` executable is taken only from a catalog-listed set of absolute paths per OS. The policy may
-    pick one of them, and the op is unavailable if none exists. It is never a `PATH` lookup.
-  - **Its output carries lines of file content.** The claim says so.
+  - Flags: `--no-config`, `--no-ignore` and `--no-follow`; hidden files are never searched; the pattern
+    after `--`. Ignore files are not read because a `.ignore` or `.gitignore` in or above the folder can
+    name a hidden file to search (`!.env`), so with them hidden files would not always be skipped.
+  - A folder that holds one of the host's own folders is refused `path_outside_root`: the search walks
+    the whole folder, which a path check cannot bound.
+  - The `rg` executable is one absolute path per OS, the one each OS's packages use: `/usr/bin/rg` on
+    Linux, Homebrew's `/opt/homebrew/bin/rg` on macOS. The op is unavailable where it is not there. It
+    is never a `PATH` lookup. (A set of paths the policy picks from, and a policy switch for hidden
+    files, were designed first; v0.1 has neither.)
+  - **Its output carries lines of file content.** The claim says so, and the catalog entry's
+    `sends_file_content` is true, so a shell asks the user to acknowledge it before it is enabled.
 
 **The policy digest.** `policy_digest` is an HMAC-SHA256 of the canonical local policy, under a random key
 that never leaves the computer. The user can match a result to a policy, and Lucille can tell when the

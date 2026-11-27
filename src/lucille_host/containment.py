@@ -186,6 +186,29 @@ def inside_own(folder: str, own: Iterable[str]) -> bool:
         return False
 
 
+def holds_own(folder: str, own: Iterable[str]) -> bool:
+    """Whether one of the host's own folders is ``folder`` or is anywhere under it, by device and
+    inode of the own folder's real path and each folder above it: an operation that walks the
+    whole of ``folder`` (``files.search``) would read it. True also where ``folder`` cannot be
+    looked up; an own folder that does not exist holds nothing to read."""
+    try:
+        target = _identity(os.stat(folder))
+    except (OSError, ValueError):
+        return True
+    for own_folder in own:
+        try:
+            real = os.path.realpath(own_folder, strict=True)
+        except (OSError, ValueError):
+            continue
+        for above in _above(real):
+            try:
+                if _identity(os.stat(above)) == target:
+                    return True
+            except (OSError, ValueError):
+                return True
+    return False
+
+
 def contain(root_path: str, path: str, *, own: Iterable[str] = ()) -> str | None:
     """The real path of the folder, if ``path`` stays inside it and names a file, a folder or
     nothing; None for any escape. ``own`` are the host's own folders, which no path may reach."""
