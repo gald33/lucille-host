@@ -423,6 +423,21 @@ def plan_downloads(
     return sorted(chosen, key=lambda wheel: wheel.name)
 
 
+def planned_wheels(
+    requirements_text: str, lock_text: str, python_version: str, deployment_target: str
+) -> list[LockWheel]:
+    """The wheels the build installs for the app's runtime, sorted by name: steps 1 and 2 of
+    this module's docstring, without the download. ``verify_app.py`` asks this too, so that it
+    expects exactly the files the build chose."""
+    env_markers = marker_environment(python_version)
+    python = tuple(int(part) for part in python_version.split(".")[:2])
+    target = deployment_target.split(".")
+    macos = (int(target[0]), int(target[1]))
+    requirements = parse_requirements(requirements_text)
+    expected = [req for req in requirements if marker_holds(req.marker, env_markers)]
+    return plan_downloads(parse_lock(lock_text), expected, (python[0], python[1]), macos)
+
+
 # ---------------------------------------------------------------------------------------------
 # Files and hashes
 
@@ -858,13 +873,7 @@ def assemble_site_packages(
         raise AssemblyError(f"the host wheel must be {host_wheel_name(host_version)}")
     if sha256_of(host_wheel) != host_sha256:
         raise AssemblyError(f"{host_wheel.name}: its sha256 is not {host_sha256}")
-    env_markers = marker_environment(python_version)
-    python = tuple(int(part) for part in python_version.split(".")[:2])
-    target = deployment_target.split(".")
-    macos = (int(target[0]), int(target[1]))
-    requirements = parse_requirements(requirements_text)
-    expected = [req for req in requirements if marker_holds(req.marker, env_markers)]
-    plan = plan_downloads(parse_lock(lock_text), expected, (python[0], python[1]), macos)
+    plan = planned_wheels(requirements_text, lock_text, python_version, deployment_target)
     wheels = fetch_wheels(plan, cache, work / "find-links")
 
     env = uv_env(environ, deployment_target)

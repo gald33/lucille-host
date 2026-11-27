@@ -50,8 +50,8 @@ signature macOS trusts needs a Developer ID and notarization, which this script 
 and writes the ``Info.plist`` the app would get, without running any other program. ``toolchain``
 checks that the pinned Xcode is installed and is the one ``xcodebuild`` runs, and with
 ``--github-env FILE`` writes its ``DEVELOPER_DIR`` there for the later steps of a GitHub Actions
-job. ``compare`` prints whether two builds' unsigned tarballs are the same, as Markdown, and always
-exits 0.
+job. ``compare`` prints whether two builds' unsigned tarballs are the same, as Markdown under the
+heading ``--title`` gives, and always exits 0.
 
 Exit codes: 0 done, 1 refused or failed, 2 usage error.
 """
@@ -1850,12 +1850,15 @@ def build(out: Path, **options: Any) -> Path:
     return dmg
 
 
-def compare(first: Path, second: Path, app_name: str) -> str:
-    """Two builds' unsigned tarballs compared, as Markdown: SAME, DIFFERENT, or FAILED when either
-    is missing; the sha256 of each gzip file and of the tar inside it; and up to 50 members that
-    differ."""
+COMPARE_TITLE: Final = "The unsigned app, built twice in this job"
+
+
+def compare(first: Path, second: Path, app_name: str, title: str = COMPARE_TITLE) -> str:
+    """Two builds' unsigned tarballs compared, as Markdown under the heading ``title``: SAME,
+    DIFFERENT, or FAILED when either is missing; the sha256 of each gzip file and of the tar
+    inside it; and up to 50 members that differ."""
     a, b = (folder / unsigned_tarball_name(app_name) for folder in (first, second))
-    lines = ["### The unsigned app, built twice in this job", ""]
+    lines = [f"### {title}", ""]
     missing = [str(path) for path in (a, b) if not path.is_file()]
     if missing:
         return "\n".join([*lines, f"**FAILED**: no tarball at {', '.join(missing)}", ""])
@@ -1923,6 +1926,9 @@ def _parser() -> argparse.ArgumentParser:
     compare_parser = commands.add_parser("compare", help="compare two builds' unsigned tarballs")
     compare_parser.add_argument("first", type=Path)
     compare_parser.add_argument("second", type=Path)
+    compare_parser.add_argument(
+        "--title", default=COMPARE_TITLE, help="the Markdown heading (default: %(default)s)"
+    )
     return parser
 
 
@@ -1943,7 +1949,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         elif args.command == "toolchain":
             select_toolchain(load_pins(), args.github_env)
         elif args.command == "compare":
-            print(compare(args.first, args.second, load_pins().app_name))
+            print(compare(args.first, args.second, load_pins().app_name, args.title))
         else:
             options: dict[str, Any] = {
                 "host_wheel": args.host_wheel.resolve(),

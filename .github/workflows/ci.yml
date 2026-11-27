@@ -126,6 +126,9 @@ jobs:
       cache_key: ${{ steps.handoff.outputs.cache_key }}
       dmg_sha256: ${{ steps.handoff.outputs.dmg_sha256 }}
       selftest_sha256: ${{ steps.handoff.outputs.selftest_sha256 }}
+      host_wheel_sha256: ${{ steps.wheel.outputs.sha256 }}
+      unsigned_cache_key: ${{ steps.unsigned.outputs.cache_key }}
+      unsigned_sha256: ${{ steps.unsigned.outputs.sha256 }}
     env:
       UV_PYTHON_PREFERENCE: only-managed
       RUN_NUMBER: ${{ github.run_number }}
@@ -191,6 +194,24 @@ jobs:
           key: ${{ steps.handoff.outputs.cache_key }}
           lookup-only: true
           fail-on-cache-miss: true
+      # The unsigned tarball the build wrote before signing, for the rebuild job: a cache entry of
+      # its own, which that job refuses unless its sha256 is the one output here.
+      - name: Hand the unsigned tarball to the rebuild job
+        id: unsigned
+        env:
+          HANDOFF_KEY: ${{ steps.handoff.outputs.cache_key }}
+        run: |
+          set -- build/macos/*-unsigned-macOS-arm64.tar.gz
+          if [ "$#" -ne 1 ] || [ ! -f "$1" ]; then echo "expected one unsigned tarball: $*"; exit 1; fi
+          mkdir -p build/macos/unsigned-handoff
+          cp "$1" build/macos/unsigned-handoff/
+          echo "cache_key=$HANDOFF_KEY-unsigned" >> "$GITHUB_OUTPUT"
+          echo "sha256=$(shasum -a 256 "$1" | cut -d ' ' -f 1)" >> "$GITHUB_OUTPUT"
+      - name: Keep it in the Actions cache
+        uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        with:
+          path: build/macos/unsigned-handoff
+          key: ${{ steps.unsigned.outputs.cache_key }}
       - name: Let the smoke jobs run
         id: built
         run: echo "built=true" >> "$GITHUB_OUTPUT"
@@ -210,6 +231,15 @@ jobs:
         run: |
           if [ "$REF_TYPE" = tag ]; then set -- --tag "$REF_NAME"; else set -- --build-number "$RUN_NUMBER"; fi
           uv run --no-project python tools/macos/check_app.py version "$@"
+      # The user's check (VERIFYING.md, "The Mac app"), run on the disk image as a user would run
+      # it, against this checkout. It downloads the wheels and the runtime archive again into a
+      # cache of its own, and compares the host with the wheel this job built, which is not on PyPI.
+      - name: "Check: verify_app.py, the disk image against MANIFEST.json, the pins and this checkout"
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        timeout-minutes: 15
+        env:
+          HOST_WHEEL: ${{ steps.wheel.outputs.path }}
+        run: uv run --no-project python tools/macos/verify_app.py build/macos/*-adhoc-macOS-arm64.dmg --host-wheel "$HOST_WHEEL" --cache build/macos/verify-cache --summary "$GITHUB_STEP_SUMMARY"
       - name: "Check: libraries, paths, minimum macOS, and what the app imports"
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         run: uv run --no-project python tools/macos/check_app.py links
@@ -358,6 +388,79 @@ jobs:
           path: build/macos/*-adhoc-macOS-arm64.dmg
           if-no-files-found: error
           retention-days: 3
+
+  # The unsigned app built again from the same commit, on another runner, and compared with the
+  # tarball macos-app built (decisions/0002 §18, "The rebuild job"). The verdict, SAME or
+  # DIFFERENT with the files that differ, and the same for the host wheel, go to the job summary.
+  # A difference is recorded, not a gate, until the build is byte-reproducible across runners; a
+  # build that fails, or a tarball that is not macos-app's, fails the job.
+  macos-rebuild:
+    name: rebuild the unsigned app and compare (macos-15, arm64)
+    needs: macos-app
+    if: ${{ !cancelled() && needs.macos-app.outputs.built == 'true' }}
+    runs-on: macos-15
+    timeout-minutes: 45
+    env:
+      UV_PYTHON_PREFERENCE: only-managed
+      RUN_NUMBER: ${{ github.run_number }}
+      REF_TYPE: ${{ github.ref_type }}
+      REF_NAME: ${{ github.ref_name }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          version: "0.11.32"
+          python-version: "3.13.14"
+          enable-cache: false
+      - name: Select the pinned Xcode
+        run: uv run --no-project python tools/macos/build_app.py toolchain --github-env "$GITHUB_ENV"
+      - name: Show the machine and the tools
+        run: |
+          sw_vers
+          uname -m
+          xcodebuild -version
+          xcrun swiftc --version
+      - name: Build the host wheel
+        id: wheel
+        run: uv run --no-project python tools/macos/build_app.py wheel --out build/macos/host-wheel --github-output "$GITHUB_OUTPUT"
+      - name: "Compare the host wheel with macos-app's: SAME or DIFFERENT (recorded, not a gate)"
+        env:
+          FIRST: ${{ needs.macos-app.outputs.host_wheel_sha256 }}
+          SECOND: ${{ steps.wheel.outputs.sha256 }}
+        run: |
+          if [ "$FIRST" = "$SECOND" ]; then verdict=SAME; else verdict=DIFFERENT; fi
+          echo "the host wheel: $verdict (macos-app $FIRST, this job $SECOND)"
+          printf '### The host wheel, built by macos-app and again by this job\n\n**%s**\n\n| macos-app | this job |\n|---|---|\n| `%s` | `%s` |\n\n' "$verdict" "$FIRST" "$SECOND" >> "$GITHUB_STEP_SUMMARY"
+      - name: Build the unsigned app again
+        env:
+          HOST_WHEEL: ${{ steps.wheel.outputs.path }}
+          HOST_WHEEL_SHA256: ${{ steps.wheel.outputs.sha256 }}
+        run: |
+          if [ "$REF_TYPE" = tag ]; then set -- --tag "$REF_NAME"; else set -- --build-number "$RUN_NUMBER"; fi
+          uv run --no-project python tools/macos/build_app.py assemble --host-wheel "$HOST_WHEEL" --host-wheel-sha256 "$HOST_WHEEL_SHA256" "$@"
+      - name: Restore the unsigned tarball macos-app built
+        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        with:
+          path: build/macos/unsigned-handoff
+          key: ${{ needs.macos-app.outputs.unsigned_cache_key }}
+          fail-on-cache-miss: true
+      - name: Refuse anything but the bytes macos-app built
+        env:
+          UNSIGNED_SHA256: ${{ needs.macos-app.outputs.unsigned_sha256 }}
+        run: |
+          set -- build/macos/unsigned-handoff/*-unsigned-macOS-arm64.tar.gz
+          if [ "$#" -ne 1 ] || [ ! -f "$1" ]; then echo "expected one unsigned tarball: $*"; exit 1; fi
+          echo "$UNSIGNED_SHA256  $1" | shasum -a 256 --check --strict
+      - name: "Compare the two unsigned tarballs: SAME or DIFFERENT (recorded, not a gate)"
+        run: |
+          uv run --no-project python tools/macos/build_app.py compare build/macos/unsigned-handoff build/macos --title "The unsigned app, built by macos-app and again by this job" > build/macos/rebuild.md
+          cat build/macos/rebuild.md
+          cat build/macos/rebuild.md >> "$GITHUB_STEP_SUMMARY"
+          if ! grep -qx '[*][*]SAME[*][*]' build/macos/rebuild.md; then
+            echo "::warning title=Rebuild::the unsigned app built again on another runner is not the same; the job summary lists the files that differ"
+          fi
 
   # The same bytes on macOS 26 and on macOS 27 (the xcode-27 image): the disk image and the
   # self-test macos-app built, restored from the cache and refused unless their sha256 is the one
