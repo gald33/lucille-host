@@ -6,9 +6,9 @@ code and tests of the development version back so far.
 
 ## The claim
 
-This is the whole claim. The same text is in the [README](README.md). `lucille-host status` is meant to
-print it from the first release on; the development version's does not. [CLAIMS.md](CLAIMS.md) maps each
-sentence to the code and test behind it, or marks it as Lucille policy that this repository cannot prove.
+This is the whole claim. The same text is in the [README](README.md). `lucille-host status` prints it.
+[CLAIMS.md](CLAIMS.md) maps each sentence to the code and test behind it, or marks it as Lucille policy
+that this repository cannot prove.
 
 > lucille-host does only what you switch on, on your computer. It can run only the operations built into
 > this release (listed in `src/lucille_host/ops/` and by `lucille-host ops list`), and only on folders

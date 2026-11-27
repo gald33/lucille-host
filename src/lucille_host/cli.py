@@ -29,7 +29,8 @@ verbs:
   ends, and ``--allow-downgrade`` starts a release older than one that ran on the profile
   before. It has exit codes of its own (:data:`RUN_EXITS`, spec/CLI.md section 13);
 - ``status``: the version, the local policy, the pair, the work rooms, and what ``run`` last saw
-  of the hub and the clock, read from the profile's files with no hub call (``report.py``);
+  of the hub and the clock, read from the profile's files with no hub call, then the claim of
+  PRIVACY.md that this release makes (``report.py``);
 - ``log [--limit N]``: the last lines of the audit log, oldest first, across its rotated files;
 - ``forget``: leave the pair's work rooms, forget the pair here, and tell Lucille if the hub can
   be reached; it says whether Lucille was told. When another command forgot the pair while this
@@ -643,7 +644,8 @@ def build_parser() -> argparse.ArgumentParser:
             "Shows the version, the local policy and the operations it enables, the controls, "
             "where the pair is kept and the hub, the pair (never its SAS), the work rooms held, "
             "and what `run` last saw: whether it runs, its last contact with the hub, and the "
-            "clock. It reads this computer's files only, and makes no hub call."
+            "clock, then the claim this release makes, as in PRIVACY.md. It reads this "
+            "computer's files only, and makes no hub call."
         ),
     )
     _json_option(status)
