@@ -10,11 +10,13 @@ them as an ordinary user, with the extra.
 
 from __future__ import annotations
 
+import errno
 import io
 import os
 import subprocess
 import sys
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -162,3 +164,25 @@ def test_the_output_scenarios_run_before_policy_unchanged() -> None:
     mine = ["output-bounded", "replies-path-free", "failures-codes-only", "output-decodable"]
     assert all(name in names for name in mine)
     assert all(names.index(name) < names.index("policy-unchanged") for name in mine)
+
+
+def test_a_name_the_filesystem_refuses_is_not_planted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # APFS refuses a file name that is not UTF-8 with EILSEQ; the other files are still planted.
+    from lucille_host.conformance import scenarios_output
+
+    real_open = open
+
+    def refusing(path: Any, *args: Any, **kwargs: Any) -> Any:
+        if isinstance(path, bytes) and path.endswith(scenarios_output.ODD_NAME):
+            raise OSError(errno.EILSEQ, "Illegal byte sequence", path)
+        return real_open(path, *args, **kwargs)
+
+    monkeypatch.setattr("builtins.open", refusing)
+    files = {scenarios_output.ODD_NAME: b"x\n", scenarios_output.LATIN: b"y\n"}
+    folder = tmp_path / "planted"
+    with scenarios_output._planted_bytes(folder, files) as planted:
+        assert planted == {scenarios_output.LATIN}
+        assert (folder / "latin.txt").read_bytes() == b"y\n"
+    assert not folder.exists()
