@@ -30,6 +30,7 @@ from lucille_host.conformance._scenarios import (
     ROOT,
     STREAM_CAP,
     Context,
+    Skipped,
     check,
     expect_refused,
     measure,
@@ -57,8 +58,13 @@ def _text(reply: dict[str, Any]) -> str:
 
 @contextlib.contextmanager
 def _search_on(ctx: Context) -> Iterator[None]:
-    """``files.search`` on for the block, then off again, with the baseline digest back."""
+    """``files.search`` on for the block, then off again, with the baseline digest back. Where
+    this computer cannot run it (no ripgrep where the catalog says), the scenario is skipped
+    before anything changes: never a pass."""
     assert ctx.baseline is not None
+    listed = [o for o in ctx.host.cli("ops", "list") if o.get("name") == SEARCH]
+    if listed and listed[0].get("state") == "unavailable":
+        raise Skipped(f"{SEARCH} cannot run here: {listed[0].get('missing_executable')} is missing")
     ctx.host.enable(SEARCH)
     try:
         yield
