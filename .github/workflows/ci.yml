@@ -299,6 +299,15 @@ jobs:
       - name: Measure start-up time, as shipped and with every .pyc removed (decisions/0002 §6)
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         run: uv run --no-project python tools/macos/check_app.py startup --summary "$GITHUB_STEP_SUMMARY"
+      # The suite runs files.search's conformance scenarios with the real ripgrep, from the one place
+      # the catalog names on macOS, as the test jobs do; the image does not ship it. It is installed
+      # after the checks of the app and ~/Library above, so none of them sees it, and before the
+      # snapshot the pairing check's ~/Library diff starts from.
+      - name: Install ripgrep where files.search looks for it
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: |
+          brew install ripgrep
+          /opt/homebrew/bin/rg --version
       - name: "Check: the host's whole test suite on a copy of the bundled runtime"
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         timeout-minutes: 20
