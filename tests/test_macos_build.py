@@ -733,6 +733,7 @@ def test_the_abilities_menu_says_the_cores_words() -> None:
     }
     assert set(listed) == {
         "files.sha256",
+        "files.search",
         "github.read",
         "gmail.check",
         "gmail.mailboxes",
@@ -1219,14 +1220,16 @@ def test_content_sending_ops_ask_first() -> None:
     stub = json.loads(
         (check_app.CLI_FIXTURES / "ops-list-sends-file-content.json").read_text(encoding="utf-8")
     )
-    assert [op["sends_file_content"] for op in stub["stdout"]] == [False, False, True] + [False] * 6
+    assert [op["sends_file_content"] for op in stub["stdout"]] == [False, False, True, True] + [
+        False
+    ] * 6
     selftest = _SELF_TEST.read_text(encoding="utf-8")
     assert "ops-list-sends-file-content" in selftest
     assert "let questionOn: [Bool] = content.map { $0.asksFirst(turningOn: true) }" in selftest
     assert (
-        "questionOn == [false, false, true, false, false, false, false, false, false]\n"
+        "questionOn == [false, false, true, true, false, false, false, false, false, false]\n"
         "                          && questionOff == "
-        "[false, false, false, false, false, false, false, false, false]" in selftest
+        "[false, false, false, false, false, false, false, false, false, false]" in selftest
     )
 
 

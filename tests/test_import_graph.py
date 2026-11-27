@@ -26,6 +26,7 @@ RUNTIME_MODULES = (
     "lucille_host.__main__",
     "lucille_host._exec",
     "lucille_host._output",
+    "lucille_host._ripgrep",
     "lucille_host._switchboard",
     "lucille_host.asks",
     "lucille_host.audit",

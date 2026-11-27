@@ -87,6 +87,19 @@ The first version.
   not fit; `truncated` in a search or mailbox list now also says that some were left out to fit; and a
   mailbox's name, an attachment's `content_type` and its `filename` have limits. The schema did not
   change.
+- **Revised in the draft, 2026-11-27: `files.search`'s reply is a document.** Its `stdout` was
+  ripgrep's text output, `path:line:text` a line; a newline in a file's name wrote a line that read as
+  a match. Now the host runs ripgrep with `--json` and returns, in `stdout`, a document held to a new
+  schema, `files.search.schema.json`: `{"matches": [{"path", "line_number", "lines",
+  "line_truncated"}], "truncated", "error"}`, each path and line as ripgrep gives it, `{"text": ...}`
+  or `{"bytes": <base64>}` (§11). At most 1000 matches, each line cut at 1000 bytes, the document fit
+  to the stream's cap; `truncated` says when not all is there, and the reply's `stdout_truncated` is
+  the same. Output the host does not read as ripgrep's messages gives the document with no matches and
+  `error` `unreadable_output`. A new fixture kind, `fixtures/files.search/`, and a reply fixture,
+  `done-files-search`. The reply schema did not change: no field, status or code was added. This is a
+  change to what the host sends, made in the draft: no host release has had `files.search`, and
+  Lucille has accepted no version yet. §10 now says what "hidden" means (a name that starts with a
+  dot, ripgrep's rule) and that ripgrep's standard input is `/dev/null`.
 - **Added in the draft, 2026-11-27: `credential.ask`,** an operation that asks the user to save a
   credential on the computer, typed there into the host's own prompt (§10). Its `args` are `{service, name,
   reason?}`: a service the host has a template for (`github` or `gmail`), a credential's name, and Lucille's

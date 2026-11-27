@@ -462,6 +462,7 @@ FIXTURE_KEYS = {
     ),
     "reply": ({"description", "valid", "schema_valid", "body"}, {"prose_rule", "op"}),
     "host.describe": ({"description", "valid", "schema_valid", "body"}, set()),
+    "files.search": ({"description", "valid", "schema_valid", "body"}, {"prose_rule"}),
 }
 
 

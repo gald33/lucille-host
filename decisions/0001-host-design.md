@@ -4,7 +4,7 @@ Author: lucille-host maintainers. First written 2026-10-15; revised 2026-10-19 a
 for this public repository 2026-10-27; the protocol it describes was written out as
 [spec/PROTOCOL.md](../spec/PROTOCOL.md) on 2026-10-28. Status: **draft.** Built so far: the package
 skeleton, the guards, CI, the protocol spec (its prose, schemas and fixtures), and, on 2026-10-29: "The
-closed operation set" without `files.search` or limits tightened in the policy; "Execution rules";
+closed operation set" without limits tightened in the policy (`files.search` came on 2026-11-26); "Execution rules";
 "Local policy and upgrades"; "Audit log"; and, of "Pause, kill and shutdown", `pause`, `resume`, `kill`
 and drain. On 2026-10-30: "Pairing" and its stores, "The read loop" (with the envelope checks, dedupe,
 expiry, restarts and reply posting), what the host does on removal on the Lucille side, and `status`,
@@ -13,8 +13,10 @@ in building pairing and the read loop" lists what that build chose. On 2026-11-0
 events, the lifeline on standard input, its exit codes, reloading the policy as it changes and idling
 while it is invalid, `policy reset`, and refusing a downgrade); "Choices made in supervising run" lists
 what that build chose.
-On 2026-11-26: the release workflow, `release.yml`, which has not run yet. Not built: the conformance
-suite, `files.search` and `lucille-host verify`.
+On 2026-11-26: the release workflow, `release.yml`, which has not run yet, and `files.search`. On
+2026-11-27: the conformance suite, with the scenarios of the first row of "Host invariants and their
+tests" and a positive control; the other rows that name conformance have no scenario yet. Not built:
+`lucille-host verify`.
 
 This record describes the program in this repository, and it governs the host's code. A pull request that
 changes the design updates this record in the same pull request.
@@ -474,11 +476,45 @@ is Lucille policy as of 2026-10-27; not proven by this repository.
   1..200}`. Off by default.
   - It runs ripgrep with `cwd` set to the root's realpath and no path argument, so every path in its
     output is relative.
-  - Flags: `--no-config` and `--no-follow`; no hidden files unless the policy allows them; the pattern
-    after `--`.
-  - The `rg` executable is taken only from a catalog-listed set of absolute paths per OS. The policy may
-    pick one of them, and the op is unavailable if none exists. It is never a `PATH` lookup.
-  - **Its output carries lines of file content.** The claim says so.
+  - Flags: `--json`, `--no-config`, `--no-ignore` and `--no-follow`; hidden files are never searched;
+    the pattern after `--`. Ignore files are not read because a `.ignore` or `.gitignore` in or above
+    the folder can name a hidden file to search (`!.env`), so with them hidden files would not always be
+    skipped. "Hidden" is ripgrep's rule: a file or folder whose name starts with a dot, not one the OS
+    marks hidden in another way (macOS's `hidden` flag, say), which ripgrep does not skip for that.
+  - Its child's stdin is `/dev/null`, as every child's is, so ripgrep, given no path, searches its
+    folder and never reads a pattern or data from standard input.
+  - **The reply is structured.** ripgrep's `--json` writes one message a line, and gives each path and
+    each line as `{"text": ...}` when it is UTF-8 and as `{"bytes": <base64>}` when it is not. Its text
+    output could not carry a path whose name holds a newline: that name wrote a line that read as a
+    match (`--null` would not help, since the host's decoding drops NUL). So the catalog entry names the
+    form of its output, `ripgrep_json`, and the host reads it once the child has ended
+    (`src/lucille_host/_ripgrep.py`): it keeps only the `match` messages, each one's path, line number
+    and line, in ripgrep's two forms, and returns them as a document in `stdout`
+    (`files.search.schema.json`, spec/PROTOCOL.md §11). Any line it does not read as one of ripgrep's
+    messages (not JSON, nested past 8 levels, which the host checks before any parser runs, a kind
+    ripgrep does not write, an absolute path or one with a `..` part) gives the document with no matches
+    and `error` `unreadable_output`; nothing of such output is passed on. This is the one catalog
+    mechanism added for it: an entry names a form other than text, and the host's code for that form
+    does the reading. The form's name is in the entry's definition hash; the code that reads it is not,
+    as the code that decodes and caps text is not.
+  - Bounds: at most 4 MiB of ripgrep's output is read (rule `raw-ceiling`); at most 1,000 matches; each
+    line cut at 1,000 bytes by the host, since `--max-columns` does nothing under `--json`; a match whose
+    path passes 4,096 bytes is left out; the document fit to the 64 KiB stream cap, or a request's lower
+    one, by leaving out the last matches. The document's `truncated` says when not all is there, and the
+    reply's `stdout_truncated` is the same. Redaction runs on each path and line, before the line
+    is cut, so that a key the cut would split is redacted whole.
+  - A folder that holds one of the host's own folders is refused `path_outside_root`: the search walks
+    the whole folder, which a path check cannot bound.
+  - The `rg` executable is one absolute path per OS, the one each OS's packages use: `/usr/bin/rg` on
+    Linux, Homebrew's `/opt/homebrew/bin/rg` on macOS. The op is unavailable where it is not there. It
+    is never a `PATH` lookup. (A set of paths the policy picks from, and a policy switch for hidden
+    files, were designed first; v0.1 has neither.)
+  - Homebrew's `/opt/homebrew/bin/rg` is writable by the user who owns the Homebrew prefix, usually the
+    Mac's own user. A process running as that user could replace it, and the host would run what it put
+    there; the `start` audit line's SHA-256 would show the change, and nothing stops it. So on macOS
+    the program is no stronger than the user's own account. (Linux's `/usr/bin/rg` belongs to root.)
+  - **Its output carries lines of file content.** The claim says so, and the catalog entry's
+    `sends_file_content` is true, so a shell asks the user to acknowledge it before it is enabled.
 
 **The policy digest.** `policy_digest` is an HMAC-SHA256 of the canonical local policy, under a random key
 that never leaves the computer. The user can match a result to a policy, and Lucille can tell when the
@@ -827,9 +863,15 @@ The schemas and fixtures ship in the wheel as package data; `tests/spec/test_pac
 an installed wheel. The prose stays in `spec/` at the root and is not in the wheel.
 
 **`src/lucille_host/conformance/`** is a hostile fake Lucille. It drives a real local hub: `switchboard
-serve` on 127.0.0.1 for the scenarios, and the in-process `switchboard.testing` hub for the vendored Store
-template test, which needs that hub's injected clock. It may spawn only the local hub and the installed
-`lucille-host`, under a lint of its own. The runtime package's lints exempt this directory explicitly.
+serve` on 127.0.0.1 for the scenarios, and (not built yet) the in-process `switchboard.testing` hub for the
+vendored Store template test, which needs that hub's injected clock. For the scenarios it gives the
+installed `lucille-host` a home of its own in a temporary folder, pairs it through `pair begin --hub
+--store-file --test-key` with a throwaway key and `pair confirm`, sets the policy with the host's own `ops
+enable` and `roots add`, starts `run --json-events`, offers a work room and posts the requests. It observes
+the host from outside: the replies Lucille reads, `run`'s `request` events (a process start is its `started`
+event), `status --json`, the policy file and `host.describe`. It may spawn only the local hub and the
+installed `lucille-host`, under a lint of its own. The runtime package's lints exempt this directory
+explicitly.
 
 **Docs:** `PRIVACY.md` (the claim plus the must-not-claim list), `CLAIMS.md`, `THREAT_MODEL.md`,
 `VERIFYING.md`, `SECURITY.md` (GitHub private vulnerability reporting), `decisions/`.
@@ -871,7 +913,7 @@ template test, which needs that hub's injected clock. It may spawn only the loca
 
 | Invariant | Test |
 |---|---|
-| Nothing Lucille sends can widen what the host permits | Conformance tries each of these: an unknown op, a not-enabled op, extra keys (`exe`, `argv`, `env`, `cwd`, `timeout`), policy- and update-shaped fields, traversal, an absolute path, a symlink escape, a file named `--version`, and oversize args. Each is refused with the right code, the policy digest is unchanged, and the spawn count is 0. `caps` above the host's own are not refused, but the effective cap never exceeds the host's own |
+| Nothing Lucille sends can widen what the host permits | Conformance tries each of these: an unknown op, a not-enabled op, extra keys (`exe`, `argv`, `env`, `cwd`, `timeout`), policy- and update-shaped fields, traversal, an absolute path, a symlink escape, a file named `--version`, and oversize args. Each is refused with the right code, the policy digest is unchanged, and the spawn count is 0; the file named `--version` is not refused but hashed, not read as an option. `caps` above the host's own are not refused, but the effective cap never exceeds the host's own. The suite shows that such `caps` are not refused and that a request cap below the output is applied. It does not yet show that the host's cap holds against longer output; `tests/test_exec.py` (`test_request_caps_never_raise_the_host_cap`) shows it |
 | No shell; one spawn site; children get a built environment and no key | The AST lint. A fixture that dumps its environment shows only allowlisted keys |
 | Nothing runs before the local SAS confirmation | A fake Lucille offers a room and posts a request before the user confirms the SAS: no touch, no accept, no spawn, no reply; `pair confirm` before the host has shown the SAS confirms nothing; once the SAS is shown and confirmed, the request runs. At `pair`'s prompt on a terminal, a `y` typed before the question is discarded. `pair confirm` after the code has expired still opens the gate. `n`, `pair reject` and the deadline each forget the pair, and a confirmation made in time is never expired by `run` or `pair status` judging the gate beside it |
 | One run per job id, never after `not_after` | A duplicated request runs once. A second `run` of the profile refuses while one runs, and two processes writing the journal at once never both take a job id. An expired request is refused with no spawn. A restart between a decision to run and sent gives `failed interrupted`, with no second run; a refusal not yet sent is re-posted unchanged |

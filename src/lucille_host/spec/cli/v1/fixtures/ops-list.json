@@ -43,6 +43,17 @@
     {
       "v": 1,
       "type": "op",
+      "name": "files.search",
+      "state": "disabled",
+      "enabled": false,
+      "summary": "Search the files in a folder",
+      "sends": "Lucille gets the lines that match its search in the files of one folder you added, with each file's path inside that folder, up to 200 lines a file. Hidden files are never searched.",
+      "sends_file_content": true,
+      "diagnostic": false
+    },
+    {
+      "v": 1,
+      "type": "op",
       "name": "github.read",
       "state": "disabled",
       "enabled": false,

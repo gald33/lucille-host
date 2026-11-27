@@ -18,7 +18,9 @@ is exactly ``{name}`` for an argument ``name``; it is replaced by that argument'
 whole argv element, never spliced into a string. A string argument comes after ``--``. An integer
 argument may come before it: it is rendered with ``str()`` from an integer the schema bounds below
 by 1, so it cannot begin with ``-``. (``host.sleep`` needs that: macOS's ``/bin/sleep`` takes no
-``--``.)
+``--``.) A boolean argument picks one of two flags: an element ``{name?--on:--off}`` is replaced by
+``--on`` when the argument is true and by ``--off`` when it is false. Both are literal flags of the
+catalog's, never a request's text, and the element comes before ``--``.
 
 Three elements of a template are filled by the host, never from a request (decisions/0003,
 "First use"): :data:`HOST_PYTHON`, the interpreter the host runs on; :data:`HOST_STATE`, the
@@ -27,6 +29,11 @@ profile's state folder; and :data:`HOST_PROFILE`, the profile's name. An entry w
 that embeds the host (``library.py``) does not, so there it is unavailable. An entry may also
 name, per OS, variables of the host's own environment that its child gets beside
 :data:`CHILD_ENV` (:attr:`Operation.env_copy`).
+
+An entry that runs a child may name a form its standard output is read in other than text
+(:attr:`Operation.output`): ``files.search``'s is ``ripgrep_json``, ripgrep's ``--json``
+messages, which the host reads after the child exits and turns into a document of its own
+(``_ripgrep.py``). Any other entry's output is text, decoded, redacted and capped.
 
 Each entry's :attr:`Operation.definition_hash` covers everything that decides what the entry does
 when it is enabled. The local policy stores it beside each enabled entry, and an upgrade that
@@ -96,6 +103,7 @@ __all__ = [
     "MAX_TIMEOUT_S",
     "OPERATIONS",
     "OS_FAMILIES",
+    "OUTPUTS",
     "Operation",
     "Result",
     "Stopped",
@@ -111,6 +119,9 @@ __all__ = [
 # The operating systems this release runs on, by the names host.describe reports.
 OS_FAMILIES: Final = ("linux", "macos")
 
+# The forms of a child's standard output the host reads beside text (:attr:`Operation.output`).
+OUTPUTS: Final = ("ripgrep_json",)
+
 # A child's time limit: this by default, and never more than MAX_TIMEOUT_S.
 DEFAULT_TIMEOUT_S: Final = 30
 MAX_TIMEOUT_S: Final = 300
@@ -120,6 +131,8 @@ _OBJECT_KEYWORDS = frozenset({"type", "additionalProperties", "required", "prope
 _VALUE_KEYWORDS = frozenset({"type", "minimum", "maximum", "minLength", "maxLength", "pattern"})
 
 _PLACEHOLDER = re.compile(r"\{([a-z_][a-z0-9_]*)\}", re.ASCII)
+# A boolean argument's choice between two of the catalog's own flags: {name?--on:--off}.
+_CHOICE = re.compile(r"\{([a-z_][a-z0-9_]*)\?(--[a-z][a-z0-9-]*):(--[a-z][a-z0-9-]*)\}", re.ASCII)
 
 # Template elements the host fills itself, never from a request: the interpreter it runs on, the
 # profile's state folder and the profile's name. The template holds these markers, which are what
@@ -262,8 +275,14 @@ class Operation:
     in_process: InProcess | None = None
     # A rule beyond the schema that its args must hold to (:data:`ARGS_RULES`), by name, or None.
     args_rule: str | None = None
+    # How the host reads its child's standard output (:data:`OUTPUTS`): None for text, decoded,
+    # redacted and capped (spec/PROTOCOL.md section 13); "ripgrep_json" for ripgrep's --json
+    # messages, which the host turns into files.search's document (``_ripgrep.document``).
+    output: str | None = None
 
     def __post_init__(self) -> None:
+        if self.output is not None and (self.output not in OUTPUTS or self.argv is None):
+            raise ValueError(f"{self.name}: an output form is one of a child's: {OUTPUTS}")
         if self.in_process is None:
             return
         if self.argv is not None:
@@ -282,8 +301,16 @@ class Operation:
 
     @property
     def uses_root(self) -> bool:
-        """Whether the operation works inside a folder alias: it takes ``root`` and ``path``."""
+        """Whether the operation works inside a folder alias: it takes ``root``, and ``path`` too
+        unless it works on the whole folder (:attr:`walks_root`)."""
         return "root" in self.params()["properties"]
+
+    @property
+    def walks_root(self) -> bool:
+        """Whether the operation works on the whole folder ``root`` names, from its top: it takes
+        ``root`` and no ``path``. Its child runs in the folder, and is given no path."""
+        properties = self.params()["properties"]
+        return "root" in properties and "path" not in properties
 
     @property
     def runs_host_python(self) -> bool:
@@ -346,6 +373,13 @@ class Operation:
                     raise ValueError(f"{self.name}: the host gives no value for {element}")
                 built.append(filled)
                 continue
+            choice = _CHOICE.fullmatch(element)
+            if choice is not None:
+                value = args[choice.group(1)]
+                if type(value) is not bool:
+                    raise ValueError(f"{self.name}: {choice.group(1)} is not a boolean")
+                built.append(choice.group(2) if value else choice.group(3))
+                continue
             match = _PLACEHOLDER.fullmatch(element)
             if match is None:
                 built.append(element)
@@ -367,9 +401,10 @@ class Operation:
         """SHA-256 over what decides what this entry does when enabled: its name, parameter
         schema, argv templates and file operands, its time limit and the cap on it, where its
         child runs (the folder's real path, or ``/``), and the child's environment; for an
-        in-process entry, its function and each source file on its code path; and, when a
-        reply can carry the contents of a file, that it can. The words a shell shows are not in
-        it."""
+        in-process entry, its function and each source file on its code path; the form its
+        child's output is read in, when it is not text (the name of the form, not the host's
+        code that reads it, as for text); and, when a reply can carry the contents of a file,
+        that it can. The words a shell shows are not in it."""
         return _sha256_json(self._definition())
 
     def _definition(self) -> dict[str, Any]:
@@ -392,6 +427,8 @@ class Operation:
             ),
             # Written only when there is one, for the same reason.
             **({"args_rule": self.args_rule} if self.args_rule else {}),
+            # Written only when it is not text, for the same reason.
+            **({"output": self.output} if self.output else {}),
             # Written only when true, so that the hashes of entries that send no file contents
             # are the ones they had before the field existed.
             **({"sends_file_content": True} if self.about.sends_file_content else {}),
@@ -455,6 +492,7 @@ def _entry(
     env_copy: dict[str, tuple[str, ...]] | None = None,
     args_rule: str | None = None,
     timeout_s: int = DEFAULT_TIMEOUT_S,
+    output: str | None = None,
 ) -> Operation:
     return Operation(
         name=name,
@@ -467,6 +505,7 @@ def _entry(
         file_operands=file_operands,
         env_copy=None if env_copy is None else MappingProxyType(env_copy),
         args_rule=args_rule,
+        output=output,
     )
 
 
@@ -479,6 +518,31 @@ _GMAIL_CREDENTIAL: Final = {
     "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$",
 }
 _NO_NUL: Final = "^[^\\u0000]*$"
+# files.search's program, ripgrep, at the one place each OS's packages put it: Debian's, Ubuntu's
+# and Fedora's /usr/bin, and Homebrew's on Apple silicon. Where it is not there, the operation is
+# unavailable; the host never looks it up on PATH.
+_RIPGREP: Final = {"linux": "/usr/bin/rg", "macos": "/opt/homebrew/bin/rg"}
+# Run in the folder with no path, so every path it prints is relative to it. No configuration
+# file, and no ignore file (a .ignore or .gitignore can name a hidden file to search, so with
+# them hidden files would not always be skipped); hidden files (a name that starts with a dot)
+# are skipped by name; no link is followed; one JSON message a line, by path, which the host
+# reads (``_ripgrep``): --json gives each path and line as text or base64, so no name can make
+# a line of output, and the host cuts each line at 1,000 bytes, since --max-columns does nothing
+# under --json.
+_SEARCH_FLAGS: Final = (
+    "--json",
+    "--no-config",
+    "--no-ignore",
+    "--no-follow",
+    "--line-number",
+    "--sort",
+    "path",
+    "{fixed_strings?--fixed-strings:--no-fixed-strings}",
+    "--max-count",
+    "{max_count}",
+    "--",
+    "{pattern}",
+)
 _DATE: Final = "^[0-9]{4}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])$"
 
 
@@ -608,6 +672,31 @@ _ENTRIES = (
             ),
         ),
         file_operands=("path",),
+    ),
+    # Searches the whole folder a root names, from its top, with ripgrep (decisions/0001, "The
+    # closed operation set"). Its output carries lines of the files it searched.
+    _entry(
+        "files.search",
+        _object(
+            ["root", "pattern", "fixed_strings", "max_count"],
+            {
+                "root": _ROOT,
+                "pattern": _text(256),
+                "fixed_strings": {"type": "boolean"},
+                "max_count": {"type": "integer", "minimum": 1, "maximum": 200},
+            },
+        ),
+        {family: (rg, *_SEARCH_FLAGS) for family, rg in _RIPGREP.items()},
+        About(
+            summary="Search the files in a folder",
+            sends=(
+                "Lucille gets the lines that match its search in the files of one folder you "
+                "added, with each file's path inside that folder, up to 200 lines a file. "
+                "Hidden files are never searched."
+            ),
+            sends_file_content=True,
+        ),
+        output="ripgrep_json",
     ),
     # Reads one GitHub REST API endpoint with a credential stored on this computer
     # (decisions/0003, "First use"). Its program is the host's own interpreter running
@@ -774,8 +863,28 @@ def _patterns(name: str, params_json: str) -> Mapping[str, re.Pattern[str]]:
     )
 
 
+def _check_argv(op: Operation) -> None:
+    """Each boolean choice in ``op``'s templates names a boolean argument and comes before
+    ``--``; a boolean argument is never placed any other way."""
+    properties = op.params()["properties"]
+    for family, template in (op.argv or {}).items():
+        end = template.index("--") if "--" in template else len(template)
+        for index, element in enumerate(template):
+            choice = _CHOICE.fullmatch(element)
+            plain = _PLACEHOLDER.fullmatch(element)
+            if choice is not None:
+                key = choice.group(1)
+                if properties.get(key, {}).get("type") != "boolean":
+                    raise RuntimeError(f"{op.name} {family}: {key} is not a boolean argument")
+                if index >= end or choice.group(2) == choice.group(3):
+                    raise RuntimeError(f"{op.name} {family}: a choice of two flags before --")
+            elif plain is not None and properties[plain.group(1)]["type"] == "boolean":
+                raise RuntimeError(f"{op.name} {family}: a boolean is placed only as a choice")
+
+
 for _op in _ENTRIES:
     _patterns(_op.name, _op.params_json)
+    _check_argv(_op)
 
 
 GMAIL_ID_MAX: Final = 2**64 - 1

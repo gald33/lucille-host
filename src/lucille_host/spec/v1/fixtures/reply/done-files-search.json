@@ -1,0 +1,20 @@
+{
+  "description": "files.search: its document goes JSON-encoded in stdout, here with a path and a line that are UTF-8 and a path and a line that are not; stdout_truncated is the document's truncated.",
+  "valid": true,
+  "schema_valid": true,
+  "op": "files.search",
+  "body": {
+    "v": "lucille.exec/1",
+    "dir": "reply",
+    "job_id": "00000000-0000-4000-8000-000000001465",
+    "status": "done",
+    "exit_code": 0,
+    "stdout": "{\"matches\":[{\"path\":{\"text\":\"notes/todo.txt\"},\"line_number\":3,\"lines\":{\"text\":\"hello world\\n\"},\"line_truncated\":false},{\"path\":{\"bytes\":\"YmFk/25hbWUudHh0\"},\"line_number\":1,\"lines\":{\"bytes\":\"aGVsbG8g/v8K\"},\"line_truncated\":false}],\"truncated\":false,\"error\":null}",
+    "stderr": "",
+    "stdout_truncated": false,
+    "stderr_truncated": false,
+    "duration_ms": 12,
+    "policy_digest": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    "host_version": "0.1.0"
+  }
+}
