@@ -170,7 +170,12 @@ backstop ([VERIFYING.md](VERIFYING.md) says what each guard cannot see).
   included); `tests/test_read_loop.py` (`test_refusal_order`: requests carrying `argv` or `exe` are
   refused through `run`, and nothing refused starts a process); `tests/test_pair.py`
   (`test_new_pair_starts_from_fresh_policy`: a new pair starts with only `host.describe` enabled and no
-  folder); invariant "An upgrade never runs a changed op under old consent" (pending, conformance).
+  folder); invariant "An upgrade never runs a changed op under old consent" (conformance,
+  `upgrade-disables-changed-op` in `src/lucille_host/conformance/_upgrade.py`: with the stored definition
+  hash of `files.sha256` no longer the catalog's, `host.describe` stops listing it, a request is refused
+  `not_enabled` and starts nothing, the policy file is not rewritten, and it runs once enabled again. It
+  edits the stored hash rather than installing a changed release; that the host sees the two alike is
+  read from `policy.effective`, not tested).
 
 **C4.** "It never runs code, a shell or a command line sent by Lucille, and the programs it starts get none
 of its keys and none of your environment variables, except those of `github.read` and the four `gmail.`
@@ -190,7 +195,11 @@ operations: each reads a credential you saved for it, and gets `HOME` (macOS) or
   backend ran `gcc` and `ld` on Linux with the whole environment);
   `tests/test_catalog.py` (`test_catalog_entries`: every executable is absolute and every string
   placeholder follows `--`); invariant "No shell; one spawn site; children get a built environment and
-  no key" (pending, conformance); `tests/test_envelope.py`
+  no key" (conformance, `child-env-built-and-no-key` in `src/lucille_host/conformance/_child_env.py`,
+  Linux only: with keys, tokens and `RIPGREP_CONFIG_PATH` planted in `run`'s own environment,
+  `host.sleep`'s child, read from `/proc`, has exactly `PATH`, `LANG` and `LC_ALL`, only its three
+  standard streams, and standard input on `/dev/null`; it does not cover `github.read` or the `gmail.`
+  operations, whose children get more); `tests/test_envelope.py`
   (`test_steps_1_to_4_hold_to_the_request_fixtures`: requests carrying `exe`, `argv`, `env`, `cwd` or
   `timeout` are refused `bad_request` by the host's own check); invariant "Nothing Lucille sends can
   widen what the host permits" (pending, conformance: the same through the installed host).

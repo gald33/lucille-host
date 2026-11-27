@@ -118,12 +118,19 @@ def _own_environment(runtime: Path) -> Iterator[None]:
                 os.environ[name] = value
 
 
+def _register_all() -> None:
+    """Import the modules that hold scenarios beside ``_scenarios.py``. Each registers its own
+    before ``policy-unchanged``, which stays last, and puts back what it changes."""
+    from lucille_host.conformance import _child_env, _upgrade  # noqa: F401
+
+
 def main(argv: Sequence[str] | None = None, *, scenarios: Sequence[object] | None = None) -> int:
     """Run the suite; the exit code. ``scenarios``, for the suite's own tests, replaces the
     registered ones."""
     from lucille_host.conformance import _scenarios, _spawn
     from lucille_host.conformance._host import HarnessError
 
+    _register_all()
     out = sys.stdout
     chosen = list(_scenarios.REGISTRY if scenarios is None else scenarios)
     if not chosen:
