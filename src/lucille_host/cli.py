@@ -105,6 +105,7 @@ from lucille_host import (
     policy,
     report,
     runs,
+    services,
     store,
     verify,
 )
@@ -750,7 +751,8 @@ def build_parser() -> argparse.ArgumentParser:
             "and the gmail operations use one: a credential of the service github, bound to "
             "api.github.com, or of the service gmail, bound to imap.gmail.com, read by a "
             "separate process when that operation is on. Nothing Lucille sends can list or "
-            "change them."
+            "change them; with credential.ask on, Lucille can ask you to save one, which you "
+            "answer with credential asks and credential answer."
         ),
     )
     credential_verbs = credential.add_subparsers(
@@ -794,9 +796,36 @@ def build_parser() -> argparse.ArgumentParser:
     )
     credential_test.add_argument("service", help="the service")
     credential_test.add_argument("name", help="the credential's name")
+    credential_asks = credential_verbs.add_parser(
+        "asks", help="show what Lucille asks you to save here, waiting for your answer"
+    )
+    credential_answer = credential_verbs.add_parser(
+        "answer",
+        help="answer one of Lucille's asks: save the credential it asks for, or decline",
+    )
+    credential_answer.add_argument("id", help="the ask's id, as credential asks shows it")
+    credential_answer.add_argument(
+        "--decline", action="store_true", help="decline it: nothing is saved"
+    )
+    credential_answer.add_argument(
+        "--value-stdin",
+        action="store_true",
+        help=(
+            "read the value from one line of stdin, without asking anything (stdin must not be "
+            "a terminal); the program that runs this has shown the ask and the user said yes"
+        ),
+    )
     parser.forms = {"run": run, "pair": pair, "roots add": add, "credential": credential}
     parser.credential_parsers = frozenset(
-        {credential, credential_set, credential_list, credential_remove, credential_test}
+        {
+            credential,
+            credential_set,
+            credential_list,
+            credential_remove,
+            credential_test,
+            credential_asks,
+            credential_answer,
+        }
     )
     for each in parser.credential_parsers:
         _json_option(each)
@@ -825,6 +854,15 @@ def _check_usage(parser: argparse.ArgumentParser, args: argparse.Namespace) -> N
         if not args.value_stdin:
             forms["credential"].error(
                 "with --json, credential set reads the value with --value-stdin"
+            )
+    if args.verb == "credential" and args.credential_verb == "answer":
+        if args.decline and args.value_stdin:
+            forms["credential"].error(
+                "credential answer takes --decline or --value-stdin, not both"
+            )
+        if as_json and not (args.decline or args.value_stdin):
+            forms["credential"].error(
+                "with --json, credential answer takes --decline or --value-stdin"
             )
     if args.verb == "roots" and args.roots_verb == "add":
         add = forms["roots add"]
@@ -2010,6 +2048,9 @@ def _credential_verb(args: argparse.Namespace, dirs: paths.Dirs, out: _Out) -> N
         if args.credential_verb == "test":
             _credential_test(args, dirs, out, creds.saved(args.service, args.name) is not None)
             return
+        if args.credential_verb in ("asks", "answer"):
+            _credential_asks(args, dirs, out, creds)
+            return
         if args.credential_verb == "list":
             saved = creds.names()
             if not saved:
@@ -2038,14 +2079,7 @@ def _credential_verb(args: argparse.Namespace, dirs: paths.Dirs, out: _Out) -> N
             value = _credential_value(args, key)
         except (EOFError, KeyboardInterrupt) as exc:
             raise _Refused("interrupted", "nothing was saved") from exc
-        if any(0xD800 <= ord(char) <= 0xDFFF for char in value):
-            # What stdin decodes undecodable bytes to under the C or POSIX locale, or with
-            # PYTHONUTF8=1 (surrogateescape): not text, and not to be stored.
-            raise _Refused(
-                "bad_value", "the value is not text in this terminal's encoding; nothing was saved"
-            )
-        if any(ord(char) < 0x20 or ord(char) == 0x7F for char in value):
-            raise _Refused("bad_value", "the value holds a control character; nothing was saved")
+        _check_value(value)
         saved = creds.save(args.service, args.name, value, hosts, replace=args.replace)
         out.say(
             f"{'replaced' if before else 'saved'} {key}, to be sent only to "
@@ -2055,6 +2089,8 @@ def _credential_verb(args: argparse.Namespace, dirs: paths.Dirs, out: _Out) -> N
             "credential",
             **_credential_fields(saved),
         )
+        for warning in _set_warnings(args.service, saved.hosts, value):
+            print(f"lucille-host: warning: {warning}", file=sys.stderr, flush=True)
     except credentials.CredentialExists as exc:
         raise _Refused(
             "credential_exists",
@@ -2063,6 +2099,210 @@ def _credential_verb(args: argparse.Namespace, dirs: paths.Dirs, out: _Out) -> N
         ) from exc
     except credentials.CredentialError as exc:
         raise _Refused("bad_credential", str(exc)) from exc
+
+
+def _check_value(value: str) -> None:
+    """Refuse a value that is not text, or that holds a control character (spec/CLI.md section
+    15), before it is saved."""
+    if any(0xD800 <= ord(char) <= 0xDFFF for char in value):
+        # What stdin decodes undecodable bytes to under the C or POSIX locale, or with
+        # PYTHONUTF8=1 (surrogateescape): not text, and not to be stored.
+        raise _Refused(
+            "bad_value", "the value is not text in this terminal's encoding; nothing was saved"
+        )
+    if any(ord(char) < 0x20 or ord(char) == 0x7F for char in value):
+        raise _Refused("bad_value", "the value holds a control character; nothing was saved")
+
+
+def _set_warnings(service: str, hosts: Sequence[str], value: str) -> list[str]:
+    """What ``credential set`` warns of once a credential is saved (decisions/0003, "Hardening",
+    rules 2 and 4): a service with no template, which nothing uses; hosts without the template's,
+    to which its operations send it; and a value not in the template's form, which they never
+    send, such as an account's own password saved by mistake. Never the value itself."""
+    template = services.SERVICES.get(service)
+    if template is None:
+        return [
+            f"nothing in this release uses a credential of the service {service}: only "
+            + " and ".join(sorted(services.SERVICES))
+            + " have a template"
+        ]
+    warnings = []
+    missing = [host for host in template.hosts if host not in hosts]
+    if missing:
+        warnings.append(
+            f"it is not bound to {', '.join(missing)}, so {', '.join(template.reads)} will not "
+            "send it"
+        )
+    if not services.value_fits(template, value):
+        warnings.append(
+            f"the value is not {template.value_words}, so {', '.join(template.reads)} will not "
+            f"send it; if it is your account's own password, remove it and make a narrower one "
+            f"at {template.make_at}"
+        )
+    return warnings
+
+
+def _ask_fields(ask: Any, replaces: bool) -> dict[str, Any]:
+    """A ``credential_ask`` object's fields (spec/CLI.md section 6)."""
+    template = services.SERVICES[ask.service]
+    return {
+        "id": ask.id,
+        "service": ask.service,
+        "title": template.title,
+        "name": ask.name,
+        "hosts": list(ask.hosts),
+        "reason": ask.reason,
+        "replaces": replaces,
+        "value_words": template.value_words,
+        "make_at": template.make_at,
+        "asked_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(ask.asked_at)),
+        "until": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(ask.until)),
+    }
+
+
+def _ask_lines(ask: Any, replaces: bool) -> list[str]:
+    """The ask as the terminal shows it: the host's own lines first, Lucille's words last, each of
+    their lines marked as Lucille's (decisions/0003, "Entry")."""
+    template = services.SERVICES[ask.service]
+    lines = [
+        f"Lucille asks you to save a credential on this computer (ask {ask.id}):",
+        f"  service: {template.title} ({ask.service})",
+        f"  name:    {ask.name}",
+        f"  sent only to: {', '.join(ask.hosts)}",
+        f"  what to type: {template.value_words}; make one at {template.make_at}",
+    ]
+    if replaces:
+        lines.append(f"  it replaces the {ask.service}/{ask.name} saved here now")
+    left = max(0, int(ask.until - time.time()))
+    lines.append(f"  it is declined unless you answer within {left} s")
+    if ask.reason is not None:
+        from lucille_host import asks as host_asks  # noqa: PLC0415 - only an ask's lines need it
+
+        lines.extend(host_asks.reason_lines(ask.reason))
+    return lines
+
+
+def _credential_asks(args: argparse.Namespace, dirs: paths.Dirs, out: _Out, creds: Any) -> None:
+    """``credential asks`` and ``credential answer``: the asks ``credential.ask`` leaves open, and
+    the user's answer to one (decisions/0003, "Entry"). The value is typed here, saved as
+    ``credential set`` saves one, bound to the service's template's hosts and no other, and never
+    shown; Lucille learns only "saved" or "declined"."""
+    from lucille_host import asks as host_asks  # noqa: PLC0415 - only these actions read the asks
+
+    asks = host_asks.Asks(paths.ensure_dir(dirs.state))
+    if args.credential_verb == "asks":
+        waiting = asks.waiting()
+        if not waiting:
+            print("lucille-host: Lucille is asking for no credential", file=sys.stderr)
+        for ask in waiting:
+            replaces = creds.saved(ask.service, ask.name) is not None
+            if out.as_json:
+                out.obj("credential_ask", **_ask_fields(ask, replaces))
+            else:
+                for line in _ask_lines(ask, replaces):
+                    out.text(line)
+                out.text(f"  answer it with: lucille-host credential answer {ask.id}")
+        return
+    if host_asks.ID.fullmatch(args.id) is None:
+        raise _Refused("no_such_ask", "an ask's id is 16 digits of 0-9 and a-f")
+    try:
+        ask = asks.get(args.id)
+    except host_asks.AskGone:
+        raise _Refused(
+            "no_such_ask", f"no ask {args.id} waits for an answer: it was answered, or it lapsed"
+        ) from None
+    key = f"{ask.service}/{ask.name}"
+    replaces = creds.saved(ask.service, ask.name) is not None
+    answer = "declined"
+    if not args.decline:
+        if not args.value_stdin:
+            if not sys.stdin.isatty():
+                raise _Refused(
+                    "no_value",
+                    "standard input is not a terminal: run this in a terminal to see the ask and "
+                    "type the value, or pass --value-stdin or --decline",
+                )
+            for line in _ask_lines(ask, replaces):
+                print(line, file=sys.stderr)
+            try:
+                said = _input_line("Save it, sent only to these hosts? Type yes to save it: ")
+            except (EOFError, KeyboardInterrupt):
+                said = ""
+            if said.strip().lower() == "yes":
+                answer = "saved"
+        else:
+            answer = "saved"
+    if answer == "saved":
+        try:
+            value = _credential_value(args, key)
+        except (EOFError, KeyboardInterrupt) as exc:
+            raise _Refused("interrupted", "nothing was saved, and the ask still waits") from exc
+        _check_value(value)
+        template = services.SERVICES[ask.service]
+        if not services.value_fits(template, value):
+            raise _Refused(
+                "bad_value",
+                f"the value is not {template.value_words}; nothing was saved, and the ask still "
+                "waits",
+            )
+        try:
+            asks.get(ask.id)
+        except host_asks.AskGone:
+            raise _Refused(
+                "no_such_ask", f"ask {ask.id} lapsed while the value was typed; nothing was saved"
+            ) from None
+        saved = creds.save(ask.service, ask.name, value, ask.hosts, replace=True)
+    try:
+        asks.answer(ask.id, answer)
+    except host_asks.AskGone:
+        audit.AuditLog(dirs.state).write(
+            "credential_answer",
+            service=ask.service,
+            name=ask.name,
+            answer="lapsed",
+            saved=answer == "saved",
+        )
+        raise _Refused(
+            "no_such_ask",
+            f"ask {ask.id} lapsed before the answer was recorded, so Lucille was told it was "
+            + (
+                "declined; the credential is saved here all the same"
+                if answer == "saved"
+                else "declined"
+            ),
+        ) from None
+    audit.AuditLog(dirs.state).write(
+        "credential_answer", service=ask.service, name=ask.name, answer=answer
+    )
+    if answer == "saved":
+        out.say(
+            f"saved {key}, to be sent only to {', '.join(saved.hosts)}; Lucille is told it was "
+            "saved, never the value",
+            "credential_answer",
+            id=ask.id,
+            service=ask.service,
+            name=ask.name,
+            answer=answer,
+        )
+        return
+    out.say(
+        f"declined ask {ask.id} for {key}; nothing was saved, and Lucille is told it was declined",
+        "credential_answer",
+        id=ask.id,
+        service=ask.service,
+        name=ask.name,
+        answer=answer,
+    )
+
+
+def _input_line(prompt: str) -> str:
+    """One line typed at the terminal, after ``prompt`` on standard error. EOFError at the end of
+    standard input."""
+    print(prompt, end="", file=sys.stderr, flush=True)
+    line = sys.stdin.readline()
+    if not line:
+        raise EOFError
+    return line
 
 
 def _credential_fields(saved: Any) -> dict[str, Any]:
@@ -2274,11 +2514,13 @@ def _profile_denied(exc: BaseException, dirs: paths.Dirs) -> bool:
 # argparse's usage errors of a credential command line that repeat nothing typed on it: the
 # arguments a form needs, by name, and options that need a word after them.
 _CREDENTIAL_REQUIRED: Final = "the following arguments are required: "
-_CREDENTIAL_ARGUMENTS: Final = frozenset({"service", "name", "--host", "ACTION"})
+_CREDENTIAL_ARGUMENTS: Final = frozenset({"service", "name", "id", "--host", "ACTION"})
 _CREDENTIAL_USAGE: Final = frozenset(
     {
         "argument --host: expected one argument",
         "with --json, credential set reads the value with --value-stdin",
+        "credential answer takes --decline or --value-stdin, not both",
+        "with --json, credential answer takes --decline or --value-stdin",
     }
 )
 
@@ -2300,7 +2542,7 @@ def _usage_said(
     if not ours and "credential" not in words:
         return message
     if message.startswith("argument ACTION: invalid choice:"):
-        return "unknown credential subcommand: it is set, list, remove or test"
+        return "unknown credential subcommand: it is set, list, remove, test, asks or answer"
     if message in _CREDENTIAL_USAGE or message.startswith(_CREDENTIAL_REQUIRED):
         own = message.removeprefix(_CREDENTIAL_REQUIRED)
         if all(name in _CREDENTIAL_ARGUMENTS for name in own.split(", ")) or own == message:

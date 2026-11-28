@@ -56,7 +56,7 @@ from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any, Final, NoReturn
 
-from lucille_host import nesting, proxy
+from lucille_host import nesting, proxy, services
 from lucille_host._output import PRIVATE_KEY_MARK, TOKEN_MARK, key_block_end, redact_to_end
 
 __all__ = [
@@ -96,13 +96,10 @@ SIGNIN_WINDOW_S: Final = 600
 SIGNINS_MAX: Final = 60
 REFUSED_WAIT_S: Final = 900
 
-# The credential's value: the account's address, one space, the app password's 16 letters.
-VALUE: Final = re.compile(
-    r"^[A-Za-z0-9._%+-]{1,64}@([A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.){1,8}"
-    r"[A-Za-z]{2,63} [a-z]{16}$",
-    re.ASCII,
-)
-ADDRESS_MAX: Final = 254
+# The credential's value: the account's address, one space, the app password's 16 letters, from
+# its service template (services.py).
+VALUE: Final = services.GMAIL_VALUE
+ADDRESS_MAX: Final = services.GMAIL_ADDRESS_MAX
 
 SEARCH_ITEMS: Final = (
     "(UID FLAGS INTERNALDATE RFC822.SIZE X-GM-MSGID X-GM-THRID "

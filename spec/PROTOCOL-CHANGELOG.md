@@ -108,6 +108,15 @@ The first version.
   change to what the host sends, made in the draft: no host release has had `files.search`, and
   Lucille has accepted no version yet. §10 now says what "hidden" means (a name that starts with a
   dot, ripgrep's rule) and that ripgrep's standard input is `/dev/null`.
+- **Added in the draft, 2026-11-27: `credential.ask`,** an operation that asks the user to save a
+  credential on the computer, typed there into the host's own prompt (§10). Its `args` are `{service, name,
+  reason?}`: a service the host has a template for (`github` or `gmail`), a credential's name, and Lucille's
+  own words, shown apart. It carries no value and names no hosts: the host binds the credential to its
+  service template's hosts alone. Its reply is a child's output, `{"answer": "saved"}` or `{"answer":
+  "declined"}` (§11). No field, status or code was added; one prose rule was, `credential-ask-args` (§10),
+  which refuses in `reason` the characters that would move, hide or blank out text, and runs of spaces.
+  The host's side is in [decisions/0003](../decisions/0003-local-credentials.md) ("Entry"). Lucille sends it
+  only with `min_host_version` set to the first release whose catalog has it.
 - **Files.** JSON Schemas (draft 2020-12) for the request, the reply and the `host.describe` document, closed
   at every level; golden fixtures for requests, replies, `host.describe` documents and decoding. Both ship
   in the wheel under `lucille_host/spec/v1/`.

@@ -10,7 +10,8 @@
     "gmail.check",
     "gmail.mailboxes",
     "gmail.search",
-    "gmail.read"
+    "gmail.read",
+    "credential.ask"
   ],
   "roots": [
     "docs"

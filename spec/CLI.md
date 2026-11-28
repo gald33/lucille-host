@@ -545,6 +545,31 @@ drain: a signal (`SIGTERM`, `SIGHUP` or Ctrl-C), the end of standard input, or a
 | `name` | string | |
 | `host` | string | The host it signed in to: `imap.gmail.com`. |
 
+### `credential_ask`: one of Lucille's asks for a credential, waiting for the user's answer
+
+| Field | Type | |
+|---|---|---|
+| `id` | string, 16 digits of `0`-`9` and `a`-`f` | The ask's id, which `credential answer` takes. |
+| `service` | `github` or `gmail` | A service the host has a template for (section 15). |
+| `title` | string | What a person calls the service: `GitHub`, `Gmail`. |
+| `name` | string, as `credential`'s | The credential's name. |
+| `hosts` | array of strings, at least 1 | The only hosts the credential will be sent to: the service's template's, never Lucille's. |
+| `reason` | string or null | Lucille's own words, at most 300 characters, or null when it sent none. A shell shows them apart from the rest, under "Lucille says:", and never as its own. |
+| `replaces` | boolean | A credential of that service and name is saved here now, and saving replaces it. |
+| `value_words` | string | What the value is, in the host's words. |
+| `make_at` | string, an `https://` URL | The service's page where the user makes one, the narrowest it offers. |
+| `asked_at` | string (a time) | When Lucille asked. |
+| `until` | string (a time) | When the ask lapses, declined, unless it is answered. |
+
+### `credential_answer`: the user's answer to an ask
+
+| Field | Type | |
+|---|---|---|
+| `id` | string | The ask's id. |
+| `service` | `github` or `gmail` | |
+| `name` | string | |
+| `answer` | `saved` or `declined` | What Lucille is told, and all it is told. |
+
 ### `profile_check`: a folder or file of the profile that is not yours
 
 | Field | Type | In states |
@@ -616,6 +641,8 @@ line with no verb never give it).
 | `credential list` | one `credential` per credential, by service then name; none when none is saved | `insecure_keyring`, `store_error` |
 | `credential remove <service> <name>` | one `credential_removed` | `no_such_credential`, `bad_credential`, `insecure_keyring`, `store_error` |
 | `credential test <service> <name>` | one `credential_test` | `no_test`, `no_such_credential`, `paused`, `bad_credential`, `unreachable`, `limit_reached`, `sign_in_refused`, `insecure_keyring`, `store_error` |
+| `credential asks` | one `credential_ask` per ask waiting for an answer, oldest first; none when none waits | `insecure_keyring`, `store_error` |
+| `credential answer <id> --decline`, or `--value-stdin` | one `credential_answer` | `no_such_ask`, `no_value`, `bad_value`, `values_differ`, `interrupted`, `insecure_keyring`, `store_error` |
 | `verify` | one `verify` | `not_a_release`, `no_verifier`, `unreachable`, `yanked`, `not_attested`, `files_differ` |
 
 Notes:
@@ -772,6 +799,7 @@ list of what this project must never claim; a test checks them against it.
 | `gmail.mailboxes` | List your Gmail mailboxes | Lucille gets the names of your Gmail mailboxes and labels. | false | false |
 | `gmail.search` | Search your Gmail | Lucille gets the sender, recipients, subject, date and size of up to 50 messages that match its search, never their text. The app password goes only to imap.gmail.com. | false | false |
 | `gmail.read` | Read one Gmail message | Lucille gets one message it names: its headers, up to 32 KB of its text, and its attachments' names, types and sizes, never their contents. | false | false |
+| `credential.ask` | Ask you to save a credential here | Lucille learns only whether you saved the credential it asked for or declined. You type it on this computer; it is never sent to Lucille. | false | false |
 
 ## 9. Folder aliases and folder checks
 
@@ -873,19 +901,20 @@ limit, as it runs every verb, and stops it when the limit passes.
 | `none` | This computer holds no pair, or another command forgot it meanwhile. |
 | `waiting` | No resolve has seen Lucille collect this computer's answer, so there is no SAS to confirm: Lucille has not collected it, or the hub could not be reached to ask. The message says which. |
 | `sas_ready` | This computer has not shown the SAS yet: `pair status` shows it. |
-| `interrupted` | Ctrl-C while `pair` waited. The pair is kept; `pair status` resumes. Or Ctrl-C, or the end of standard input, while `credential set` asked for a value: nothing was stored. |
+| `interrupted` | Ctrl-C while `pair` waited. The pair is kept; `pair status` resumes. Or Ctrl-C, or the end of standard input, while `credential set` or `credential answer` asked for a value: nothing was stored. |
 | `pair_unusable` | The pairing library refused the pair here, or the store holds a SAS for it that is not four digits, `-`, four digits. |
 | `room_not_left` | A work room could not be left, so its keys would stay behind; the command can be tried again, or `forget` leaves it. |
 | `several_pairs` | The profile holds more than one pair, and the host keeps one. |
 | `bad_credential` | `credential`: a service or credential name, a host, or a value the store does not take (section 15). Nothing was stored. |
 | `credential_exists` | `credential set`: a credential is stored under that service and name already, and `--replace` was not given. Nothing changed. |
 | `no_such_credential` | `credential remove`: no credential is stored under that service and name. |
-| `no_value` | `credential set`: no value was given, or standard input is of the wrong kind to give one: not a terminal without `--value-stdin`, or a terminal with it. Nothing was stored. |
-| `values_differ` | `credential set`: the value typed twice differed. Nothing was stored. |
-| `bad_value` | `credential set`: the value holds a control character, or is not text in standard input's encoding (a line that does not decode, or one holding a lone surrogate). Nothing was stored. |
+| `no_value` | `credential set`, `credential answer`: no value was given, or standard input is of the wrong kind to give one: not a terminal without `--value-stdin`, or a terminal with it. Nothing was stored. |
+| `values_differ` | `credential set`, or `credential answer` at a terminal: the value typed twice differed. Nothing was stored, and an ask still waits. |
+| `bad_value` | `credential set`, `credential answer`: the value holds a control character, or is not text in standard input's encoding (a line that does not decode, or one holding a lone surrogate); for `credential answer`, also a value not in the form its service's template says. Nothing was stored. |
 | `no_test` | `credential test`: the service has no test; only `gmail` has one. Nothing was read. |
 | `paused` | `credential test`: the host is paused, and so starts nothing. Nothing was read. |
 | `sign_in_refused` | `credential test`: Gmail refused the app password (wrong or revoked), or did within the last 15 minutes and was not asked again. |
+| `no_such_ask` | `credential answer`: no ask with that id waits for an answer: none was made, it was answered, or it lapsed. Or it lapsed while the value was typed, and nothing was saved; or just after the credential was saved, which the message says, and Lucille was told it was declined. |
 | `unreachable` | `credential test`: `imap.gmail.com` did not resolve, resolved to an address the host does not allow, could not be connected to, or the connection broke. `verify`: PyPI or sigstore's trust root could not be reached, the connection broke, or PyPI answered with a status but 200 and 404, more than 64 MiB, or a listing or provenance that is not JSON; nothing was verified. |
 | `limit_reached` | `credential test`: the credential was used for more than 60 sign-ins in 10 minutes, or Gmail sent more than the host reads. |
 | `bad_service` | `pair begin`: that is not a chat service Capsule connects through (`telegram`). A pairing code given there, as the paste form took one, is refused with it too, saying that pasting a code is no longer supported. |
@@ -1240,7 +1269,8 @@ of operation use a stored credential, each off by default, each in a separate pr
 that names it: `github.read` reads one stored under the service `github` and bound to `api.github.com`
 (decisions/0003, "First use"), and the `gmail` operations one stored under `gmail` and bound to
 `imap.gmail.com` ("Second use"). Nothing Lucille sends can list or change one, nor read one any other
-way. With `--json`, before the verb or after an action, it writes the objects of section 7, and
+way; with `credential.ask` on, it can ask the user to save one, which the user types here ("Asks",
+below). With `--json`, before the verb or after an action, it writes the objects of section 7, and
 `credential set` takes the value only with `--value-stdin`.
 
 | Form | What it does |
@@ -1248,7 +1278,34 @@ way. With `--json`, before the verb or after an action, it writes the objects of
 | `credential set <service> <name> --host <host> [--host <host> ...] [--value-stdin] [--replace]` | Stores one credential, bound to the hosts given. |
 | `credential list` | One line per credential, by service then name: its service and name, its hosts and when it was stored. Never its value. With none stored, nothing on standard output, a line on standard error, and exit 0. |
 | `credential remove <service> <name>` | Deletes that credential and no other. One not stored is refused, exit 1. |
+| `credential asks` | One block per ask of Lucille's that waits for an answer (`credential.ask`, below), oldest first: its id, the service, the name, the hosts, what to type and where to make one, whether it replaces a credential saved here, how long it waits, and, last, Lucille's own words, cut into lines of at most 64 columns that each start `Lucille says: `. With none waiting, nothing on standard output, a line on standard error, and exit 0. |
+| `credential answer <id> [--decline \| --value-stdin]` | Answers one ask. Without an option, standard input must be a terminal: it shows the ask on standard error, asks `Type yes to save it`, and anything but `yes` declines; after `yes`, the value is typed twice, as for `credential set`. `--decline` declines it, asking nothing. `--value-stdin` saves the value read from one line of standard input, asking nothing: the program that runs it showed the ask itself and the user chose to save. With `--json`, one of the two is needed. Saving binds the credential to the ask's hosts and no other, replacing one saved under that service and name; a value not in its service's form is refused (`bad_value`), nothing is saved, and the ask still waits. Each answer writes one `credential_answer` line to the audit log: the service, the name and the answer, never the value; for an ask that lapsed before its answer was recorded, the answer `lapsed` and whether the credential was saved all the same (`saved`). |
 | `credential test <service> <name>` | Signs in with that credential and out again, reading nothing, by running `gmail.check`'s child, as a request would, whether or not `gmail.check` is enabled. `gmail` only. On success, one line, `gmail/<name>: signed in to imap.gmail.com`, and exit 0; otherwise the child's own fixed line and exit 1. Refused, starting nothing, for another service (`no_test`), a credential not stored (`no_such_credential`), while the host is paused (`paused`), and while keyring's own settings turn the keyring off (`insecure_keyring`). The child's exits give `bad_credential` (2), `unreachable` (4), `limit_reached` (5), `sign_in_refused` (7) and `internal` (any other). Each test writes one `credential_test` line to the audit log: the service, the name and the code (`ok` on success), never the value. Nothing Lucille sends can run it. |
+
+**Asks (`credential.ask`).** Lucille may ask for a credential with the operation `credential.ask`
+([PROTOCOL.md](PROTOCOL.md) §10), off by default. The request carries no value: a service with a template
+(`github` or `gmail`), a name, and, optionally, Lucille's reason. Its child leaves the ask for `credential
+asks` and `credential answer` and waits up to 240 s for the user's answer; Lucille is told only `saved` or
+`declined`.
+- The hosts are the service template's, never the request's: `api.github.com` for `github`,
+  `imap.gmail.com` for `gmail`. A service with no template cannot be asked for.
+- Declining is the default: an ask not answered within 240 s is declined, and so, without being shown,
+  is an ask made while another waits and an ask made less than 600 s after any ask ended, for any
+  credential.
+- Lucille's words come last, after the host's own lines, cut at their spaces into lines of at most 64
+  columns (a character beyond ASCII counts two), each starting `Lucille says: `, so every line fits in 78 columns
+  and none reads as one of the host's. Rule `credential-ask-args` (PROTOCOL.md §10) keeps out of them the
+  characters that would move, hide or blank out text, and runs of spaces.
+- While an ask waits, `run` runs no other request: it runs one at a time.
+- A shell shows an ask in a dialog of its own when `run` reports a `credential.ask` request `started`
+  (section 6, `request`), reads it with `credential asks --json`, and answers it with `credential answer
+  <id> --value-stdin --json` or `--decline --json`; closing the dialog declines.
+
+**Warnings of `credential set`** (decisions/0003, "Hardening"). Once a credential is saved, `credential set`
+warns on standard error, never naming the value: for a service with no template, that nothing in this
+release uses it; for one with a template, when its hosts leave out the template's, and when its value is
+not in the template's form (a GitHub token; a Gmail address and app password), which the operations never
+send, such as an account's own password saved by mistake. It is saved all the same.
 
 **Names.** A service and a credential name are each 1 to 64 characters of `a`-`z`, `0`-`9`, `.`, `_` and
 `-`, starting with a letter or a digit: `gmail`, `github.com`, `app-password`. The whole name is matched:
@@ -1295,7 +1352,7 @@ That use enforces exactly what is stored here:
   any usage error of a line that names the verb anywhere, before `--` or after it
   (`lucille-host -- credential list <word>`), whichever parser raised it. It is argparse's own message
   only where that names the verb's arguments and options (`the following arguments are required: name`). An unknown action is
-  `unknown credential subcommand: it is set, list, remove or test`, after the verb's usage. Any other says that
+  `unknown credential subcommand: it is set, list, remove, test, asks or answer`, after the verb's usage. Any other says that
   a value is never given on the command line, and that one typed there is now in the shell's history.
 
 **Replacing.** A credential already stored under that service and name is refused (exit 1), and nothing
@@ -1413,7 +1470,8 @@ folder where that is missing). It exits 0 whatever it finds.
   earlier run as root left unreadable.
 - **1.0** (`0.1.0`, still a draft): the first version, with `run`'s event stream and exit codes, `policy reset`,
   and `credential` with `--json` (its types `credential`, `credential_removed` and `credential_test`), for
-  the Mac app's Gmail window; and Connect from Lucille's chat: `pair begin`, `pair resume`, `pair cancel`,
+  the Mac app's Gmail window, and `credential asks` and `credential answer` (the types `credential_ask` and
+  `credential_answer`, the code `no_such_ask`), for `credential.ask`; and Connect from Lucille's chat: `pair begin`, `pair resume`, `pair cancel`,
   the `connect` type, and its error codes. The paste form is gone: `pair` takes no pairing code, on its
   command line or with `--code-stdin`, and answers only a code delivered for its own Connect request.
 - A build of the repository's development version is not a release, and writes the latest contract

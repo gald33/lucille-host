@@ -62,6 +62,7 @@ def test_catalog_entries() -> None:
         "gmail.mailboxes",
         "gmail.search",
         "gmail.read",
+        "credential.ask",
     }
     with pytest.raises(TypeError):
         OPERATIONS["host.shell"] = OPERATIONS["host.describe"]  # type: ignore[index]
@@ -226,11 +227,13 @@ HASHES = {
     "gmail.mailboxes": "6e83854a220198786480f5351698afeb31772b063b85d6d36ec27a869a652c7a",
     "gmail.search": "23ddbfe59aa0647a5700b2c50999c23934e71e0b851c6997519743ce475aeca1",
     "gmail.read": "edfd1db766b04b134996e29935f3d480eca2931aaadc7119c854ad9a7c71c556",
+    "credential.ask": "dc0b914b618fcdfe780bc562de97da7188a15050597b2dee3a3244352105b108",
 }
 VERSION_BEFORE_WORDS = "06fe2f327b0916227970e377eaad94b064a7631bd7ff2696b3cef675bd607f35"
 VERSION_WITH_GITHUB_READ = "49f81c2d24e04c15a0b38268434523da60ee4cb5bbb8283c8f4f725e15711652"
 VERSION_WITH_GMAIL = "dc430cc7c08f0f36be46233c2d807ddb7ec7de07746ddb990e3247a950ca2bd0"
 VERSION_WITH_FILES_SEARCH = "fbb41771c2e57bd99a0873ac65bf852a3bff6d529efa9636ae4d5a9b330e97bc"
+VERSION_WITH_ASK = "ffda8ab1c65ac3fe446d714994d43456b40baa37f3c1d87c64a33bdc6d5d255a"
 
 
 def _with_about(op: Operation, **changes: Any) -> Operation:
@@ -239,9 +242,11 @@ def _with_about(op: Operation, **changes: Any) -> Operation:
 
 def test_copy_fields_outside_definition_hash() -> None:
     assert {name: op.definition_hash for name, op in OPERATIONS.items()} == HASHES
-    assert CATALOG_VERSION == VERSION_WITH_FILES_SEARCH
+    assert CATALOG_VERSION == VERSION_WITH_ASK
     assert CATALOG_VERSION == catalog_version(tuple(OPERATIONS.values()))
-    before_search = tuple(op for op in OPERATIONS.values() if op.name != "files.search")
+    before_ask = tuple(op for op in OPERATIONS.values() if op.name != "credential.ask")
+    assert catalog_version(before_ask) == VERSION_WITH_FILES_SEARCH
+    before_search = tuple(op for op in before_ask if op.name != "files.search")
     assert catalog_version(before_search) == VERSION_WITH_GMAIL
     before_gmail = tuple(op for op in before_search if not op.name.startswith("gmail."))
     assert catalog_version(before_gmail) == VERSION_WITH_GITHUB_READ

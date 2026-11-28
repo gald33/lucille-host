@@ -38,6 +38,7 @@ from lucille_host import (
     __version__,
     _exec,
     _switchboard,
+    asks,
     cli,
     connect,
     connecting,
@@ -459,6 +460,23 @@ def _gmail_child(exit_code: int, stderr: str = "") -> Callable[[World], None]:
     return set_up
 
 
+ASK_ID = "0123456789abcdef"
+ASK_REASON = "To read your receipts, I need a Gmail app password."
+
+
+def _gmail_asked(w: World) -> None:
+    """One ask of Lucille's for gmail/default waiting, as credential.ask's child leaves it."""
+    made = asks.Asks(paths.ensure_dir(w.dirs.state), new_id=lambda: ASK_ID).make(
+        "gmail", "default", ASK_REASON
+    )
+    assert made is not None
+
+
+def _gmail_asked_with_value(w: World) -> None:
+    _gmail_asked(w)
+    w.stdin = GMAIL_VALUE + "\n"
+
+
 def _gmail_paused(w: World) -> None:
     _gmail_saved(w)
     w.ok("pause")
@@ -626,6 +644,9 @@ SETUPS: dict[str, Callable[[World], None]] = {
         "lucille-host gmail: Gmail refused the app password: make a new one at Google's "
         "app-password page and save it\n",
     ),
+    "credential-asks": _gmail_asked,
+    "credential-answer": _gmail_asked_with_value,
+    "credential-answer-decline": _gmail_asked,
     "roots-check": _roots_check,
     "resume": _paused,
     "status-unreadable": _status_unreadable,

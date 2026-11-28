@@ -57,7 +57,7 @@ from typing import Any, Final, NoReturn
 
 import certifi
 
-from lucille_host import __version__, nesting
+from lucille_host import __version__, nesting, services
 from lucille_host._output import PRIVATE_KEY_MARK, TOKEN_MARK, key_block_end, redact_to_end
 
 __all__ = [
@@ -86,7 +86,8 @@ BODY_CAP: Final = 1024 * 1024
 NET_TIMEOUT_S: Final = 20.0
 _READ_CHUNK: Final = 64 * 1024
 
-TOKEN: Final = re.compile(r"github_pat_[A-Za-z0-9_]{22,255}|ghp_[A-Za-z0-9]{36,251}", re.ASCII)
+# The form of a GitHub token, from its service template (services.py).
+TOKEN: Final = services.GITHUB_TOKEN
 
 OK: Final = 0
 CREDENTIAL: Final = 2

@@ -30,6 +30,9 @@
     },
     {
       "$ref": "#/$defs/request.gmail.read"
+    },
+    {
+      "$ref": "#/$defs/request.credential.ask"
     }
   ],
   "$defs": {
@@ -335,6 +338,38 @@
           "minLength": 1,
           "maxLength": 20,
           "pattern": "^[1-9][0-9]{0,19}$"
+        }
+      }
+    },
+    "args.credential.ask": {
+      "description": "credential.ask: ask the user to save a credential on the computer, typed there into the host's own prompt; the request carries no value, and the hosts are the service's template's, never the request's (spec/PROTOCOL.md section 10; decisions/0003, \"Entry\").",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "service",
+        "name"
+      ],
+      "properties": {
+        "service": {
+          "description": "A service the host has a template for: github or gmail.",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^(github|gmail)$"
+        },
+        "name": {
+          "description": "The credential's name; the host saves it as <service>/<name>.",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+        },
+        "reason": {
+          "description": "Lucille's own words, shown under \"Lucille says:\"; rule credential-ask-args refuses a character that would move or hide text.",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 300,
+          "pattern": "^[^\\u0000]*$"
         }
       }
     },
@@ -695,6 +730,47 @@
         },
         "args": {
           "$ref": "#/$defs/args.gmail.read"
+        },
+        "not_after": {
+          "$ref": "#/$defs/not_after"
+        },
+        "caps": {
+          "$ref": "#/$defs/caps"
+        },
+        "min_host_version": {
+          "$ref": "#/$defs/min_host_version"
+        }
+      }
+    },
+    "request.credential.ask": {
+      "description": "A request for credential.ask.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "v",
+        "dir",
+        "job_id",
+        "op",
+        "args",
+        "not_after"
+      ],
+      "properties": {
+        "v": {
+          "$ref": "#/$defs/v"
+        },
+        "dir": {
+          "$ref": "#/$defs/dir",
+          "const": "request"
+        },
+        "job_id": {
+          "$ref": "#/$defs/job_id"
+        },
+        "op": {
+          "$ref": "#/$defs/op_name",
+          "const": "credential.ask"
+        },
+        "args": {
+          "$ref": "#/$defs/args.credential.ask"
         },
         "not_after": {
           "$ref": "#/$defs/not_after"
