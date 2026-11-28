@@ -373,8 +373,8 @@ enforces.
      button's action is `tests/test_macos_build.py`'s, not the lint's: the lint makes every call one it
      can find by that text;
    - in Swift, on a read of the pasteboard or of what is dropped on the app (writing, for Copy
-     Diagnostics, is allowed here; until Copy Diagnostics is built, `tests/test_macos_build.py` and
-     `check_app.py links` refuse `NSPasteboard` altogether), and on an `http://`, `https://`, `ws://`,
+     Diagnostics, is allowed here; Copy Diagnostics writes through a text view's own Copy, so
+     `tests/test_macos_build.py` and `check_app.py links` still refuse `NSPasteboard` altogether), and on an `http://`, `https://`, `ws://`,
      `wss://` or `ftp://` URL;
    - on a phrase [PRIVACY.md](PRIVACY.md) says this project must never claim, as a whole word in any
      case, in the string literals of the app's Swift (decoded; the self-test's are not read), in the
