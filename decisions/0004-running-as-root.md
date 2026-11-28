@@ -444,7 +444,9 @@ nothing on its own:
   at every folder and file inside it (`policy.toml` among them). It follows no symbolic link into a
   folder, and a link's own owner does not matter; what a link points to, which the host follows, is
   looked at and reported by its own path, so that a `policy.toml` linked to a root-owned file names that
-  file.
+  file. A link to the home folder or a folder above it (`/`, or a home folder root owns) is not reported,
+  as the walk up never reports those: root owning one is not what a run as root leaves, and the repair of
+  a home folder would be a `chown -R` of all of it.
 - Inside the home folder, each finding carries two command lines for a person to run as root: `ls -lR`
   (`ls -l` for a file) first, as "Look first" asks, then `chown -R <uid>` (`chown -h <uid>` for a file, so
   that a file swapped for a symbolic link before root runs it changes the link and not what it points

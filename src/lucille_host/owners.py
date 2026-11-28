@@ -22,7 +22,8 @@ it is not inside the config folder, as it is on macOS):
 - Where the folder itself is the user's, every folder and file inside it. One owned by another
   user is reported, and nothing inside it. A symbolic link is not followed into, and its own owner
   does not matter; what it points to, which the host follows (a ``policy.toml`` linked to a file
-  kept elsewhere), is looked at as the folder or file it is, and reported by its own path.
+  kept elsewhere), is looked at as the folder or file it is, and reported by its own path, unless
+  that is the home folder or a folder above it (a link to ``/``), which is never reported.
 
 A folder or file outside the home folder is reported with no repair: the host cannot tell whether
 another program needs it as it is (decisions/0004, 4.3, "Not checked"), so a person decides.
@@ -116,11 +117,17 @@ def _commands(path: Path, kind: str, me: int) -> tuple[str, str]:
     return f"ls -l {quoted}", f"chown -h {me} {quoted}"
 
 
-def _finding(path: Path, kind: str, uid: int, home: Path, me: int) -> Found:
-    if not path.is_relative_to(home) or path == home:
-        return Found(OUTSIDE_HOME, path, kind, uid)
+def _finding(path: Path, kind: str, uid: int, home: Path, me: int) -> list[Found]:
+    """What is reported of ``path``, which uid ``uid`` owns: nothing where it is the home folder or
+    a folder above it (``/`` among them), which the check never reports, since root owning one is
+    not what a run as root leaves; ``outside_home`` elsewhere outside the home folder, with no
+    command; ``not_yours`` inside it, with its commands."""
+    if home.is_relative_to(path):
+        return []
+    if not path.is_relative_to(home):
+        return [Found(OUTSIDE_HOME, path, kind, uid)]
     look, repair = _commands(path, kind, me)
-    return Found(NOT_YOURS, path, kind, uid, look, repair)
+    return [Found(NOT_YOURS, path, kind, uid, look, repair)]
 
 
 def _chain(folder: Path, home: Path, me: int) -> tuple[list[Found], bool]:
@@ -143,7 +150,7 @@ def _chain(folder: Path, home: Path, me: int) -> tuple[list[Found], bool]:
         if uid is not None:
             highest = (each, uid)
     if highest is not None:
-        return [_finding(highest[0], "folder", highest[1], home, me)], False
+        return _finding(highest[0], "folder", highest[1], home, me), False
     if hidden is not None:
         return [Found(UNREADABLE, hidden, None, None)], False
     return [], own
@@ -170,7 +177,7 @@ def _inside(folder: Path, home: Path, me: int) -> list[Found]:
             return  # it points at nothing, or at itself: the host reads nothing there
         uid = _uid(info)
         if uid != me:
-            found.append(_finding(_real(path), _kind(info), uid, home, me))
+            found.extend(_finding(_real(path), _kind(info), uid, home, me))
 
     def other(path: Path) -> bool:
         """Whether nothing inside ``path`` is to be looked at: it is not the user's, or it is a
@@ -188,7 +195,7 @@ def _inside(folder: Path, home: Path, me: int) -> list[Found]:
         uid = _uid(info)
         if uid == me:
             return False
-        found.append(_finding(path, _kind(info), uid, home, me))
+        found.extend(_finding(path, _kind(info), uid, home, me))
         return True
 
     for where, folders, files in os.walk(folder, onerror=unreadable):

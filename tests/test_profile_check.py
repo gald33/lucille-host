@@ -340,6 +340,22 @@ def test_what_a_symlink_inside_the_profile_points_to_is_looked_at(
     ]
 
 
+@pytest.mark.parametrize("where", ["/", "home", "above home"])
+def test_a_symlink_to_the_home_folder_or_above_is_not_reported(
+    home: Path, planted: Planted, where: str
+) -> None:
+    # Root owns `/`, and may own the home folder and the folder above it: none of them is what a
+    # run as root left, so a link inside the profile to one of them is no finding. With the home
+    # folder, a finding would ask root to `chown -R` the whole home folder.
+    target = {"/": Path("/"), "home": home, "above home": home.parent}[where]
+    environ = _linux(home)
+    found = _made(environ)
+    (found.state / "link").symlink_to(target)
+    _plant(planted, target)
+    assert owners._uid(os.stat(target)) == 0
+    assert _check(environ) == []
+
+
 def test_a_policy_file_linked_to_a_root_owned_file(home: Path, planted: Planted) -> None:
     # The host reads the policy through the link, so the file it points to is the one to repair.
     environ = _linux(home)

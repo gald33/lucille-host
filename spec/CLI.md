@@ -1396,7 +1396,8 @@ folder where that is missing). It exits 0 whatever it finds.
   owns is written, and nothing inside it is looked at; one that cannot be looked at is `unreadable`. A
   symbolic link is not followed into, and its own owner does not matter; what it points to, which the host
   follows (a `policy.toml` linked to a file kept elsewhere), is looked at as the folder or file it is, and
-  written by its own resolved path.
+  written by its own resolved path, unless that is the home folder or a folder above it (a link to `/`),
+  which is never written.
 - **The repair.** Inside the home folder, `look` is `ls -lR '<path>'` (`ls -l` for a file) and `repair` is
   `chown -R <uid> '<path>'` (`chown -h` for a file), `<uid>` being the user's own uid, which needs no
   lookup in the user database. `-h` changes a symbolic link itself, never the file it points to, so that a
