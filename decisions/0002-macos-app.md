@@ -133,11 +133,21 @@ developing the app. Its builds stay ad hoc signed, for the repository owner's ow
   renamed copy is told to go to the Trash only while another copy of Capsule is at
   `/Applications/Capsule.app`, a folder whose `Info.plist` gives the same bundle identifier; with none
   there, it is told to be renamed Capsule.
+- **The folder checks** (§12, §3.3). Once a folder is added from the menu, `roots check --json <alias>`
+  runs on it with the window and Cancel adding has, so that a question macOS asks comes then, not at a
+  request from Lucille. A folder that opens, or a check that gives no answer, gets the menu's note "Folder
+  added"; otherwise "Capsule can't open *name*", that the folder was added, and what Set Up's Folders
+  page says of it, in that page's words (`SetupText.folderState`). Once the first launch note is closed,
+  or at once while connected, `roots check --json` runs on every folder, with no window; while each one
+  opens nothing is said, and otherwise one note names each that doesn't, in those words. A check that
+  fails says nothing. Each note offers **Open Privacy Settings** when macOS blocks a folder; `missing`
+  is words only, with no **Choose Again**. The Folders submenu shows, under a folder, what its last check
+  found.
 - **The one opener** (§20). A note's button, or one under a folder on Set Up's Folders page, shows the
   user a place in macOS, and only from that click: **Open Date & Time Settings** in the note behind the
   line that says the Mac's clock is off; **Open Privacy Settings**, at Files & Folders, never Full Disk
-  Access, in the note that says macOS is blocking Capsule from a folder being added, and under a folder
-  `roots check` finds macOS refuses the host; and **Show Applications Folder**, then Quit, for every copy
+  Access, in the note that says macOS is blocking Capsule from a folder being added, and under a folder,
+  or in the note of a folder, that `roots check` finds macOS refuses the host; and **Show Applications Folder**, then Quit, for every copy
   the app judges not to be in the Applications folder. The places are a closed list, and one call in
   `macos/App/SystemPlaces.swift` opens them; no text or request from Lucille, and no refusal of a request,
   offers one (the clock's place follows the clock state `run` reports, which the hub's refusals of the
@@ -145,7 +155,8 @@ developing the app. Its builds stay ad hoc signed, for the repository owner's ow
   cannot open the place, the note comes again with "Capsule couldn't open System Settings." (or "your
   Applications folder") first, and OK or Quit alone; for the button under a folder on Set Up's Folders
   page, which had no note, a note says it first, then what that page says of the folder and how to allow
-  it by hand, with OK alone. What the two System Settings pages are called on each macOS, and that their
+  it by hand, with OK alone; the note of a folder's check comes again with its own words, then how to
+  allow the folder by hand, as that page says it. What the two System Settings pages are called on each macOS, and that their
   addresses open them, is not yet seen on a Mac: `check_app.py places` opens each and prints what it
   shows.
 - **The update notice** (§16). When `run` says that Lucille asked for a newer release (`host_too_old`), the
@@ -178,9 +189,8 @@ developing the app. Its builds stay ad hoc signed, for the repository owner's ow
   on macOS 26 and 27, without the end-to-end check (§18, §19). Logs and UI snapshots are uploaded on every
   run. The disk image is uploaded only by a manual run whose every check passed, and kept 3 days.
 
-Not built yet: the typed gate (§11.2; decided on 2026-11-21), the check
-after a folder is added from the menu, and at launch (`roots check`, §12; Set Up's Folders page runs it),
-the Welcome and main windows, updates, **Remove Capsule…** (section 17), Copy
+Not built yet: the typed gate (§11.2; decided on 2026-11-21), **Choose Again** for a folder `roots check`
+finds `missing` (§3.3, §12; the checks say it in words only), the Welcome and main windows, updates, **Remove Capsule…** (section 17), Copy
 Diagnostics (§15), Developer ID signing and notarization, ripgrep (`Helpers/rg`; the pins hold an empty
 ripgrep commit until then, and `Resources/licenses/` has no ripgrep licence), and the release jobs. The
 first build also departs from this record in these ways, among others; `macos/README.md`, under "Choices
@@ -245,7 +255,8 @@ made for the first build", says why for most of them:
   Review and Turn On is not built (§13); on What Lucille may do it says so as a fact, and its switch is
   the menu's. Set Up lists `host.describe` with its switch and the core's words, as §13 has it, where
   the menu does not. The Folders page offers **Open Privacy Settings** under a folder whose check is
-  `denied_by_macos`, and says `missing` in words, with no Choose Again button (§12);
+  `denied_by_macos`, and says `missing` in words, with no Choose Again button (§12), as do the notes
+  of the checks at launch and after Add a Folder… ("What is built today");
 - a run the app stopped waiting for is counted as stuck, and said to hold up every change to folders and
   abilities, only when its verb takes the host's settings lock: of the short runs, `ops enable` and
   `ops disable`, `roots add` but the alias suggestion, `roots remove` and `policy reset`

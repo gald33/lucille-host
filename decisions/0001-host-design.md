@@ -17,8 +17,8 @@ On 2026-11-26: `files.search`, and the release workflow, `release.yml`, which ru
 tag; it has not run yet, and `v0.1.0` is the first. On
 2026-11-27: the conformance suite, with a positive control and scenarios for some rows of "Host
 invariants and their tests"; [CLAIMS.md](../CLAIMS.md) names each, and a row with none is still pending.
-Not built:
-`lucille-host verify`.
+Also on 2026-11-27, after `0.1.0`: `lucille-host verify`, in no release yet; "Choices made in building
+verify" lists what that build chose.
 
 This record describes the program in this repository, and it governs the host's code. A pull request that
 changes the design updates this record in the same pull request.
@@ -774,7 +774,7 @@ where there is one (`waiting`, `sas_pending`, `confirmed`, `leaked`, `expired`, 
 - An extra, `[conformance]`, adds `agent-switchboard[server]` at the runtime pin and `starlette>=1.9`, for
   the conformance suite only. A test asserts that the runtime import graph never reaches `fastapi` or
   `uvicorn`.
-- An extra, `[verify]`, adds `pypi-attestations` for `lucille-host verify`, which a later release adds.
+- An extra, `[verify]`, adds `pypi-attestations` for `lucille-host verify` (below).
 - There is no auto-update.
 
 **`release.yml`** runs on protected `v*` tags, on GitHub-hosted runners only, with every action pinned by
@@ -792,10 +792,28 @@ A workflow-lint test rejects any `self-hosted` label, and any action not pinned 
 
 **Before anyone other than the repository owner pairs a computer,** a later release adds:
 - a rebuild job that compares sha256s;
-- `lucille-host verify`;
+- `lucille-host verify` (built, below; `0.1.0` does not hold it);
 - conformance scenarios for every row of "Host invariants and their tests" that names conformance, not
   only the first;
 - exact dependency pins in a user's install, not only in CI's (THREAT_MODEL.md, "Known gaps").
+
+**`lucille-host verify`** checks the release whose code is running, and stops at the first check that
+fails:
+1. the host is a release, `X.Y.Z`, not a development build;
+2. PyPI lists exactly the release's wheel and sdist, and marks neither, nor the release, yanked;
+3. for each of the two files, the bytes PyPI serves have the sha256 PyPI lists, and each file is
+   attested as `release.yml`'s post-publish check requires (`tools/release/check_release.py
+   published`): every attestation bundle PyPI records names repository `gald33/lucille-host`, workflow
+   `release.yml` and environment `pypi`; every attestation in it verifies with sigstore against that
+   repository and workflow and those bytes; and its certificate names that repository, tag
+   `refs/tags/v<version>`, and a GitHub-hosted runner;
+4. the files installed are the attested wheel's: every file the wheel holds but its `RECORD` is in the
+   folder the running package was imported from, with the same sha256, and the package folder holds no
+   other file but bytecode (`.pyc`) in a `__pycache__` folder.
+
+It needs the `[verify]` extra, and says so (`no_verifier`) without it. It writes one `verify` object
+with `--json` (spec/CLI.md). Its error codes say which kind of check failed, so that a shell can tell a
+release that is not attested from files that differ here, and both from a network that could not be used.
 
 That nobody else pairs until then is Lucille policy as of 2026-10-27; not proven by this repository.
 
@@ -832,6 +850,11 @@ That nobody else pairs until then is Lucille policy as of 2026-10-27; not proven
    - its publisher names repository `gald33/lucille-host`, workflow `release.yml` and environment `pypi`;
    - its signing certificate's Runner Environment extension reads `github-hosted`.
 
+   `lucille-host verify` makes this check on an installed host, and checks the installed files against
+   the attested wheel ("Packaging, releases and verification"). It runs the installed host's own code,
+   so it cannot vouch for a host whose files were already changed: a third party runs it from a fresh
+   install, or checks the files with `pypi-attestations` itself.
+
    The same check works for the pinned `agent-switchboard` release: its publisher is `gald33/switchboard`,
    `publish.yml`, environment `pypi`, `refs/tags/v2.6.0`. That certificate was decoded on 2026-10-19;
    since 2026-11-26 `release.yml` verifies it with sigstore before it builds a release
@@ -846,7 +869,11 @@ That nobody else pairs until then is Lucille policy as of 2026-10-27; not proven
 **What verification cannot establish:**
 - anything about what Lucille's backend does with a reply;
 - whether installed files are still the verified ones after any process running as the same user has
-  touched them;
+  touched them; and `lucille-host verify` is the installed code checking itself, which a changed install
+  can make say anything;
+- the bytecode Python may load in place of an installed source file, the `lucille-host` script the
+  installer wrote, the interpreter, and every other package in the environment, none of which `verify`
+  checks;
 - the provenance of dependencies beyond the ones checked;
 - tag protection and the `pypi` environment's required reviewer, which are repository settings.
 
@@ -1210,6 +1237,43 @@ each could be made another way in a later pull request that updates this list.
   hub call, once the loader's first look at the policy is in or a tick has passed.
 - **The digest key** is read before `run` serves: a damaged key stops `run` (`state_invalid`), and is not
   taken for an invalid policy.
+
+## Choices made in building verify
+
+Where this record left `lucille-host verify` open, its build chose the smallest form that is safe. The
+maintainer accepts or changes each in the pull request that built it.
+- **It checks the running release only.** It takes no version, file or URL: what it checks is the code
+  that runs it, found from the package's own location, and its version. A development build is refused
+  (`not_a_release`) before anything is fetched.
+- **It checks both files PyPI serves,** the sdist as well as the wheel, as `release.yml` does, though only
+  the wheel is installed: a release whose sdist is not attested is not one this repository published.
+- **The installed files are compared with the attested wheel's own bytes,** read from the zip in memory
+  once its attestation has verified, not with the installed `RECORD`, which the installer writes and
+  any process running as the user can change. The installer's own files in the `.dist-info` folder
+  (`RECORD`, `INSTALLER`, `REQUESTED`, `direct_url.json`) are not compared, and not looked for. In the
+  package folder, a file the wheel does not hold fails the check, a compiled extension module or a lone
+  `.pyc` included, since Python would load either; bytecode in `__pycache__` is counted and not checked,
+  since a release ships none and every installer and interpreter may write it. A folder that is a
+  symbolic link fails too. A file that is a link is read through it.
+- **A yanked release fails,** with a code of its own (`yanked`): a yanked release is how "A bad release"
+  withdraws one, and the user is told to read the security advisories. PyPI's reason is not repeated.
+- **It runs in the command's own process,** not as a child: it opens no store and reads no file of a
+  profile, so it holds no secret a child would keep away. Its module, `verify.py`, has a lint zone of its
+  own with five more imports than the runtime's (`certifi`, `http`, `ssl`, `zipfile` and, imported only
+  when a check runs, `pypi_attestations`); `run` never calls it. Like the credential children
+  ([0003](0003-local-credentials.md)), it opens a connection of its own: an HTTPS GET to `pypi.org` or
+  `files.pythonhosted.org` only, the certificate checked against certifi's bundle, TLS 1.2 or later,
+  following no redirect, at most 64 MiB a response. `pypi-attestations` fetches sigstore's trust root
+  with its own client, and keeps it in the user's cache folder.
+- **A network that cannot be used is not a verdict.** PyPI or sigstore's trust root that cannot be
+  reached, or a status but 200 and 404, gives `unreachable`, and says to try again. PyPI's 404 for the
+  release or a file's provenance is `not_attested`. An error from `pypi-attestations` that is not its own
+  verification error is taken for a trust root that could not be fetched (`unreachable`); either way
+  nothing verifies.
+- **Dependencies are not checked.** An install resolves `agent-switchboard` and `keyring` within the
+  wheel's ranges, not the lock's pins ("Not decided yet"), so `verify` has no pin to check them against.
+  The `[verify]` extra declares `pypi-attestations` with no version, as before; the lock pins 0.0.30 for
+  this repository, and an install takes what it resolves.
 
 ## Not decided yet
 

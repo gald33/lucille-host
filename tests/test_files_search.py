@@ -287,6 +287,9 @@ def test_a_line_that_is_not_a_message_reads_as_unreadable(line: bytes) -> None:
         _rg_match(path={"text": "/etc/passwd"}),
         _rg_match(path={"text": "../outside.txt"}),
         _rg_match(path={"text": "sub/../../outside.txt"}),
+        _rg_match(path={"text": "sub//a.txt"}),
+        _rg_match(path={"text": "sub/"}),
+        _rg_match(path={"text": ".."}),
         _rg_match(path={"bytes": _b64(b"/abs")}),
         _rg_match(path={"text": ""}),
         _rg_match(path="a.txt"),
@@ -342,6 +345,33 @@ def test_at_most_matches_most_and_each_line_cut() -> None:
     assert match["lines"] == {"bytes": _b64(b"\xff" * 1000)} and match["line_truncated"]
     (match,) = _read(_rg(_rg_match(line={"text": "x" * 1000})))["matches"]
     assert len(match["lines"]["text"]) == 1000 and not match["line_truncated"]
+
+
+def test_text_is_cut_at_a_characters_end() -> None:
+    # One byte, then two-byte characters: byte 1000 falls inside a character, which goes whole.
+    line = "a" + "\u00e9" * 999 + "\n"
+    (match,) = _read(_rg(_rg_match(line={"text": line})))["matches"]
+    assert match["lines"] == {"text": "a" + "\u00e9" * 499} and match["line_truncated"]
+    # Four-byte characters: 1000 is a character's end, and the cut keeps 250 of them.
+    (match,) = _read(_rg(_rg_match(line={"text": "\U0001f600" * 300})))["matches"]
+    assert match["lines"] == {"text": "\U0001f600" * 250}
+    # Three bytes, then four-byte characters: the cut drops the one byte 1000 falls inside.
+    (match,) = _read(_rg(_rg_match(line={"text": "abc" + "\U0001f600" * 300})))["matches"]
+    assert match["lines"] == {"text": "abc" + "\U0001f600" * 249}
+
+
+def test_the_fit_counts_each_comma() -> None:
+    raw = _rg(*(_rg_match(number=n) for n in range(1, 6)))
+    whole, _ = _ripgrep.document(raw, _output.STREAM_CAP, cut=False)
+    size = _output.json_size(whole)
+    # At exactly its size the whole document fits; one byte less, the last match goes, though
+    # the document without that match's comma would have been small enough.
+    assert _ripgrep.document(raw, size, cut=False) == (whole, False)
+    found = _read(raw, size - 1)
+    assert [m["line_number"] for m in found["matches"]] == [1, 2, 3, 4] and found["truncated"]
+    # The first match has no comma before it: a cap of the one-match document holds it.
+    one, _ = _ripgrep.document(_rg(_rg_match()), _output.STREAM_CAP, cut=False)
+    assert _read(raw, _output.json_size(one))["matches"] == [json.loads(one)["matches"][0]]
 
 
 def test_a_path_past_its_most_is_left_out() -> None:

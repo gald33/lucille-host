@@ -210,7 +210,9 @@ def test_conformance_jobs_install_ripgrep_where_files_search_looks(job: str) -> 
         "  sudo apt-get install -y -q --no-install-recommends ripgrep\n" in runs
     )
     assert "/usr/bin/rg --version" in runs
-    assert "brew install ripgrep" in runs
+    # Without a `brew update` first: the formula of the runner image's own Homebrew, and no minutes
+    # spent fetching every formula there is.
+    assert "HOMEBREW_NO_AUTO_UPDATE=1 brew install ripgrep" in runs
     assert "/opt/homebrew/bin/rg --version" in runs
 
 
