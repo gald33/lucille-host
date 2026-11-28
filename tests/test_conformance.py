@@ -21,8 +21,8 @@ from typing import Any
 import pytest
 
 import lucille_host.conformance as conformance
-from lucille_host.conformance import _scenarios, _spawn
-from lucille_host.conformance._scenarios import Failed, Scenario
+from lucille_host.conformance import _procfs, _restore, _scenarios, _spawn
+from lucille_host.conformance._scenarios import Failed, Scenario, Skipped
 
 AS_ROOT = os.geteuid() == 0
 ROOT_REASON = "the host refuses to run as root; CI runs this test as an ordinary user"
@@ -76,14 +76,33 @@ def test_each_scenario_gets_a_line_and_any_error_fails() -> None:
     def breaks(ctx: object) -> None:
         raise KeyError("stdout")
 
+    def cannot(ctx: object) -> None:
+        raise Skipped("needs Linux's /proc")
+
     out = io.StringIO()
-    chosen = [Scenario("passes", passes), Scenario("fails", fails), Scenario("breaks", breaks)]
-    assert conformance.run_scenarios(chosen, object(), out) == (1, 2)
+    chosen = [
+        Scenario("passes", passes),
+        Scenario("fails", fails),
+        Scenario("breaks", breaks),
+        Scenario("cannot", cannot),
+    ]
+    assert conformance.run_scenarios(chosen, object(), out) == (1, 2, 1)
     assert out.getvalue().splitlines() == [
         "PASS passes",
         "FAIL fails: expected refused not_enabled, got done [details on stderr]",
         "FAIL breaks: KeyError: 'stdout'",
+        "SKIP cannot: needs Linux's /proc",
     ]
+
+
+def test_skipped_alone_is_not_a_pass() -> None:
+    def cannot(ctx: object) -> None:
+        raise Skipped("needs Linux's /proc")
+
+    out = io.StringIO()
+    passed, failed, skipped = conformance.run_scenarios([Scenario("cannot", cannot)], object(), out)
+    assert (passed, failed, skipped) == (0, 0, 1)
+    assert conformance.verdict(passed, failed) == 1
 
 
 def test_scenarios_are_registered_once_each_with_a_description() -> None:
@@ -91,6 +110,9 @@ def test_scenarios_are_registered_once_each_with_a_description() -> None:
     assert len(names) == len(set(names)) >= 20
     assert names[0] == "control-enabled-op-runs"
     assert names[-1] == "policy-unchanged"
+    # The modules beside _scenarios.py register theirs when the package is imported, so this
+    # test sees them however it is run.
+    assert {"child-env-built-and-no-key", "upgrade-disables-changed-op"} <= set(names)
     assert all(found.doc for found in _scenarios.REGISTRY)
     with pytest.raises(ValueError, match="two scenarios"):
         _scenarios.scenario(lambda ctx: None, name="unknown-op")
@@ -124,8 +146,52 @@ def test_suite_passes_against_the_installed_host() -> None:
     )
     shown = f"stdout:\n{done.stdout}\nstderr:\n{done.stderr}"
     assert done.returncode == 0, shown
-    lines = [line for line in done.stdout.splitlines() if line.startswith(("PASS ", "FAIL "))]
-    assert lines == [f"PASS {found.name}" for found in _scenarios.REGISTRY], shown
+    lines = [
+        line for line in done.stdout.splitlines() if line.startswith(("PASS ", "FAIL ", "SKIP "))
+    ]
+    names = [found.name for found in _scenarios.REGISTRY]
+    assert [_verdict(line) for line in lines] == expected_verdicts(names, needs_met()), shown
+
+
+def needs_met() -> dict[str, bool]:
+    """Each scenario that may skip, and whether what it needs is here: Linux's ``/proc`` for the
+    child's environment, and ripgrep at the catalog's path, looked for on disk by the suite
+    itself rather than asked of the host, for the scenarios that search."""
+    search = _restore.ripgrep_here() is not None
+    return {
+        "child-env-built-and-no-key": _procfs.available(),
+        "output-bounded": search,
+        "replies-path-free": search,
+        "output-decodable": search,
+    }
+
+
+def expected_verdicts(names: list[str], needs: dict[str, bool]) -> list[tuple[str, str]]:
+    """What the suite must print for each scenario, in order: SKIP only for a scenario whose
+    need is not met here, and PASS for every other, so that a scenario that skips where it could
+    check, or one that may never skip, fails this test."""
+    return [(name, "SKIP" if needs.get(name, True) is False else "PASS") for name in names]
+
+
+def _verdict(line: str) -> tuple[str, str]:
+    verdict, rest = line.split(" ", 1)
+    return rest.split(":", 1)[0].strip(), verdict
+
+
+def test_expected_verdicts_allow_a_skip_only_where_its_need_is_missing() -> None:
+    names = ["control-enabled-op-runs", "child-env-built-and-no-key", "output-bounded"]
+    met = {"child-env-built-and-no-key": True, "output-bounded": True}
+    assert expected_verdicts(names, met) == [(name, "PASS") for name in names]
+    missing = {"child-env-built-and-no-key": False, "output-bounded": True}
+    assert expected_verdicts(names, missing) == [
+        ("control-enabled-op-runs", "PASS"),
+        ("child-env-built-and-no-key", "SKIP"),
+        ("output-bounded", "PASS"),
+    ]
+
+
+def test_every_scenario_that_may_skip_is_registered() -> None:
+    assert set(needs_met()) <= {found.name for found in _scenarios.REGISTRY}
 
 
 def _refused_as_unknown_op(ctx: _scenarios.Context) -> None:

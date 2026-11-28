@@ -547,8 +547,11 @@ signing its pairing code with a throwaway key it passes to `--test-key` (never L
 policy with the host's own `ops enable` and `roots add`, as you would. Then it plays a hostile Lucille:
 it starts `run`, offers a work room, and posts the requests of its scenarios, each aimed at a row of
 "Host invariants and their tests" in the design record, and a positive control. [CLAIMS.md](CLAIMS.md)
-names the scenario behind each claim. It prints one line per scenario, `PASS` or `FAIL` with the reason, and exits 0 only
-when at least one scenario ran and every one passed. The host refuses to run as root, and so does the
+names the scenario behind each claim. It prints one line per scenario: `PASS`, `FAIL` with the reason, or
+`SKIP` with the reason when the scenario cannot check on this computer: the child's environment is read
+from Linux's `/proc`, which macOS does not have, and the scenarios that search need ripgrep where the
+catalog says (`/usr/bin/rg` on Linux, `/opt/homebrew/bin/rg` on macOS). It exits 0 only when at least one scenario passed and
+none failed; a skipped scenario is never a pass. The host refuses to run as root, and so does the
 suite: run it as an ordinary user. What each scenario asserts is in its docstring, in
 `lucille_host/conformance/`.
 
