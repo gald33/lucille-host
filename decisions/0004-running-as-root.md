@@ -430,7 +430,8 @@ and repair belong in the host at all. It is built in the smallest form that answ
 nothing on its own:
 - `lucille-host profile check`, run as the user, **finds and says**; it never repairs. The repair needs
   root, which the host never is (as root, the verb is refused like every other). It takes no lock, sends
-  nothing, and writes nothing but its line in the run record, and it exits 0 whatever it finds.
+  nothing, and writes nothing but its line in the run record (which, as for every command, makes the
+  state folder where it is missing), and it exits 0 whatever it finds.
 - It resolves the profile's folders with `paths.dirs`, as every verb does (an absolute `XDG_*_HOME`, a
   relative one ignored, a relative `HOME`, the macOS layout, where the state folder is inside the config
   folder and is looked at once), then follows every symbolic link (`os.path.realpath`), since the host
@@ -440,7 +441,10 @@ nothing on its own:
   rest (4.3: "the highest folder shown owned by root is the one to repair"). A folder the user cannot look
   at is reported as `unreadable` only when no folder above it is another uid's (4.3: below a root-owned
   folder that is "expected and is not a second finding"). Where the profile folder is the user's, it looks
-  at every folder and file inside it (`policy.toml` among them), not following a symbolic link.
+  at every folder and file inside it (`policy.toml` among them). It follows no symbolic link into a
+  folder, and a link's own owner does not matter; what a link points to, which the host follows, is
+  looked at and reported by its own path, so that a `policy.toml` linked to a root-owned file names that
+  file.
 - Inside the home folder, each finding carries two command lines for a person to run as root: `ls -lR`
   (`ls -l` for a file) first, as "Look first" asks, then `chown -R <uid>` (`chown` for a file). The path is
   always in single quotes. The user is named by **uid**, not by name: that needs no user database (the
@@ -454,14 +458,21 @@ nothing on its own:
   pointer to the verb to their message: "if an earlier run as root left it so, `lucille-host profile check`
   names what to repair". The code is unchanged. `run`'s `stopped` objects carry no message, so `run` has
   none.
-- Tests: planted owners, since only root can make a root-owned file and the suite never runs as root (it
-  replaces the two functions that read an owner); a real folder with no permissions for the folders the
-  user cannot look into. They cover a root-owned file, a root-owned profile folder and a root-owned
-  ancestor, the default layout, a custom `XDG_STATE_HOME` inside and outside the home folder, a relative
-  `XDG_CONFIG_HOME` and a relative `HOME`, symbolic links inside and outside the home folder and inside the
-  profile, the macOS layout, a quote in a path, and a profile the user owns, which passes. Not run: a real
-  root-owned profile on a real system (nothing here runs as root). Run by hand on macOS; CI runs the tests on
-  Linux and macOS.
+- Tests: planted owners, since only root can make a root-owned file and the suite never runs as root. They
+  replace only `owners._uid`, which reads the owner out of a `stat` result, and plant by device and inode,
+  so every `stat` and `lstat` is real: a link and what it points to are told apart, and a folder with no
+  permissions refuses a `stat` below it for real, as a root-owned 0700 folder does. They cover a
+  root-owned file, a root-owned profile folder, a root-owned chain the user cannot look into, walked up to
+  its highest folder, and a walk that reaches the home folder and stops there; the default layout, a
+  custom `XDG_STATE_HOME` inside and outside the home folder, a relative `XDG_CONFIG_HOME` and a relative
+  `HOME`, symbolic links inside and outside the home folder and inside the profile (a link to a root-owned
+  folder or file, one that points at nothing, one that cannot be looked at), the macOS layout, a quote in a
+  path, and a profile the user owns, which passes. Each of these mutations of the check fails a test: no
+  stop at the home folder, a stop at the first folder that cannot be looked at, an unreadable folder put
+  before a root-owned one above it, `stat` for `lstat` inside the profile, and either arm of the pointer's
+  path test. Not run here: a real root-owned profile on a real system (nothing here runs as root); the
+  review of the change made some as root on Linux, and the verb named the right folder each time. Run by
+  hand on macOS; CI runs the tests on Linux and macOS.
 
 For B or C, add to the above: a privilege drop in `_exec.py:235-243` and its tests; a root-aware
 `policy.is_broad` (or a rule that a root caller's "home" is every home); the path conditions in `paths.py`;

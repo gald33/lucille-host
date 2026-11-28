@@ -583,22 +583,18 @@ def _not_toml(w: World) -> None:
 
 
 def _owned(w: World, planted: tuple[Path, ...] = ()) -> None:
-    """The owners the check reads: root (uid 0) for the paths ``planted``, as only root could make
-    them, and the uid every test is given (conftest.py) for the files this suite made."""
-    roots = {os.path.realpath(path) for path in planted}
+    """The owners the check reads: root (uid 0) for the paths ``planted``, by device and inode, as
+    only root could make them, and the uid every test is given (conftest.py) for the files this
+    suite made. Each ``stat`` the check makes is still a real one."""
+    roots = {(info.st_dev, info.st_ino) for info in map(os.stat, planted)}
     mine = os.getuid()
 
-    def planting(real: Callable[[Path], int | None]) -> Callable[[Path], int | None]:
-        def owner(path: Path) -> int | None:
-            if os.path.realpath(path) in roots:
-                return 0
-            found = real(path)
-            return os.geteuid() if found == mine else found
+    def uid(info: os.stat_result) -> int:
+        if (info.st_dev, info.st_ino) in roots:
+            return 0
+        return os.geteuid() if info.st_uid == mine else info.st_uid
 
-        return owner
-
-    w.monkeypatch.setattr(owners, "_owner", planting(owners._owner))
-    w.monkeypatch.setattr(owners, "_own_owner", planting(owners._own_owner))
+    w.monkeypatch.setattr(owners, "_uid", uid)
 
 
 def _root_owned(w: World) -> None:

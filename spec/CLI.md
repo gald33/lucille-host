@@ -562,9 +562,10 @@ drain: a signal (`SIGTERM`, `SIGHUP` or Ctrl-C), the end of standard input, or a
 (section 17). `not_yours` is inside the home folder and owned by another user (`uid`; root is 0); `look`
 and `repair` are command lines for a person to run as root, with the path in single quotes: `look` shows
 what is there, and `repair` gives it to the user. A shell shows them, and never runs them. `outside_home`
-is the same outside the home folder, where the host suggests no repair. `unreadable` cannot be looked at,
-and no folder above it is another user's. `ok` names the profile's two folders, as the host resolves
-them; on macOS the state folder is inside the config folder.
+is the same outside the home folder, where the host suggests no repair. `unreadable` cannot be looked at:
+a folder above it refuses the user (above a profile folder, it is written only when no folder above it is
+another user's). `ok` names the profile's two folders, as the host resolves them; on macOS the state
+folder is inside the config folder.
 
 ### `verify`: the running release passed every check
 
@@ -1378,7 +1379,8 @@ that root owns, mode 0700 or 0600, so that the user's own commands fail with `Pe
 ([decisions/0004-running-as-root.md](../decisions/0004-running-as-root.md), 1.2 and 4.3). `profile check`,
 run as the user, finds them and says how to repair each one. It changes nothing (the repair needs root,
 and the host never runs as root: as root it is refused, as every verb is), takes no lock, sends nothing,
-and writes nothing but its line in the run record (section 16). It exits 0 whatever it finds.
+and writes nothing but its line in the run record (section 16: like every command, it makes the state
+folder where that is missing). It exits 0 whatever it finds.
 
 - **Which folders.** The profile's config folder, and its state folder where that is not inside the config
   folder. Each is resolved as every verb resolves it (`HOME` where it is absolute, an absolute
@@ -1390,9 +1392,11 @@ and writes nothing but its line in the run record (section 16). It exits 0 whate
   the folders another user owns, it writes the highest, since `chown -R` of it repairs the ones below. A
   folder that cannot be looked at because the one above it refuses the user is written as `unreadable` only
   when no folder above it is another user's.
-- **Inside each folder**, where the folder itself is the user's: every folder and file, without following
-  a symbolic link. One another user owns is written, and nothing inside it is looked at; one that cannot
-  be looked at is `unreadable`.
+- **Inside each folder**, where the folder itself is the user's: every folder and file. One another user
+  owns is written, and nothing inside it is looked at; one that cannot be looked at is `unreadable`. A
+  symbolic link is not followed into, and its own owner does not matter; what it points to, which the host
+  follows (a `policy.toml` linked to a file kept elsewhere), is looked at as the folder or file it is, and
+  written by its own resolved path.
 - **The repair.** Inside the home folder, `look` is `ls -lR '<path>'` (`ls -l` for a file) and `repair` is
   `chown -R <uid> '<path>'` (`chown` for a file), `<uid>` being the user's own uid, which needs no lookup
   in the user database. The group is left as it is. The folder may hold another program's files by now

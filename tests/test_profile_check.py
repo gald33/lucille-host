@@ -2,19 +2,21 @@
 the folders and files of a profile that another user owns, found by the user, with the repair.
 
 Only root can make a file root owns, and the suite never runs as root, so another user's folder or
-file is planted: :func:`owners._owner` and :func:`owners._own_owner` are made to say uid 0 for the
-paths a test names, as root would leave them (each folder root made, from the highest down), and,
-for the rest, the uid every test is given (tests/conftest.py) where the suite's own uid owns it.
-A folder the user cannot look inside is real: a folder of the user's with no permissions at all,
-which refuses ``stat`` below it as a root-owned 0700 folder does. Every case runs in conftest's
-private home, with the layouts 4.3 lists: the default one, a custom and a relative
-``XDG_*_HOME``, a relative ``HOME``, symbolic links, macOS, and a folder outside the home folder.
+file is planted: :func:`owners._uid`, which reads the owner from what ``stat`` or ``lstat`` gave, is
+made to say uid 0 for the folders and files a test names, by device and inode, as root would leave
+them (each folder root made, from the highest down), and, for the rest, the uid every test is given
+(tests/conftest.py) where the suite's own uid owns it. Every ``stat`` and ``lstat`` the check makes
+is a real one, so that a symbolic link and what it points to are told apart as they are outside the
+suite. A folder the user cannot look inside is real too: a folder with no permissions at all, which
+refuses ``stat`` below it as a root-owned 0700 folder does. Every case runs in conftest's private
+home, with the layouts 4.3 lists: the default one, a custom and a relative ``XDG_*_HOME``, a
+relative ``HOME``, symbolic links, macOS, and a folder outside the home folder.
 """
 
 from __future__ import annotations
 
 import os
-from collections.abc import Callable, Iterator
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -29,22 +31,21 @@ from tests.spec import _support
 MINE = os.getuid()
 
 
+Planted = set[tuple[int, int]]
+
+
 @pytest.fixture
-def planted(monkeypatch: pytest.MonkeyPatch) -> set[str]:
-    """The real paths that root owns, as far as the check can tell; empty to begin with."""
-    found: set[str] = set()
+def planted(monkeypatch: pytest.MonkeyPatch) -> Planted:
+    """The folders and files root owns, as far as the check can tell, by device and inode; empty to
+    begin with."""
+    found: Planted = set()
 
-    def planting(real: Callable[[Path], int | None]) -> Callable[[Path], int | None]:
-        def owner(path: Path) -> int | None:
-            if os.path.realpath(path) in found:
-                return 0
-            uid = real(path)
-            return TEST_UID if uid == MINE else uid
+    def uid(info: os.stat_result) -> int:
+        if (info.st_dev, info.st_ino) in found:
+            return 0
+        return TEST_UID if info.st_uid == MINE else info.st_uid
 
-        return owner
-
-    monkeypatch.setattr(owners, "_owner", planting(owners._owner))
-    monkeypatch.setattr(owners, "_own_owner", planting(owners._own_owner))
+    monkeypatch.setattr(owners, "_uid", uid)
     return found
 
 
@@ -55,11 +56,13 @@ def home(home: Path) -> Path:
     return home
 
 
-def _plant(planted: set[str], *where: Path) -> None:
-    planted.update(os.path.realpath(path) for path in where)
+def _plant(planted: Planted, *where: Path) -> None:
+    """What each of ``where`` is, a symbolic link followed, made root's. Before any folder above it
+    loses its permissions."""
+    planted.update((info.st_dev, info.st_ino) for info in map(os.stat, where))
 
 
-def _plant_down(planted: set[str], top: Path, folder: Path) -> None:
+def _plant_down(planted: Planted, top: Path, folder: Path) -> None:
     """``top`` and every folder from it down to ``folder``, as root makes them."""
     _plant(planted, folder, *[above for above in folder.parents if above.is_relative_to(top)])
 
@@ -85,14 +88,15 @@ def _states(found: list[owners.Found]) -> list[tuple[str, Path]]:
 
 @pytest.fixture
 def unreadable_folders() -> Iterator[list[Path]]:
-    """Folders a test takes every permission from, given back before ``tmp_path`` is removed."""
+    """Folders a test takes every permission from, given back before ``tmp_path`` is removed, the
+    last taken first."""
     taken: list[Path] = []
     yield taken
-    for folder in taken:
+    for folder in reversed(taken):
         folder.chmod(0o700)
 
 
-def test_a_profile_the_user_owns_passes(home: Path, planted: set[str]) -> None:
+def test_a_profile_the_user_owns_passes(home: Path, planted: Planted) -> None:
     environ = _linux(home)
     found = _made(environ)
     found.policy_file.write_text("")
@@ -100,11 +104,11 @@ def test_a_profile_the_user_owns_passes(home: Path, planted: set[str]) -> None:
     assert _check(environ) == []
 
 
-def test_nothing_made_yet_passes(home: Path, planted: set[str]) -> None:
+def test_nothing_made_yet_passes(home: Path, planted: Planted) -> None:
     assert _check(_linux(home)) == []
 
 
-def test_a_root_owned_file_in_the_users_profile(home: Path, planted: set[str]) -> None:
+def test_a_root_owned_file_in_the_users_profile(home: Path, planted: Planted) -> None:
     environ = _linux(home)
     found = _made(environ)
     found.policy_file.write_text("")
@@ -122,7 +126,7 @@ def test_a_root_owned_file_in_the_users_profile(home: Path, planted: set[str]) -
     ]
 
 
-def test_a_root_owned_profile_folder(home: Path, planted: set[str]) -> None:
+def test_a_root_owned_profile_folder(home: Path, planted: Planted) -> None:
     environ = _linux(home)
     found = _made(environ)
     (found.state / "paused").write_text("")
@@ -137,23 +141,28 @@ def test_a_root_owned_profile_folder(home: Path, planted: set[str]) -> None:
 
 
 def test_the_highest_root_owned_ancestor_is_the_one_to_repair(
-    home: Path, planted: set[str], unreadable_folders: list[Path]
+    home: Path, planted: Planted, unreadable_folders: list[Path]
 ) -> None:
-    # As after a root `pause` in a home with no .local: every folder it made is root's, and the
-    # user cannot look below the highest one.
+    # As after a root `pause` in a home with no .local: every folder it made is root's, mode 0700,
+    # so the user's `stat` of each folder below .local is refused, for real. The refusals are not
+    # findings, and the walk goes on past them up to .local, which `chown -R` repairs.
     environ = _linux(home)
     found = _made(environ)
     local = home / ".local"
-    _plant(planted, local, local / "state", local / "state" / "lucille-host", found.state)
-    local.chmod(0)
-    unreadable_folders.append(local)
-    result = _check(environ)
+    chain = [found.state, found.state.parent, local / "state", local]
+    _plant(planted, *chain)
     real = Path(os.path.realpath(local))
+    for folder in chain:
+        folder.chmod(0)
+        unreadable_folders.append(folder)
+    with pytest.raises(PermissionError):
+        found.state.stat()
+    result = _check(environ)
     assert _states(result) == [("not_yours", real)]
     assert result[0].repair == f"chown -R {TEST_UID} '{real}'"
 
 
-def test_the_config_and_state_sides_are_repaired_apart(home: Path, planted: set[str]) -> None:
+def test_the_config_and_state_sides_are_repaired_apart(home: Path, planted: Planted) -> None:
     environ = _linux(home)
     found = _made(environ)
     _plant_down(planted, home / ".config", found.config)
@@ -165,15 +174,22 @@ def test_the_config_and_state_sides_are_repaired_apart(home: Path, planted: set[
     assert found.config.is_dir()
 
 
-def test_the_home_folder_and_above_are_never_reported(home: Path, planted: set[str]) -> None:
+def test_the_home_folder_and_above_are_never_reported(home: Path, planted: Planted) -> None:
+    # Every folder from each profile folder up to the home folder is root's, and so are the home
+    # folder and the one above it: the walk reaches the home folder, and stops there.
     environ = _linux(home)
-    _made(environ)
+    found = _made(environ)
+    _plant_down(planted, home / ".config", found.config)
+    _plant_down(planted, home / ".local", found.state)
     _plant(planted, home, home.parent)
-    assert _check(environ) == []
+    assert _states(_check(environ)) == [
+        ("not_yours", Path(os.path.realpath(home / ".config"))),
+        ("not_yours", Path(os.path.realpath(home / ".local"))),
+    ]
 
 
 def test_a_folder_the_user_cannot_look_inside_with_no_other_owner(
-    home: Path, planted: set[str], unreadable_folders: list[Path]
+    home: Path, planted: Planted, unreadable_folders: list[Path]
 ) -> None:
     environ = _linux(home)
     found = _made(environ)
@@ -184,7 +200,7 @@ def test_a_folder_the_user_cannot_look_inside_with_no_other_owner(
 
 
 def test_a_folder_inside_the_profile_that_cannot_be_listed(
-    home: Path, planted: set[str], unreadable_folders: list[Path]
+    home: Path, planted: Planted, unreadable_folders: list[Path]
 ) -> None:
     environ = _linux(home)
     found = _made(environ)
@@ -195,7 +211,7 @@ def test_a_folder_inside_the_profile_that_cannot_be_listed(
     assert _states(_check(environ)) == [("unreadable", Path(os.path.realpath(pairs)))]
 
 
-def test_a_custom_xdg_folder_inside_home(home: Path, planted: set[str]) -> None:
+def test_a_custom_xdg_folder_inside_home(home: Path, planted: Planted) -> None:
     environ = _linux(home, XDG_STATE_HOME=str(home / "data" / "state"))
     found = _made(environ)
     assert found.state == home / "data" / "state" / "lucille-host" / "default"
@@ -207,7 +223,7 @@ def test_a_custom_xdg_folder_inside_home(home: Path, planted: set[str]) -> None:
 
 
 def test_a_custom_xdg_folder_outside_home_gets_no_repair(
-    home: Path, tmp_path: Path, planted: set[str]
+    home: Path, tmp_path: Path, planted: Planted
 ) -> None:
     elsewhere = tmp_path / "srv" / "state"
     environ = _linux(home, XDG_STATE_HOME=str(elsewhere))
@@ -220,7 +236,7 @@ def test_a_custom_xdg_folder_outside_home_gets_no_repair(
 
 
 def test_a_relative_xdg_folder_is_ignored_as_every_verb_ignores_it(
-    home: Path, planted: set[str], monkeypatch: pytest.MonkeyPatch
+    home: Path, planted: Planted, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.chdir(home)
     environ = _linux(home, XDG_CONFIG_HOME="relative/config")
@@ -232,7 +248,7 @@ def test_a_relative_xdg_folder_is_ignored_as_every_verb_ignores_it(
 
 
 def test_a_relative_home_resolves_as_the_paths_do(
-    tmp_path: Path, planted: set[str], monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, planted: Planted, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("HOME", "home")
@@ -245,7 +261,7 @@ def test_a_relative_home_resolves_as_the_paths_do(
 
 
 def test_a_symlinked_folder_inside_home_is_repaired_where_it_points(
-    home: Path, planted: set[str]
+    home: Path, planted: Planted
 ) -> None:
     dotfiles = home / "dotfiles" / "config"
     dotfiles.mkdir(parents=True)
@@ -260,7 +276,7 @@ def test_a_symlinked_folder_inside_home_is_repaired_where_it_points(
 
 
 def test_a_symlinked_folder_pointing_outside_home(
-    home: Path, tmp_path: Path, planted: set[str]
+    home: Path, tmp_path: Path, planted: Planted
 ) -> None:
     target = tmp_path / "disk" / "local"
     target.mkdir(parents=True)
@@ -271,8 +287,8 @@ def test_a_symlinked_folder_pointing_outside_home(
     assert _states(_check(environ)) == [("outside_home", Path(os.path.realpath(target / "state")))]
 
 
-def test_a_symlink_inside_the_profile_is_not_followed(
-    home: Path, tmp_path: Path, planted: set[str]
+def test_a_symlink_inside_the_profile_is_not_followed_into(
+    home: Path, tmp_path: Path, planted: Planted
 ) -> None:
     environ = _linux(home)
     found = _made(environ)
@@ -281,10 +297,60 @@ def test_a_symlink_inside_the_profile_is_not_followed(
     (outside / "root-file").write_text("")
     _plant(planted, outside / "root-file")
     (found.state / "link").symlink_to(outside)
+    (found.state / "nowhere").symlink_to(tmp_path / "missing")
+    (found.state / "itself").symlink_to(found.state / "itself")
     assert _check(environ) == []
 
 
-def test_the_macos_layout(home: Path, planted: set[str]) -> None:
+def test_what_a_symlink_inside_the_profile_points_to_is_looked_at(
+    home: Path, tmp_path: Path, planted: Planted
+) -> None:
+    # The link is the user's; the folder it points to is root's, and is reported by its own path,
+    # outside the home folder, with nothing inside it.
+    environ = _linux(home)
+    found = _made(environ)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "root-file").write_text("")
+    _plant(planted, outside, outside / "root-file")
+    (found.state / "link").symlink_to(outside)
+    assert _check(environ) == [
+        owners.Found("outside_home", Path(os.path.realpath(outside)), "folder", 0)
+    ]
+
+
+def test_a_policy_file_linked_to_a_root_owned_file(home: Path, planted: Planted) -> None:
+    # The host reads the policy through the link, so the file it points to is the one to repair.
+    environ = _linux(home)
+    found = _made(environ)
+    target = home / "dotfiles" / "policy.toml"
+    target.parent.mkdir()
+    target.write_text("")
+    found.policy_file.symlink_to(target)
+    _plant(planted, target)
+    real = Path(os.path.realpath(target))
+    assert _check(environ) == [
+        owners.Found("not_yours", real, "file", 0, f"ls -l '{real}'", f"chown {TEST_UID} '{real}'")
+    ]
+
+
+def test_a_symlink_to_a_file_that_cannot_be_looked_at(
+    home: Path, planted: Planted, unreadable_folders: list[Path]
+) -> None:
+    environ = _linux(home)
+    found = _made(environ)
+    kept = home / "kept"
+    kept.mkdir()
+    (kept / "policy.toml").write_text("")
+    found.policy_file.symlink_to(kept / "policy.toml")
+    kept.chmod(0)
+    unreadable_folders.append(kept)
+    assert _states(_check(environ)) == [
+        ("unreadable", Path(os.path.realpath(kept)) / "policy.toml")
+    ]
+
+
+def test_the_macos_layout(home: Path, planted: Planted) -> None:
     environ = {"HOME": str(home)}
     found = _made(environ, family="macos")
     assert found.state == found.config / "state"
@@ -295,7 +361,7 @@ def test_the_macos_layout(home: Path, planted: set[str]) -> None:
     assert _states(_check(environ, family="macos")) == [("not_yours", real)]
 
 
-def test_a_path_with_a_quote_is_quoted_for_a_shell(home: Path, planted: set[str]) -> None:
+def test_a_path_with_a_quote_is_quoted_for_a_shell(home: Path, planted: Planted) -> None:
     environ = _linux(home, XDG_STATE_HOME=str(home / "it's here"))
     found = _made(environ)
     _plant_down(planted, home / "it's here", found.state)
@@ -309,7 +375,7 @@ def test_a_path_with_a_quote_is_quoted_for_a_shell(home: Path, planted: set[str]
 
 
 def test_the_verb_writes_nothing_but_its_run_record(
-    host_env: HostEnv, planted: set[str], capsys: pytest.CaptureFixture[str]
+    host_env: HostEnv, planted: Planted, capsys: pytest.CaptureFixture[str]
 ) -> None:
     paths.ensure_dir(host_env.dirs.config)
     paths.ensure_dir(host_env.dirs.state)
@@ -320,7 +386,7 @@ def test_the_verb_writes_nothing_but_its_run_record(
 
 
 def test_the_verb_in_text(
-    host_env: HostEnv, planted: set[str], capsys: pytest.CaptureFixture[str]
+    host_env: HostEnv, planted: Planted, capsys: pytest.CaptureFixture[str]
 ) -> None:
     config = paths.ensure_dir(host_env.dirs.config)
     _plant(planted, config)
@@ -337,7 +403,7 @@ def test_the_verb_in_text(
 
 def test_the_verb_in_json_validates(
     host_env: HostEnv,
-    planted: set[str],
+    planted: Planted,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -386,7 +452,14 @@ def test_a_denied_path_outside_the_profile_is_said_as_it_was(
 ) -> None:
     from lucille_host import cli
 
-    exc = PermissionError(13, "Permission denied", "/a/file")
-    assert not cli._profile_denied(exc, host_env.dirs)
-    inside = PermissionError(13, "Permission denied", str(host_env.dirs.state / "x"))
-    assert cli._profile_denied(inside, host_env.dirs)
+    def denied(path: Path | str) -> bool:
+        refused = PermissionError(13, "Permission denied", str(path))
+        return cli._profile_denied(refused, host_env.dirs)
+
+    assert not denied("/a/file")
+    assert not denied(host_env.home / "Documents")
+    assert denied(host_env.dirs.state / "x")
+    assert denied(host_env.dirs.config)
+    # A folder above one of the profile's folders.
+    assert denied(host_env.dirs.state.parent)
+    assert denied(host_env.home)

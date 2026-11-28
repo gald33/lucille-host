@@ -47,7 +47,8 @@ verbs:
 - ``pause``, ``resume`` and ``kill``: the local controls;
 - ``profile check``: whether every folder and file of the profile, and every folder above it up
   to the home folder, is the user's, and, for one that root (or another user) owns, the commands
-  that repair it, for a person to run as root (``owners.py``). It changes nothing.
+  that repair it, for a person to run as root (``owners.py``). It changes nothing but its line in
+  the run record.
 - ``verify``: the host installed here is a release PyPI serves, attested by this repository's
   release workflow, and its installed files are the release's (``verify.py``). It needs the
   ``[verify]`` extra, and reads no file of a profile.

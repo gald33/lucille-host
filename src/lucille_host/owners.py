@@ -5,7 +5,8 @@ A command run as root before the host refused uid 0 could leave folders and file
 profile that root owns, mode 0700 or 0600, so that the user's own commands fail with ``Permission
 denied``. This module finds them, run as the user, and says how to repair each one. It changes
 nothing: the repair needs root, and the host never runs as root. It sends nothing and writes
-nothing.
+nothing (the verb's line in the run record is :func:`lucille_host.cli.main`'s, as for every
+command).
 
 What it looks at, for each of the profile's folders (the config folder, and the state folder where
 it is not inside the config folder, as it is on macOS):
@@ -18,8 +19,10 @@ it is not inside the config folder, as it is on macOS):
   that cannot be looked at, because the folder above it does not let the user in, is not reported
   when a folder above it is another user's: repairing that one repairs it. Of the folders owned by
   another user, the highest is reported: ``chown -R`` of it repairs the ones below.
-- Where the folder itself is the user's, every folder and file inside it, without following a
-  symbolic link. One owned by another user is reported, and nothing inside it.
+- Where the folder itself is the user's, every folder and file inside it. One owned by another
+  user is reported, and nothing inside it. A symbolic link is not followed into, and its own owner
+  does not matter; what it points to, which the host follows (a ``policy.toml`` linked to a file
+  kept elsewhere), is looked at as the folder or file it is, and reported by its own path.
 
 A folder or file outside the home folder is reported with no repair: the host cannot tell whether
 another program needs it as it is (decisions/0004, 4.3, "Not checked"), so a person decides.
@@ -33,6 +36,7 @@ uid, which needs no lookup. The group is left as it is.
 from __future__ import annotations
 
 import os
+import stat
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -63,20 +67,25 @@ class Found:
     repair: str | None = None
 
 
+def _uid(info: os.stat_result) -> int:
+    """The uid that owns what ``info`` describes. A test replaces it, and only it, to plant another
+    user's folder or file by its device and inode, since only root could make one, and to give the
+    suite's own files the uid every test is given (tests/conftest.py): every ``stat`` and
+    ``lstat`` is still a real one, and refuses as it would."""
+    return info.st_uid
+
+
+def _kind(info: os.stat_result) -> str:
+    return "folder" if stat.S_ISDIR(info.st_mode) else "file"
+
+
 def _owner(path: Path) -> int | None:
     """The uid that owns ``path``, a symbolic link followed; None where nothing is there. Raises
-    :class:`PermissionError` where the folder above it does not let this process look. A test
-    replaces it to plant another user's folder, which only root could make, and to give the
-    suite's own files the uid every test is given (tests/conftest.py)."""
+    :class:`PermissionError` where a folder above it does not let this process look."""
     try:
-        return os.stat(path).st_uid
+        return _uid(os.stat(path))
     except (FileNotFoundError, NotADirectoryError):
         return None
-
-
-def _own_owner(path: Path) -> int:
-    """The uid that owns ``path`` itself, a symbolic link not followed (inside a profile)."""
-    return os.lstat(path).st_uid
 
 
 def _real(path: Path) -> Path:
@@ -140,7 +149,7 @@ def _chain(folder: Path, home: Path, me: int) -> tuple[list[Found], bool]:
 
 def _inside(folder: Path, home: Path, me: int) -> list[Found]:
     """Every folder and file inside ``folder`` that another user owns, or that cannot be looked
-    at; nothing inside one is looked at."""
+    at, and what each symbolic link inside it points to; nothing inside one is looked at."""
     found: list[Found] = []
 
     def unreadable(exc: OSError) -> None:
@@ -148,24 +157,42 @@ def _inside(folder: Path, home: Path, me: int) -> list[Found]:
             raise exc
         found.append(Found(UNREADABLE, Path(exc.filename), None, None))
 
-    def other(path: Path, kind: str) -> bool:
-        """Whether ``path`` is not the user's, recording why."""
+    def linked(path: Path) -> None:
+        """What the symbolic link ``path`` points to, recorded where it is not the user's."""
         try:
-            uid = _own_owner(path)
+            info = os.stat(path)
+        except PermissionError:
+            found.append(Found(UNREADABLE, _real(path), None, None))
+            return
+        except OSError:
+            return  # it points at nothing, or at itself: the host reads nothing there
+        uid = _uid(info)
+        if uid != me:
+            found.append(_finding(_real(path), _kind(info), uid, home, me))
+
+    def other(path: Path) -> bool:
+        """Whether nothing inside ``path`` is to be looked at: it is not the user's, or it is a
+        symbolic link, or it cannot be looked at. Records what is found."""
+        try:
+            info = os.lstat(path)
         except FileNotFoundError:
             return True  # gone since the folder was listed: nothing to look inside
         except PermissionError:
             found.append(Found(UNREADABLE, path, None, None))
             return True
+        if stat.S_ISLNK(info.st_mode):
+            linked(path)
+            return True
+        uid = _uid(info)
         if uid == me:
             return False
-        found.append(_finding(path, kind, uid, home, me))
+        found.append(_finding(path, _kind(info), uid, home, me))
         return True
 
     for where, folders, files in os.walk(folder, onerror=unreadable):
-        folders[:] = [name for name in sorted(folders) if not other(Path(where, name), "folder")]
+        folders[:] = [name for name in sorted(folders) if not other(Path(where, name))]
         for name in sorted(files):
-            other(Path(where, name), "file")
+            other(Path(where, name))
     return found
 
 
