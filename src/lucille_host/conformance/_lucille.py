@@ -20,6 +20,7 @@ import base64
 import hashlib
 import json
 import time
+from collections.abc import Callable
 from typing import Any
 
 import httpx
@@ -36,6 +37,14 @@ HOST_ID = "lucille-host"
 EXEC = "lucille.exec"
 # The most messages a read of the work room returns: the most the hub gives in one read.
 READ_MOST = 500
+# The epochs whose drop rooms Lucille reads for a Connect code, as offsets from its own clock's
+# epoch E: E, E-1, E+1 and E-2 (decisions/0002 §11.4, step 6). The host stretched the code with the
+# epoch of its own clock when it drew it, and an epoch can end before Lucille stretches it too.
+EPOCH_OFFSETS = (0, -1, 1, -2)
+
+
+class NoRequest(Exception):
+    """No drop room, or more than one, of the epochs Lucille reads holds the host's hello."""
 
 
 class LoopbackClient(Client):
@@ -100,25 +109,51 @@ class Lucille:
         self.rooms = sharing.ShareStore(folder / "lucille-pairs", env={})
         self.signer = Signer()
         self.name: str | None = None
+        # The clock whose epoch Lucille stretches a Connect code with.
+        self.clock: Callable[[], float] = time.time
 
     def _with(self, **options: Any) -> dict[str, Any]:
         return {"connect": connect_client, "now": time.time(), **options}
 
-    def deliver(self, shown: str, *, sender: str, handle: str) -> None:
+    def deliver(self, shown: str, *, sender: str, handle: str) -> int:
         """Answer the Connect code the host showed: start a pairing whose note names the
-        request's nonce, and post its code, signed, into the request's drop room."""
+        request's nonce, and post its code, signed, into the request's drop room.
+
+        Like Lucille, it reads the drop rooms of every epoch in :data:`EPOCH_OFFSETS`, and
+        delivers into the one that holds the host's hello. The offset of that room's epoch from
+        this clock's is returned; :class:`NoRequest` if no room, or more than one, holds it."""
         code = connect.parse_code(shown)
         if code is None:
             raise ValueError(f"not a connect code: {shown!r}")
-        key = connect.stretch(code, connect.epoch(time.time()))
+        here = connect.epoch(self.clock())
+        found = [
+            (offset, key)
+            for offset in EPOCH_OFFSETS
+            for key in [connect.stretch(code, here + offset)]
+            if self._holds_hello(key)
+        ]
+        if len(found) != 1:
+            offsets = ", ".join(f"{offset:+d}" for offset, _ in found) or "none"
+            raise NoRequest(
+                f"the host's hello is in the drop rooms of epochs {offsets} of Lucille's clock "
+                f"({len(EPOCH_OFFSETS)} read), not in exactly one"
+            )
+        offset, key = found[0]
         nonce = connect.nonce(key)
         started = pairing.start(
             self.base,
             **self._with(store=self.pairs, note=connect.note_for(nonce), with_token=False, ttl=900),
         )
         self.name = started.name
+        body = self.signer.delivery(started.code, nonce, sender=sender, handle=handle)
+        with connect_client(self._drop(key), agent_id=pairing.throwaway_agent("lucille")) as poster:
+            poster.post(connect.CHANNEL, body, ttl=connect.POST_TTL)
+        return offset
+
+    def _drop(self, key: bytes) -> ClientConfig:
+        """The drop room of the stretched key ``key``."""
         room = pairing.handshake_room(key)
-        drop = ClientConfig(
+        return ClientConfig(
             url=self.url,
             workspace=room.workspace,
             key=room.key,
@@ -126,9 +161,12 @@ class Lucille:
             peer_log="",
             stash_db="",
         )
-        body = self.signer.delivery(started.code, nonce, sender=sender, handle=handle)
-        with connect_client(drop, agent_id=pairing.throwaway_agent("lucille")) as poster:
-            poster.post(connect.CHANNEL, body, ttl=connect.POST_TTL)
+
+    def _holds_hello(self, key: bytes) -> bool:
+        """Whether the drop room of ``key`` holds the host's hello."""
+        with connect_client(self._drop(key), agent_id=pairing.throwaway_agent("lucille")) as reader:
+            rows = reader.history(connect.CHANNEL, limit=connect.READ_LIMIT)
+        return any(isinstance(row, dict) and row.get("body") == connect.HELLO for row in rows)
 
     def collect(self) -> str:
         """Collect the host's answer; the pairing's state."""

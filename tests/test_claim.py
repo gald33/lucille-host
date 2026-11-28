@@ -45,7 +45,9 @@ def test_the_shipped_claim_is_the_readme_s() -> None:
 
 def test_the_shipped_claim_is_plain_text_in_the_package() -> None:
     # Beside report.py, so that the wheel carries it (tests/spec/test_packaged.py builds one).
-    assert report.CLAIM_FILE == REPO_ROOT / "src" / "lucille_host" / "claim.txt"
+    # Wherever the package is installed: the Mac app's job runs this suite on a copy of its bundled
+    # runtime, where lucille_host is in site-packages, not in this checkout's src.
+    assert report.CLAIM_FILE == Path(report.__file__).with_name("claim.txt")
     raw = report.CLAIM_FILE.read_bytes()
     assert raw.decode("ascii") == report.claim()
     lines = report.claim().split("\n")

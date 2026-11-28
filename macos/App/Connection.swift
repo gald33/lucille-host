@@ -596,8 +596,8 @@ final class Connection: ObservableObject {
     }
 
     /// The note that says where the menu is was closed at launch, or a paired launch showed none:
-    /// say that the host is paused if it is, then pick up a pairing left unfinished. Only Resume
-    /// resumes.
+    /// check every folder (`HostModel.checkAtLaunch`), say that the host is paused if it is, then
+    /// pick up a pairing left unfinished. Only Resume resumes.
     func afterWelcome() {
         welcomeDone = true
         afterWelcomeIfReady()
@@ -608,6 +608,9 @@ final class Connection: ObservableObject {
             return
         }
         afterWelcomeDone = true
+        // Every folder is checked once, now, once nothing shown at launch can race it
+        // (decisions/0002 §12).
+        Task { await HostModel.shared.checkAtLaunch() }
         guard effectivePaused() else {
             resumePairing()
             return
@@ -940,6 +943,12 @@ final class Connection: ObservableObject {
                 Connection.log("ops list did not answer for Activity: exit \(result.status)")
             }
         }
+    }
+
+    /// Copy Diagnostics…: the versions and `status`, read again, in a note whose Copy alone writes
+    /// them to the pasteboard (decisions/0002 §15).
+    func diagnosticsChosen() {
+        DiagnosticsPanel.chosen(cli)
     }
 
     /// The Activity window's Show the Host's Log: its last 200 lines, which the window shows as

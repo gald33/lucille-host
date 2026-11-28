@@ -78,6 +78,7 @@ CLI_TYPES = (
     "credential_removed",
     "credential_test",
     "uninstalled",
+    "verify",
     "error",
 )
 

@@ -1,0 +1,33 @@
+{
+  "description": "verify, with release 1.2.3 installed in a folder under the home and PyPI and sigstore stood in for: PyPI lists and serves its two files, each with one attestation by gald33/lucille-host, release.yml, pypi, at tag v1.2.3, from a GitHub-hosted runner, and the installed files are the wheel's, with two bytecode files beside them",
+  "argv": [
+    "--json",
+    "verify"
+  ],
+  "exit": 0,
+  "stdout": [
+    {
+      "v": 1,
+      "type": "verify",
+      "version": "1.2.3",
+      "repository": "gald33/lucille-host",
+      "workflow": "release.yml",
+      "environment": "pypi",
+      "files": [
+        {
+          "name": "lucille_host-1.2.3-py3-none-any.whl",
+          "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+          "attestations": 1
+        },
+        {
+          "name": "lucille_host-1.2.3.tar.gz",
+          "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+          "attestations": 1
+        }
+      ],
+      "site": "/home/me/venv/lib/python3/site-packages",
+      "installed": 8,
+      "bytecode": 2
+    }
+  ]
+}

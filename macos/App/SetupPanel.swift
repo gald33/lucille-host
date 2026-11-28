@@ -239,8 +239,7 @@ final class SetupPanel: NSObject, NSWindowDelegate {
         let name = label("\u{201C}\(folder.alias)\u{201D}", width: width - 40 - buttonRoom)
         var lines = [folder.path]
         var place: SystemPlace?
-        let check = shown.checks.first(where: { $0.alias == folder.alias && $0.path == folder.path })
-        if let check {
+        if let check = SetupText.check(of: folder, in: shown.checks) {
             if let said = SetupText.folderState(check.state) {
                 lines.append(said)
             }

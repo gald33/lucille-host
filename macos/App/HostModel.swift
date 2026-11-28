@@ -21,8 +21,9 @@ final class HostModel: ObservableObject {
     /// Whether a run the app stopped waiting for, of a verb that takes the policy lock, has still
     /// not ended (`HostCLI.stuckRuns`).
     @Published private(set) var stuck = false
-    /// Whether the host can open each folder, from `roots check --json`, for Set Up's Folders page:
-    /// read while that page shows, and for a folder Set Up adds back.
+    /// Whether the host can open each folder, from `roots check --json`, for Set Up's Folders page
+    /// and the menu's Folders submenu: read at launch, for a folder once it is added, and while
+    /// that page shows (decisions/0002 §12).
     @Published private(set) var folderChecks: [FolderCheck] = []
     /// Called once the menu's set-up is read again, once folders are checked, and when the user
     /// says no to turning an ability on: Set Up's window shows what the menu shows.
@@ -138,9 +139,9 @@ final class HostModel: ObservableObject {
     /// asks once the Open panel has given it the folder, and Choose a Smaller Folder opens the Open
     /// panel instead. The folder then goes through `addRoot`, confirmed only by that answer: the
     /// whole disk is refused again, the home folder is asked about once the host refuses it as
-    /// `broad_folder`, and the name dialog opens again after `alias_taken`. Then `roots check` on
-    /// the folder now held at that path, so that a question macOS asks about it comes now, not at a
-    /// request from Lucille. The host's policy holds only folders, so the folder's URL says so, and
+    /// `broad_folder`, and the name dialog opens again after `alias_taken`; once it is added,
+    /// `addRoot` runs `roots check` on it, so that a question macOS asks about it comes now, not at
+    /// a request from Lucille. The host's policy holds only folders, so the folder's URL says so, and
     /// nothing reads the disk on the main thread to find out. An ability goes through
     /// `setAbility`, with its acknowledgement for one whose replies can carry a file's contents;
     /// this returns once its switch is turned, as the menu's is, before the host answers.
@@ -160,12 +161,6 @@ final class HostModel: ObservableObject {
             }
             await addRoot(alias: folder.alias, url: URL(fileURLWithPath: folder.path, isDirectory: true),
                           place: HostText.place(of: folder.path, home: cli.home), confirmedHome: confirmed)
-            guard let held = folders.first(where: { $0.path == folder.path }) else {
-                return
-            }
-            let result = await run(["--json", "roots", "check", held.alias], timeout: SetupFlow.checkLimit)
-            folderChecks = folderChecks.filter { $0.alias != held.alias } + VerbOutcome(result).folderChecks
-            onRead?()
         case .ability(let ability):
             setAbility(ability, on: true)
         }
@@ -177,6 +172,24 @@ final class HostModel: ObservableObject {
         let result = await run(["--json", "roots", "check"], timeout: SetupFlow.checkLimit)
         folderChecks = VerbOutcome(result).folderChecks
         onRead?()
+    }
+
+    /// `roots check --json` of every folder, once at launch (decisions/0002 §12), with no window,
+    /// so that a folder moved, renamed or unplugged, or one macOS now blocks, is said before
+    /// Lucille asks for it: in one note, in the Folders page's words (`SetupText.launchNote`), and
+    /// under the folder in the menu. A check that fails says nothing; the menu's own reads say
+    /// when the host can't be run.
+    func checkAtLaunch() async {
+        let result = await run(["--json", "roots", "check"], timeout: SetupFlow.checkLimit)
+        guard result.succeeded else {
+            return
+        }
+        let checks = VerbOutcome(result).folderChecks
+        folderChecks = checks
+        onRead?()
+        if let note = SetupText.launchNote(checks) {
+            showFolderNote(note, key: "launchFolderCheck")
+        }
     }
 
     /// `ops enable` or `ops disable`, with the window that has a Cancel button if it takes more
@@ -588,7 +601,10 @@ final class HostModel: ObservableObject {
     }
 
     /// Run `roots add`, with a window that has a Cancel button while the host checks the folder,
-    /// which can take long on a network drive. A refusal is read by its code (`HostText.refusal`):
+    /// which can take long on a network drive. Once it is added, `roots check` on it, with the
+    /// same window, so that a question macOS asks about it comes now, not at a request from
+    /// Lucille (decisions/0002 §12); the note then says what that check found
+    /// (`SetupText.addedNote`). A refusal is read by its code (`HostText.refusal`):
     /// `broad_folder` asks about the home folder, as the host's `kind` says, unless it is the
     /// whole disk; and `alias_taken`, an alias another verb took after the host suggested it,
     /// opens the name dialog again, with the sentence that says so (spec/CLI.md §7).
@@ -622,6 +638,15 @@ final class HostModel: ObservableObject {
                 message: checking, timeout: addTimeout
             )
         }
+        var state: FolderCheck.State?
+        if result.succeeded {
+            let checked = await runWithProgress(
+                ["--json", "roots", "check", alias], message: checking, timeout: SetupFlow.checkLimit
+            )
+            let found = VerbOutcome(checked).folderChecks.filter { $0.alias == alias }
+            folderChecks = folderChecks.filter { $0.alias != alias } + found
+            state = found.first(where: { $0.path == path })?.state
+        }
         await reload()
         let added = folders.contains { $0.alias == alias && $0.path == path }
         let stuck = HostCLI.stuckRuns > 0
@@ -637,7 +662,7 @@ final class HostModel: ObservableObject {
         }
         if result.succeeded {
             let connected = Connection.shared.holdsPair
-            showNote(title: "Folder added", text: HostText.folderAdded(alias: alias, connected: connected))
+            showFolderNote(SetupText.addedNote(alias: alias, connected: connected, state: state))
             return
         }
         let explanation = HostText.explain(
@@ -743,6 +768,29 @@ final class HostModel: ObservableObject {
             alert.addButton(withTitle: "OK")
             return alert
         }
+    }
+
+    /// What `roots check` found, in a note: Open Privacy Settings first for a folder macOS blocks
+    /// (decisions/0002 §20), which opens it. When macOS could not open it, the note comes again
+    /// with that said first, then how to allow the folder by hand, as Set Up's Folders page says,
+    /// and OK alone. `key` names a note shown only once at a time.
+    private func showFolderNote(_ note: FolderNote, key: String? = nil) {
+        let place = note.place
+        Alerts.shared.show(key: key, {
+            let alert = NSAlert()
+            alert.alertStyle = note.warning ? .warning : .informational
+            alert.messageText = note.title
+            alert.informativeText = note.text
+            if let place {
+                alert.addButton(withTitle: PlaceText.button(place))
+            }
+            alert.addButton(withTitle: "OK")
+            return alert
+        }, done: { response in
+            if let place, response == .alertFirstButtonReturn, !SystemPlaces.open(place) {
+                Connection.shared.notOpened(place, title: note.title, text: note.text + " " + SetupText.folderAllowSteps)
+            }
+        })
     }
 
     /// A run that failed, in a note: its explanation, and, when the explanation offers a place in

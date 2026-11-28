@@ -1,15 +1,15 @@
-# Verifying lucille-host (DRAFT)
+# Verifying lucille-host
 
-**DRAFT.** No release exists yet. Step 1 works on this repository today. Steps 2 to 4 need a release and
-cannot be done yet. This file is finished with the first release. Then someone who did not build that
-release follows it once, on a clean machine, and reports each step they could not complete.
+Each step works on `0.1.0`, the first release. Nobody who did not build it has followed this file yet on a
+clean machine; until someone has, and has reported each step they could not complete, treat it as
+untested by a third party.
 
 ## 1. Read the source, and what CI enforces on it
 
 **What to read.**
 - `src/lucille_host/ops/` is the complete list of operations Lucille can ask the host to run. In
-  `0.1.0.dev0` it holds `host.describe`, `host.sleep` and `files.sha256`; `lucille-host ops list` prints
-  them. `src/lucille_host/_exec.py` is the one place a process starts.
+  `0.1.0` it holds `host.describe`, `host.sleep`, `files.sha256`, `files.search`, `github.read`,
+  `gmail.check`, `gmail.mailboxes`, `gmail.search` and `gmail.read`; `lucille-host ops list` prints them. `src/lucille_host/_exec.py` is the one place a process starts.
 - [CLAIMS.md](CLAIMS.md) maps each sentence of the privacy claim to the code and test behind it.
 - [decisions/0001-host-design.md](decisions/0001-host-design.md) is the design.
 - [spec/PROTOCOL.md](spec/PROTOCOL.md) is the protocol between Lucille and the host, `lucille.exec/1`:
@@ -170,9 +170,11 @@ enforces.
        `itertools`, `json`, `logging`, `math`, `os`, `pathlib`, `re`, `secrets`, `shutil`, `signal`,
        `stat`, `sys`, `tempfile`, `termios`, `textwrap`, `threading`, `time`, `tomllib`, `types`,
        `typing`, `keyring`, `switchboard` and `lucille_host` itself. `src/lucille_host/_exec.py` may
-       also import `subprocess`. An import anywhere in a file counts. A submodule comes with its
-       module (`os.path`, `logging.handlers`), and what the rules above refuse stays refused inside
-       an allowed module (`os.system`, `logging.config`). A module an allowed module re-exports is
+       also import `subprocess`, and `src/lucille_host/verify.py`, the checks of `lucille-host
+       verify`, `certifi`, `http`, `ssl`, `zipfile` and `pypi_attestations`. An import anywhere in
+       a file counts. A submodule comes with its module (`os.path`, `logging.handlers`), and what
+       the rules above refuse stays refused inside an allowed module (`os.system`,
+       `logging.config`). A module an allowed module re-exports is
        checked as itself, by the same list: `from logging.handlers import socket` imports `socket`,
        and `enum.bltns` is `builtins`. The runtime may not import or use `lucille_host.conformance`,
        which is not held to the list. `platform`, `uuid`, `string` and `socket` are left off on
@@ -371,8 +373,8 @@ enforces.
      button's action is `tests/test_macos_build.py`'s, not the lint's: the lint makes every call one it
      can find by that text;
    - in Swift, on a read of the pasteboard or of what is dropped on the app (writing, for Copy
-     Diagnostics, is allowed here; until Copy Diagnostics is built, `tests/test_macos_build.py` and
-     `check_app.py links` refuse `NSPasteboard` altogether), and on an `http://`, `https://`, `ws://`,
+     Diagnostics, is allowed here; Copy Diagnostics writes through a text view's own Copy, so
+     `tests/test_macos_build.py` and `check_app.py links` still refuse `NSPasteboard` altogether), and on an `http://`, `https://`, `ws://`,
      `wss://` or `ftp://` URL;
    - on a phrase [PRIVACY.md](PRIVACY.md) says this project must never claim, as a whole word in any
      case, in the string literals of the app's Swift (decoded; the self-test's are not read), in the
@@ -464,7 +466,7 @@ uv run python tools/guards/switchboard_lint.py .
 uv run python tools/guards/macos_lint.py .
 ```
 
-## 2. Check provenance (needs a release)
+## 2. Check provenance
 
 Every file of a release on PyPI must carry a PEP 740 attestation:
 - its publisher names repository `gald33/lucille-host`, workflow `release.yml` and environment `pypi`;
@@ -472,11 +474,47 @@ Every file of a release on PyPI must carry a PEP 740 attestation:
 
 - the certificate names the release's tag, `refs/tags/v<version>`.
 
-The `[verify]` extra installs `pypi-attestations`, and a later release adds `lucille-host verify` to make
-this check on an installed host. The release workflow makes it after publishing
-(`tools/release/check_release.py published`, which also checks that PyPI serves exactly the bytes the
-workflow built), and the GitHub Release carries `SHA256SUMS`. The environment is not in the signing
-certificate, so what is checked is PyPI's record of it.
+The release workflow makes this check after publishing (`tools/release/check_release.py published`,
+which also checks that PyPI serves exactly the bytes the workflow built), and the GitHub Release carries
+`SHA256SUMS`. The environment is not in the signing certificate, so what is checked is PyPI's record of
+it.
+
+**`lucille-host verify`** makes the same check on an installed host, and then checks the installed files.
+`0.1.0` does not hold it: the release after `0.1.0` is the first that does. For `0.1.0`, use the
+`pypi-attestations` check below, which its `[verify]` extra installs.
+It needs the `[verify]` extra, which installs `pypi-attestations`. Install the release with it into a
+fresh virtual environment, then run it:
+
+```sh
+python3 -m venv verify-env
+verify-env/bin/pip install 'lucille-host[verify]==<version>'
+verify-env/bin/lucille-host verify
+```
+
+It checks, and stops at the first check that fails:
+- the host is a release, not a development build;
+- PyPI lists exactly the release's wheel and sdist, and has not marked the release yanked;
+- the bytes PyPI serves for each have the sha256 it lists, and each file carries the attestations above,
+  verified with sigstore against those bytes;
+- every file the wheel holds but its `RECORD` is installed, with the same sha256, in the folder the
+  running package came from, and the package folder holds no other file but bytecode in `__pycache__`.
+
+On success it prints the release, each file's sha256 and how many attestations verified, the folder it
+checked, how many files there are the wheel's, and how many bytecode files it did not check; with
+`--json`, one `verify` object ([spec/CLI.md](spec/CLI.md)). It asks only `pypi.org`,
+`files.pythonhosted.org` and sigstore's trust root, and reads none of the host's own files. A failure
+says which check and which file, and exits 1: `not_attested` for a release that is not attested,
+`files_differ` for files installed here that are not the release's, `yanked` for a withdrawn release,
+`unreachable` when PyPI or sigstore could not be asked (nothing was verified: try again).
+
+`lucille-host verify` is the installed host checking itself. It cannot vouch for an install whose files
+were changed before it ran, since the changed code is what runs. Run it from a fresh install, as above.
+To check a file without running any of the host's code, `pypi-attestations` checks the repository on its
+own (not the workflow, tag or runner):
+
+```sh
+verify-env/bin/python -m pypi_attestations verify pypi --repository https://github.com/gald33/lucille-host pypi:lucille_host-<version>-py3-none-any.whl
+```
 
 The same check works for the pinned `agent-switchboard` release. Its publisher is `gald33/switchboard`,
 workflow `publish.yml`, environment `pypi`, ref `refs/tags/v2.6.0`. The release workflow checks it before
@@ -493,7 +531,7 @@ and verifies its attestation with sigstore.
 A release is called "reproducible" only when a rebuild from the tagged source produced the same sha256s.
 No rebuild job exists yet.
 
-## 3. Run the conformance suite (needs a release)
+## 3. Run the conformance suite
 
 Install the release with its `[conformance]` extra into a fresh virtual environment, then run the suite:
 
@@ -507,18 +545,21 @@ It runs offline, against a local Switchboard hub it starts on 127.0.0.1. It pair
 `lucille-host`, in a home of its own under a temporary folder, through the real `pair begin` flow,
 signing its pairing code with a throwaway key it passes to `--test-key` (never Lucille's), and sets the
 policy with the host's own `ops enable` and `roots add`, as you would. Then it plays a hostile Lucille:
-it starts `run`, offers a work room, and posts the requests of the first row of "Host invariants and
-their tests" in the design record, "Nothing Lucille sends can widen what the host permits", and a
-positive control. It prints one line per scenario, `PASS` or `FAIL` with the reason, and exits 0 only
-when at least one scenario ran and every one passed. The host refuses to run as root, and so does the
-suite: run it as an ordinary user. What each scenario asserts is in the docstrings of
-`lucille_host/conformance/_scenarios.py`.
+it starts `run`, offers a work room, and posts the requests of its scenarios, each aimed at a row of
+"Host invariants and their tests" in the design record, and a positive control. [CLAIMS.md](CLAIMS.md)
+names the scenario behind each claim. It prints one line per scenario: `PASS`, `FAIL` with the reason, or
+`SKIP` with the reason when the scenario cannot check on this computer: the child's environment is read
+from Linux's `/proc`, which macOS does not have, and the scenarios that search need ripgrep where the
+catalog says (`/usr/bin/rg` on Linux, `/opt/homebrew/bin/rg` on macOS). It exits 0 only when at least one scenario passed and
+none failed; a skipped scenario is never a pass. The host refuses to run as root, and so does the
+suite: run it as an ordinary user. What each scenario asserts is in its docstring, in
+`lucille_host/conformance/`.
 
 Run it with the virtual environment's own `python`, as above. The conformance lint lets the suite name
 the programs it starts by their path beside that interpreter, so that it tests the `lucille-host`
 installed with it, not one that happens to be first on your `PATH`.
 
-## 4. Watch (needs a release)
+## 4. Watch
 
 `lucille-host log` shows every request received, every local decision, and a fingerprint of everything
 sent. `lucille-host status` shows the pair, its work rooms, and when the host last reached the hub.
@@ -527,7 +568,10 @@ sent. `lucille-host status` shows the pair, its work rooms, and when the host la
 
 - Anything about what Lucille's backend does with a reply.
 - Whether installed files are still the verified ones after any process running as your user has touched
-  them.
+  them. `lucille-host verify` checks them as they are when it runs, with their own code.
+- The bytecode Python may load in place of an installed source file, the `lucille-host` script the
+  installer wrote, the interpreter, and every other package in the environment: `lucille-host verify`
+  checks none of them.
 - The provenance of dependencies beyond the ones checked.
 - Tag protection and the `pypi` environment's required reviewer. They are repository settings, which a
   reader cannot see.

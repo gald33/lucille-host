@@ -245,7 +245,7 @@ def _mounted_at(
             return os.stat_result(values)
         return found
 
-    monkeypatch.setattr(cli.os, "stat", stat)
+    monkeypatch.setattr("lucille_host.cli.os.stat", stat)
 
 
 @pytest.mark.parametrize(("where", "inside"), [("state", ("mnt",)), ("config", ("sub", "mnt"))])
@@ -369,7 +369,7 @@ def test_lock_files_go_last(
         unlinked.append(os.fsdecode(path))
         real(path, *args, **kwargs)
 
-    monkeypatch.setattr(cli.os, "unlink", unlink)
+    monkeypatch.setattr("lucille_host.cli.os.unlink", unlink)
     assert _main(["--json", "uninstall-data", "--yes"], monkeypatch) == 0
     locks = {loop.RUN_LOCK, cli.PAIR_LOCK, store.CREDENTIALS_LOCK}
     assert locks <= set(unlinked)

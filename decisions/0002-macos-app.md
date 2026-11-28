@@ -75,6 +75,13 @@ developing the app. Its builds stay ad hoc signed, for the repository owner's ow
 - **Activity…** (§15): a window with what Lucille asked this Mac to do since the app opened, from `run`'s
   `request` events, in words, newest first, kept in memory only and at most 500; and, behind **Show the
   Host's Log**, the last 200 lines of `log --json --limit 200`, as the host wrote them.
+- **Copy Diagnostics…** (§15), always in the menu: it reads `--json --version` and `status --json` again,
+  and shows in a note the text it would copy, under a sentence that says leaving things out is best
+  effort. The text holds the app's version, the host's and the contract's, the macOS version, and
+  `status`'s fields of a closed shape, its folders by alias only, each checked against its shape and
+  written as `unknown` when it fails. Only the note's **Copy**, the default, writes the pasteboard: that
+  text, as plain text, through a text view's own Copy, so the app's code still names no pasteboard.
+  **Cancel** writes nothing, and nothing is kept.
 - **Reset Settings…** (§10, §14), offered only while the host cannot read the settings file: in the note
   behind the menu's line that says so, in the one behind `run`'s Needs attention line for `policy`
   `invalid`, and, while connected, in the Settings submenu. It asks first, with Cancel the default, then runs `policy reset --json`, which sets the file
@@ -133,11 +140,21 @@ developing the app. Its builds stay ad hoc signed, for the repository owner's ow
   renamed copy is told to go to the Trash only while another copy of Capsule is at
   `/Applications/Capsule.app`, a folder whose `Info.plist` gives the same bundle identifier; with none
   there, it is told to be renamed Capsule.
+- **The folder checks** (§12, §3.3). Once a folder is added from the menu, `roots check --json <alias>`
+  runs on it with the window and Cancel adding has, so that a question macOS asks comes then, not at a
+  request from Lucille. A folder that opens, or a check that gives no answer, gets the menu's note "Folder
+  added"; otherwise "Capsule can't open *name*", that the folder was added, and what Set Up's Folders
+  page says of it, in that page's words (`SetupText.folderState`). Once the first launch note is closed,
+  or at once while connected, `roots check --json` runs on every folder, with no window; while each one
+  opens nothing is said, and otherwise one note names each that doesn't, in those words. A check that
+  fails says nothing. Each note offers **Open Privacy Settings** when macOS blocks a folder; `missing`
+  is words only, with no **Choose Again**. The Folders submenu shows, under a folder, what its last check
+  found.
 - **The one opener** (§20). A note's button, or one under a folder on Set Up's Folders page, shows the
   user a place in macOS, and only from that click: **Open Date & Time Settings** in the note behind the
   line that says the Mac's clock is off; **Open Privacy Settings**, at Files & Folders, never Full Disk
-  Access, in the note that says macOS is blocking Capsule from a folder being added, and under a folder
-  `roots check` finds macOS refuses the host; and **Show Applications Folder**, then Quit, for every copy
+  Access, in the note that says macOS is blocking Capsule from a folder being added, and under a folder,
+  or in the note of a folder, that `roots check` finds macOS refuses the host; and **Show Applications Folder**, then Quit, for every copy
   the app judges not to be in the Applications folder. The places are a closed list, and one call in
   `macos/App/SystemPlaces.swift` opens them; no text or request from Lucille, and no refusal of a request,
   offers one (the clock's place follows the clock state `run` reports, which the hub's refusals of the
@@ -145,7 +162,8 @@ developing the app. Its builds stay ad hoc signed, for the repository owner's ow
   cannot open the place, the note comes again with "Capsule couldn't open System Settings." (or "your
   Applications folder") first, and OK or Quit alone; for the button under a folder on Set Up's Folders
   page, which had no note, a note says it first, then what that page says of the folder and how to allow
-  it by hand, with OK alone. What the two System Settings pages are called on each macOS, and that their
+  it by hand, with OK alone; the note of a folder's check comes again with its own words, then how to
+  allow the folder by hand, as that page says it. What the two System Settings pages are called on each macOS, and that their
   addresses open them, is not yet seen on a Mac: `check_app.py places` opens each and prints what it
   shows.
 - **The update notice** (§16). When `run` says that Lucille asked for a newer release (`host_too_old`), the
@@ -171,9 +189,9 @@ developing the app. Its builds stay ad hoc signed, for the repository owner's ow
   can carry a file's contents is turned on only after a question, though no operation in this release
   sends file contents), Set Up Folders and Abilities… while Set Up's window was closed before its last
   page, Add a Folder… (its name dialog starting from the alias the host suggests), the folders with
-  Remove, Activity…, Gmail… (the Gmail window, decisions/0003 "Second use", connected or not), the
-  Settings submenu (Open at Login and Reset Settings… while connected, **Remove Capsule…** connected or
-  not), the pairing items (Connect to Lucille…,
+  Remove, Activity…, Copy Diagnostics…, Gmail… (the Gmail window, decisions/0003 "Second use",
+  connected or not), the Settings submenu (Open at Login and Reset Settings… while connected,
+  **Remove Capsule…** connected or not), the pairing items (Connect to Lucille…,
   Finish Connecting…, Stop Connecting…, Disconnect from Lucille…), and Quit Capsule;
   while a request's process runs, Stop What's Running; and, while Lucille needs a newer release, the
   update notice's line and Prepare to Update…. A copy that is not at `/Applications/Capsule.app` shows only
@@ -188,10 +206,10 @@ developing the app. Its builds stay ad hoc signed, for the repository owner's ow
   on macOS 26 and 27, without the end-to-end check (§18, §19). Logs and UI snapshots are uploaded on every
   run. The disk image is uploaded only by a manual run whose every check passed, and kept 3 days.
 
-Not built yet: the typed gate (§11.2; decided on 2026-11-21), the check
-after a folder is added from the menu, and at launch (`roots check`, §12; Set Up's Folders page runs it),
-the Welcome and main windows, updates, Copy
-Diagnostics (§15), Developer ID signing and notarization, ripgrep (`Helpers/rg`; the pins hold an empty
+Not built yet: the typed gate (§11.2; decided on 2026-11-21), **Choose Again** for a folder `roots check`
+finds `missing` (§3.3, §12; the checks say it in words only), the Welcome and main windows, updates,
+the core's `diagnostics` verb and so the audit lines in Copy Diagnostics
+(§15), Developer ID signing and notarization, ripgrep (`Helpers/rg`; the pins hold an empty
 ripgrep commit until then, and `Resources/licenses/` has no ripgrep licence), and the release jobs. The
 first build also departs from this record in these ways, among others; `macos/README.md`, under "Choices
 made for the first build", says why for most of them:
@@ -228,8 +246,14 @@ made for the first build", says why for most of them:
   is not in version 1 (spec/CLI.md §6, §14). A request whose `run` ended before it finished reads "Stopped
   when Capsule's helper program stopped." (§15);
 - Activity is a window of its own that the menu opens, not a part of a main window, and nothing in it can
-  be selected, so nothing in it can be copied: the app adds no copy of its own until Copy Diagnostics
+  be selected, so nothing in it can be copied: the app's one copy of its own is Copy Diagnostics' Copy
   (§15), and the pairing field's Command-C and Command-X are AppKit's, for the user's own text;
+- Copy Diagnostics is made by the app, from `--version` and `status`, not by the core's `diagnostics` verb,
+  which is not built (spec/CLI.md §14). So it holds no audit line, and none of the host's words for
+  people (a `message`, a refusal's words, which may name a path): of a refusal of `status`, its `code`
+  alone. Besides what §15 leaves out, it leaves out the pair's name, the rooms, process ids, the settings
+  file's path, and `status`'s `store`, `hub` and `offers_waiting`. Until the verb is built, the copy is the
+  app's alone, and Terminal has no command that writes the same text (§15);
 - Stop What's Running is not offered while `run` drains for a quit or a Disconnect, whose own ladder stops
   the operation: Stop now during a quit, `kill` after 330 s during a Disconnect. The menu offers it from a
   request's `started` to its `finished` (§14);
@@ -254,7 +278,8 @@ made for the first build", says why for most of them:
   Review and Turn On is not built (§13); on What Lucille may do it says so as a fact, and its switch is
   the menu's. Set Up lists `host.describe` with its switch and the core's words, as §13 has it, where
   the menu does not. The Folders page offers **Open Privacy Settings** under a folder whose check is
-  `denied_by_macos`, and says `missing` in words, with no Choose Again button (§12);
+  `denied_by_macos`, and says `missing` in words, with no Choose Again button (§12), as do the notes
+  of the checks at launch and after Add a Folder… ("What is built today");
 - Remove Capsule… decides, where section 17 does not: it is off while the pairing window is open or
   `pair` runs, and while a Disconnect or a quit is under way. **Save a Copy of the Activity Log…** saves
   the host's log as `log --json` gives it, every line the host keeps (`--limit 1000000`), one per line,
@@ -2436,8 +2461,10 @@ in 10 minutes or less.
     `["-I", "-B", "-X", "utf8", "-m", "lucille_host"]`, outside its comments. The lint sees that they are
     written there, not that the `Process` gets them; a build test pins the lines where it does;
   - no read of a pasteboard, or of what is dropped on the app (the user pastes into a field, §11.3; writing,
-    for Copy Diagnostics, is allowed by this rule). Until Copy Diagnostics is built, a build test and
-    `check_app.py links` refuse `NSPasteboard` altogether; the change that adds it lifts both;
+    for Copy Diagnostics, is allowed by this rule). Copy Diagnostics writes through a text view's own Copy,
+    so a build test and `check_app.py links` still refuse `NSPasteboard` altogether, and a build test holds
+    every call of a view's `copy(_:)` or `cut(_:)` by the app's code to that one, in
+    `macos/App/DiagnosticsPanel.swift`;
   - no `http://`, `https://`, `ws://`, `wss://` or `ftp://` in Swift, but for the one web page below, as
     one exact string literal in the opener's file and nowhere else;
   - one exception for the app's one opener, added with Open Date & Time Settings, Open Privacy Settings and

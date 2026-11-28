@@ -20,8 +20,9 @@ Useful things to include:
 
 ## Supported versions
 
-No release exists yet. Version `0.1.0.dev0` is a development version, not meant to be installed.
-Which versions get fixes will be stated here with the first release.
+`0.1.0` is the first release, for the repository owner's own use. Only the latest release gets fixes.
+A fix ships as a new release, and a bad release is yanked on PyPI and named in a GitHub security
+advisory.
 
 ## What counts
 

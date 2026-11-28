@@ -2,8 +2,10 @@
 
 A scenario is a function of one :class:`Context`, registered with :func:`scenario`. It passes when
 it returns, and fails when it raises :class:`Failed` (what the host did is not what the spec says)
-or anything else (the suite counts that as a failure too, never as a pass). Scenarios run in the
-order they are registered, against one host, paired once, with one ``run`` reading one work room.
+or anything else (the suite counts that as a failure too, never as a pass). It raises
+:class:`Skipped` when it cannot check on this computer: that is reported, and is neither.
+Scenarios run in the order they are registered, against one host, paired once, with one ``run``
+reading one work room.
 
 What a scenario is given (``ctx``):
 
@@ -63,6 +65,11 @@ REPLY_WAIT = 60.0
 
 class Failed(Exception):
     """The host did not do what the spec says."""
+
+
+class Skipped(Exception):
+    """The scenario cannot check on this computer (Linux's ``/proc`` on macOS, say); the reason.
+    It is reported on its own line and in the summary, and is never a pass."""
 
 
 def check(ok: bool, message: str) -> None:

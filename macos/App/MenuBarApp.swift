@@ -250,11 +250,15 @@ struct HostItems: View {
             ForEach(model.folders) { folder in
                 Menu(folder.alias) {
                     Text(folder.path)
+                    if let said = SetupText.folderState(of: folder, in: model.folderChecks) {
+                        Text(said)
+                    }
                     Button("Remove") { model.removeFolder(folder) }
                 }
             }
         }
         Button(ConnectionText.activityItem) { connection.activityChosen() }
+        Button(DiagnosticsText.menuItem) { connection.diagnosticsChosen() }
         // The Gmail window, connected or not, so that Gmail can be set up before pairing.
         Button(GmailText.menuItem) { model.gmailChosen() }
         // Settings: while connected, Open at Login, whose switch shows what macOS says

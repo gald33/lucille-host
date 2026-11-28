@@ -2,7 +2,7 @@
 
 This file takes each sentence of the claim in [PRIVACY.md](PRIVACY.md) and says what backs it.
 
-**Status: no release exists.** Version `0.1.0.dev0` has the catalog, the executor, the local policy, the
+**Status: `0.1.0`, the first release, for the repository owner's own use.** It has the catalog, the executor, the local policy, the
 audit log, the local controls, the stores and Switchboard client set-up, and pairing: `lucille-host pair`
 answers Lucille's code and keeps the local gate. `lucille-host run` keeps the pair once the gate is open,
 takes the work rooms Lucille offers over it by the host's accept policy, and reads and answers Lucille's
@@ -11,10 +11,10 @@ what the host holds and what `run` last saw, with no hub call, and then this cla
 the pair on the computer. With `--json`, every verb but `run` writes the objects of
 [spec/CLI.md](spec/CLI.md) instead of its text, and `run --json-events` writes `run`'s events, for an app
 that supervises it with `--exit-on-stdin-eof`. The conformance suite (`python -m lucille_host.conformance`)
-runs the scenarios of the design record's first invariant, "Nothing Lucille sends can widen what the host
-permits", against the installed host. Some tests named below do not exist yet: the conformance scenarios
-of the other invariants. The release workflow's provenance checks exist and are tested, and have not run,
-since no release exists.
+runs its scenarios against the installed host; each item below names the scenarios behind it. Some tests
+named below do not exist yet: the items that say "pending, conformance" have no scenario. The release workflow's provenance checks are tested, and run on each release's
+tag; they have not run yet, and `v0.1.0` is the first. `lucille-host verify` is tested with PyPI and
+sigstore stood in for, and is in no release yet.
 
 **How to read it.**
 - **Code** names the file that makes the sentence true. "Not written yet" means the code does not exist.
@@ -98,7 +98,9 @@ backstop ([VERIFYING.md](VERIFYING.md) says what each guard cannot see).
   refused; no path through `/proc`; no path into the host's own files, hard links and linked
   folders included); `tests/test_jobs.py` (`test_unheld_root_is_path_outside_root`); invariant "Nothing Lucille sends can widen what the
   host permits" (conformance scenarios `unknown-op`, `not-enabled-op`, `traversal`, `absolute-path`,
-  `symlink-escape` and `unknown-root`: each is refused with its code through the installed host, with no
+  `symlink-escape`, `unknown-root`, `oversize-path` (a path of 1025 characters, `bad_args`) and
+  `oversize-request` (a request over 16 KiB, `bad_request`): each is refused with its code through the
+  installed host, with no
   `started` event from `run`, which the control `control-enabled-op-runs` shows is written when a process
   starts).
 - Limit: the AST lint reads the forms written out in a file. Its rules for the whole repository are a
@@ -180,7 +182,12 @@ backstop ([VERIFYING.md](VERIFYING.md) says what each guard cannot see).
   included); `tests/test_read_loop.py` (`test_refusal_order`: requests carrying `argv` or `exe` are
   refused through `run`, and nothing refused starts a process); `tests/test_pair.py`
   (`test_new_pair_starts_from_fresh_policy`: a new pair starts with only `host.describe` enabled and no
-  folder); invariant "An upgrade never runs a changed op under old consent" (pending, conformance).
+  folder); invariant "An upgrade never runs a changed op under old consent" (conformance,
+  `upgrade-disables-changed-op` in `src/lucille_host/conformance/_upgrade.py`: with the stored definition
+  hash of `files.sha256` no longer the catalog's, `host.describe` stops listing it, a request is refused
+  `not_enabled` and starts nothing, the policy file is not rewritten, and it runs once enabled again. It
+  edits the stored hash rather than installing a changed release; that the host sees the two alike is
+  read from `policy.effective`, not tested).
 
 **C4.** "It never runs code, a shell or a command line sent by Lucille, and the programs it starts get none
 of its keys and none of your environment variables, except those of `github.read` and the four `gmail.`
@@ -201,7 +208,11 @@ operations: each reads a credential you saved for it, and gets `HOME` (macOS) or
   backend ran `gcc` and `ld` on Linux with the whole environment);
   `tests/test_catalog.py` (`test_catalog_entries`: every executable is absolute and every string
   placeholder follows `--`); invariant "No shell; one spawn site; children get a built environment and
-  no key" (pending, conformance); `tests/test_envelope.py`
+  no key" (conformance, `child-env-built-and-no-key` in `src/lucille_host/conformance/_child_env.py`,
+  Linux only: with keys, tokens and `RIPGREP_CONFIG_PATH` planted in `run`'s own environment,
+  `host.sleep`'s child, read from `/proc`, has exactly `PATH`, `LANG` and `LC_ALL`, only its three
+  standard streams, and standard input on `/dev/null`; it does not cover `github.read` or the `gmail.`
+  operations, whose children get more); `tests/test_envelope.py`
   (`test_steps_1_to_4_hold_to_the_request_fixtures`: requests carrying `exe`, `argv`, `env`, `cwd` or
   `timeout` are refused `bad_request` by the host's own check); conformance scenarios `extra-key-exe`,
   `extra-key-argv`, `extra-key-env`, `extra-key-cwd` and `extra-key-timeout` (the same through the
@@ -244,8 +255,8 @@ operations: each reads a credential you saved for it, and gets `HOME` (macOS) or
 - Code: the reply is built only from an operation's output and the fields of `host.describe`: the reply
   schema, `src/lucille_host/spec/v1/reply.schema.json`, allows three closed shapes and no other field;
   `reply_body` in `src/lucille_host/jobs.py` builds them; `src/lucille_host/ops/`.
-- Tests: invariant "Nothing Lucille sends can widen what the host permits" (pending: a refused request
-  spawns nothing); `tests/spec/test_fixtures.py` (a reply carrying any other field, such as error text,
+- Tests: invariant "Nothing Lucille sends can widen what the host permits" (its conformance scenarios,
+  listed under C2: each refused request starts no process, by `run`'s own `started` events); `tests/spec/test_fixtures.py` (a reply carrying any other field, such as error text,
   is invalid; this tests the spec); `tests/test_jobs.py` (`test_replies_of_each_shape_hold_to_the_schema`:
   the replies the host builds hold to that schema).
 - Partly proven by review only. No test can show that no other code path sends a file. A reader checks
@@ -270,7 +281,20 @@ a search pattern), and what an enabled operation returns, up to 64 KiB of output
   of output comes back truncated and flagged, its JSON string exactly 64 KiB;
   `test_exec_raw_ceiling_drops_the_rest_and_flags_it`; `test_request_caps_never_raise_the_host_cap`); `tests/test_output.py`; invariant "Output is
   bounded, decodable and path-free" (conformance scenario `output-bounded`: a `files.search` whose output
-  passes 1 MiB comes back truncated and flagged, and the serialized reply measures under 256 KiB).
+  passes 1 MiB comes back truncated and flagged, and the serialized reply measures under 256 KiB; and
+  conformance scenario `output-decodable`: a `files.search` over a line that is not UTF-8, a file name
+  that is not UTF-8, a long line of two-byte characters and a file holding NUL comes back with no
+  U+0000 and no unpaired surrogate in the reply or its document, the bytes that are not UTF-8 exactly,
+  the long line cut within 1000 bytes at a character's end and flagged, and no match in the file
+  holding NUL, which ripgrep skips as binary. The file name that is not UTF-8 is checked only where
+  the filesystem accepts such a name, so not on macOS, whose filesystem refuses it. The host's guard
+  that sends a line holding NUL as bytes is not reached by the scenario; it is tested with ripgrep's
+  output given directly, `tests/test_files_search.py`
+  (`test_text_and_bytes_are_given_as_ripgrep_gives_them`));
+  invariant "Failures cross the wire as codes only" (conformance scenario `failures-codes-only`: requests
+  that carry a sentinel, in the op's name, a path, a folder alias, an extra envelope key or an extra
+  argument, are each refused with a code alone, and the sentinel is in no body the host posted. The
+  sentinel is one the request carries; the scenario puts none in an operation's stderr).
 
 **C8.** "`files.search` returns lines of the files it searches."
 - Code: the `files.search` catalog entry (`src/lucille_host/ops/__init__.py`), which runs ripgrep with
@@ -292,7 +316,15 @@ a search pattern), and what an enabled operation returns, up to 64 KiB of output
   `unreadable_output` and no match; a message nested past 8 levels is refused before the parser; a cut
   last line; at most 1000 matches; redaction of each path and line, before a line is cut
   (`test_redaction_runs_before_the_line_is_cut`); the child's stdin is `/dev/null`. Each document is held to its schema. `tests/test_catalog.py`: its words, and that
-  `sends_file_content` is in its definition hash.
+  `sends_file_content` is in its definition hash. The conformance suite, through the installed host
+  (`src/lucille_host/conformance/_search.py`): `search-root-traversal` (a root written as a path is
+  refused `bad_args`, one the policy does not hold `path_outside_root`, and `path`, `paths`, `cwd` or
+  `glob` in its arguments `bad_args`, each starting nothing with the policy digest unchanged);
+  `search-flag-injection` (a pattern shaped like a ripgrep flag, as a fixed string or a regular
+  expression, matches only the line holding that text, and a file named `--version` is matched as a
+  file); `search-no-escape` (nothing is reached through a link out of the folder, or in a hidden file,
+  even with `RIPGREP_CONFIG_PATH` set in `run`'s environment to a configuration that would follow
+  links and search hidden files).
 
 **C9.** "Lucille also learns the host's version, OS family, enabled operation names and folder aliases (never
 folder paths), each run's exit code and duration, a fingerprint that changes when your local policy
@@ -436,7 +468,8 @@ asks for, with the token you saved for it."
   name resolves to must be on the proxy's fixed list (`address_allowed`), and the connection goes to a
   vetted address with TLS checked for `api.github.com` against certifi's bundle; no redirect is
   followed, and no proxy setting is read. `tools/guards/ast_lint.py`: among the host's modules, only
-  `proxy.py` may import `socket`, `ssl`, `http.client`, `ipaddress` or `certifi`.
+  `proxy.py` may import `socket`, `ssl`, `http.client`, `ipaddress` or `certifi`, but for `verify.py`,
+  which may import `ssl`, `http.client` and `certifi` for `lucille-host verify`, which `run` never calls.
 - Tests: `tests/test_proxy.py` (`test_refused_addresses`, `test_allowed_addresses`,
   `test_one_refused_address_refuses_the_whole_request`, `test_a_redirect_is_reported_never_followed`,
   `test_it_connects_to_vetted_addresses_only_in_order`); `tests/test_jobs.py`
@@ -684,8 +717,11 @@ reachable then."
   GitHub-hosted runners only, and every action is pinned by commit SHA); `tests/test_release.py`
   (`release.yml` builds from a tag on `main` that names the package's version, publishes only from
   environment `pypi`, and then checks that PyPI serves those bytes, attested to this repository,
-  `release.yml` and `pypi`, at that tag, from a GitHub-hosted runner); and the provenance check in
-  [VERIFYING.md](VERIFYING.md), step 2 (pending; no release exists).
+  `release.yml` and `pypi`, at that tag, from a GitHub-hosted runner); `tests/test_verify.py`
+  (`lucille-host verify` passes only a release PyPI lists and serves exactly, not yanked, each file
+  attested by this repository, `release.yml` and `pypi`, at its tag, from a GitHub-hosted runner, whose
+  installed files are the attested wheel's, with PyPI and sigstore stood in for); and the provenance check
+  in [VERIFYING.md](VERIFYING.md), step 2, which the workflow's `provenance` job runs on each release.
 
 ## Guards that back no single sentence
 
@@ -714,5 +750,5 @@ These existing tests back the design rather than one sentence of the claim.
 | `tests/test_status.py` | `status`, `log` and `forget`, as the design record's "CLI verbs" describes them. `status` makes no hub call, and shows the version, the policy check, the enabled operations and folder aliases, the controls, where the pair is kept, the hub and a configured loopback hub, the pair's state, the work rooms held, or, only when it holds none, that the host holds none with the check its last room failed, and what `run` last saw: whether it runs, its last contact with the hub, and the clock, `skewed` when the hub refused a write of the host's for a clock more than 300 s from its own: a reply it posted, or one the library made for it in a touch, an accept or a leave; and `pair` warns when the hub refuses its answer so. Its text ends with the claim, word for word as the README gives it, with no pair, with a pair whose SAS waits to be confirmed, with a confirmed pair, and in every state below where `--json` is held to the text; the object leaves the claim out. While the pair waits, it says only that no command has seen Lucille collect the answer, since it asks nobody. It never shows the SAS, which `pair status` shows: not while the pair waits, nor once the SAS has reached the host and no command has shown it (`sas_ready`, when it starts no deadline either), nor while the SAS waits to be confirmed, nor past its deadline. `log` and `forget` as C18 and C23 say. A profile runs one `run`: a second, in this process or another, refuses before it does anything. `run` stops when another process forgets its pair, Lucille told or not, and at once when its pair has no gate record; a stop signal while it waits for that `forget` stops it with no error once `forget` is done. While that `forget` waits on a slow hub with the record lock held, `run` kills the request it runs from the room `forget` marked abandoned, and starts none it had read, without waiting for the lock. A `forget` or `pair reject` that another process's `forget` beat says the pair is gone. When the library drops the pair and its work room cannot be left then, the command says so and that `forget` leaves the room, and `forget`, with no pair held, does; with no room left of it, `forget` says that no pair is held. With `--json`, each field of `status` says what its line says, in every state set up here (every work room state, every reason a room was abandoned or left, every reason an operation is disabled, both stores, a loopback hub or none, a pair with no gate record, a confirmed pair's generation or none, and a clock skewed before any skew was measured), each object its schema accepts, and never the SAS, nor starts the deadline; a room record that holds a value no status could report (a name that is not a room's or a pair's, an unknown reason) stops `status` as `state_invalid`; `log --json` writes the same lines oldest first; `pair status` never shows a SAS of another shape than the library's that the store holds, and stops with `pair_unusable`, as JSON and as text; a room that the last record of a `run` that stopped, saying so or not, lists as read is reported as not read; `forget --json` says whether Lucille was told, or that the rooms of a pair already gone were left, or that a room could not be left (`room_not_left`), with the pair kept or gone; `pair begin --json` says when the hub refused its answer for the clock. | | `tests/test_supervision.py` | Supervising `run`, [spec/CLI.md](spec/CLI.md) §13, through the command as an app runs it. Every event is one compact ASCII object of `"v": 1` its schema accepts, `ready` first and `stopped` last, nothing after `stopped`, each line within 16384 bytes and whole across threads; a `request` object never carries an absolute path, the home folder, a folder's path, the profile's folders, the hub, the SAS, a room's workspace or anything an operation returned, a path with a character a terminal must not show is not written, and its `reply_bytes` is the size the audit log's `sent` line gives; an op without an operation name's form, or a request over the protocol's size, or one whose arguments break its operation's schema, says nothing of what it asked; `finished` says what the posted reply says for a request done and one killed, and `abandoned` for one whose room was given up; `host_too_old` follows its refusal; `state` comes right after `ready`, follows the gate, the pause flag, the rooms, the policy, the offers waiting, the hub's last contact, the clock (skewed too) and the check of the room the host left on its own, says a room `read_stuck` and drops a room no longer read, and comes at least every period, also while main waits on a hub that never answers, up to the bound of one step, past which it goes quiet. Each exit code of section 13.3 comes with its `stopped` reason, each reason has its case, and so does each `failed` code of the schema but `hub_error`, which `test_every_reason_has_a_case` names as the one without, the same without `--json-events`, and the table equals the spec's; a failure `run` has no code for, from the command or from one of its threads, is `failed` `internal` and is raised, so that its traceback is shown, with no line in its place. A pair that this computer's side ended in the pair room (a `forget` here that stopped part way) is `ended` when `run`'s first resolve finds it. At its end `run` waits up to 5 s for its last events: a slow reader gets them all, and one that reads nothing holds `run` up no longer. Under `--exit-on-stdin-eof`, no standard input drains `run` before it serves, nor does one that ends during its start checks, with no later check and no hub call, and nor does a stop signal then; bytes written on standard input are discarded; a non-blocking read end is no end and is read blocking; a background job on a terminal is not stopped by its read, and Ctrl-D in the foreground ends it; a standard output nobody reads drains it (without the lifeline, `run` goes on), and the exit code stays the one `run` chose, also in a real process whose stdout, or stderr, is closed; on a real pipe the events are ASCII, a path that is not ASCII among them, and a write on the standard output descriptor does not reach the pipe; a pair record the file store cannot read, or the library refuses, stops `run` before `ready` (23, 20) at every start; a policy file invalid by what it holds, or that cannot be read, holds the offers at once and stops nothing, one changed while an operation runs or while a step waits on the hub holds them until a load says it is valid, and one invalid only by a folder is found by the next periodic load, also while an operation runs; an offer waiting, or an accept a stop interrupted, waits at start while the policy is not checked or invalid, no room is read then, and a verdict on an earlier file lets nothing through; a stalled policy load does not hold up the drain, a lifeline whose audit line cannot be written still stops `run`, and a drain keeps `status.json` written. A damaged digest key stops `run` (`state_invalid`), and so does a damaged `state/cursors.json`, before `ready`, after the store and before the digest key, even with no pair; a shut gate waits, and past its deadline exits 20. The version record refuses an older release (25), before any keyring call or store error, and only for its own profile, comparing each part as a number (0.10.0 comes after 0.9.0, and 10.0.0 after 9.99.99); it holds only a release, and `--allow-downgrade` gets past it without lowering it. Supervision starts no process but the operation's own. |
 | `tests/test_runs.py` | The run record (spec/CLI.md section 16): one line per command, written before its work, holding the command's name and never an argument (a value typed on the command line by mistake is not recorded), the runtime's real path only where it is an app's, and nothing as root or for a bad profile; the command is read as the parser reads it (an option by an abbreviation, a verb after `--`); a line that cannot be written (a folder in its place, a symbolic link, a failing write, a lock held elsewhere past 0.2 s) never fails the command; a FIFO in its place never blocks it and is not written, nor is a device or a file linked elsewhere; a line is at most 1,024 bytes and never holds a time that is no finite number; the record is cut by bytes once larger than 64 KiB, reading only its last 32 KiB however large it was made (a 5 MB line, 20 MB of lines, 3 MB with no newline), and the cut is atomic: with eight processes appending at once, no line is lost, every line is in the record or in a record a cut replaced, and a reader never finds the record empty or half written. `tests/test_supervision.py` (`test_second_run_exits_21`) holds that a refused second `run` writes its line and nothing else. |
 | `tests/test_end_to_end.py` | The host end to end through the commands, against Switchboard's in-process hub and a stand-in for Lucille: `pair begin` with Lucille's signed answer, `pair confirm`, `run`, a room Lucille offers taken, a `host.describe` request answered with a note with no thread, `status`, `forget` beside the running `run`, which then stops, and `log`. |
-| `tests/test_skeleton.py` | What the host builds on and `0.1.0.dev0` still leaves to later releases: every part of Switchboard the Switchboard-surface lint allows exists in the pinned library, as do the methods the host calls on what those return, and the managed hub's URL in the library is the host's. |
+| `tests/test_skeleton.py` | What the host builds on and `0.1.0` still leaves to later releases: every part of Switchboard the Switchboard-surface lint allows exists in the pinned library, as do the methods the host calls on what those return, and the managed hub's URL in the library is the host's. |
 | `tests/test_conformance.py` | The conformance suite: it passes against the host installed beside the interpreter running the tests, one `PASS` line per registered scenario; a scenario whose expectation does not hold (a refusal expected with another code, a request that runs expected refused) makes it exit 1; so do no scenarios, running as root, and programs missing beside the interpreter. |

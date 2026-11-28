@@ -3,7 +3,8 @@
 The protocol between Lucille's backend and lucille-host: how Lucille asks a paired computer to run one
 operation from the host's closed catalog, and how the computer answers.
 
-**Version 1.0, draft.** No released host implements it yet. This document, the JSON Schemas and the golden
+**Version 1.0, draft.** lucille-host `0.1.0` implements it. It stays a draft, and can still change, until the
+release that opens pairing to anyone other than the repository owner. This document, the JSON Schemas and the golden
 fixtures are the spec together. Changes are recorded in [PROTOCOL-CHANGELOG.md](PROTOCOL-CHANGELOG.md).
 
 ## Contents
@@ -698,6 +699,15 @@ no insignificant whitespace, every non-ASCII character escaped:
 
 `{"matches": [{"path", "line_number", "lines", "line_truncated"}], "truncated", "error"}`
 
+The schema gives it two closed shapes: the matches found, with `error` null; or ripgrep's output unread,
+with no matches, `truncated` true and `error` `unreadable_output`.
+
+**A client reads `error` first.** An error document comes in a `done` reply, often with `exit_code` 0
+(ripgrep exited as it does after a match), so neither the status nor the exit code says that the search
+could not be read: only `error` does. A client checks it, then `truncated`, before it reads `matches`.
+An empty `stdout` (a cap too small for any document, below) is neither shape: a client reads it as not
+whole.
+
 For example (one match, in `notes/todo.txt`, line 3):
 
 `{"matches":[{"path":{"text":"notes/todo.txt"},"line_number":3,"lines":{"text":"hello world\n"},"line_truncated":false}],"truncated":false,"error":null}`
@@ -706,8 +716,10 @@ For example (one match, in `notes/todo.txt`, line 3):
   `{"bytes": ...}`, the bytes in standard base64 with padding, when they are not. A text that holds
   U+0000 goes as its bytes. So a name or a line that is not UTF-8 comes back exactly, and a newline in a
   file's name is a character of a string, never the start of another match.
-- `path` is relative to the folder: never absolute, and with no `..` part. `lines` is the matching
-  line, with the line ending it had; `line_number` counts from 1.
+- `path` is relative to the folder: its parts joined by `/`, none of them empty or `..`, so it is
+  never absolute. The schema's pattern holds a text path to that; a path in bytes it cannot read, and
+  the host holds it to the same. `lines` is the matching line, with the line ending it had;
+  `line_number` counts from 1.
 - Only ripgrep's `match` messages are kept, in the order it wrote them: by path, then by line. Its
   `begin`, `end`, `context` and `summary` messages are read and dropped.
 - Bounds: at most 1000 matches; each line cut at 1000 bytes, at a character's end when it is text, with
@@ -715,6 +727,12 @@ For example (one match, in `notes/todo.txt`, line 3):
   stream's cap (`stream-size`: 64 KiB, or a request's lower cap), measured as the JSON-encoded `stdout`
   string, by leaving out the last matches. The host reads at most ripgrep's first 4 MiB (`raw-ceiling`):
   a last line that cut leaves without its end is dropped.
+- **Rule search-bytes.** A path holds at most 4096 bytes and a line at most 1000: of UTF-8 for a text,
+  and the bytes its base64 gives for bytes. These are the host's bounds. JSON Schema counts characters,
+  not bytes, so the schema can state only what they imply: a text path of at most 4096 characters, a
+  text line of at most 1000, and base64 of at most 5464 and 1336 characters, which hold up to 4098 and
+  1002 bytes. A document the schema accepts can still break this rule (1000 characters of `é` are 2000
+  bytes), and the fixtures name it.
 - §13's redaction runs on each path and each line, on its bytes, before a line is cut, so that a key
   the cut would split is redacted whole. A private-key block that a path or a
   line opens and does not end takes the rest of the output, as over a stream: the match is kept with its
@@ -726,7 +744,7 @@ For example (one match, in `notes/todo.txt`, line 3):
 - `error` is null, or `unreadable_output`: a line of ripgrep's output was not one of its messages as the
   host reads them (not UTF-8, nested more than 8 levels, which is checked before any parser reads it, not
   JSON or with a key twice, not one of its five kinds, or a `match` whose path, line or line number is
-  not as ripgrep writes them, an absolute path or one with a `..` part included), or a last line had no
+  not as ripgrep writes them, a path with an empty or `..` part included), or a last line had no
   newline though the host cut nothing. The document then has no matches, and nothing of that output is
   in the reply.
 - A request's cap too small to hold the document with no matches (53 bytes measured as `stdout`, 69
@@ -1054,7 +1072,7 @@ fixture about a job id holds a malformed one, or none, on purpose.
 | `description` | What the fixture shows. |
 | `valid` | Whether a conforming sender may send this body: it passes the schema and every named rule (`not-after-range` in [§10](#10-requests), and those of [§13](#13-strings-numbers-sizes-and-output)). |
 | `schema_valid` | What the JSON Schema alone says. A `valid` fixture is always `schema_valid`. |
-| `prose_rule` | Present only when the schema accepts the body and a named rule refuses it: one of `strings`, `integers`, `request-size`, `stream-size`, `not-after-range`. |
+| `prose_rule` | Present only when the schema accepts the body and a named rule refuses it: one of `strings`, `integers`, `request-size`, `stream-size`, `not-after-range`, and, for a `files.search` document, `search-bytes` ([§11](#11-replies)). |
 | `host_state` | Requests only, optional: the host state the expected reply assumes, as overrides of `fixtures/host-state.json`. |
 | `expect` | Requests only: `{"reply": null}` when the host posts nothing, or `{"reply": {"status", "code"?}}`; and, where it matters, `effective_caps`. |
 | `op` | Replies only, optional: the operation the reply answers, where its `stdout` has a schema (`host.describe`, `files.search`). |
@@ -1083,8 +1101,10 @@ own is in its schema, so the two labels always agree.
 `body`, labelled with `description`, `valid`, `schema_valid` and, where a named rule refuses it,
 `prose_rule`, as above. They are written by hand: the bodies for each pattern above do not cover this
 schema's patterns. They hold a document of each form (text and bytes, for a path and a line), a newline
-in a path, no matches, `unreadable_output`, each bound at its most and one past it, a key each closed
-object does not list, each required key left out, and base64 that is not standard and padded.
+in a path, no matches, `unreadable_output`, each bound at its most and one past it (in characters, and
+in bytes for rule `search-bytes`), a key each closed object does not list, each required key left out,
+base64 that is not standard and padded, a text path that is absolute or has an empty or `..` part (and
+dots that are no such part), and an error with a match or with `truncated` false.
 
 **`decode/*.json`.** Each holds a child's raw output, base64-encoded in `raw_base64`, and the `text` the host
 decodes from it ([§13](#13-strings-numbers-sizes-and-output)).

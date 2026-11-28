@@ -294,6 +294,7 @@ LOGIC_SOURCES: Final = (
     "PlaceRules.swift",
     "Gmail.swift",
     "Removal.swift",
+    "Diagnostics.swift",
 )
 # The host's golden fixtures (spec/CLI.md section 11), which the self-test reads through the
 # app's JSON reader and its pairing, supervision and Set Up state machines.
@@ -3014,12 +3015,18 @@ RESUME_ITEM: Final = "Resume Lucille"
 # menu shows connected or not; as App/Removal.swift spells it. No check chooses it: it would put
 # the app under test in the Trash.
 REMOVE_ITEM: Final = f"Remove {APP_NAME}…"
+
+# Copy Diagnostics, as in App/Diagnostics.swift (tests/test_macos_build.py checks that they
+# agree): the menu's item, which is always there. The ui check does not choose it: its Copy
+# would write the runner's pasteboard, which the pairing check's own text is on.
+DIAGNOSTICS_ITEM: Final = "Copy Diagnostics…"
 # The items the menu shows while the app's profile holds no pair, besides its first line.
 MENU_ITEMS: Final = (
     "Abilities",
     "Add a Folder…",
     "Folders",
     ACTIVITY_ITEM,
+    DIAGNOSTICS_ITEM,
     "Settings",
     CONNECT_ITEM,
     f"Quit {APP_NAME}",
