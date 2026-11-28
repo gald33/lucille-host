@@ -13,7 +13,8 @@ the pair on the computer. With `--json`, every verb but `run` writes the objects
 that supervises it with `--exit-on-stdin-eof`. The conformance suite (`python -m lucille_host.conformance`)
 runs its scenarios against the installed host; each item below names the scenarios behind it. Some tests
 named below do not exist yet: the items that say "pending, conformance" have no scenario. The release workflow's provenance checks are tested, and run on each release's
-tag; they have not run yet, and `v0.1.0` is the first.
+tag; they have not run yet, and `v0.1.0` is the first. `lucille-host verify` is tested with PyPI and
+sigstore stood in for, and is in no release yet.
 
 **How to read it.**
 - **Code** names the file that makes the sentence true. "Not written yet" means the code does not exist.
@@ -181,7 +182,12 @@ backstop ([VERIFYING.md](VERIFYING.md) says what each guard cannot see).
   included); `tests/test_read_loop.py` (`test_refusal_order`: requests carrying `argv` or `exe` are
   refused through `run`, and nothing refused starts a process); `tests/test_pair.py`
   (`test_new_pair_starts_from_fresh_policy`: a new pair starts with only `host.describe` enabled and no
-  folder); invariant "An upgrade never runs a changed op under old consent" (pending, conformance).
+  folder); invariant "An upgrade never runs a changed op under old consent" (conformance,
+  `upgrade-disables-changed-op` in `src/lucille_host/conformance/_upgrade.py`: with the stored definition
+  hash of `files.sha256` no longer the catalog's, `host.describe` stops listing it, a request is refused
+  `not_enabled` and starts nothing, the policy file is not rewritten, and it runs once enabled again. It
+  edits the stored hash rather than installing a changed release; that the host sees the two alike is
+  read from `policy.effective`, not tested).
 
 **C4.** "It never runs code, a shell or a command line sent by Lucille, and the programs it starts get none
 of its keys and none of your environment variables, except those of `github.read` and the four `gmail.`
@@ -202,7 +208,11 @@ operations: each reads a credential you saved for it, and gets `HOME` (macOS) or
   backend ran `gcc` and `ld` on Linux with the whole environment);
   `tests/test_catalog.py` (`test_catalog_entries`: every executable is absolute and every string
   placeholder follows `--`); invariant "No shell; one spawn site; children get a built environment and
-  no key" (pending, conformance); `tests/test_envelope.py`
+  no key" (conformance, `child-env-built-and-no-key` in `src/lucille_host/conformance/_child_env.py`,
+  Linux only: with keys, tokens and `RIPGREP_CONFIG_PATH` planted in `run`'s own environment,
+  `host.sleep`'s child, read from `/proc`, has exactly `PATH`, `LANG` and `LC_ALL`, only its three
+  standard streams, and standard input on `/dev/null`; it does not cover `github.read` or the `gmail.`
+  operations, whose children get more); `tests/test_envelope.py`
   (`test_steps_1_to_4_hold_to_the_request_fixtures`: requests carrying `exe`, `argv`, `env`, `cwd` or
   `timeout` are refused `bad_request` by the host's own check); conformance scenarios `extra-key-exe`,
   `extra-key-argv`, `extra-key-env`, `extra-key-cwd` and `extra-key-timeout` (the same through the
@@ -245,8 +255,8 @@ operations: each reads a credential you saved for it, and gets `HOME` (macOS) or
 - Code: the reply is built only from an operation's output and the fields of `host.describe`: the reply
   schema, `src/lucille_host/spec/v1/reply.schema.json`, allows three closed shapes and no other field;
   `reply_body` in `src/lucille_host/jobs.py` builds them; `src/lucille_host/ops/`.
-- Tests: invariant "Nothing Lucille sends can widen what the host permits" (pending: a refused request
-  spawns nothing); `tests/spec/test_fixtures.py` (a reply carrying any other field, such as error text,
+- Tests: invariant "Nothing Lucille sends can widen what the host permits" (its conformance scenarios,
+  listed under C2: each refused request starts no process, by `run`'s own `started` events); `tests/spec/test_fixtures.py` (a reply carrying any other field, such as error text,
   is invalid; this tests the spec); `tests/test_jobs.py` (`test_replies_of_each_shape_hold_to_the_schema`:
   the replies the host builds hold to that schema).
 - Partly proven by review only. No test can show that no other code path sends a file. A reader checks
@@ -271,7 +281,16 @@ a search pattern), and what an enabled operation returns, up to 64 KiB of output
   of output comes back truncated and flagged, its JSON string exactly 64 KiB;
   `test_exec_raw_ceiling_drops_the_rest_and_flags_it`; `test_request_caps_never_raise_the_host_cap`); `tests/test_output.py`; invariant "Output is
   bounded, decodable and path-free" (conformance scenario `output-bounded`: a `files.search` whose output
-  passes 1 MiB comes back truncated and flagged, and the serialized reply measures under 256 KiB);
+  passes 1 MiB comes back truncated and flagged, and the serialized reply measures under 256 KiB; and
+  conformance scenario `output-decodable`: a `files.search` over a line that is not UTF-8, a file name
+  that is not UTF-8, a long line of two-byte characters and a file holding NUL comes back with no
+  U+0000 and no unpaired surrogate in the reply or its document, the bytes that are not UTF-8 exactly,
+  the long line cut within 1000 bytes at a character's end and flagged, and no match in the file
+  holding NUL, which ripgrep skips as binary. The file name that is not UTF-8 is checked only where
+  the filesystem accepts such a name, so not on macOS, whose filesystem refuses it. The host's guard
+  that sends a line holding NUL as bytes is not reached by the scenario; it is tested with ripgrep's
+  output given directly, `tests/test_files_search.py`
+  (`test_text_and_bytes_are_given_as_ripgrep_gives_them`));
   invariant "Failures cross the wire as codes only" (conformance scenario `failures-codes-only`: requests
   that carry a sentinel, in the op's name, a path, a folder alias, an extra envelope key or an extra
   argument, are each refused with a code alone, and the sentinel is in no body the host posted. The
@@ -297,7 +316,15 @@ a search pattern), and what an enabled operation returns, up to 64 KiB of output
   `unreadable_output` and no match; a message nested past 8 levels is refused before the parser; a cut
   last line; at most 1000 matches; redaction of each path and line, before a line is cut
   (`test_redaction_runs_before_the_line_is_cut`); the child's stdin is `/dev/null`. Each document is held to its schema. `tests/test_catalog.py`: its words, and that
-  `sends_file_content` is in its definition hash.
+  `sends_file_content` is in its definition hash. The conformance suite, through the installed host
+  (`src/lucille_host/conformance/_search.py`): `search-root-traversal` (a root written as a path is
+  refused `bad_args`, one the policy does not hold `path_outside_root`, and `path`, `paths`, `cwd` or
+  `glob` in its arguments `bad_args`, each starting nothing with the policy digest unchanged);
+  `search-flag-injection` (a pattern shaped like a ripgrep flag, as a fixed string or a regular
+  expression, matches only the line holding that text, and a file named `--version` is matched as a
+  file); `search-no-escape` (nothing is reached through a link out of the folder, or in a hidden file,
+  even with `RIPGREP_CONFIG_PATH` set in `run`'s environment to a configuration that would follow
+  links and search hidden files).
 
 **C9.** "Lucille also learns the host's version, OS family, enabled operation names and folder aliases (never
 folder paths), each run's exit code and duration, a fingerprint that changes when your local policy
@@ -458,7 +485,8 @@ asks for, with the token you saved for it."
   name resolves to must be on the proxy's fixed list (`address_allowed`), and the connection goes to a
   vetted address with TLS checked for `api.github.com` against certifi's bundle; no redirect is
   followed, and no proxy setting is read. `tools/guards/ast_lint.py`: among the host's modules, only
-  `proxy.py` may import `socket`, `ssl`, `http.client`, `ipaddress` or `certifi`.
+  `proxy.py` may import `socket`, `ssl`, `http.client`, `ipaddress` or `certifi`, but for `verify.py`,
+  which may import `ssl`, `http.client` and `certifi` for `lucille-host verify`, which `run` never calls.
 - Tests: `tests/test_proxy.py` (`test_refused_addresses`, `test_allowed_addresses`,
   `test_one_refused_address_refuses_the_whole_request`, `test_a_redirect_is_reported_never_followed`,
   `test_it_connects_to_vetted_addresses_only_in_order`); `tests/test_jobs.py`
@@ -706,8 +734,11 @@ reachable then."
   GitHub-hosted runners only, and every action is pinned by commit SHA); `tests/test_release.py`
   (`release.yml` builds from a tag on `main` that names the package's version, publishes only from
   environment `pypi`, and then checks that PyPI serves those bytes, attested to this repository,
-  `release.yml` and `pypi`, at that tag, from a GitHub-hosted runner); and the provenance check in
-  [VERIFYING.md](VERIFYING.md), step 2, which the workflow's `provenance` job runs on each release.
+  `release.yml` and `pypi`, at that tag, from a GitHub-hosted runner); `tests/test_verify.py`
+  (`lucille-host verify` passes only a release PyPI lists and serves exactly, not yanked, each file
+  attested by this repository, `release.yml` and `pypi`, at its tag, from a GitHub-hosted runner, whose
+  installed files are the attested wheel's, with PyPI and sigstore stood in for); and the provenance check
+  in [VERIFYING.md](VERIFYING.md), step 2, which the workflow's `provenance` job runs on each release.
 
 ## Guards that back no single sentence
 

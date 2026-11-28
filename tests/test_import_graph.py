@@ -58,6 +58,7 @@ RUNTIME_MODULES = (
     "lucille_host.spec",
     "lucille_host.state",
     "lucille_host.store",
+    "lucille_host.verify",
 )
 SERVER_PACKAGES = ("fastapi", "uvicorn")
 MARKER = "LOADED-MODULES:"

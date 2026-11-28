@@ -1,0 +1,10 @@
+{
+  "description": "error set with truncated false: an error document is never whole.",
+  "valid": false,
+  "schema_valid": false,
+  "body": {
+    "matches": [],
+    "truncated": false,
+    "error": "unreadable_output"
+  }
+}

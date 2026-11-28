@@ -1,0 +1,16 @@
+{
+  "description": "verify, set up as for the fixture verify, with the installed lucille_host/cli.py changed",
+  "argv": [
+    "--json",
+    "verify"
+  ],
+  "exit": 1,
+  "stdout": [
+    {
+      "v": 1,
+      "type": "error",
+      "code": "files_differ",
+      "message": "the files installed in /home/me/venv/lib/python3/site-packages are not the release's: lucille_host/cli.py is not the release's. Install the release again, into a fresh environment"
+    }
+  ]
+}

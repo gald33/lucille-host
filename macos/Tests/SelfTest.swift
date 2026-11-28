@@ -1,8 +1,9 @@
 import Foundation
 
 /// Runs the app's code that draws nothing (`Alias`, `HostCLI`, `HostText`, `HostJSON`, `Pairing`,
-/// `Supervisor`, `ConnectionText`, `RequestLog`, `Placement`, `Setup`, `LoginRules`, `PlaceRules`)
-/// without a screen: where a copy of the app may run, the place in macOS each problem offers, the
+/// `Supervisor`, `ConnectionText`, `RequestLog`, `Placement`, `Setup`, `LoginRules`, `PlaceRules`,
+/// `Gmail`, `Diagnostics`) without a screen: where a copy of the app may run, the place in macOS
+/// each problem offers, what Copy Diagnostics copies, the
 /// host's golden fixtures through the JSON reader, Activity's request
 /// log, the three state machines (pairing, `run`'s supervision and Set Up) and what Set Up offers
 /// to add back, the latch that keeps a misplaced copy from starting anything, fake
@@ -43,6 +44,7 @@ struct SelfTest {
         checkSupervisor(fixtures, report)
         checkLoginRules(fixtures, report)
         checkGmail(fixtures, report)
+        checkDiagnostics(fixtures, report)
         if let home = options["home"] {
             // First among the checks that start anything: until it opens the latch, nothing can.
             checkSpawnLatch(home: home, report)
@@ -1239,6 +1241,122 @@ extension SelfTest {
 
     /// The Gmail window's rules: the value it sends and in what form, the verbs it runs, and what
     /// it reads of the host's `credential` objects (decisions/0003, "Second use").
+    /// What Copy Diagnostics copies (decisions/0002 §15): fields of a closed shape only, from
+    /// `--version` and `status`, so no path, name of a pair or room, process id or host's words.
+    static func checkDiagnostics(_ fixtures: [String: Fixture], _ report: Report) {
+        let version = fixtures["version"].flatMap { Diagnostics.version(.done($0.objects)) }
+        report.expect(version?.host == "0.1.0.dev0" && version.map { Diagnostics.isContract($0.contract) } == true,
+                      "Copy Diagnostics reads the release and contract of --version", "\(String(describing: version))")
+        func facts(_ status: Diagnostics.StatusRead, app: String? = "1.2.0", macOS: [Int] = [15, 4, 1]) -> Diagnostics.Facts {
+            Diagnostics.Facts(appVersion: app, hostVersion: version?.host, contract: version?.contract,
+                              macOS: macOS, status: status, readAt: sampleTime)
+        }
+        // Never a path (so no slash at all), a pair's or a room's name, or the host's own words.
+        let private_ = ["/", "pair-abcdef", "room-1", "room-2", "policy.toml", "keyring backend", "switchboard"]
+        for name in ["status-paired", "status-unpaired", "status-unreadable"] {
+            guard let fixture = fixtures[name] else {
+                report.expect(false, "the fixture \(name) is there")
+                continue
+            }
+            let read = Diagnostics.statusRead(.done(fixture.objects))
+            guard case .read = read else {
+                report.expect(false, "Copy Diagnostics reads \(name)")
+                continue
+            }
+            let text = Diagnostics.text(facts(read))
+            for word in private_ {
+                report.expect(!text.contains(word), "Copy Diagnostics leaves \(word.debugDescription) out of \(name)", text)
+            }
+        }
+        if let fixture = fixtures["status-paired"] {
+            let text = Diagnostics.text(facts(Diagnostics.statusRead(.done(fixture.objects))))
+            let expected = """
+                \(DiagnosticsText.heading), 2026-11-01T12:00:00Z
+                app_version: 1.2.0
+                host_version: 0.1.0.dev0
+                contract: \(version?.contract ?? "")
+                macos_version: 15.4.1
+                status:
+                  host_version: 0.1.0.dev0
+                  paused: false
+                  policy: ok
+                  folders: docs
+                  enabled: host.describe
+                  pair: confirmed
+                  run: stopped
+                  last_hub_contact: 2026-11-01T12:00:00Z
+                  last_left_because: none
+                  clock: ok, skew_s 1.5
+                audit: \(DiagnosticsText.noAudit)
+
+                """
+            report.expect(text == expected, "Copy Diagnostics writes status-paired as its fields, folders by alias", text)
+        }
+        if let fixture = fixtures["status-unreadable"] {
+            let text = Diagnostics.text(facts(Diagnostics.statusRead(.done(fixture.objects))))
+            report.expect(text.contains("  pair: unreadable, insecure_keyring\n") && text.contains("  paused: true\n")
+                          && text.contains("  folders: none\n") && text.contains("  clock: unknown\n"),
+                          "Copy Diagnostics writes an unreadable pair's code, never its message", text)
+        }
+        // A status whose every field the app would not show as it is: each is counted or unknown.
+        var odd = status(.confirmed(name: "pair-secret"), run: .running(pid: 4242))
+        odd.hostVersion = "/opt/x"
+        odd.folders = ["docs", "/Users/ada/Secret", "Ünï", "taxes"]
+        odd.enabledOps = ["files.sha256", "../x", "a.b.c", "nope", "A.b"]
+        odd.lastLeftBecause = "/etc/passwd"
+        odd.lastHubContact = sampleTime
+        odd.clock = .skewed(skew: .nan)
+        let oddText = Diagnostics.text(facts(.read(odd), app: "1.0 /x", macOS: [15, 4]))
+        for word in ["/", "4242", "pair-secret", "Secret", "Ünï", "passwd", "nope"] {
+            report.expect(!oddText.contains(word), "Copy Diagnostics never writes \(word.debugDescription)", oddText)
+        }
+        for line in ["app_version: unknown\n", "macos_version: unknown\n", "  host_version: unknown\n",
+                     "  folders: docs, taxes, 2 unknown\n", "  enabled: files.sha256, a.b.c, 3 unknown\n",
+                     "  pair: confirmed\n", "  run: running\n", "  last_left_because: unknown\n",
+                     "  clock: skewed, skew_s unknown\n"] {
+            report.expect(oddText.contains(line), "Copy Diagnostics writes \(line.debugDescription)", oddText)
+        }
+        for (pair, said) in [(StatusPair.other("/x"), "unknown"), (.unreadable(code: "/x"), "unreadable, unknown"),
+                             (.sasPending(name: "pair-secret", deadline: sampleTime), "sas_pending"),
+                             (.expired(name: "pair-secret", deadline: sampleTime), "expired"), (.severalPairs, "several_pairs")] {
+            let text = Diagnostics.text(facts(.read(status(pair, run: .notSeen(pid: 77)))))
+            report.expect(text.contains("  pair: \(said)\n") && text.contains("  run: not_seen\n")
+                          && !text.contains("pair-secret") && !text.contains("77") && !text.contains("/"),
+                          "Copy Diagnostics writes the pair as \(said), with no name or process id", text)
+        }
+        let invalid = HostStatus(hostVersion: "0.1.0", paused: false, policyOK: false, folders: ["docs"], enabledOps: ["host.describe"],
+                                 pair: .noPair, run: .stopped, lastHubContact: nil, lastLeftBecause: "check_3", clock: .ok(skew: -2.31))
+        let invalidText = Diagnostics.text(facts(.read(invalid)))
+        report.expect(invalidText.contains("  policy: invalid\n  pair: none\n") && !invalidText.contains("folders")
+                      && invalidText.contains("  last_left_because: check_3\n") && invalidText.contains("  clock: ok, skew_s -2.3\n"),
+                      "an invalid policy has no folders or abilities to write", invalidText)
+        // A refusal keeps its code alone, and a verb that gave no answer says so.
+        let refused = Diagnostics.statusRead(.refused(HostError(code: "store_error", message: "can't open /home/ada/x", kind: nil)))
+        report.expect(refused == .refused(code: "store_error"), "a refused status keeps its code alone")
+        let refusedText = Diagnostics.text(facts(refused))
+        report.expect(refusedText.contains("status: refused, store_error\n") && !refusedText.contains("/"),
+                      "Copy Diagnostics writes a refusal's code, never its message", refusedText)
+        report.expect(Diagnostics.text(facts(.refused(code: "../x"))).contains("status: refused, unknown\n"),
+                      "a refusal's code of another shape is unknown")
+        for outcome in [VerbOutcome.timedOut, .cancelled, .notStarted, .signaled, .otherExit(3), .done([])] {
+            report.expect(Diagnostics.statusRead(outcome) == .failed, "\(outcome) gives no status to write")
+        }
+        report.expect(Diagnostics.text(facts(.failed)).contains("status: no answer\n"), "a status with no answer says so")
+        // The shapes, as the contract gives them.
+        for (value, ok) in [("host.describe", true), ("a.b", true), ("a_1.b_2.c", true), ("a", false), ("a.", false),
+                            (".a", false), ("a..b", false), ("A.b", false), ("a.1b", false), ("a.b-c", false)] {
+            report.expect(Diagnostics.isOpName(value) == ok, "\(value.debugDescription) is \(ok ? "" : "not ")an operation's name")
+        }
+        for (value, ok) in [("1.0", true), ("1.12", true), ("1.9999", true), ("1.01", false), ("1.", false),
+                            ("2.0", false), ("1.10000", false), ("1.a", false)] {
+            report.expect(Diagnostics.isContract(value) == ok, "\(value.debugDescription) is \(ok ? "" : "not ")a contract's version")
+        }
+        for (value, ok) in [("0.1.0.dev0", true), ("1.2.0+abc_1-x", true), ("v1.0", false), ("1.0 x", false),
+                            ("", false), ("1" + String(repeating: "0", count: 31), true), ("1" + String(repeating: "0", count: 32), false)] {
+            report.expect(Diagnostics.isVersion(value) == ok, "\(value.debugDescription) is \(ok ? "" : "not ")a version")
+        }
+    }
+
     static func checkGmail(_ fixtures: [String: Fixture], _ report: Report) {
         let typed = GmailRules.value(address: "  Reader@Example.org ", password: "ABCD efgh ijkl mnop")
         report.expect(typed == "Reader@Example.org abcdefghijklmnop",
@@ -1701,7 +1819,7 @@ extension SelfTest {
         // core's words, the folders, and what each change answered (spec/CLI.md §7).
         for name in ["version", "version-json-after", "version-no-verb"] {
             let objects = fixtures[name]?.objects ?? []
-            report.expect(objects == [.version(hostVersion: "0.1.0.dev0", contract: "1.0")]
+            report.expect(objects == [.version(hostVersion: "0.1.0.dev0", contract: "1.1")]
                               && VerbOutcome.done(objects).hostVersion == "0.1.0.dev0",
                           "\(name) gives the host's version", "\(objects)")
         }
@@ -3136,8 +3254,68 @@ extension SelfTest {
         report.expect(stateWords == expectedWords && SetupText.folderDenied != SetupText.folderUnopened,
                       "a folder that opens says nothing; macOS's block, its permissions, a missing folder and any other error each say so",
                       "\(stateWords)")
+        checkFolderNotes(report)
 
         checkSetupWalk(report)
+    }
+
+    /// The notes of `roots check` after a folder is added from the menu and at launch (decisions/0002
+    /// §12): each in the Folders page's words, Open Privacy Settings only for a folder macOS
+    /// blocks, the menu's own note for a folder that opens or a check that did not answer, and no
+    /// note at launch while every folder opens.
+    static func checkFolderNotes(_ report: Report) {
+        let app = HostText.appName
+        let added = HostText.folderAdded(alias: "documents", connected: true)
+        let plain = FolderNote(title: "Folder added", text: added, warning: false, place: nil)
+        let opens = SetupText.addedNote(alias: "documents", connected: true, state: .ok)
+        let unanswered = SetupText.addedNote(alias: "documents", connected: true, state: nil)
+        report.expect(opens == plain && unanswered == plain,
+                      "a folder added that opens, or whose check did not answer, gets the menu's own note",
+                      "\(opens) \(unanswered)")
+        let notYet = SetupText.addedNote(alias: "documents", connected: false, state: .ok)
+        report.expect(notYet.text == HostText.folderAdded(alias: "documents", connected: false) && notYet.place == nil,
+                      "and before a connection, the note says a new connection starts with no folders", notYet.text)
+
+        let blocked = SetupText.addedNote(alias: "documents", connected: true, state: .deniedByMacOS)
+        report.expect(blocked == FolderNote(
+            title: "\(app) can't open \u{201C}documents\u{201D}",
+            text: "The folder was added. macOS is blocking \(app) from this folder. Until \(app) can open it, Lucille can't use this folder.",
+            warning: true, place: .filesAndFolders
+        ), "a folder added that macOS blocks says so in the Folders page's words, with Open Privacy Settings", "\(blocked)")
+        let others: [FolderCheck.State] = [.denied, .missing, .error(errno: "EIO")]
+        let otherNotes = others.map { SetupText.addedNote(alias: "documents", connected: true, state: $0) }
+        let otherWords = others.map { SetupText.folderState($0) ?? "" }
+        report.expect(zip(otherNotes, otherWords).allSatisfy { note, said in
+            note.warning && note.place == nil && note.text.contains(said) && note.text.hasPrefix("The folder was added. ")
+        }, "its permissions, a missing folder and any other error say so too, and offer no place", "\(otherNotes)")
+
+        let checks = [
+            FolderCheck(alias: "documents", path: "/Users/a/Documents", state: .ok),
+            FolderCheck(alias: "photos", path: "/Volumes/Photos", state: .missing),
+            FolderCheck(alias: "work", path: "/Users/a/Work", state: .deniedByMacOS),
+        ]
+        report.expect(SetupText.launchNote([]) == nil && SetupText.launchNote([checks[0]]) == nil,
+                      "at launch, no folders, or folders that all open, say nothing")
+        let missing = SetupText.launchNote([checks[0], checks[1]])
+        report.expect(missing == FolderNote(
+            title: "\(app) can't open \u{201C}photos\u{201D}",
+            text: "This folder isn't there any more. Until \(app) can open it, Lucille can't use this folder.",
+            warning: true, place: nil
+        ), "at launch, one folder that isn't there any more is named and said in words, with no place", "\(String(describing: missing))")
+        let several = SetupText.launchNote(checks)
+        report.expect(several == FolderNote(
+            title: "\(app) can't open some of your folders",
+            text: "\u{201C}photos\u{201D}: This folder isn't there any more.\n\u{201C}work\u{201D}: macOS is blocking \(app) from this folder.\n\nUntil \(app) can open them, Lucille can't use these folders.",
+            warning: true, place: .filesAndFolders
+        ), "at launch, several are each named, in order, with Open Privacy Settings once one is blocked by macOS",
+           "\(String(describing: several))")
+
+        let folder = Folder(alias: "photos", path: "/Volumes/Photos", broad: false)
+        let moved = Folder(alias: "photos", path: "/Volumes/Other", broad: false)
+        report.expect(SetupText.folderState(of: folder, in: checks) == SetupText.folderMissing
+                      && SetupText.folderState(of: moved, in: checks) == nil
+                      && SetupText.folderState(of: Folder(alias: "documents", path: "/Users/a/Documents", broad: false), in: checks) == nil,
+                      "the menu says a folder's check only for its alias and path, and nothing for one that opens")
     }
 
     /// Set Up through 40,000 seeded steps, partly the way the app feeds it and partly not: the

@@ -459,6 +459,63 @@ enum SetupText {
         }
     }
 
+    /// The check of `folder` among `checks`: the one for its alias and its path, so that a check
+    /// of a folder since removed, or of another folder under the same name, says nothing of it.
+    static func check(of folder: Folder, in checks: [FolderCheck]) -> FolderCheck? {
+        checks.first(where: { $0.alias == folder.alias && $0.path == folder.path })
+    }
+
+    /// What the menu's Folders submenu says under a folder, in the Folders page's words: nothing
+    /// for a folder the host can open, or one not checked since the app opened.
+    static func folderState(of folder: Folder, in checks: [FolderCheck]) -> String? {
+        check(of: folder, in: checks).flatMap { folderState($0.state) }
+    }
+
+    /// The note after a folder is added from the menu, once `roots check` has answered for it
+    /// (decisions/0002 §12): the menu's own note when the host can open it, or `state` is nil
+    /// because the check did not answer; otherwise that the folder was added, then what the Folders
+    /// page says of it, and Open Privacy Settings for one macOS blocks (`PlaceRules`).
+    static func addedNote(alias: String, connected: Bool, state: FolderCheck.State?) -> FolderNote {
+        guard let state, let said = folderState(state) else {
+            return FolderNote(
+                title: folderAddedTitle, text: HostText.folderAdded(alias: alias, connected: connected),
+                warning: false, place: nil
+            )
+        }
+        return FolderNote(
+            title: cantOpenTitle(alias), text: "The folder was added. \(said) \(untilItCan)",
+            warning: true, place: PlaceRules.place(for: state)
+        )
+    }
+
+    /// The note at launch, from `roots check` of every folder (decisions/0002 §12): nothing while
+    /// the host can open each one; otherwise each folder it can't, by the name Lucille knows it by,
+    /// in the Folders page's words, and Open Privacy Settings when macOS blocks any of them.
+    static func launchNote(_ checks: [FolderCheck]) -> FolderNote? {
+        let refused = checks.compactMap { check in folderState(check.state).map { (check, $0) } }
+        guard let first = refused.first else {
+            return nil
+        }
+        let place = refused.lazy.compactMap { PlaceRules.place(for: $0.0.state) }.first
+        if refused.count == 1 {
+            return FolderNote(title: cantOpenTitle(first.0.alias), text: "\(first.1) \(untilItCan)",
+                              warning: true, place: place)
+        }
+        let lines = refused.map { "\u{201C}\($0.0.alias)\u{201D}: \($0.1)" }
+        return FolderNote(
+            title: "\(appName) can't open some of your folders",
+            text: lines.joined(separator: "\n") + "\n\n" + untilTheyCan, warning: true, place: place
+        )
+    }
+
+    static let folderAddedTitle = "Folder added"
+    static let untilItCan = "Until \(appName) can open it, Lucille can't use this folder."
+    static let untilTheyCan = "Until \(appName) can open them, Lucille can't use these folders."
+
+    static func cantOpenTitle(_ alias: String) -> String {
+        "\(appName) can't open \u{201C}\(alias)\u{201D}"
+    }
+
     /// What a row of the Add back page is called: a folder by the name Lucille knows it by, an
     /// ability in the core's words.
     static func rowTitle(_ item: RestoreItem) -> String {

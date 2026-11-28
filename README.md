@@ -20,7 +20,10 @@ app password stored here (`gmail.check`, `gmail.mailboxes`, `gmail.search`, `gma
 `files.search`, off by default, which searches the files of one folder with ripgrep. Those are tested
 against Switchboard's in-process hub and a stand-in for Lucille, not against Lucille itself. The
 conformance suite plays a hostile Lucille against the installed program; the release workflow runs it on
-the built wheel before publishing, and again from PyPI after.
+the built wheel before publishing, and again from PyPI after. `verify` checks that the host installed is
+a release PyPI serves, attested by this repository's release workflow, and that its files are the
+release's ([VERIFYING.md](VERIFYING.md), step 2); it is in no release yet, and is tested with PyPI and
+sigstore stood in for.
 
 ## What it is
 
@@ -115,6 +118,10 @@ still pending.
 3. **Control.** `lucille-host pause`, `kill` and `forget` work on the computer, even offline. Nothing
    Lucille sends can unpause the host or widen its policy. `lucille-host status` and `log` show what the
    host holds and what it did.
+4. **Checking.** `lucille-host verify`, installed with the `[verify]` extra, checks that the host is a
+   release PyPI serves, attested by this repository's release workflow, and that the files installed are
+   the release's. It is the installed code checking itself: [VERIFYING.md](VERIFYING.md) says how to
+   check from a fresh install, and what it cannot show.
 
 `0.1.0` has these verbs.
 

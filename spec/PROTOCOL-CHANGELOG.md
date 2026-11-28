@@ -87,6 +87,14 @@ The first version.
   not fit; `truncated` in a search or mailbox list now also says that some were left out to fit; and a
   mailbox's name, an attachment's `content_type` and its `filename` have limits. The schema did not
   change.
+- **Revised in the draft, after the 0.1.0 tag: `files.search.schema.json` states more of §11.** It now
+  refuses a text path that is absolute or has an empty or `..` part (a pattern), and an `error` with a
+  match or with `truncated` false (two closed shapes, in a `oneOf`). The byte bounds on paths and lines,
+  which a schema counting characters cannot state, are a named rule, `search-bytes` (§11), which the
+  fixtures name. The host now also refuses, as `unreadable_output`, a path of ripgrep's with an empty
+  part, so that every document it writes is one the schema accepts. §11 says a client reads `error`
+  first, since an error document can come with `exit_code` 0. No document the host wrote before is
+  refused, but for a path with an empty part, which ripgrep does not write.
 - **Revised in the draft, 2026-11-27: `files.search`'s reply is a document.** Its `stdout` was
   ripgrep's text output, `path:line:text` a line; a newline in a file's name wrote a line that read as
   a match. Now the host runs ripgrep with `--json` and returns, in `stdout`, a document held to a new

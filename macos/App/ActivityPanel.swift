@@ -7,7 +7,7 @@ import AppKit
 /// decides nothing, and keeps nothing once the app quits.
 ///
 /// - Nothing in it can be selected or edited, so nothing in it can be taken out of it: that would
-///   write the pasteboard, and the app adds no copy of its own (Copy Diagnostics, §15, is later). It
+///   write the pasteboard, and the app's one copy of its own is Copy Diagnostics' Copy (§15). It
 ///   has no button on a request: a refusal is a fact, never an offer to turn an ability on (§13).
 /// - It is one non-modal panel that stays on the screen while the user works in another app. It is
 ///   not restorable and keeps no frame of its own: macOS would otherwise keep the window's state

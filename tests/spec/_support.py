@@ -20,6 +20,8 @@
 
 from __future__ import annotations
 
+import base64
+import binascii
 import datetime
 import json
 import re
@@ -76,6 +78,7 @@ PROSE_RULES = (
     "not-after-range",
     "gmail-args",
     "credential-ask-args",
+    "search-bytes",
 )
 GMAIL_ID_MAX = 2**64 - 1
 _CONTROL = re.compile(r"[\x00-\x1f\x7f]")
@@ -132,6 +135,34 @@ def credential_ask_args_broken(op: Any, args: Any) -> bool:
         or "  " in reason
         or not reason.strip()
     )
+
+
+# Rule search-bytes (spec/PROTOCOL.md section 11): the most bytes of a path and of a line in a
+# files.search document, which a schema, counting characters, cannot state.
+SEARCH_BYTES = {"path": 4096, "lines": 1000}
+
+
+def search_bytes_broken(body: Any) -> bool:
+    """Rule search-bytes: a path over 4096 bytes or a line over 1000, as UTF-8 for a text and as
+    the bytes its base64 gives for bytes."""
+    matches = body.get("matches") if isinstance(body, dict) else None
+    for match in matches if isinstance(matches, list) else []:
+        for key, most in SEARCH_BYTES.items():
+            item = match.get(key) if isinstance(match, dict) else None
+            if not isinstance(item, dict) or len(item) != 1:
+                continue
+            if isinstance(item.get("text"), str):
+                size = len(item["text"].encode("utf-8", "surrogatepass"))
+            elif isinstance(item.get("bytes"), str):
+                try:
+                    size = len(base64.b64decode(item["bytes"], validate=True))
+                except binascii.Error:
+                    continue
+            else:
+                continue
+            if size > most:
+                return True
+    return False
 
 
 def ecma_regex(pattern: str) -> re.Pattern[str]:
@@ -248,6 +279,8 @@ def prose_violations(
         and credential_ask_args_broken(body.get("op"), body.get("args"))
     ):
         broken.append("credential-ask-args")
+    if kind == "files.search" and search_bytes_broken(body):
+        broken.append("search-bytes")
     return broken
 
 

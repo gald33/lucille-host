@@ -1,0 +1,31 @@
+{
+  "description": "Dots that are not a .. part: a hidden name, ..a, a., ... and a part that is one dot.",
+  "valid": true,
+  "schema_valid": true,
+  "body": {
+    "matches": [
+      {
+        "path": {
+          "text": ".hidden/..a/a./.../x"
+        },
+        "line_number": 3,
+        "lines": {
+          "text": "hello world\n"
+        },
+        "line_truncated": false
+      },
+      {
+        "path": {
+          "text": "./a.txt"
+        },
+        "line_number": 3,
+        "lines": {
+          "text": "hello world\n"
+        },
+        "line_truncated": false
+      }
+    ],
+    "truncated": false,
+    "error": null
+  }
+}
