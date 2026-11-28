@@ -15,7 +15,7 @@
       "kind": "file",
       "uid": 0,
       "look": "ls -l '/home/me/.config/lucille-host/default/policy.toml'",
-      "repair": "chown 1000 '/home/me/.config/lucille-host/default/policy.toml'"
+      "repair": "chown -h 1000 '/home/me/.config/lucille-host/default/policy.toml'"
     },
     {
       "v": 1,

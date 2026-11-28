@@ -446,8 +446,9 @@ nothing on its own:
   looked at and reported by its own path, so that a `policy.toml` linked to a root-owned file names that
   file.
 - Inside the home folder, each finding carries two command lines for a person to run as root: `ls -lR`
-  (`ls -l` for a file) first, as "Look first" asks, then `chown -R <uid>` (`chown` for a file). The path is
-  always in single quotes. The user is named by **uid**, not by name: that needs no user database (the
+  (`ls -l` for a file) first, as "Look first" asks, then `chown -R <uid>` (`chown -h <uid>` for a file, so
+  that a file swapped for a symbolic link before root runs it changes the link and not what it points
+  to). The path is always in single quotes. The user is named by **uid**, not by name: that needs no user database (the
   runtime's import allowlist has no `pwd`), and is exact. The group is left as it is, which 4.3 says does
   no harm.
 - **Outside the home folder** (a custom `XDG_*_HOME` there, or a link that points there) it reports what it

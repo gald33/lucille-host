@@ -16,6 +16,7 @@ relative ``HOME``, symbolic links, macOS, and a folder outside the home folder.
 from __future__ import annotations
 
 import os
+import shlex
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -121,8 +122,28 @@ def test_a_root_owned_file_in_the_users_profile(home: Path, planted: Planted) ->
             "file",
             0,
             f"ls -l '{policy_file}'",
-            f"chown {TEST_UID} '{policy_file}'",
+            f"chown -h {TEST_UID} '{policy_file}'",
         )
+    ]
+
+
+def test_a_files_repair_changes_a_link_swapped_in_and_not_what_it_points_to(
+    home: Path, planted: Planted
+) -> None:
+    # Root runs `repair` later, by hand. Should the user swap the file for a symbolic link to a file
+    # of root's by then, a `chown` that follows the link would give the user that file: `-h` changes
+    # the link itself.
+    environ = _linux(home)
+    found = _made(environ)
+    found.policy_file.write_text("")
+    _plant(planted, found.policy_file)
+    (repaired,) = _check(environ)
+    assert repaired.repair is not None
+    assert shlex.split(repaired.repair) == [
+        "chown",
+        "-h",
+        str(TEST_UID),
+        os.path.realpath(found.policy_file),
     ]
 
 
@@ -330,7 +351,9 @@ def test_a_policy_file_linked_to_a_root_owned_file(home: Path, planted: Planted)
     _plant(planted, target)
     real = Path(os.path.realpath(target))
     assert _check(environ) == [
-        owners.Found("not_yours", real, "file", 0, f"ls -l '{real}'", f"chown {TEST_UID} '{real}'")
+        owners.Found(
+            "not_yours", real, "file", 0, f"ls -l '{real}'", f"chown -h {TEST_UID} '{real}'"
+        )
     ]
 
 

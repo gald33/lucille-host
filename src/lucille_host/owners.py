@@ -29,8 +29,10 @@ another program needs it as it is (decisions/0004, 4.3, "Not checked"), so a per
 
 Each finding inside the home folder comes with two command lines, for a person to run as root:
 one that shows what is there (``ls -lR``), since the folder may hold another program's files, and
-one that gives it back to the user (``chown -R``, or ``chown`` for a file), naming the user by
-uid, which needs no lookup. The group is left as it is.
+one that gives it back to the user (``chown -R``, or ``chown -h`` for a file), naming the user
+by uid, which needs no lookup. The group is left as it is. ``-h`` changes a symbolic link itself:
+a file the user swaps for a link between the check and the repair does not give root's ``chown``
+the file the link points to.
 """
 
 from __future__ import annotations
@@ -111,7 +113,7 @@ def _commands(path: Path, kind: str, me: int) -> tuple[str, str]:
     quoted = _quoted(str(path))
     if kind == "folder":
         return f"ls -lR {quoted}", f"chown -R {me} {quoted}"
-    return f"ls -l {quoted}", f"chown {me} {quoted}"
+    return f"ls -l {quoted}", f"chown -h {me} {quoted}"
 
 
 def _finding(path: Path, kind: str, uid: int, home: Path, me: int) -> Found:

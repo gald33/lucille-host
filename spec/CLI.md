@@ -1398,8 +1398,10 @@ folder where that is missing). It exits 0 whatever it finds.
   follows (a `policy.toml` linked to a file kept elsewhere), is looked at as the folder or file it is, and
   written by its own resolved path.
 - **The repair.** Inside the home folder, `look` is `ls -lR '<path>'` (`ls -l` for a file) and `repair` is
-  `chown -R <uid> '<path>'` (`chown` for a file), `<uid>` being the user's own uid, which needs no lookup
-  in the user database. The group is left as it is. The folder may hold another program's files by now
+  `chown -R <uid> '<path>'` (`chown -h` for a file), `<uid>` being the user's own uid, which needs no
+  lookup in the user database. `-h` changes a symbolic link itself, never the file it points to, so that a
+  file swapped for a link before root runs `repair` gives root's `chown` nothing else. The group is left as
+  it is. The folder may hold another program's files by now
   (a `~/.config` root made), so a person runs `look` first. Outside the home folder it suggests no
   command (`outside_home`): whether another program needs that folder as it is is a person's call.
 - The text form writes one finding per line, `look` and `repair` indented below it, or "every folder and
