@@ -271,7 +271,16 @@ a search pattern), and what an enabled operation returns, up to 64 KiB of output
   of output comes back truncated and flagged, its JSON string exactly 64 KiB;
   `test_exec_raw_ceiling_drops_the_rest_and_flags_it`; `test_request_caps_never_raise_the_host_cap`); `tests/test_output.py`; invariant "Output is
   bounded, decodable and path-free" (conformance scenario `output-bounded`: a `files.search` whose output
-  passes 1 MiB comes back truncated and flagged, and the serialized reply measures under 256 KiB);
+  passes 1 MiB comes back truncated and flagged, and the serialized reply measures under 256 KiB; and
+  conformance scenario `output-decodable`: a `files.search` over a line that is not UTF-8, a file name
+  that is not UTF-8, a long line of two-byte characters and a file holding NUL comes back with no
+  U+0000 and no unpaired surrogate in the reply or its document, the bytes that are not UTF-8 exactly,
+  the long line cut within 1000 bytes at a character's end and flagged, and no match in the file
+  holding NUL, which ripgrep skips as binary. The file name that is not UTF-8 is checked only where
+  the filesystem accepts such a name, so not on macOS, whose filesystem refuses it. The host's guard
+  that sends a line holding NUL as bytes is not reached by the scenario; it is tested with ripgrep's
+  output given directly, `tests/test_files_search.py`
+  (`test_text_and_bytes_are_given_as_ripgrep_gives_them`));
   invariant "Failures cross the wire as codes only" (conformance scenario `failures-codes-only`: requests
   that carry a sentinel, in the op's name, a path, a folder alias, an extra envelope key or an extra
   argument, are each refused with a code alone, and the sentinel is in no body the host posted. The
