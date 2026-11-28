@@ -28,7 +28,7 @@ from pathlib import Path
 from typing import Any
 
 from lucille_host.conformance import _spawn
-from lucille_host.conformance._lucille import Lucille
+from lucille_host.conformance._lucille import Lucille, NoRequest
 
 # The longest one wait may take, in seconds.
 WAIT = 60.0
@@ -40,17 +40,43 @@ class HarnessError(Exception):
     """The harness could not set the host up: not a finding about the host."""
 
 
-def until(condition: Callable[[], Any], what: str, *, seconds: float = WAIT) -> Any:
+def until(
+    condition: Callable[[], Any],
+    what: str,
+    *,
+    seconds: float = WAIT,
+    detail: Callable[[], str] | None = None,
+) -> Any:
     """What ``condition()`` returns once it is truthy, asked every 50 ms for at most
-    ``seconds``; :class:`HarnessError` naming ``what`` if it never is."""
+    ``seconds``; :class:`HarnessError` naming ``what`` if it never is, followed by what
+    ``detail()`` says then."""
     deadline = time.monotonic() + seconds
     while True:
         found = condition()
         if found:
             return found
         if time.monotonic() >= deadline:
-            raise HarnessError(f"{what} did not happen within {seconds:g} s")
+            said = f"\n{detail()}" if detail is not None else ""
+            raise HarnessError(f"{what} did not happen within {seconds:g} s{said}")
         time.sleep(0.05)
+
+
+def outline(child: _spawn.Child) -> str:
+    """What a pairing failure shows of ``pair begin --json``: its exit code, the type and state of
+    each object it wrote, with an error's code and kind, and how many lines it wrote on standard
+    error. Nothing else of what it wrote: no connect code, pairing code, name, note or SAS."""
+    shown = []
+    for found in child.objects():
+        part = str(found.get("type"))
+        if "state" in found:
+            part += f" {found['state']}"
+        if found.get("type") == "error":
+            part += f" (code {found.get('code')}, kind {found.get('kind')})"
+        shown.append(part)
+    return (
+        f"pair begin: exit {child.proc.poll()}; wrote {', '.join(shown) or 'nothing'}; "
+        f"{len(child.err)} line(s) on stderr"
+    )
 
 
 def host_env(home: Path, tmp: Path, extra: Mapping[str, str] | None = None) -> dict[str, str]:
@@ -148,8 +174,26 @@ class Host:
                 return None
 
             code = until(shown_code, "pair begin showing its connect code")
-            lucille.deliver(code, sender="telegram:123456789", handle="@ada")
-            until(lambda: lucille.collect() == "paired", "Lucille collecting the host's answer")
+            try:
+                offset = lucille.deliver(code, sender="telegram:123456789", handle="@ada")
+            except NoRequest as error:
+                raise HarnessError(f"Lucille found no request: {error}\n{outline(pair)}") from None
+            collected: list[str] = []
+
+            def answered() -> bool:
+                if pair.proc.poll() not in (None, 0):
+                    raise HarnessError(f"pair begin failed\n{outline(pair)}")
+                collected[:] = [lucille.collect()]
+                return collected[0] == "paired"
+
+            def how_far() -> str:
+                state = collected[0] if collected else "never collected"
+                return (
+                    f"{outline(pair)}\nLucille: delivered in the drop room of epoch {offset:+d} "
+                    f"of its clock; its pairing is {state}"
+                )
+
+            until(answered, "Lucille collecting the host's answer", detail=how_far)
             if pair.wait(WAIT) != 0:
                 raise HarnessError(f"pair begin did not end well\n{pair.describe()}")
             shown = pair.objects()[-1]
