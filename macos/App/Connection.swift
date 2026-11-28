@@ -722,6 +722,12 @@ final class Connection: ObservableObject {
         }
     }
 
+    /// Copy Diagnostics…: the versions and `status`, read again, in a note whose Copy alone writes
+    /// them to the pasteboard (decisions/0002 §15).
+    func diagnosticsChosen() {
+        DiagnosticsPanel.chosen(cli)
+    }
+
     /// The Activity window's Show the Host's Log: its last 200 lines, which the window shows as
     /// the host wrote them. `log` writes nothing when the log is empty (spec/CLI.md §7).
     private func readLog() {

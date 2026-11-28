@@ -4305,6 +4305,54 @@ def test_the_app_never_reads_the_pasteboard() -> None:
     ]
 
 
+# The app's own copies: a call of a view's copy(_:) or cut(_:) by the app's code, or a write of a
+# selection. A user's Command-C or Command-X, which the pairing field forwards by selector, is not
+# one.
+_COPIES_ON_ITS_OWN = (
+    r"\.(copy|cut)\s*\(\s*(nil|self|sender)\s*\)",
+    r"\bwriteSelection\s*\(",
+)
+
+
+def test_copy_diagnostics_is_the_apps_one_copy_of_its_own() -> None:
+    # decisions/0002 §15: Copy Diagnostics is the user's act. Its note's Copy, and nothing else,
+    # copies: once, the whole text, as plain text, through a text view of its own, so the app
+    # still never names the pasteboard (test_the_app_never_reads_the_pasteboard).
+    assert _matches(_COPIES_ON_ITS_OWN, "view.copy(nil)")
+    assert not _matches(_COPIES_ON_ITS_OWN, "NSImage(named: glyph)?.copy() as? NSImage")
+    assert not _matches(_COPIES_ON_ITS_OWN, "return #selector(NSText.copy(_:))")
+    for path in SWIFT_FILES:
+        found = re.findall(_COPIES_ON_ITS_OWN[0], path.read_text(encoding="utf-8"))
+        assert len(found) == (1 if path.name == "DiagnosticsPanel.swift" else 0), path.name
+        assert not re.search(_COPIES_ON_ITS_OWN[1], path.read_text(encoding="utf-8")), path.name
+    panel = _swift("DiagnosticsPanel.swift")
+    copy = _swift_function(panel, "    private static func copy(_ text: String) {")
+    assert "        view.isRichText = false\n        view.string = text\n" in copy
+    assert "        view.selectAll(nil)\n        view.copy(nil)\n" in copy
+    assert panel.count("copy(text)") == 1
+    assert (
+        "            if response == .alertFirstButtonReturn {\n"
+        "                copy(text)\n"
+        "            }\n"
+    ) in panel
+    # Copy is the note's first button, then Cancel; the text shown can't be selected or edited.
+    assert panel.index("DiagnosticsText.copyButton") < panel.index("DiagnosticsText.cancelButton")
+    box = _swift_function(panel, "    private static func box(_ text: String) -> NSView {")
+    assert "view.isEditable = false" in box and "view.isSelectable = false" in box
+    # The menu offers it always, after Activity…, and the ui check looks for it there.
+    menu = _swift("MenuBarApp.swift")
+    item = "        Button(DiagnosticsText.menuItem) { connection.diagnosticsChosen() }\n"
+    assert menu.index("Button(ConnectionText.activityItem)") < menu.index(item)
+    assert menu.index(item) < menu.index("if connection.items.connect {")
+    words = _swift("Diagnostics.swift")
+    assert f'static let menuItem = "{_named_in_swift(check_app.DIAGNOSTICS_ITEM)}"' in words
+    assert check_app.DIAGNOSTICS_ITEM in check_app.MENU_ITEMS
+    # What it copies is made in a file that draws nothing, which the self-test runs.
+    assert "Diagnostics.swift" in check_app.LOGIC_SOURCES
+    assert "DiagnosticsPanel.swift" not in check_app.LOGIC_SOURCES
+    assert "checkDiagnostics(fixtures, report)" in _SELF_TEST.read_text(encoding="utf-8")
+
+
 _NAMES_A_TEST_HUB_OR_FILE_STORE = (r"--hub\b", r"--store-file\b")
 
 

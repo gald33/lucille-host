@@ -46,8 +46,9 @@ def rewrite_definition(data: bytes, new_hash: str) -> bytes:
 def upgrade_disables_changed_op(ctx: Context) -> None:
     """With files.sha256's stored definition hash no longer the catalog's, as after an upgrade
     that changed the entry: host.describe stops listing it, a request for it is refused
-    not_enabled and starts nothing, the policy digest is unchanged by that refusal, and the
-    policy file is left as it is; once the user enables it again, it runs."""
+    not_enabled and starts nothing, the policy digest is unchanged by that refusal, the policy
+    file is left as it is, and `ops list` shows it disabled_by_upgrade; once the user enables it
+    again, it runs."""
     assert ctx.baseline is not None
     named = ctx.host.policy_file
     check(named is not None, "the host names no policy file")
@@ -59,6 +60,11 @@ def upgrade_disables_changed_op(ctx: Context) -> None:
         until_describe(ctx, lambda d: OP not in d["enabled_ops"], f"disabling the changed {OP}")
         refused_here(ctx, ctx.body(OP, args), "not_enabled")
         check(named.read_bytes() == changed, "the host rewrote the policy file")
+        listed = [o for o in ctx.host.cli("ops", "list") if o.get("name") == OP]
+        check(
+            [o.get("state") for o in listed] == ["disabled_by_upgrade"],
+            f"ops list does not tell the user why {OP} is off: {listed!r}",
+        )
 
         ctx.host.enable(OP)
         until_describe(ctx, lambda d: OP in d["enabled_ops"], f"enabling {OP} again")

@@ -316,7 +316,15 @@ a search pattern), and what an enabled operation returns, up to 64 KiB of output
   `unreadable_output` and no match; a message nested past 8 levels is refused before the parser; a cut
   last line; at most 1000 matches; redaction of each path and line, before a line is cut
   (`test_redaction_runs_before_the_line_is_cut`); the child's stdin is `/dev/null`. Each document is held to its schema. `tests/test_catalog.py`: its words, and that
-  `sends_file_content` is in its definition hash.
+  `sends_file_content` is in its definition hash. The conformance suite, through the installed host
+  (`src/lucille_host/conformance/_search.py`): `search-root-traversal` (a root written as a path is
+  refused `bad_args`, one the policy does not hold `path_outside_root`, and `path`, `paths`, `cwd` or
+  `glob` in its arguments `bad_args`, each starting nothing with the policy digest unchanged);
+  `search-flag-injection` (a pattern shaped like a ripgrep flag, as a fixed string or a regular
+  expression, matches only the line holding that text, and a file named `--version` is matched as a
+  file); `search-no-escape` (nothing is reached through a link out of the folder, or in a hidden file,
+  even with `RIPGREP_CONFIG_PATH` set in `run`'s environment to a configuration that would follow
+  links and search hidden files).
 
 **C9.** "Lucille also learns the host's version, OS family, enabled operation names and folder aliases (never
 folder paths), each run's exit code and duration, a fingerprint that changes when your local policy
