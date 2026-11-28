@@ -298,3 +298,14 @@ def test_check_sas_says_which_without_saying_either_sas(
     assert message.splitlines()[1].startswith("pair begin: exit 0; wrote ")
     for secret in ("4821", "9374", *SECRETS):
         assert secret not in message
+
+
+def test_check_sas_fails_when_neither_side_holds_a_sas() -> None:
+    # A host at sas_pending that shows no SAS, and a Lucille that holds none, are not a match.
+    written = [{k: v for k, v in _sas_pending("4821").items() if k != "sas"}]
+    with pytest.raises(HarnessError) as raised:
+        check_sas(_child(written, ""), None)
+    assert str(raised.value).splitlines()[0] == (
+        "pair begin ended on pair sas_pending; the SAS it showed is the one Lucille holds, "
+        "which is none"
+    )
