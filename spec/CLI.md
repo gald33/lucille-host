@@ -585,7 +585,7 @@ drain: a signal (`SIGTERM`, `SIGHUP` or Ctrl-C), the end of standard input, or a
 
 `profile check` writes one of these for each folder or file it finds, by path, or one `ok` when it finds none
 (section 17). `not_yours` is inside the home folder and owned by another user (`uid`; root is 0); `look`
-and `repair` are command lines for a person to run as root, with the path in single quotes: `look` shows
+and `repair` are command lines for a person to run as root, in the form section 17 gives: `look` shows
 what is there, and `repair` gives it to the user. A shell shows them, and never runs them. `outside_home`
 is the same outside the home folder, where the host suggests no repair. `unreadable` cannot be looked at:
 a folder above it refuses the user (above a profile folder, it is written only when no folder above it is
@@ -1454,9 +1454,16 @@ folder where that is missing). It exits 0 whatever it finds.
   symbolic link is not followed into, and its own owner does not matter; what it points to, which the host
   follows (a `policy.toml` linked to a file kept elsewhere), is looked at as the folder or file it is, and
   written by its own resolved path.
-- **The repair.** Inside the home folder, `look` is `ls -lR '<path>'` (`ls -l` for a file) and `repair` is
-  `chown -R <uid> '<path>'` (`chown` for a file), `<uid>` being the user's own uid, which needs no lookup
-  in the user database. The group is left as it is. The folder may hold another program's files by now
+- **The repair.** Inside the home folder, `look` runs `ls -lR` (`ls -l` for a file) and `repair` runs
+  `chown -R <uid>` (`chown` for a file), `<uid>` being the user's own uid, which needs no lookup in the user
+  database. The group is left as it is. Each is written as
+  `(cd -P '<folder>' && [ "$(pwd -P)" = '<folder>' ] && <command> './<name>')`: `<folder>` is the folder
+  that holds the path, with no symbolic link in it, and `<name>` is the path's last part, each in single
+  quotes. The folder and every folder above it, up to the finding, are the user's (the walk up stops at the
+  first one that is), so the user could swap one for a symbolic link to another account's folder holding
+  a file or folder of the same name before root runs the command. The command then stops at the
+  `pwd -P` check and changes nothing. Past the check it names the finding by its name alone, so no folder
+  above it is looked up again. It runs in a subshell, and leaves root's shell where it was. The folder may hold another program's files by now
   (a `~/.config` root made), so a person runs `look` first. Outside the home folder it suggests no
   command (`outside_home`): whether another program needs that folder as it is is a person's call.
 - The text form writes one finding per line, `look` and `repair` indented below it, or "every folder and

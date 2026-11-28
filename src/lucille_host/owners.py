@@ -31,6 +31,16 @@ Each finding inside the home folder comes with two command lines, for a person t
 one that shows what is there (``ls -lR``), since the folder may hold another program's files, and
 one that gives it back to the user (``chown -R``, or ``chown`` for a file), naming the user by
 uid, which needs no lookup. The group is left as it is.
+
+Root runs them later, by hand, and every folder above a finding, up to the one that holds it, is
+the user's: the walk up stops at the first one that is. So the user could, in the meantime, swap
+one of those folders for a symbolic link to another account's folder that holds a file or folder
+of the same name, and a command naming the whole path would give root's ``chown`` that one. Each
+command therefore goes into the folder that holds the finding (``cd -P``), checks that it is in
+that folder by its path with no symbolic link in it (``pwd -P``, which the kernel answers for the
+folder the shell is in), stops if not, and only then names the finding, by its name alone. Once
+the shell is in a folder no path above the name is looked up again, so no link above the name
+can be followed. It runs in a subshell, so that root's shell is left where it was.
 """
 
 from __future__ import annotations
@@ -107,11 +117,18 @@ def _quoted(word: str) -> str:
 
 
 def _commands(path: Path, kind: str, me: int) -> tuple[str, str]:
-    """The command that shows what is at ``path``, and the one that gives it to the uid ``me``."""
-    quoted = _quoted(str(path))
+    """The command that shows what is at ``path``, and the one that gives it to the uid ``me``.
+    ``path`` is resolved (:func:`check`), so the folder that holds it is named with no symbolic
+    link in it, as ``pwd -P`` names it; the name, after ``./``, cannot be read as an option."""
+    folder = _quoted(str(path.parent))
+    name = _quoted(f"./{path.name}")
+
+    def inside(command: str) -> str:
+        return f'(cd -P {folder} && [ "$(pwd -P)" = {folder} ] && {command} {name})'
+
     if kind == "folder":
-        return f"ls -lR {quoted}", f"chown -R {me} {quoted}"
-    return f"ls -l {quoted}", f"chown {me} {quoted}"
+        return inside("ls -lR"), inside(f"chown -R {me}")
+    return inside("ls -l"), inside(f"chown {me}")
 
 
 def _finding(path: Path, kind: str, uid: int, home: Path, me: int) -> Found:

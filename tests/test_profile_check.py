@@ -16,7 +16,8 @@ relative ``HOME``, symbolic links, macOS, and a folder outside the home folder.
 from __future__ import annotations
 
 import os
-from collections.abc import Iterator
+import subprocess
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 import pytest
@@ -65,6 +66,15 @@ def _plant(planted: Planted, *where: Path) -> None:
 def _plant_down(planted: Planted, top: Path, folder: Path) -> None:
     """``top`` and every folder from it down to ``folder``, as root makes them."""
     _plant(planted, folder, *[above for above in folder.parents if above.is_relative_to(top)])
+
+
+def _in(path: Path | str, command: str) -> str:
+    """``command`` on ``path`` as the check prints it: in a subshell, in the folder that holds it
+    once that folder is checked to be the one named, with no symbolic link, on its name alone."""
+    path = Path(path)
+    folder = "'" + str(path.parent).replace("'", "'\"'\"'") + "'"
+    name = "'./" + path.name.replace("'", "'\"'\"'") + "'"
+    return f'(cd -P {folder} && [ "$(pwd -P)" = {folder} ] && {command} {name})'
 
 
 def _linux(home: Path, **extra: str) -> dict[str, str]:
@@ -120,8 +130,8 @@ def test_a_root_owned_file_in_the_users_profile(home: Path, planted: Planted) ->
             policy_file,
             "file",
             0,
-            f"ls -l '{policy_file}'",
-            f"chown {TEST_UID} '{policy_file}'",
+            _in(policy_file, "ls -l"),
+            _in(policy_file, f"chown {TEST_UID}"),
         )
     ]
 
@@ -135,7 +145,12 @@ def test_a_root_owned_profile_folder(home: Path, planted: Planted) -> None:
     # The folder, and nothing inside it: `chown -R` of it repairs that too.
     assert _check(environ) == [
         owners.Found(
-            "not_yours", state, "folder", 0, f"ls -lR '{state}'", f"chown -R {TEST_UID} '{state}'"
+            "not_yours",
+            state,
+            "folder",
+            0,
+            _in(state, "ls -lR"),
+            _in(state, f"chown -R {TEST_UID}"),
         )
     ]
 
@@ -159,7 +174,7 @@ def test_the_highest_root_owned_ancestor_is_the_one_to_repair(
         found.state.stat()
     result = _check(environ)
     assert _states(result) == [("not_yours", real)]
-    assert result[0].repair == f"chown -R {TEST_UID} '{real}'"
+    assert result[0].repair == _in(real, f"chown -R {TEST_UID}")
 
 
 def test_the_config_and_state_sides_are_repaired_apart(home: Path, planted: Planted) -> None:
@@ -219,7 +234,7 @@ def test_a_custom_xdg_folder_inside_home(home: Path, planted: Planted) -> None:
     real = Path(os.path.realpath(home / "data"))
     result = _check(environ)
     assert _states(result) == [("not_yours", real)]
-    assert result[0].repair == f"chown -R {TEST_UID} '{real}'"
+    assert result[0].repair == _in(real, f"chown -R {TEST_UID}")
 
 
 def test_a_custom_xdg_folder_outside_home_gets_no_repair(
@@ -272,7 +287,7 @@ def test_a_symlinked_folder_inside_home_is_repaired_where_it_points(
     real = Path(os.path.realpath(dotfiles))
     result = _check(environ)
     assert _states(result) == [("not_yours", real)]
-    assert result[0].repair == f"chown -R {TEST_UID} '{real}'"
+    assert result[0].repair == _in(real, f"chown -R {TEST_UID}")
 
 
 def test_a_symlinked_folder_pointing_outside_home(
@@ -330,7 +345,9 @@ def test_a_policy_file_linked_to_a_root_owned_file(home: Path, planted: Planted)
     _plant(planted, target)
     real = Path(os.path.realpath(target))
     assert _check(environ) == [
-        owners.Found("not_yours", real, "file", 0, f"ls -l '{real}'", f"chown {TEST_UID} '{real}'")
+        owners.Found(
+            "not_yours", real, "file", 0, _in(real, "ls -l"), _in(real, f"chown {TEST_UID}")
+        )
     ]
 
 
@@ -361,13 +378,102 @@ def test_the_macos_layout(home: Path, planted: Planted) -> None:
     assert _states(_check(environ, family="macos")) == [("not_yours", real)]
 
 
+Shell = Callable[[str], tuple[int, str, list[str]]]
+
+
+@pytest.fixture
+def root_shell(tmp_path: Path) -> Shell:
+    """Runs a printed command with ``sh``, as root would paste it, with a ``chown`` that changes
+    nothing and writes down the folder it ran in, with no symbolic link, and what it was given."""
+    bin_folder = tmp_path / "bin"
+    bin_folder.mkdir()
+    log = tmp_path / "chown.log"
+    stand_in = bin_folder / "chown"
+    stand_in.write_text('#!/bin/sh\nprintf \'%s\\n\' "$(pwd -P)" "$@" >> "$CHOWN_LOG"\n')
+    stand_in.chmod(0o755)
+
+    def run(command: str) -> tuple[int, str, list[str]]:
+        environ = {
+            **os.environ,
+            "PATH": f"{bin_folder}{os.pathsep}{os.environ['PATH']}",
+            "CHOWN_LOG": str(log),
+        }
+        done = subprocess.run(
+            ["/bin/sh", "-c", command], env=environ, capture_output=True, text=True, check=False
+        )
+        return done.returncode, done.stdout, log.read_text().splitlines() if log.exists() else []
+
+    return run
+
+
+def _swap_for_a_link(folder: Path, elsewhere: Path, *inside: str) -> None:
+    """What the user can do before root runs a command: move ``folder``, which is theirs, aside,
+    and put in its place a symbolic link to ``elsewhere``, another account's folder that holds
+    ``inside``, the names the check reported, as another account's profile does."""
+    folder.rename(folder.with_name(folder.name + ".moved"))
+    for name in inside:
+        (elsewhere / name).parent.mkdir(parents=True, exist_ok=True)
+        (elsewhere / name).write_text("another account's")
+    folder.symlink_to(elsewhere)
+
+
+def test_the_printed_repair_names_the_file_it_found(
+    home: Path, planted: Planted, root_shell: Shell
+) -> None:
+    environ = _linux(home)
+    found = _made(environ)
+    found.policy_file.write_text("")
+    _plant(planted, found.policy_file)
+    (finding,) = _check(environ)
+    assert finding.repair is not None
+    returned, _, chown = root_shell(finding.repair)
+    assert returned == 0
+    ran_in, *given = chown
+    assert ran_in == os.path.realpath(found.config)
+    assert given == [str(TEST_UID), "./policy.toml"]
+    assert os.stat(Path(ran_in, given[-1])) == os.stat(found.policy_file)
+
+
+@pytest.mark.parametrize("kind", ["file", "folder"])
+def test_a_folder_above_a_finding_swapped_for_a_link_stops_the_printed_commands(
+    home: Path, tmp_path: Path, planted: Planted, root_shell: Shell, kind: str
+) -> None:
+    # The folder that holds a finding is the user's (the walk up stops at the first one that is),
+    # so the user can swap it, or one above it, for a link to another account's folder holding a
+    # file or folder of the same name. A command that named the whole path would then give root's
+    # `chown` that account's file. The printed commands stop instead, and change nothing.
+    environ = _linux(home)
+    found = _made(environ)
+    elsewhere = tmp_path / "another-account"
+    if kind == "file":
+        found.policy_file.write_text("")
+        _plant(planted, found.policy_file)
+        swapped, inside = found.config, ["policy.toml"]
+    else:
+        (found.state / "pairs").mkdir()
+        _plant(planted, found.state, found.state / "pairs")
+        swapped, inside = found.state.parent, ["default/pairs/record"]
+    (finding,) = _check(environ)
+    assert finding.look is not None and finding.repair is not None
+    _swap_for_a_link(swapped, elsewhere, *inside)
+    assert Path(finding.path).exists()  # the same path now names another account's
+    for command in (finding.look, finding.repair):
+        returned, out, chown = root_shell(command)
+        assert returned != 0
+        assert out == ""
+        assert chown == []
+
+
 def test_a_path_with_a_quote_is_quoted_for_a_shell(home: Path, planted: Planted) -> None:
     environ = _linux(home, XDG_STATE_HOME=str(home / "it's here"))
     found = _made(environ)
     _plant_down(planted, home / "it's here", found.state)
-    real = os.path.realpath(home / "it's here")
+    folder = os.path.realpath(home)
     result = _check(environ)
-    assert result[0].repair == f"chown -R {TEST_UID} '" + real.replace("'", "'\"'\"'") + "'"
+    assert result[0].repair == (
+        f"(cd -P '{folder}' && [ \"$(pwd -P)\" = '{folder}' ] && "
+        f"chown -R {TEST_UID} './it'\"'\"'s here')"
+    )
     assert found.state.is_dir()
 
 
@@ -396,8 +502,8 @@ def test_the_verb_in_text(
     assert said.err == ""
     assert said.out.startswith(
         f"{real}: a folder owned by uid 0, not by you\n"
-        f"  look first, as root: ls -lR '{real}'\n"
-        f"  then repair, as root: chown -R {TEST_UID} '{real}'\n"
+        f"  look first, as root: {_in(real, 'ls -lR')}\n"
+        f"  then repair, as root: {_in(real, f'chown -R {TEST_UID}')}\n"
     )
 
 

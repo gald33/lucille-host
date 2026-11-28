@@ -14,8 +14,8 @@
       "path": "/home/me/.config/lucille-host/default/policy.toml",
       "kind": "file",
       "uid": 0,
-      "look": "ls -l '/home/me/.config/lucille-host/default/policy.toml'",
-      "repair": "chown 1000 '/home/me/.config/lucille-host/default/policy.toml'"
+      "look": "(cd -P '/home/me/.config/lucille-host/default' && [ \"$(pwd -P)\" = '/home/me/.config/lucille-host/default' ] && ls -l './policy.toml')",
+      "repair": "(cd -P '/home/me/.config/lucille-host/default' && [ \"$(pwd -P)\" = '/home/me/.config/lucille-host/default' ] && chown 1000 './policy.toml')"
     },
     {
       "v": 1,
@@ -24,8 +24,8 @@
       "path": "/home/me/.local/state/lucille-host/default",
       "kind": "folder",
       "uid": 0,
-      "look": "ls -lR '/home/me/.local/state/lucille-host/default'",
-      "repair": "chown -R 1000 '/home/me/.local/state/lucille-host/default'"
+      "look": "(cd -P '/home/me/.local/state/lucille-host' && [ \"$(pwd -P)\" = '/home/me/.local/state/lucille-host' ] && ls -lR './default')",
+      "repair": "(cd -P '/home/me/.local/state/lucille-host' && [ \"$(pwd -P)\" = '/home/me/.local/state/lucille-host' ] && chown -R 1000 './default')"
     }
   ]
 }

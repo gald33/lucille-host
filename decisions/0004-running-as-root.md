@@ -446,7 +446,12 @@ nothing on its own:
   looked at and reported by its own path, so that a `policy.toml` linked to a root-owned file names that
   file.
 - Inside the home folder, each finding carries two command lines for a person to run as root: `ls -lR`
-  (`ls -l` for a file) first, as "Look first" asks, then `chown -R <uid>` (`chown` for a file). The path is
+  (`ls -l` for a file) first, as "Look first" asks, then `chown -R <uid>` (`chown` for a file). Each goes
+  into the folder that holds the finding, checks with `pwd -P` that it is that folder by its path with no
+  symbolic link, and only then names the finding by its name (spec/CLI.md section 17). Every folder above a
+  finding, up to the one that holds it, is the user's, so a command naming the whole path could be sent,
+  by a folder the user swapped for a link before root ran it, to another account's file of the same name.
+  The check could not be made by the host when it prints the command: the swap comes after. The paths are
   always in single quotes. The user is named by **uid**, not by name: that needs no user database (the
   runtime's import allowlist has no `pwd`), and is exact. The group is left as it is, which 4.3 says does
   no harm.
