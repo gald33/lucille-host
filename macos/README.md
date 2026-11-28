@@ -75,8 +75,9 @@ build is, and what is planned after it.
   the build removed from it; and every installed wheel's name, version, file name, URL and sha256. It
   holds no time and no signature.
 - `Capsule-unsigned-macOS-arm64.tar.gz`, the app before it is signed, as a tarball whose bytes depend only
-  on the files: entries sorted, each with the commit's time and owner 0. CI builds it twice and compares
-  the two.
+  on the files: entries sorted, each with the commit's time and owner 0. CI builds it twice in
+  `macos-app` and compares the two, and once more on another runner, in `macos-rebuild`, and compares
+  that with `macos-app`'s.
 - **`Capsule-<version>-<commit>-adhoc-macOS-arm64.dmg`**, a disk image whose volume is named Capsule. It holds
   the app and a link to the Applications folder. The file name says the signature is ad hoc and names
   the commit, so the image cannot be taken for a release asset. `hdiutil create` writes it as
@@ -1029,9 +1030,11 @@ push to `main`. Its job `macos-app` builds the app on a GitHub-hosted Apple sili
 runs each check in [`check_app.py`](../tools/macos/check_app.py). Its jobs `macos-smoke`, on `macos-26` and
 on `xcode-27` (macOS 27), take the disk image and the compiled Swift self-test that `macos-app` built,
 refuse them unless their sha256 is the one `macos-app` gave, and run the checks marked "both" on them; they
-build nothing. The workflow's token can only read the repository, and the Mac jobs use no secret. A check
-that finds a problem fails its job, and every job, on `xcode-27` too, fails the workflow run when it fails
-(decisions/0002 §18: the `xcode-27` leg did not from 2026-11-02 to 2026-11-18).
+build nothing. Its job `macos-rebuild` builds the unsigned app again on another `macos-15` runner and
+compares it with `macos-app`'s. The workflow's token can only read the repository, and the Mac jobs use no
+secret. A check that finds a problem fails its job, and every job, on `xcode-27` too, fails the workflow
+run when it fails (decisions/0002 §18: the `xcode-27` leg did not from 2026-11-02 to 2026-11-18). The
+rebuild's comparison is recorded, not a check: a difference does not fail its job.
 
 | Check | Where | What it shows |
 |---|---|---|
@@ -1060,6 +1063,8 @@ that finds a problem fails its job, and every job, on `xcode-27` too, fails the 
 | `suite` | `macos-app` | The host's whole test suite passes on a copy of the app's runtime, with the test dependencies installed into the copy only, by hash, and the host's wheel and agent-switchboard installed again by `MANIFEST.json`'s sha256, so that their commands sit beside the copy's interpreter. |
 | `pairing` | `macos-app` | It needs Switchboard's hub and the test harness, so it runs with the interpreter of the copy of the runtime that `suite` made, after it; the smoke jobs have no such copy, and do not run it. With a hub of its own and a stand-in for Lucille, a test harness connects the app's profile through the command line (`pair begin` with `--hub`, `--test-key` and `--store-file`, which the app never passes), leaving the number to confirm. Then, driven through System Events: Finish Connecting… shows Lucille's number, once and no other; Return and Space answer nothing; They Match confirms. `run` is the app's child, on the app's profile, with a pipe on its standard input; a second `run` of the profile is refused (exit 21); `run` reads the work room Lucille offers, and the menu says "Connected to Lucille"; the app itself holds no network connection. The Set Up window then opens by itself, within 60 seconds, with no Add back page (the harness paired, so the app saw no `policy_reset`), on Folders, which lists none; on What Lucille may do, with `files.sha256` off (`ops list --json` says so), the switch "Check a file's fingerprint" shows it off, turns it on (`ops list --json` says it is enabled, and the switch shows it on), and off again; Ready, whose box "Open Capsule when you log in" is checked and which says macOS will show a notice; and Done closes the window. What macOS answers an ad hoc build is not known, so after Done the check passes on any state, as long as the app says on standard error which one it was (`login item: enabled`, `requiresApproval`, `notRegistered` or `notFound`) and its words agree: no note while enabled; "macOS needs your OK…", closed with Not Now, while it waits; "Capsule couldn't turn on opening at login", closed with OK, otherwise. Open Login Items Settings is never pressed. `sudo -n sfltool dumpbtm`'s records that name the app are printed, never checked. A Set Up check that fails does not stop the pairing check: the window and any note about opening at login are closed and `files.sha256` turned off, and the steps after it run. Every later launch is connected: the app shows no note about the menu bar (one that shows is counted, then closed with OK, so the later steps still run), and the check presses nothing it has not seen; it says on standard error which state macOS gives the login item, and, only while it waits for your OK, "Capsule won't start when you log in", where the check chooses Keep It Off, which must close that note (left up, it would hold every later note behind it, so the check stops there) and leave the item `notRegistered` or `notFound`. A folder added through the command line, then a `files.sha256` request on it while that ability is off: the host turns it away, and Activity says "Turned away: that ability is off on this Mac." with no button but its disclosure (M18). Then `files.sha256` turned on through the command line, and a request like it, answered with the file's fingerprint, which Activity says finished. `run` killed with SIGKILL while the app's note about the menu bar is up is started again before the note is closed; the app killed with SIGKILL leaves `run` to finish and exit. Quit, chosen in that note during a 20-second request, asks first, shows the finishing panel with Stop now, and quits once `run` has finished and drained. Opened again, while no request runs, the menu does not offer Stop What's Running; during a longer request it does, and choosing it tells Lucille the request failed (`killed_locally`), says "Stopped, and paused. Resume when you're ready.", and pauses the host while `run` goes on; ten seconds later the host is still paused, and Resume Lucille, from the menu, resumes it. Opened again, Lucille asks for a release newer than this one (999.0.0, which a development build is older than): the host refuses the request `host_too_old`, and the app says "Lucille needs Capsule 999.0.0 or newer", where to get it in words, and offers only Not Now and Prepare to Update; a second request asking for 999.0.1 while that note is up brings no second note; Not Now closes it, and a third asking for 999.0.2 does not bring it back; the menu then holds "Lucille needs Capsule 999.0.2 or newer", which shows the note again with that version, and Prepare to Update…, which asks no Quit question, lets `run` finish and stop, and quits. Opened again, Quit then Stop now, during a longer request, tells Lucille the request failed (`killed_locally`) and pauses the host; the next launch says it is paused, and it stays paused until Resume. Disconnect lets `run` finish, then forgets the connection, and says Lucille was told; its note adds "Capsule won't open when you log in." exactly when the app had said the login item was on or waiting for your OK, and the app then says `login item: notRegistered` (or `notFound`). The menu holds Settings while connected, and still once disconnected, for Remove Capsule…. It drives the copy in `/Applications`. The profile is set aside first and put back after, and the app's signature still verifies. Screenshots are kept with the others. |
 | a second build | `macos-app` | The unsigned app is built again, in another folder, and the two tarballs are compared by sha256. The tarballs hold the `.pyc` files. The job summary says SAME, DIFFERENT or FAILED, with both digests. Not a gate. |
+| `verify_app.py` | `macos-app` | The user's check of a copy against its source ([Checking a copy against its source](#checking-a-copy-against-its-source)), run on the disk image, with the host wheel this job built. It downloads the wheels and the runtime archive again into a cache of its own. |
+| a rebuild on another runner | `macos-rebuild` | The host wheel and the unsigned app are built again, from the same commit with the same run number, on another `macos-15` runner. `macos-app`'s tarball, kept in the Actions cache, is refused unless its sha256 is the one `macos-app` output. The job summary says SAME or DIFFERENT for the wheel and for the tarball, with both digests and up to 50 files that differ, and a difference is a warning on the run's page. A difference is not a gate; a build that fails, or a tarball that is not `macos-app`'s, fails the job. |
 
 ## What CI does not check
 
@@ -1328,9 +1333,49 @@ uv run --no-project python tools/macos/check_app.py bytecode --out /Volumes/Caps
 ```
 
 It runs the bundled interpreter and writes nothing. It cannot show that the `.py` files or the interpreter
-are the ones the build used. `codesign --verify --deep --strict` shows whether any file changed since the
-app was signed, and an ad hoc signature does not say who signed it. Whether macOS lets the interpreter of
-a downloaded, quarantined copy run from Terminal is not yet tested on a Mac.
+are the ones the build used; `verify_app.py`, below, does. `codesign --verify --deep --strict` shows
+whether any file changed since the app was signed, and an ad hoc signature does not say who signed it.
+Whether macOS lets the interpreter of a downloaded, quarantined copy run from Terminal is not yet tested
+on a Mac.
+
+## Checking a copy against its source
+
+[`tools/macos/verify_app.py`](../tools/macos/verify_app.py) checks a copy of the app, or on a Mac the
+disk image that holds it, against the `MANIFEST.json` inside it, the pins and the source
+(decisions/0002 §18). From a checkout of the commit `MANIFEST.json` names, with no change to a tracked
+file:
+
+```sh
+git checkout <commit>
+uv run --no-project python tools/macos/verify_app.py /Applications/Capsule.app
+```
+
+It downloads the wheels `uv.lock` pins for the app, from the lock's URLs, and the pinned runtime
+archive, and refuses each unless its sha256 is the pinned one. The host's wheel comes from PyPI, by
+the sha256 PyPI lists for the version; a build that is not a release is not on PyPI, so give it the
+wheel built from the same checkout (`build_app.py wheel`) with `--host-wheel`. Then it makes, in a
+temporary folder, the files the build makes from those, and holds every file of the app to them: each
+must be there, byte for byte, with its execute bit, and the app may hold nothing else. site-packages is
+held to the wheels' `RECORD` files, and `MANIFEST.json` field by field to what the build writes. Signing
+rewrites each Mach-O file, so on a Mac each is compared with its reference after `codesign
+--remove-signature` on a copy of both, setting aside the one field that leaves different (the vmsize
+of `__LINKEDIT`). It never starts the bundled interpreter. `--offline` downloads nothing and reads the
+cache only; `--summary FILE` appends the report as Markdown.
+
+On a Mac, a Mach-O file that is still different after that fails the check. Anything in the app that
+is not a file, a folder or a link (a FIFO, a socket, a device) fails before any file is read. It exits 0
+when every check that ran passed, 1 when one failed (a folder that is not a clean checkout of the
+commit, or not a git checkout at all, included), and 2 on a usage error or a disk image off a Mac.
+
+What it does not establish, plainly:
+- **Off a Mac, a changed Mach-O file still exits 0.** It takes the app, not the disk image, compares no
+  Mach-O file, and its last line says how many it did not compare.
+- **The app's own executable and every `.pyc` file are admitted by name only.** The executable must be
+  a Mach-O file, and only the rebuild job compares it; what each `.pyc` holds, `check_app.py bytecode`
+  (above) judges.
+- **`codesign --verify` accepts any consistent ad hoc signature.** It shows the sealed files are the
+  ones signed, not who signed them; the comparison with the source is what holds them to it.
+- Anything Apple's notarization looked for.
 
 ## Not done yet
 

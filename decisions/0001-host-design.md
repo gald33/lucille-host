@@ -232,7 +232,9 @@ The host:
   (sb `docs/sharing.md:533-536`). The host keeps room keys as it keeps the pair: in its OS-keyring Store,
   beside the pair, or in a 0600 file only under `--store-file`, with the same warning
   (spec/PROTOCOL.md §18).
-- The host keeps the pair in one keyring backend on each system, and refuses to run as uid 0. It builds that
+- The host keeps the pair in one keyring backend on each system, and refuses to run as uid 0 (for every verb
+  but `--version` and `--help`: [0004](0004-running-as-root.md); `profile check`, run as the user, names
+  what an earlier run as root left in the profile, and how to repair it). It builds that
   backend itself: keyring's Secret Service backend (`keyring.backends.SecretService.Keyring`) on Linux, or
   its Keychain backend (`keyring.backends.macOS.Keyring`) on macOS, importing that system's module alone. It
   never asks keyring for a backend, so keyring chooses none, and none of the backends keyring's entry points
@@ -673,7 +675,9 @@ this record says below of reading a code applies to that code; [spec/CLI.md](../
 `run [--json-events] [--exit-on-stdin-eof] [--allow-downgrade]`, `status`, `log [--limit N]`, `forget`,
 `ops list|enable|disable`, `roots list|add|remove`, `policy previous|reset`, `pause`, `resume`, `kill`,
 and, for an app that drives the command line, `roots add --suggest-alias PATH`,
-`roots check [ALIAS]` and `uninstall-data --yes` (decisions/0002 section 17). They print text, with the state word first
+`roots check [ALIAS]` and `uninstall-data --yes` (decisions/0002 section 17); and `profile check`,
+which finds what an earlier run as root left in the profile ([0004](0004-running-as-root.md),
+4.3). They print text, with the state word first
 where there is one (`waiting`, `sas_pending`, `confirmed`, `leaked`, `expired`, ...).
 - `--json` makes every verb but `run` write the JSON objects of [spec/CLI.md](../spec/CLI.md) on stdout
   instead of its text, one per line, with the same exit codes; stderr stays as it is. `run`'s JSON form

@@ -205,6 +205,13 @@ developing the app. Its builds stay ad hoc signed, for the repository owner's ow
   supervision with a local hub and a stand-in for Lucille; its `macos-smoke` jobs run the same disk image
   on macOS 26 and 27, without the end-to-end check (§18, §19). Logs and UI snapshots are uploaded on every
   run. The disk image is uploaded only by a manual run whose every check passed, and kept 3 days.
+  `macos-app` also runs `verify_app.py` on its disk image, and the job `macos-rebuild` builds the unsigned
+  app again on another runner and compares it with `macos-app`'s (§18).
+- **`tools/macos/verify_app.py`** (§18, §21), a user's check of a copy of the app, or on a Mac of the disk
+  image that holds it, against its `MANIFEST.json`, the pins and the source in a checkout of the commit
+  it names. It downloads the wheels, the host's wheel and the runtime archive again, each refused unless
+  its sha256 is the one pinned, makes the files the build makes from them, and holds every file of the
+  app to them. It never runs the bundled interpreter.
 
 Not built yet: the typed gate (§11.2; decided on 2026-11-21), **Choose Again** for a folder `roots check`
 finds `missing` (§3.3, §12; the checks say it in words only), the Welcome and main windows, updates,
@@ -2167,7 +2174,75 @@ builds printed the gzip file's sha256 `67729981ad8b616c6335b3bbf1bc6ae4b20157797
 and the tar's `cdb1d07d7edc1c499bdafea0f3e5f0f5f5c94c081f8c5cfc9339a48938acb924`, which `compare` writes
 as SAME. (Its verdict goes to the job summary, which the API does not return; in each run the two digests
 are in the job's log.) Each is two builds in one job, on one machine; whether another machine gives the
-same bytes is what `macos-payload-repro` will show.
+same bytes is what the rebuild job below shows, for every pull request, and `macos-payload-repro` will
+show for a release.
+
+**Built today: the rebuild job, `macos-rebuild`.** The reproducibility check §25 step 3 calls for, in its
+smallest form: a job of `ci.yml`, not of `release.yml`, which builds no release yet (it has no Mac jobs).
+It runs on every pull request and push to `main`, once `macos-app` has handed on its disk image.
+- `macos-app` keeps its unsigned tarball, the file the build wrote before signing, in an Actions cache
+  entry of its own (its hand-off key with `-unsigned` added), and gives the key, the tarball's sha256
+  and the host wheel's sha256 as job outputs.
+- `macos-rebuild`, on another `macos-15` runner, from the same commit and with the same run number,
+  builds the host's wheel and runs `build_app.py assemble`: the same build, unsigned, with no download
+  cache of `macos-app`'s. It restores `macos-app`'s tarball and refuses it unless its sha256 is the one
+  output. Then `build_app.py compare` writes SAME or DIFFERENT to the job summary, with both digests and
+  up to 50 files that differ, and the host wheel's two sha256s with their verdict.
+- **A difference is recorded, not a gate**, and is also shown as a warning on the run's page, until the
+  build has been seen to be byte-reproducible across runners; a build that fails, a cache miss, or a
+  tarball that is not `macos-app`'s fails the job. "Reproducible" is claimed for nothing while it only
+  records (VERIFYING.md).
+- What §18 leaves open, and the choice made: the second machine is another runner of the same image,
+  `macos-15`, since that image pins the Xcode the build runs; another image would test another
+  toolchain, not the build. It is not a rebuild by a third party: it runs this repository's workflow on
+  GitHub's runners, as `macos-app` does.
+
+**Built today: `verify_app.py`, the user's check** (§21, VERIFYING.md's step 4 for the Mac app). Run as
+`uv run --no-project python tools/macos/verify_app.py PATH` from a checkout, with `PATH` the app or, on a
+Mac only, its disk image, which it mounts read-only. Its module docstring is the reference. In short:
+- **The source is the checkout.** It refuses to go on unless the checkout's `HEAD` is the commit
+  `MANIFEST.json` names and no tracked file has a change. It reads the pins, `prune.txt`, `uv.lock`
+  (through `uv export`, as the build does), `__version__` and the icons from there, and makes what the
+  build makes with the build's own functions.
+- **The downloads.** The wheels `payload.planned_wheels` chooses from the lock for the app's runtime (the
+  build's own choice, now one function both call), each from the lock's URL with the lock's sha256; the
+  host's wheel from PyPI, by the sha256 and URL PyPI's JSON lists for the version, or from
+  `--host-wheel` for a build that is not on PyPI; and the runtime archive by the pin. `--offline` reads
+  them only from the cache, and refuses a cached file whose sha256 is not the pin, without deleting it.
+- **What it checks.** `MANIFEST.json`, field by field, against what the build writes for that source and
+  those downloads, and in the build's form; site-packages against the wheels' `RECORD` files (M10, the
+  build's own check, with the `.pyc` files admitted by name); every other file against a reference app
+  made in a temporary folder from the pinned runtime, the source and the build's functions, byte for byte
+  and with its execute bit, nothing missing and nothing added; the bytecode's layout; on a Mac,
+  `codesign --verify --deep --strict`, and a disk image that holds the app and a link to
+  `/Applications`. Admitted by name only: the app's own executable (the Swift app, compared only by the
+  rebuild job), codesign's `Contents/_CodeSignature/CodeResources`, and the `.pyc` files, whose contents
+  `check_app.py bytecode` judges. A link anywhere fails.
+- **Mach-O files.** Signing rewrites them in place. Each that differs from its reference (the runtime's,
+  or its wheel's) is compared again after `codesign --remove-signature` on a copy of both. Seen on
+  2026-11-27, on a Mac with Apple's command line tools and an app made by the build's own functions and
+  signed ad hoc as the build signs (not a CI build): the copies were then the same size and differed in
+  one field only, the `vmsize` of the `__LINKEDIT` segment, which `--remove-signature` leaves as signing
+  grew it. So that field is set aside, at the places the load commands give in both files, and nothing
+  else. All four of that app's signed files (the interpreter, `_dbm`, and the two wheel extensions) were
+  then SAME, and one byte changed in an extension's code, then signed again, was DIFFERENT. On a Mac a
+  file that is DIFFERENT, or that codesign cannot strip, fails the check; elsewhere `codesign` is not there, the files are listed as not
+  compared, and the last line says so. Whether a Developer ID signature, or Apple's notarization, leaves
+  anything else is not yet seen: the first candidate settles it.
+- **What §18 left open, and the choice made**, the smallest safe form each time: the source is a clean
+  checkout of the commit, not files fetched by the script; it runs nothing from the app; it has no
+  network but PyPI's, the lock's URLs and the pin's; and a stapled app's ticket, which §7 adds only if the
+  offline first launch needs it, is not admitted until it is. `macos-app` runs it on every pull request
+  on its own disk image, with `--host-wheel` the wheel that job built, which is not on PyPI.
+- **What fails, and the exit codes.** Anything in the app that is not a file, a folder or a link (a FIFO,
+  a socket, a device) fails before any file is read, since reading one could block. `build.commit`
+  must be the 12 or more hex digits the build writes. It exits 0 when every check that ran passed, 1
+  when one failed, the source check included (a folder that is not a clean checkout of the commit, or
+  not a git checkout at all), and 2 on a usage error or a disk image off a Mac.
+- **Its limits, stated where users read them** (the docstring and `macos/README.md`): off a Mac a
+  changed Mach-O file still exits 0, with the count of those not compared on the last line; the app's
+  executable and every `.pyc` file are admitted by name only; `codesign --verify` accepts any
+  consistent ad hoc signature. What it cannot establish is in §21, step 5.
 
 **The Mac jobs in `release.yml`.**
 1. `macos-payload` (macOS 15, no secrets): downloads the exact wheel PyPI published and checks its sha256;
@@ -2175,7 +2250,8 @@ same bytes is what `macos-payload-repro` will show.
    the tarball; outputs its sha256.
 2. `macos-payload-repro` (macOS 15, no secrets): the same build, independently, compared by sha256.
    "Reproducible" is claimed for the unsigned payload only while this is green, and never for the signed disk
-   image.
+   image. `ci.yml`'s `macos-rebuild` (above) is its form for every pull request; this job is that one, with
+   a difference made a gate once the build has been seen to be reproducible across runners.
 3. `macos-sign` (macOS 15, environment `macos-release`, which needs the repository owner's approval):
    - **runs no package manager, no compiler and no test harness, and no code but Apple's tools, `gh`, and one
      reviewed standard-library Python script;**
@@ -2592,13 +2668,13 @@ in 10 minutes or less.
      gald33/lucille-host/.github/workflows/release.yml --source-ref refs/tags/vX.Y.Z --deny-self-hosted-runners`.
   3. Apple's view: `spctl -a -t open --context context:primary-signature -vv` and `xcrun stapler validate` on
      the image; `codesign -dv --verbose=4` (Team ID) on the app.
-  4. The Python inside: `tools/macos/verify_app.py "/Applications/Capsule.app"` downloads the listed wheels
-     from PyPI, checks their hashes against the release's lock, and compares every file under `site-packages`
-     with the wheels' `RECORD`, listing any file that came from none. The installer-written files of each
-     `*.dist-info` (`INSTALLER`, `REQUESTED`, `direct_url.json`, and the rewritten `RECORD`) are named, and
-     each `RECORD` is compared line by line with the wheel's own; a `.pyc` is admitted only by its name,
-     one per listed `.py`, and `check_app.py bytecode` judges what it holds. The release wheel carries its
-     PEP 740 attestation, as today.
+  4. The Python inside (built, §18): `tools/macos/verify_app.py "/Applications/Capsule.app"` downloads the
+     listed wheels from PyPI, checks their hashes against the release's lock, and compares every file under
+     `site-packages` with the wheels' `RECORD`, listing any file that came from none. The installer-written
+     files of each `*.dist-info` (`INSTALLER`, `REQUESTED`, `direct_url.json`, and the rewritten `RECORD`)
+     are named, and each `RECORD` is compared line by line with the wheel's own; a `.pyc` is admitted only
+     by its name, one per listed `.py`, and `check_app.py bytecode` judges what it holds. The release wheel
+     carries its PEP 740 attestation, as today.
   5. What this cannot establish: the Swift app, the runtime and ripgrep beyond review and their pins; what
      Apple's notarization looked for; whether the copy in Applications is still the one verified after a same-user
      process touched it (`codesign --verify --deep --strict` detects a changed sealed file).
@@ -2618,7 +2694,7 @@ These join 0001's "Host invariants and their tests".
 | M7 | Developer ID builds: hardened runtime, no entitlements, every Mach-O signed by the team | signing-job checks, on signed builds only: an ad-hoc build has neither the hardened runtime nor a Team ID (§7), so library validation against a Team ID is checked only on signed builds |
 | M8 | The bundle is never written at run time | `check_app.py readonly`, after `chmod -R a-w`: the host runs, nothing in the bundle changes, no `.pyc` appears or changes, and `codesign --verify --strict` passes after; the signature is checked again after every other check; the read-only end-to-end run once it exists. On the ad-hoc bundle on macOS 15, 26 and 27, and on every signed build |
 | M9 | Nothing runs as root, at install or at run time | no `.pkg`, no daemon (`macos_lint`); uid 0 refused (0001) |
-| M10 | The wheel inside is PyPI's; every file under `site-packages` is a file of a wheel's `RECORD`, except the named installer-written files, and the only `.pyc` there are the build's, one `checked-hash` file per `.py` a `RECORD` lists | the build guard, byte for byte before signing (`payload.record_problems`, also run on Linux); `check_app.py record` on the signed bundle, which holds each wheel `MANIFEST.json` names to `uv.lock` and the host wheel to the sha256 the wheel step output, and where each Mach-O file is compared with its wheel's after both signatures are removed, and that comparison is reported, not failed (§6); `check_app.py bytecode`, which compares each `.pyc` with what the bundled interpreter compiles; post-release checks; `verify_app.py` |
+| M10 | The wheel inside is PyPI's; every file under `site-packages` is a file of a wheel's `RECORD`, except the named installer-written files, and the only `.pyc` there are the build's, one `checked-hash` file per `.py` a `RECORD` lists | the build guard, byte for byte before signing (`payload.record_problems`, also run on Linux); `check_app.py record` on the signed bundle, which holds each wheel `MANIFEST.json` names to `uv.lock` and the host wheel to the sha256 the wheel step output, and where each Mach-O file is compared with its wheel's after both signatures are removed, and that comparison is reported, not failed (§6); `check_app.py bytecode`, which compares each `.pyc` with what the bundled interpreter compiles; post-release checks; `verify_app.py`, built, which holds site-packages to the wheels it downloads again, and every other file to the pinned runtime and the source (§18) |
 | M11 | A build from a tag has one version number; any other build records its real version in `MANIFEST.json` | the build's version rule (`bundle_versions`, tested on Linux); `check_app.py version` on the built app |
 | M12 | The app writes nothing outside the host's own folders except what macOS writes for any app | the `~/Library` diff (`check_app.py library-diff`): a changed path that names the bundle identifier, the app's name or `lucille` must match `tools/macos/library-allowlist.txt`; every other change is printed, not gated; the state folder of the app's profile (`mac-app`) must be among the changes. What it cannot see is below the table |
 | M13 | Pairing and the read loop start no process | the audit-hook test, on Linux and macOS |
@@ -2696,7 +2772,9 @@ those writes itself first (`pause`, then `resume`).
    supervision, open at login, Activity, Quit, Disconnect, the fresh policy. Ad-hoc builds on the owner's Mac
    until the project's Apple Developer membership exists (§3.2), then candidates only.
 3. **The first public disk image.** Connect from Lucille's chat, Remove, Copy Diagnostics,
-   bundled ripgrep, the Mac jobs in `release.yml`, `verify_app.py`, the reproducibility job. Gated on the test
+   bundled ripgrep, the Mac jobs in `release.yml`, `verify_app.py`, the reproducibility job (`verify_app.py`
+   and the rebuild job are built, the rebuild job in `ci.yml`, recording a difference without failing,
+   §18). Gated on the test
    with three people (§19) and on the rebuild job and `lucille-host verify` (0001).
 4. **Later.** An updater, if ever decided; Windows; a Linux tray shell.
 

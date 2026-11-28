@@ -551,6 +551,28 @@ drain: a signal (`SIGTERM`, `SIGHUP` or Ctrl-C), the end of standard input, or a
 |---|---|---|
 | `profile` | string, `^[a-z][a-z0-9_-]{0,31}$` | The profile whose keyring items, then folders, were deleted (section 7, `uninstall-data`). |
 
+### `profile_check`: a folder or file of the profile that is not yours
+
+| Field | Type | In states |
+|---|---|---|
+| `state` | `ok`, `not_yours`, `outside_home` or `unreadable` | all |
+| `config_folder` | string, an absolute path | `ok` only |
+| `state_folder` | string, an absolute path | `ok` only |
+| `path` | string, an absolute path | all but `ok` |
+| `kind` | `folder` or `file` | `not_yours`, `outside_home` |
+| `uid` | integer, 0 to 4294967295 | `not_yours`, `outside_home` |
+| `look` | string | `not_yours` only |
+| `repair` | string | `not_yours` only |
+
+`profile check` writes one of these for each folder or file it finds, by path, or one `ok` when it finds none
+(section 17). `not_yours` is inside the home folder and owned by another user (`uid`; root is 0); `look`
+and `repair` are command lines for a person to run as root, with the path in single quotes: `look` shows
+what is there, and `repair` gives it to the user. A shell shows them, and never runs them. `outside_home`
+is the same outside the home folder, where the host suggests no repair. `unreadable` cannot be looked at:
+a folder above it refuses the user (above a profile folder, it is written only when no folder above it is
+another user's). `ok` names the profile's two folders, as the host resolves them; on macOS the state
+folder is inside the config folder.
+
 ### `verify`: the running release passed every check
 
 | Field | Type | |
@@ -594,6 +616,7 @@ line with no verb never give it).
 | `pair reject` | one `pair` `rejected` | `bad_options`, `none`, `several_pairs`, `already_confirmed`, `pair_unusable`, `room_not_left`, `startup_refused`, `insecure_keyring`, `store_error`, `runtime_folder`, `state_invalid` |
 | `policy previous` | one `previous_policy` | `previous_invalid` |
 | `policy reset` | one `policy_reset` | `policy_lock_failed`, `not_invalid` |
+| `profile check` | one `profile_check` per folder or file found, or one `ok` (section 17) | |
 | `run --json-events [--exit-on-stdin-eof] [--allow-downgrade]` | `ready`; `state`, `request` and `host_too_old` as they come; `stopped`, last (section 13) | `usage` |
 | `credential set <service> <name> --host <host> [--host <host> ...] --value-stdin [--replace]` | the `credential` saved | `credential_exists`, `bad_credential`, `no_value`, `bad_value`, `interrupted`, `insecure_keyring`, `store_error` |
 | `credential list` | one `credential` per credential, by service then name; none when none is saved | `insecure_keyring`, `store_error` |
@@ -920,10 +943,15 @@ paths are resolved, so a profile name that is not valid is not looked at either.
 creates nothing: no folder, no lock file, no run record. It writes the line `lucille-host: <message>` on
 standard error and exits 1 (24 for `run`); `--json` writes one `error` object with the code
 `startup_refused` and that message, and `run --json-events` writes one `stopped` object with the reason
-`startup_refused`. The message says the host does not run as root (uid 0), and points to the repair advice
-for a profile an earlier run as root left unreadable (`decisions/0004-running-as-root.md`, section 4.3). A
-command line that does not parse is a `usage` error first, as for any user. The library's own refusal
+`startup_refused`. The message says the host does not run as root (uid 0), and points to `profile check`
+(section 17), run as the user, for a profile an earlier run as root left unreadable. A command line that
+does not parse is a `usage` error first, as for any user. The library's own refusal
 (`lucille_host.library.start`) is unchanged.
+
+**A profile that refuses the user.** When a verb other than `run` fails because the permissions on one of
+the profile's folders, a folder above one, or a file inside one refuse it, its message ends with a pointer
+to `profile check`: "if an earlier run as root left it so, `lucille-host profile check` names what to
+repair". The code is the one the failure has without it (`os_error`, `policy_invalid`, `state_invalid`).
 
 ## 11. Golden fixtures
 
@@ -1378,12 +1406,46 @@ Each line is one JSON object, of at most 1,024 bytes:
 - **What it holds about you:** which commands ran on this computer, when, and from which app, but no
   argument, folder, credential, request or reply.
 
+## 17. `profile check`: a profile an earlier run as root left behind
+
+Before the host refused uid 0, a command run as root could leave folders and files in a user's profile
+that root owns, mode 0700 or 0600, so that the user's own commands fail with `Permission denied`
+([decisions/0004-running-as-root.md](../decisions/0004-running-as-root.md), 1.2 and 4.3). `profile check`,
+run as the user, finds them and says how to repair each one. It changes nothing (the repair needs root,
+and the host never runs as root: as root it is refused, as every verb is), takes no lock, sends nothing,
+and writes nothing but its line in the run record (section 16: like every command, it makes the state
+folder where that is missing). It exits 0 whatever it finds.
+
+- **Which folders.** The profile's config folder, and its state folder where that is not inside the config
+  folder. Each is resolved as every verb resolves it (`HOME` where it is absolute, an absolute
+  `XDG_CONFIG_HOME` or `XDG_STATE_HOME`, a relative one ignored, the macOS layout), then with every
+  symbolic link followed, since the host follows them too. A finding's `path` is the resolved one; `ok`
+  names the two folders as every verb names them, before symbolic links are followed.
+- **Above each folder.** It looks at the folder and each folder above it, up to the first one the user
+  owns, and never at the home folder or above it. A missing folder is not reported: the host makes it. Of
+  the folders another user owns, it writes the highest, since `chown -R` of it repairs the ones below. A
+  folder that cannot be looked at because the one above it refuses the user is written as `unreadable` only
+  when no folder above it is another user's.
+- **Inside each folder**, where the folder itself is the user's: every folder and file. One another user
+  owns is written, and nothing inside it is looked at; one that cannot be looked at is `unreadable`. A
+  symbolic link is not followed into, and its own owner does not matter; what it points to, which the host
+  follows (a `policy.toml` linked to a file kept elsewhere), is looked at as the folder or file it is, and
+  written by its own resolved path.
+- **The repair.** Inside the home folder, `look` is `ls -lR '<path>'` (`ls -l` for a file) and `repair` is
+  `chown -R <uid> '<path>'` (`chown` for a file), `<uid>` being the user's own uid, which needs no lookup
+  in the user database. The group is left as it is. The folder may hold another program's files by now
+  (a `~/.config` root made), so a person runs `look` first. Outside the home folder it suggests no
+  command (`outside_home`): whether another program needs that folder as it is is a person's call.
+- The text form writes one finding per line, `look` and `repair` indented below it, or "every folder and
+  file of this profile is yours".
+
 ## Changes
 
 - **1.1** (the release after `0.1.0`, still a draft): `verify`, with its type `verify` and the codes
   `not_a_release`, `no_verifier`, `yanked`, `not_attested` and `files_differ`; `unreachable` is given by
-  `verify` too. And `uninstall-data --yes`, with its type `uninstalled` and the code `other_device`, for
-  the Mac app's Remove Capsule… (decisions/0002 section 17).
+  `verify` too. `profile check` and its type `profile_check` (section 17), for a profile an
+  earlier run as root left unreadable. And `uninstall-data --yes`, with its type `uninstalled` and the
+  code `other_device`, for the Mac app's Remove Capsule… (decisions/0002 section 17).
 - **1.0** (`0.1.0`, still a draft): the first version, with `run`'s event stream and exit codes, `policy reset`,
   and `credential` with `--json` (its types `credential`, `credential_removed` and `credential_test`), for
   the Mac app's Gmail window; and Connect from Lucille's chat: `pair begin`, `pair resume`, `pair cancel`,
