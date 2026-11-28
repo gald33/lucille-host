@@ -37,7 +37,7 @@ import pytest
 import yaml
 
 from lucille_host import paths
-from tools.macos import build_app, check_app, payload
+from tools.macos import build_app, check_app, payload, verify_app
 
 CI = build_app.REPO_ROOT / ".github" / "workflows" / "ci.yml"
 PINS = build_app.load_pins()
@@ -49,6 +49,7 @@ APP_UPLOAD_IF = "${{ success() && github.event_name == 'workflow_dispatch' }}"
 LOGS_UPLOAD_IF = "${{ !cancelled() }}"
 LOG_PATH = re.compile(r"build/macos/check/(?:screens/)?\*\.(?:png|txt|json)")
 HANDOFF = "build/macos/handoff"
+UNSIGNED_HANDOFF = "build/macos/unsigned-handoff"
 # The actions ci.yml may use, each at one commit.
 PINNED_ACTIONS = {
     "actions/checkout": "3d3c42e5aac5ba805825da76410c181273ba90b1",
@@ -270,8 +271,13 @@ def test_ci_uploads_the_app_only_on_a_manual_run() -> None:
         for step in _steps(doc, "macos-app")
         if str(step.get("uses", "")).startswith("actions/cache/save@")
     ]
-    assert len(saves) == 1
+    assert len(saves) == 2
     assert saves[0]["with"] == {"path": HANDOFF, "key": "${{ steps.handoff.outputs.cache_key }}"}
+    # The unsigned tarball reaches the rebuild job the same way, under a key of its own.
+    assert saves[1]["with"] == {
+        "path": UNSIGNED_HANDOFF,
+        "key": "${{ steps.unsigned.outputs.cache_key }}",
+    }
     restores = [
         step
         for job in ("macos-app", "macos-smoke")
@@ -296,6 +302,20 @@ def test_ci_uploads_the_app_only_on_a_manual_run() -> None:
         "cache_key": "${{ steps.handoff.outputs.cache_key }}",
         "dmg_sha256": "${{ steps.handoff.outputs.dmg_sha256 }}",
         "selftest_sha256": "${{ steps.handoff.outputs.selftest_sha256 }}",
+        "host_wheel_sha256": "${{ steps.wheel.outputs.sha256 }}",
+        "unsigned_cache_key": "${{ steps.unsigned.outputs.cache_key }}",
+        "unsigned_sha256": "${{ steps.unsigned.outputs.sha256 }}",
+    }
+    (rebuild,) = [
+        step
+        for step in _steps(doc, "macos-rebuild")
+        if str(step.get("uses", "")).startswith("actions/cache/")
+    ]
+    assert rebuild["uses"].split("@")[0] == "actions/cache/restore"
+    assert rebuild["with"] == {
+        "path": UNSIGNED_HANDOFF,
+        "key": "${{ needs.macos-app.outputs.unsigned_cache_key }}",
+        "fail-on-cache-miss": True,
     }
     # Nothing a check writes about ~/Library is under check/, the only folder uploaded.
     runs = "\n".join(_runs(doc, "macos-app") + _runs(doc, "macos-smoke"))
@@ -575,6 +595,84 @@ def test_the_pairing_check_has_a_library_snapshot_and_diff_of_its_own() -> None:
     assert _checks(doc, "macos-smoke").count("library-snapshot") == 1
 
 
+def test_the_rebuild_job_compares_its_build_with_macos_apps_and_reports_a_difference() -> None:
+    # decisions/0002 §18, "The rebuild job": the unsigned app built again from the same commit on
+    # another runner, compared with the tarball macos-app built, by sha256. A difference is
+    # recorded in the summary, not a gate; a build that fails, a cache miss, or a tarball that is
+    # not macos-app's fails the job.
+    doc = _ci()
+    job = doc["jobs"]["macos-rebuild"]
+    assert job["needs"] == "macos-app"
+    assert job["if"] == "${{ !cancelled() && needs.macos-app.outputs.built == 'true' }}"
+    assert job["runs-on"] == "macos-15"
+    assert job["env"]["RUN_NUMBER"] == "${{ github.run_number }}"
+    steps = _steps(doc, "macos-rebuild")
+    assert not [step for step in steps if "continue-on-error" in step or "if" in step]
+    names = [str(step.get("name", step.get("uses", ""))) for step in steps]
+    order = [
+        "Build the host wheel",
+        "Build the unsigned app again",
+        "Restore the unsigned tarball macos-app built",
+        "Refuse anything but the bytes macos-app built",
+        "Compare the two unsigned tarballs: SAME or DIFFERENT (recorded, not a gate)",
+    ]
+    assert [names.index(name) for name in order] == sorted(names.index(name) for name in order)
+    runs = {str(step.get("name")): str(step.get("run", "")) for step in steps}
+    build = runs["Build the unsigned app again"]
+    # The same command macos-app's build runs, assemble only: nothing is signed here.
+    assert "build_app.py assemble --host-wheel" in build and "build_app.py build" not in build
+    assert 'set -- --build-number "$RUN_NUMBER"' in build
+    assert "shasum -a 256 --check --strict" in runs["Refuse anything but the bytes macos-app built"]
+    compare = runs["Compare the two unsigned tarballs: SAME or DIFFERENT (recorded, not a gate)"]
+    assert "build_app.py compare build/macos/unsigned-handoff build/macos --title" in compare
+    assert '>> "$GITHUB_STEP_SUMMARY"' in compare and "::warning" in compare
+    assert "exit 1" not in compare
+    # macos-app hands the tarball on before it lets the other jobs run.
+    app_names = [str(step.get("name", "")) for step in _steps(doc, "macos-app")]
+    assert app_names.index("Hand the unsigned tarball to the rebuild job") < app_names.index(
+        "Let the smoke jobs run"
+    )
+
+
+@pytest.mark.parametrize(
+    ("verdict", "warned"),
+    [
+        ("**SAME**", False),
+        ("**DIFFERENT**", True),
+        ("**FAILED**: no tarball at build/macos", True),
+        ("not **SAME**", True),
+    ],
+)
+def test_the_rebuild_job_warns_on_anything_but_same_and_still_passes(
+    tmp_path: Path, verdict: str, warned: bool
+) -> None:
+    # The compare step's own script, run by bash -e as Actions runs it, with build_app.py compare
+    # stood in for by a uv that prints a report with this verdict line: a warning on the run's
+    # page exactly when the verdict is not SAME, the report in the summary, and exit 0 either way.
+    steps = _steps(_ci(), "macos-rebuild")
+    (script,) = [
+        str(step["run"])
+        for step in steps
+        if str(step.get("name", "")).startswith("Compare the two unsigned tarballs")
+    ]
+    (tmp_path / "build" / "macos").mkdir(parents=True)
+    summary = tmp_path / "summary.md"
+    report = f"### The unsigned app\n\n{verdict}\n\n- sha256 a\n"
+    stand_in = f"uv() {{ printf '%s' {shlex.quote(report)}; }}\n"
+    done = subprocess.run(
+        ["bash", "-e", "-c", stand_in + script],
+        cwd=tmp_path,
+        env={**os.environ, "GITHUB_STEP_SUMMARY": str(summary)},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert done.returncode == 0, done.stderr
+    assert ("::warning title=Rebuild::" in done.stdout) is warned, done.stdout
+    assert verdict in done.stdout
+    assert summary.read_text(encoding="utf-8") == report
+
+
 def test_every_job_gates_the_run_the_xcode_27_leg_included() -> None:
     # decisions/0002 §18: the xcode-27 leg did not gate from 2026-11-02, and gates since 2026-11-18,
     # after six push runs on main passed it. No job, and no leg of one, may fail without failing
@@ -665,7 +763,7 @@ def test_every_other_job_runs_its_tools_on_the_test_jobs_313_pin() -> None:
         if name != "test":
             others[name] = setups[0]["with"]["python-version"]
             assert job["env"]["UV_PYTHON_PREFERENCE"] == "only-managed", name
-    assert others == {"guards": pin, "macos-app": pin, "macos-smoke": pin}
+    assert others == {"guards": pin, "macos-app": pin, "macos-rebuild": pin, "macos-smoke": pin}
     verifying = " ".join((build_app.REPO_ROOT / "VERIFYING.md").read_text(encoding="utf-8").split())
     assert f"run their tools on {pin}" in verifying
 
@@ -2654,7 +2752,11 @@ def test_install_takes_replace_or_restore_not_both(
 # What a step's shell expands besides its job's and its own env: the files and folder GitHub sets
 # for every step.
 RUNNER_VARIABLES = frozenset({"GITHUB_ENV", "GITHUB_OUTPUT", "GITHUB_STEP_SUMMARY", "RUNNER_TEMP"})
-TOOL_SCRIPTS = {"tools/macos/build_app.py": "build_app", "tools/macos/check_app.py": "check_app"}
+TOOL_SCRIPTS = {
+    "tools/macos/build_app.py": "build_app",
+    "tools/macos/check_app.py": "check_app",
+    "tools/macos/verify_app.py": "verify_app",
+}
 # What a step that sets ``"$@"`` from the ref can pass: one flag or the other.
 VERSION_CHOICES = (("--tag", "v1.2.3"), ("--build-number", "7"))
 _VARIABLE = re.compile(r"\$\{?(\w+)\}?")
@@ -2679,7 +2781,8 @@ def tool_commands(doc: dict[Any, Any]) -> list[tuple[str, str, str, list[str]]]:
             if not isinstance(text, str):
                 continue
             name = step.get("name", f"step {number}")
-            known = {*job.get("env", {}), *step.get("env", {}), *RUNNER_VARIABLES}
+            # An env: left with no variable (as a mutation below leaves one) is null in YAML.
+            known = {*(job.get("env") or {}), *(step.get("env") or {}), *RUNNER_VARIABLES}
             sets_versions = 'set -- --tag "$REF_NAME"' in text and (
                 'set -- --build-number "$RUN_NUMBER"' in text
             )
@@ -2717,6 +2820,8 @@ def command_problems(doc: dict[Any, Any]) -> list[str]:
             with contextlib.redirect_stderr(said):
                 if script == "build_app":
                     build_app._parser().parse_args(argv)
+                elif script == "verify_app":
+                    verify_app._parser().parse_args(argv)
                 else:
                     args = check_app._parser().parse_args(argv)
         except SystemExit:
@@ -2748,7 +2853,24 @@ def test_every_command_ci_runs_parses() -> None:
     assert sum("--tag" in argv for argv in versioned) == sum(
         "--build-number" in argv for argv in versioned
     )
-    assert len(versioned) == 2 * 4  # plan, build, version, the repeat assemble
+    # plan, build, version, the repeat assemble, and the rebuild job's assemble
+    assert len(versioned) == 2 * 5
+    # verify_app.py runs once, in macos-app, on the disk image, with the wheel that job built.
+    verifies = [(job, argv) for job, _, script, argv in commands if script == "verify_app"]
+    assert verifies == [
+        (
+            "macos-app",
+            [
+                f"build/macos/*{build_app.DMG_SUFFIX}",
+                "--host-wheel",
+                "/stand-in/HOST_WHEEL",
+                "--cache",
+                "build/macos/verify-cache",
+                "--summary",
+                "/stand-in/GITHUB_STEP_SUMMARY",
+            ],
+        )
+    ]
 
 
 @pytest.mark.parametrize(

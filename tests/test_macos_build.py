@@ -4145,7 +4145,13 @@ def test_compare_reports_same_different_and_failed(
     report = build_app.compare(tmp_path / "a", tmp_path / "b", name)
     assert "**DIFFERENT**" in report and f"- `{name}.app/Contents/Info.plist`" in report
     assert build_app.main(["compare", str(tmp_path / "a"), str(tmp_path / "missing")]) == 0
-    assert "**FAILED**" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "**FAILED**" in out and f"### {build_app.COMPARE_TITLE}\n" in out
+    # The rebuild job compares two jobs' builds, and says so in its heading.
+    argv = ["compare", str(tmp_path / "a"), str(tmp_path / "b"), "--title", "Two runners"]
+    assert build_app.main(argv) == 0
+    out = capsys.readouterr().out
+    assert out.startswith("### Two runners\n") and "**DIFFERENT**" in out
 
 
 # The pairing screen, run supervision, Activity, the placement rule, Set Up and the login item's
