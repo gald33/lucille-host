@@ -1,0 +1,17 @@
+{
+  "description": "uninstall-data --yes while the profile holds a confirmed pair",
+  "argv": [
+    "--json",
+    "uninstall-data",
+    "--yes"
+  ],
+  "exit": 1,
+  "stdout": [
+    {
+      "v": 1,
+      "type": "error",
+      "code": "held",
+      "message": "this profile holds a pair (pair-abcdef): disconnect first: run `forget`, which tells Lucille when the hub can be reached. Nothing was removed"
+    }
+  ]
+}

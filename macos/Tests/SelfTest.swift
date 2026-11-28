@@ -44,6 +44,7 @@ struct SelfTest {
         checkSupervisor(fixtures, report)
         checkLoginRules(fixtures, report)
         checkGmail(fixtures, report)
+        checkRemoval(fixtures, report)
         checkDiagnostics(fixtures, report)
         if let home = options["home"] {
             // First among the checks that start anything: until it opens the latch, nothing can.
@@ -329,9 +330,11 @@ struct SelfTest {
         // Only a run that takes the host's policy lock can hold up a later change to folders and
         // abilities (the host's `_policy_lock`): a run that only reads, left behind, is not counted
         // as stuck (`HostCLI.stuckRuns`), so the next change never names one that holds nothing up.
-        let lockVerbs: Set<String> = ["ops enable", "ops disable", "roots add", "roots remove", "policy reset"]
+        let lockVerbs: Set<String> = [
+            "ops enable", "ops disable", "roots add", "roots remove", "policy reset", "uninstall-data --yes",
+        ]
         report.expect(HostCLI.policyLockVerbs == lockVerbs,
-                      "the verbs that take the policy lock are the changes to abilities and folders, and Reset Settings",
+                      "the verbs that take the policy lock are the changes to abilities and folders, Reset Settings and Remove's uninstall-data",
                       "\(HostCLI.policyLockVerbs)")
         let locking: [[String]] = [
             HostText.addFolderArguments(alias: "docs", path: "/Users/a/Documents", confirmedHome: false),
@@ -341,6 +344,7 @@ struct SelfTest {
             ["--json", "ops", "--json", "disable", "files.sha256"],
             ["--json", "roots", "remove", "docs"],
             ["--json", "policy", "reset"],
+            RemoveRules.uninstallVerb,
         ]
         let reading: [[String]] = [
             HostText.suggestAliasArguments(path: "/Users/a/Documents"),
@@ -364,7 +368,7 @@ struct SelfTest {
         let lockingSaid: [Bool] = locking.map { HostCLI.takesPolicyLock($0) }
         let readingSaid: [Bool] = reading.map { HostCLI.takesPolicyLock($0) }
         report.expect(lockingSaid.allSatisfy { $0 },
-                      "adding and removing a folder, switching an ability and Reset Settings take the policy lock, read before --",
+                      "adding and removing a folder, switching an ability, Reset Settings and uninstall-data take the policy lock, read before --",
                       "\(lockingSaid)")
         report.expect(readingSaid.allSatisfy { !$0 },
                       "the alias suggestion, the lists, the checks, the version, policy previous, status, the pair verbs, pause, resume, kill, log and forget take none, so a run of one left behind is not stuck",
@@ -4372,6 +4376,119 @@ extension SelfTest {
         let opened = fake.run(["--json", "status"])
         report.expect(opened.succeeded && FileManager.default.fileExists(atPath: marker),
                       "once a placed copy's token opens the latch, the same verb runs", "\(opened)")
+
+        // Remove (decisions/0002 section 17): once begun, only its own verbs start; once the host's
+        // data is deleted, none does; a Remove that stopped first lets every verb start again.
+        try? FileManager.default.removeItem(atPath: marker)
+        HostCLI.beginRemoval()
+        let during = fake.run(["--json", "status"])
+        let ownStart = RemoveRules.removalVerbs.allSatisfy { HostCLI.mayStart($0) }
+        report.expect(during.status == CLIResult.notStarted && !FileManager.default.fileExists(atPath: marker)
+                          && ownStart && !HostCLI.mayStart(["--json", "status"])
+                          && !HostCLI.mayStart(["run", "--json-events", "--exit-on-stdin-eof"]),
+                      "while a Remove runs, only its pause, kill, forget and uninstall-data start: a status read does not, nor run",
+                      "\(during)")
+        HostCLI.closeAfterRemoval()
+        let closed = RemoveRules.removalVerbs.contains { HostCLI.mayStart($0) } || HostCLI.mayStart(["--json", "status"])
+        report.expect(!closed, "once Remove has deleted the host's data, no verb starts again, not even its own")
+        HostCLI.endRemoval()
+        let again = fake.run(["--json", "status"])
+        report.expect(again.succeeded && FileManager.default.fileExists(atPath: marker),
+                      "a Remove that stopped before deleting anything lets every verb start again", "\(again)")
+    }
+
+    // MARK: - checkRemoval
+
+    /// A fixture's answer, as `VerbOutcome` reads the run that wrote it.
+    static func outcome(of fixture: Fixture) -> VerbOutcome {
+        let stdout = fixture.lines.map { String(decoding: $0, as: UTF8.self) + "\n" }.joined()
+        return VerbOutcome(CLIResult(status: fixture.exit, stdout: stdout, stderr: "", timedOut: false))
+    }
+
+    /// Remove <name>… (decisions/0002 section 17): what the app makes of `forget` and
+    /// `uninstall-data`, by the host's own fixtures, and the note each end gives.
+    static func checkRemoval(_ fixtures: [String: Fixture], _ report: Report) {
+        let names = ["forget", "forget-no-pair", "uninstall-data", "uninstall-data-held"]
+        let given = names.compactMap { fixtures[$0] }
+        guard given.count == names.count else {
+            report.expect(fixtures.isEmpty, "the fixtures \(names) are given")
+            return
+        }
+        let forgot = outcome(of: given[0])
+        let noPair = outcome(of: given[1])
+        let removed = outcome(of: given[2])
+        let held = outcome(of: given[3])
+
+        report.expect(given[2].objects == [.uninstalled("mac-app")] && removed.uninstalled == "mac-app",
+                      "uninstall-data's answer reads as the profile it deleted", "\(given[2].objects)")
+        report.expect(given[2].argv.suffix(RemoveRules.uninstallVerb.count) == ArraySlice(RemoveRules.uninstallVerb),
+                      "the app asks uninstall-data as the fixture does: --json uninstall-data --yes", "\(given[2].argv)")
+        if case .refused(let error) = held {
+            report.expect(error.code == "held", "uninstall-data while a pair is held is refused as held", error.code)
+        } else {
+            report.expect(false, "uninstall-data while a pair is held is refused", "\(held)")
+        }
+
+        report.expect(RemoveRules.forgetEnded(forgot) && RemoveRules.forgetEnded(noPair),
+                      "Remove goes on after forget forgot the pair, and after it found none")
+        let kept: [VerbOutcome] = [held, .timedOut, .cancelled, .notStarted, .signaled, .otherExit(3), .done([])]
+        report.expect(kept.allSatisfy { !RemoveRules.forgetEnded($0) },
+                      "any other end of forget keeps the pair, so Remove deletes nothing")
+        report.expect(RemoveRules.lucilleTold(forgot) == true && RemoveRules.lucilleTold(noPair) == nil,
+                      "Lucille was told of the pair forget forgot; with no pair there was nothing to tell")
+        report.expect(RemoveRules.deleted(removed, named: "mac-app") && !RemoveRules.deleted(removed, named: "default")
+                          && !RemoveRules.deleted(held, named: "mac-app") && !RemoveRules.deleted(.done([]), named: "mac-app"),
+                      "the data counts as deleted only when uninstall-data names the app's own profile")
+
+        report.expect(RemoveRules.removalVerbs.contains(RemoveRules.uninstallVerb)
+                          && RemoveRules.removalVerbs.contains(RemoveRules.forgetVerb)
+                          && RemoveRules.removalVerbs.contains(RemoveRules.pauseVerb)
+                          && RemoveRules.removalVerbs.contains(RemoveRules.killVerb)
+                          && !RemoveRules.removalVerbs.contains(RemoveRules.logVerb),
+                      "Remove's own verbs are its pause, Stop Now's kill, forget and uninstall-data; Save a Copy's log comes before them")
+        report.expect(HostCLI.takesPolicyLock(RemoveRules.uninstallVerb)
+                          && !HostCLI.takesPolicyLock(RemoveRules.logVerb),
+                      "uninstall-data takes the policy lock, so one left behind counts as stuck; the log read does not")
+
+        let told = RemoveRules.note(.removed(lucilleTold: true, trashed: true, login: .removed))
+        report.expect(told.title == RemoveText.removedTitle
+                          && told.text == [RemoveText.toldText, RemoveText.deletedText, RemoveText.trashedText,
+                                           LoginText.offAfterDisconnect].joined(separator: " ")
+                          && told.detail == nil,
+                      "a Remove that told Lucille says so, that the data is deleted, the app is in the Trash and the login item is off",
+                      told.text)
+        let unreached = RemoveRules.note(.removed(lucilleTold: false, trashed: false, login: .nothingToRemove))
+        report.expect(unreached.text == [RemoveText.notToldText, RemoveText.deletedText, RemoveText.notTrashedText]
+                          .joined(separator: " "),
+                      "one that could not reach Lucille says to remove the Mac there, and one that could not trash the app says to drag it",
+                      unreached.text)
+        let none = RemoveRules.note(.removed(lucilleTold: nil, trashed: true, login: .failed))
+        report.expect(none.text == [RemoveText.deletedText, RemoveText.trashedText, LoginText.removeByHand]
+                          .joined(separator: " "),
+                      "with no pair there is nothing said of Lucille; a login item that stayed is to be removed by hand",
+                      none.text)
+        let stopped = RemoveRules.note(.notDisconnected(.timedOut))
+        report.expect(stopped.title == RemoveText.notRemovedTitle
+                          && stopped.text == ConnectionText.disconnected(.timedOut).text + " " + RemoveText.nothingDeletedText,
+                      "a forget that did not end the pair says why, as Disconnect does, and that nothing was deleted",
+                      stopped.text)
+        let refused = RemoveRules.note(.notDeleted(held))
+        report.expect(refused.title == RemoveText.notRemovedTitle
+                          && refused.text == [RemoveText.couldNotDeleteText, RemoveText.refusals["held"] ?? "",
+                                              RemoveText.tryAgainText].joined(separator: " ")
+                          && refused.detail != nil,
+                      "an uninstall-data refused says so in Remove's words, with the host's message behind",
+                      refused.text)
+        let unknown = RemoveRules.note(.notDeleted(.timedOut))
+        report.expect(unknown.text == [RemoveText.couldNotDeleteText, RemoveText.uninstallUnknown, RemoveText.tryAgainText]
+                          .joined(separator: " "),
+                      "an uninstall-data that did not answer says the app can't tell", unknown.text)
+        let odd = RemoveRules.note(.notDeleted(.done([])))
+        report.expect(odd.text.contains(ConnectionText.appBug),
+                      "an uninstall-data that exits 0 without naming the profile reads as the app's own bug", odd.text)
+        report.expect(RemoveText.refusal(code: "store_error", message: "x")
+                          == ConnectionText.refusal(code: "store_error", message: "x", afterSAS: false),
+                      "a refusal Remove has no words of its own for reads as Disconnect's do")
     }
 
     // MARK: - checkChild

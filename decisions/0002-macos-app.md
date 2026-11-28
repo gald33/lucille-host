@@ -174,14 +174,24 @@ developing the app. Its builds stay ad hoc signed, for the repository owner's ow
   held, in memory only, the menu shows its line, which shows it again, and **Prepare to Update…**. Prepare
   to Update is the app's own Quit with no question: `run` drains, then the app quits. There is no
   **Download** button (the maintainer's decision of 2026-11-07).
+- **Remove Capsule…** (section 17), in the Settings submenu. It asks first, in step 1's words and a
+  mention of the saved app passwords and the activity log, which go with the settings, with
+  Cancel the default, and offers **Save a Copy of the Activity Log…**, after which it asks again. Then it
+  pauses the host, drains `run` with **Stop Now** as a Disconnect does, and runs `forget`, which takes the
+  login item away with the pair; then `uninstall-data --yes` on profile `mac-app`, a host verb new with
+  it (spec/CLI.md §7), which deletes the profile's two Keychain items and its folders; then it moves
+  itself to the Trash and says whether Lucille was told, and quits. From the user's Remove to its end,
+  the app starts only Remove's own verbs (the pause, Stop Now's `kill`, `forget` and `uninstall-data`),
+  and once the data is deleted, none, so that no read makes the folders again.
 - **The menu** shows the version and a status line read from `status --json` and `run`'s events, with a line
   for what needs attention, and offers Pause and Resume, the abilities (the operations, in the core's
   words, switched with `ops enable` and `ops disable` and set from the host's answer; one whose replies
   can carry a file's contents is turned on only after a question, though no operation in this release
   sends file contents), Set Up Folders and Abilities… while Set Up's window was closed before its last
   page, Add a Folder… (its name dialog starting from the alias the host suggests), the folders with
-  Remove, Activity…, Copy Diagnostics…, Gmail… (the Gmail window, decisions/0003 "Second use", connected or not), while
-  connected the Settings submenu, the pairing items (Connect to Lucille…,
+  Remove, Activity…, Copy Diagnostics…, Gmail… (the Gmail window, decisions/0003 "Second use",
+  connected or not), the Settings submenu (Open at Login and Reset Settings… while connected,
+  **Remove Capsule…** connected or not), the pairing items (Connect to Lucille…,
   Finish Connecting…, Stop Connecting…, Disconnect from Lucille…), and Quit Capsule;
   while a request's process runs, Stop What's Running; and, while Lucille needs a newer release, the
   update notice's line and Prepare to Update…. A copy that is not at `/Applications/Capsule.app` shows only
@@ -205,7 +215,7 @@ developing the app. Its builds stay ad hoc signed, for the repository owner's ow
 
 Not built yet: the typed gate (§11.2; decided on 2026-11-21), **Choose Again** for a folder `roots check`
 finds `missing` (§3.3, §12; the checks say it in words only), the Welcome and main windows, updates,
-**Remove Capsule…** (section 17), the core's `diagnostics` verb and so the audit lines in Copy Diagnostics
+the core's `diagnostics` verb and so the audit lines in Copy Diagnostics
 (§15), Developer ID signing and notarization, ripgrep (`Helpers/rg`; the pins hold an empty
 ripgrep commit until then, and `Resources/licenses/` has no ripgrep licence), and the release jobs. The
 first build also departs from this record in these ways, among others; `macos/README.md`, under "Choices
@@ -255,12 +265,11 @@ made for the first build", says why for most of them:
   the operation: Stop now during a quit, `kill` after 330 s during a Disconnect. The menu offers it from a
   request's `started` to its `finished` (§14);
 - Reset Settings… is a button in the notes behind the menu's lines that say the settings file can't be
-  read, and an item of the Settings submenu (§14) only while connected, since that submenu is shown only
-  then. The menu's own line, from `ops list`'s refusal `policy_invalid`, offers it whenever the file can't
+  read, and an item of the Settings submenu (§14) only while connected, as Open at Login is. The menu's own line, from `ops list`'s refusal `policy_invalid`, offers it whenever the file can't
   be read; while `run` runs, its Needs attention line offers it too;
-- the Settings submenu holds Open at Login and Reset Settings… only; **Disconnect from Lucille…** stays
-  in the main menu, where §14 puts it under Settings, because the end-to-end check drives it there, and
-  **Remove Capsule…** is not built. Open at Login's checkmark shows `enabled` only: an item that waits for
+- the Settings submenu holds Open at Login and Reset Settings… while connected, and **Remove Capsule…**
+  connected or not; **Disconnect from Lucille…** stays in the main menu, where §14 puts it under
+  Settings, because the end-to-end check drives it there. Open at Login's checkmark shows `enabled` only: an item that waits for
   approval shows unchecked;
 - steps 8 to 10 of §3.1 are the pages of one Set Up window of their own, which opens by itself once
   the status line says Connected, rather than pages after the Welcome window, and the menu stays: the
@@ -278,10 +287,35 @@ made for the first build", says why for most of them:
   the menu does not. The Folders page offers **Open Privacy Settings** under a folder whose check is
   `denied_by_macos`, and says `missing` in words, with no Choose Again button (§12), as do the notes
   of the checks at launch and after Add a Folder… ("What is built today");
+- Remove Capsule… decides, where section 17 does not: it is off while the pairing window is open or
+  `pair` runs, and while a Disconnect or a quit is under way. **Save a Copy of the Activity Log…** saves
+  the host's log as `log --json` gives it, every line the host keeps (`--limit 1000000`), one per line,
+  not the Activity window's requests, which the app keeps in memory only. A `forget` that does not end
+  the pair stops Remove there: nothing is deleted, the host stays paused, and `run` starts again, as after
+  such a Disconnect. A refused or unanswered `uninstall-data` stops it too, the pair already forgotten:
+  the app stays, and Remove can be chosen again. A quit during Remove finishes `forget`, as a quit during
+  a Disconnect does, and deletes nothing; a quit while `uninstall-data` runs waits for it, and then the app
+  goes to the Trash with no note. The app moves itself with the file system's own call, not the Finder;
+  when that fails, its note says to drag it there. Step 1's words are the app's, not the core's (§8),
+  and say also that the saved app passwords and the activity log are deleted;
+- `uninstall-data --yes` decides, where section 17 does not: it works on the profile it is given, the
+  app's `mac-app`, and so leaves `default` alone unless named. It takes the profile's `run` lock, its
+  pairing lock and its settings lock, and refuses with `busy` while `run` or `pair` of the profile runs,
+  and with `held` while the profile holds a pair or the work rooms of one gone. It holds the credential
+  store's lock too. It adds one error code, `other_device`: before it deletes anything it reads both
+  folders through, and refuses one that holds anything on another device, or is or holds a mount point
+  (on Linux read from `/proc/self/mountinfo`, so a bind mount of the same filesystem is found; on macOS,
+  which has no such mount, every mount is a device of its own), as it refuses a folder that is a
+  symbolic link (`state_invalid`); the deletion itself crosses no device, and the lock files of both
+  folders go after everything else. It deletes the Keychain items under `lucille-host` and
+  `lucille-host.credentials`, reading each back to check it is gone, before any folder, then the
+  profile's state and config folders; the `lucille-host` folder around them stays. A Connect request
+  still waiting goes with them, as `pair cancel` drops one. Run again on a profile with nothing left,
+  it succeeds;
 - a run the app stopped waiting for is counted as stuck, and said to hold up every change to folders and
   abilities, only when its verb takes the host's settings lock: of the short runs, `ops enable` and
-  `ops disable`, `roots add` but the alias suggestion, `roots remove` and `policy reset`
-  (`pair begin` and `pair resume` take it too, but run as long-lived children, never as short runs). A run that only
+  `ops disable`, `roots add` but the alias suggestion, `roots remove`, `policy reset` and Remove's
+  `uninstall-data` (`pair begin` and `pair resume` take it too, but run as long-lived children, never as short runs). A run that only
   reads, left behind, is not counted, so no later change is blamed on it. Its own result still shows the
   menu's line that a folder check is stuck: such a read waits on a drive that stopped answering, and a
   change, which loads the same settings and looks at each folder, may wait on it too.

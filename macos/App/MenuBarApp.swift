@@ -261,10 +261,11 @@ struct HostItems: View {
         Button(DiagnosticsText.menuItem) { connection.diagnosticsChosen() }
         // The Gmail window, connected or not, so that Gmail can be set up before pairing.
         Button(GmailText.menuItem) { model.gmailChosen() }
-        // While connected: Open at Login, whose switch shows what macOS says (decisions/0002 §9),
-        // and, while the settings file can't be read, Reset Settings… (§14).
-        if connection.connected {
-            Menu(LoginText.settingsMenu) {
+        // Settings: while connected, Open at Login, whose switch shows what macOS says
+        // (decisions/0002 §9), and, while the settings file can't be read, Reset Settings… (§14);
+        // and Remove <name>…, connected or not (section 17).
+        Menu(LoginText.settingsMenu) {
+            if connection.connected {
                 Toggle(
                     LoginText.openAtLoginItem,
                     isOn: Binding(
@@ -276,6 +277,8 @@ struct HostItems: View {
                     Button(ConnectionText.resetSettingsItem) { model.resetSettingsChosen() }
                 }
             }
+            Button(RemoveText.menuItem) { connection.removeChosen() }
+                .disabled(!connection.items.remove)
         }
         Divider()
         if connection.items.connect {

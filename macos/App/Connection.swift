@@ -407,6 +407,9 @@ final class Connection: ObservableObject {
         var disconnect = false
         /// Off while a Disconnect, a quit or a pairing verb runs.
         var enabled = true
+        /// Remove <name>…, in the Settings menu: off as the items above are, and while the
+        /// pairing window is open or `pair` runs, whose pairing `forget` could not end.
+        var remove = true
     }
 
     /// What a quit waits for before the app replies.
@@ -512,6 +515,9 @@ final class Connection: ObservableObject {
     private var forgetting = false
     /// A Disconnect's drain ran `kill`, which paused the host.
     private var disconnectKilled = false
+    /// Remove <name>… runs, from the user's Remove to its last note (decisions/0002 section 17).
+    /// It drains `run` and runs `forget` as a Disconnect does, in `disconnecting`'s window.
+    private var removing = false
     private var menuObserver: NSObjectProtocol?
     private var launched = false
     private var welcomeDone = false
@@ -696,6 +702,223 @@ final class Connection: ObservableObject {
         shown.show()
         disconnecting = shown
         feedRun(.disconnect)
+    }
+
+    // MARK: Remove
+
+    /// Whether a Remove runs: the menu's own reads wait, since only Remove's verbs may start
+    /// (`HostCLI.beginRemoval`).
+    var isRemoving: Bool {
+        removing
+    }
+
+    /// Remove <name>…, from the Settings menu (decisions/0002 section 17): ask first, with Cancel
+    /// the default, and offer Save a Copy of the Activity Log…, after which the question comes
+    /// again.
+    func removeChosen() {
+        guard items.remove else {
+            return
+        }
+        Alerts.shared.show(key: "remove", {
+            let alert = NSAlert()
+            alert.alertStyle = .warning
+            alert.messageText = RemoveText.questionTitle
+            alert.informativeText = RemoveText.questionText
+            alert.addButton(withTitle: ConnectionText.cancelButton)
+            alert.addButton(withTitle: RemoveText.removeButton)
+            alert.addButton(withTitle: RemoveText.saveLogButton)
+            return alert
+        }, done: { [weak self] response in
+            if response == .alertSecondButtonReturn {
+                self?.startRemoval()
+            } else if response == .alertThirdButtonReturn {
+                self?.saveActivityLog()
+            }
+        })
+    }
+
+    /// Save a Copy of the Activity Log…: every line of the host's log, as `log --json` gives them
+    /// and as the host wrote them, one per line, to a text file the user names in the Save panel.
+    /// The host's log goes with its data, so this is the user's one chance to keep it.
+    private func saveActivityLog() {
+        Task { [weak self] in
+            guard let self else {
+                return
+            }
+            let result = await VerbQueue.run(self.cli, RemoveRules.logVerb, on: VerbQueue.other, timeout: Connection.statusLimit)
+            let outcome = VerbOutcome(result)
+            guard case .done = outcome else {
+                Connection.log("log did not answer for Save a Copy: exit \(result.status)")
+                var detail: String?
+                if case .refused(let error) = outcome {
+                    detail = error.message
+                }
+                self.logNotSaved(detail: detail)
+                return
+            }
+            let lines = outcome.logLines
+            RunLoopTurn.perform { [weak self] in
+                self?.saveLog(lines)
+            }
+        }
+    }
+
+    private func saveLog(_ lines: [String]) {
+        let panel = NSSavePanel()
+        panel.nameFieldStringValue = RemoveText.saveLogName
+        panel.canCreateDirectories = true
+        NSApp.activate()
+        guard panel.runModal() == .OK, let place = panel.url else {
+            removeChosen()
+            return
+        }
+        do {
+            try Data(lines.map { $0 + "\n" }.joined().utf8).write(to: place, options: .atomic)
+        } catch {
+            logNotSaved(detail: error.localizedDescription)
+            return
+        }
+        removeChosen()
+    }
+
+    private func logNotSaved(detail: String?) {
+        Alerts.shared.show({
+            let alert = NSAlert()
+            alert.alertStyle = .warning
+            alert.messageText = RemoveText.saveLogFailedTitle
+            alert.informativeText = RemoveText.saveLogFailedText + (detail.map { "\n\nDetails: \($0)" } ?? "")
+            alert.addButton(withTitle: ConnectionText.okButton)
+            return alert
+        }, done: { [weak self] _ in
+            self?.removeChosen()
+        })
+    }
+
+    /// Remove, once the user has chosen it: from now on only Remove's own verbs start. Pause the
+    /// host, then drain `run` with Stop Now, as a Disconnect drains it; `forget` follows
+    /// (`removeAfterForget`).
+    private func startRemoval() {
+        guard items.remove, ladder == nil, !exiting, disconnecting == nil else {
+            return
+        }
+        removing = true
+        HostCLI.beginRemoval()
+        let shown = ProgressPanel(
+            message: RemoveText.removing,
+            detail: RemoveText.removingDetail,
+            buttonTitle: RemoveText.stopNowButton
+        ) { [weak self] in
+            self?.removalStopNow()
+        }
+        shown.show()
+        disconnecting = shown
+        publish()
+        Task { [weak self] in
+            guard let self else {
+                return
+            }
+            let result = await VerbQueue.run(self.cli, RemoveRules.pauseVerb, on: VerbQueue.other)
+            if let paused = VerbOutcome(result).paused {
+                self.controlsChanged(paused: paused)
+            } else {
+                Connection.log("pause did not answer for Remove: exit \(result.status)")
+            }
+            // A quit that came meanwhile drains `run` itself, and Remove goes no further.
+            guard self.removing, self.ladder == nil, !self.exiting else {
+                return
+            }
+            self.feedRun(.disconnect)
+        }
+    }
+
+    /// Stop Now, in Remove's window: `kill` stops the operation in flight, so that the drain ends
+    /// sooner. It pauses the host, as Remove has already.
+    private func removalStopNow() {
+        disconnecting?.setMessage(ConnectionText.stoppingNow)
+        disconnecting?.setButtonEnabled(false)
+        feedRun(.stopNow)
+    }
+
+    /// Remove, once `forget` has run and the login item has gone with the pair: `uninstall-data`
+    /// if the pair is gone; then the app to the Trash, and a note that says whether Lucille was
+    /// told, after which the app quits. A pair `forget` did not end stops Remove there, with
+    /// nothing deleted, and `run` starts again as after a Disconnect that did not end it. A quit
+    /// that comes while `uninstall-data` runs waits for it (`forgetting`).
+    private func removeAfterForget(_ outcome: VerbOutcome, done: Bool, login: LoginRemoval) {
+        guard done else {
+            endRemoval(.notDisconnected(outcome))
+            feedRun(.start)
+            return
+        }
+        feedSetUp(.pairEnded)
+        let told = RemoveRules.lucilleTold(outcome)
+        disconnecting?.setMessage(RemoveText.removing)
+        disconnecting?.setButtonEnabled(false)
+        forgetting = true
+        Task { [weak self] in
+            guard let self else {
+                return
+            }
+            let result = await VerbQueue.run(
+                self.cli, RemoveRules.uninstallVerb, on: VerbQueue.store, timeout: Connection.statusLimit
+            )
+            self.forgetting = false
+            let deleted = VerbOutcome(result)
+            guard RemoveRules.deleted(deleted, named: self.cli.profile) else {
+                Connection.log("uninstall-data exited \(result.status)")
+                if self.ladder != nil || self.exiting {
+                    HostCLI.endRemoval()
+                    self.replyIfDone()
+                    return
+                }
+                self.endRemoval(.notDeleted(deleted))
+                self.refreshStatus()
+                return
+            }
+            HostCLI.closeAfterRemoval()
+            let trashed = self.moveAppToTrash()
+            if self.ladder != nil || self.exiting {
+                self.replyIfDone()
+                return
+            }
+            self.disconnecting?.close()
+            self.disconnecting = nil
+            let note = RemoveRules.note(.removed(lucilleTold: told, trashed: trashed, login: login))
+            Alerts.shared.show({
+                let alert = NSAlert()
+                alert.alertStyle = .informational
+                alert.messageText = note.title
+                alert.informativeText = note.text
+                alert.addButton(withTitle: ConnectionText.okButton)
+                return alert
+            }, done: { [weak self] _ in
+                self?.quitChosen()
+            })
+        }
+    }
+
+    /// Remove stopped before the host's data was deleted: every verb may start again, and a note
+    /// says why.
+    private func endRemoval(_ end: RemovalEnd) {
+        removing = false
+        HostCLI.endRemoval()
+        disconnectKilled = false
+        disconnecting?.close()
+        disconnecting = nil
+        publish()
+        Alerts.shared.note(RemoveRules.note(end), warning: true)
+    }
+
+    /// This copy, the one at /Applications/<name>.app, moved to the Trash by the file system's
+    /// own call (decisions/0002 section 17, step 5); the Finder is not asked.
+    private func moveAppToTrash() -> Bool {
+        do {
+            try FileManager.default.trashItem(at: Bundle.main.bundleURL, resultingItemURL: nil)
+            return true
+        } catch {
+            Connection.log("the app could not be moved to the Trash: \(error.localizedDescription)")
+            return false
+        }
     }
 
     /// Stop What's Running, chosen in the menu: the supervisor asks for `kill` only while `run`
@@ -1307,8 +1530,9 @@ final class Connection: ObservableObject {
         finishing = shown
     }
 
-    /// `forget --json`, once a Disconnect has drained `run`. If the pair is still there after it,
-    /// `run` is started again, as for any confirmed pair.
+    /// `forget --json`, once a Disconnect, or a Remove, has drained `run`. If the pair is still
+    /// there after it, `run` is started again, as for any confirmed pair. A Remove goes on from
+    /// here (`removeAfterForget`), its window still up.
     private func forget() {
         forgetting = true
         let paused = disconnectKilled
@@ -1322,8 +1546,10 @@ final class Connection: ObservableObject {
             )
             self.forgetting = false
             let outcome = VerbOutcome(result)
-            self.disconnecting?.close()
-            self.disconnecting = nil
+            if !self.removing {
+                self.disconnecting?.close()
+                self.disconnecting = nil
+            }
             // Whether the pair is gone: `forget` forgot it, or there was none (`none`); not
             // `room_not_left`, nor a failure (spec/CLI.md §6). Decided, and the login item taken
             // away with the pair, before a quit's early return, so that both ways out leave none.
@@ -1342,6 +1568,10 @@ final class Connection: ObservableObject {
                 // app may now reply.
                 Connection.log("forget at quit exited \(result.status)")
                 self.replyIfDone()
+                return
+            }
+            if self.removing {
+                self.removeAfterForget(outcome, done: done, login: removal)
                 return
             }
             var note = ConnectionText.disconnected(outcome)
@@ -1992,7 +2222,8 @@ final class Connection: ObservableObject {
 
     /// Read `status` again for the menu, at most one reading at a time.
     private func refreshStatus() {
-        guard ladder == nil, !exiting else {
+        // Not while a Remove runs, which starts no verb but its own (`HostCLI.beginRemoval`).
+        guard ladder == nil, !exiting, !removing else {
             return
         }
         if statusRefreshing {
@@ -2117,6 +2348,7 @@ final class Connection: ObservableObject {
     private func menuItems() -> MenuItems {
         var shown = MenuItems()
         shown.enabled = ladder == nil && !exiting && disconnecting == nil && !flow.isBusy
+        shown.remove = shown.enabled && !removing && !flow.windowOpen && pairChild == nil
         if supervisor.runAlive {
             shown.connect = false
             shown.disconnect = true

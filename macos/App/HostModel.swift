@@ -69,6 +69,10 @@ final class HostModel: ObservableObject {
     }
 
     func refresh() {
+        // Not while a Remove runs, which starts no verb but its own (`HostCLI.beginRemoval`).
+        guard !Connection.shared.isRemoving else {
+            return
+        }
         Task { await reload() }
     }
 

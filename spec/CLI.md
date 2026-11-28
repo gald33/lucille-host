@@ -545,6 +545,12 @@ drain: a signal (`SIGTERM`, `SIGHUP` or Ctrl-C), the end of standard input, or a
 | `name` | string | |
 | `host` | string | The host it signed in to: `imap.gmail.com`. |
 
+### `uninstalled`
+
+| Field | Type | |
+|---|---|---|
+| `profile` | string, `^[a-z][a-z0-9_-]{0,31}$` | The profile whose keyring items, then folders, were deleted (section 7, `uninstall-data`). |
+
 ### `profile_check`: a folder or file of the profile that is not yours
 
 | Field | Type | In states |
@@ -616,6 +622,7 @@ line with no verb never give it).
 | `credential list` | one `credential` per credential, by service then name; none when none is saved | `insecure_keyring`, `store_error` |
 | `credential remove <service> <name>` | one `credential_removed` | `no_such_credential`, `bad_credential`, `insecure_keyring`, `store_error` |
 | `credential test <service> <name>` | one `credential_test` | `no_test`, `no_such_credential`, `paused`, `bad_credential`, `unreachable`, `limit_reached`, `sign_in_refused`, `insecure_keyring`, `store_error` |
+| `uninstall-data --yes` | one `uninstalled` | `startup_refused`, `busy`, `lock_failed`, `policy_lock_failed`, `held`, `other_device`, `insecure_keyring`, `store_error`, `runtime_folder`, `state_invalid` |
 | `verify` | one `verify` | `not_a_release`, `no_verifier`, `unreachable`, `yanked`, `not_attested`, `files_differ` |
 
 Notes:
@@ -711,6 +718,33 @@ Notes:
   standard input, and only with `--value-stdin` (without it, a usage error). No object holds a value.
   `credential list` writes no object, and exits 0, when none is saved; standard error says so.
   `credential test` exits 1 with an `error` whose `message` is the child's own fixed line (section 15).
+- **`uninstall-data --yes`** deletes what the host keeps for the profile `--profile` names, and for no
+  other: first every keyring item its stores keep for that profile (the pair's, service `lucille-host`,
+  and the credentials', service `lucille-host.credentials`, each with the profile's name as its user
+  name), checking that a read of each then finds nothing; then the profile's folders, its config folder
+  and its state folder, with its settings, its state, its run record and its audit log. An item or a
+  folder that is not there is no failure, so the verb can be run again after one that stopped part way,
+  and on a profile that holds nothing. It refuses with `busy` while `run` or `pair` of the profile runs
+  (it takes their locks without waiting, then the policy lock, waiting for it), and with `held` while
+  the profile holds a pair, confirmed or not, or work rooms over a pair already gone: `forget` first,
+  which tells Lucille when the hub can be reached, so that a pair is never dropped here without it. It
+  deletes nothing then. It also holds the credential store's lock, so that no `credential` verb of the
+  profile changes its item meanwhile. A Connect request still waiting goes with the state folder, as
+  `pair cancel` drops one: only this computer keeps it. Before it deletes anything, keyring items
+  included, it reads both folders through without following a link: a folder that is not one (a
+  symbolic link, a file) is refused with `state_invalid`; one that holds anything on another device
+  than its own, or that is or holds a mount point, with `other_device`. On Linux the mount points are
+  read from `/proc/self/mountinfo`, so that a bind mount, which shows another folder of the same
+  filesystem on the same device, is found too; a table that cannot be read is refused the same way. On
+  macOS there is no bind or null mount, and every mount is a device of its own, which the device check
+  finds. The deletion crosses no device either, and the table is read again after the keyring items
+  are deleted and before any folder is, so that nothing outside the profile's folders is deleted
+  through a mount. Every lock file of both folders goes after everything else, so that a command of the
+  profile started meanwhile is refused until nothing else is left. A failure after the keyring items
+  are deleted says that they, and part of the folders, may be gone. A keyring the host does not
+  keep items in is refused with `insecure_keyring`, whose message does not point to `--store-file`.
+  `--yes` is required, and without it the line is a usage error: the verb asks nothing. It keeps
+  nothing of what it deleted; a shell that wants a copy of the audit log reads `log` first.
 - **`run --json-events`** writes no `error` object but for a usage error. Every other way it ends is a
   `stopped` object and an exit code of section 13.3.
 - **`verify`** checks the release whose code is running, as
@@ -857,9 +891,10 @@ limit, as it runs every verb, and stops it when the limit passes.
 | `bad_options` | `pair status`, `pair confirm` and `pair reject` take no options. |
 | `code_in_argv` | `pair` was given something other than an action; a pairing code is never taken. |
 | `bad_hub` | `--hub` names a hub that is not `http://127.0.0.1:<port>` or `http://localhost:<port>`. |
-| `busy` | Another `pair` of this profile is running. |
-| `lock_failed` | The lock that keeps one `pair` per profile could not be taken on this filesystem. |
-| `held` | This computer already holds a pair: disconnect first. |
+| `busy` | Another `pair` of this profile is running; for `uninstall-data`, a `run` or a `pair` of it. |
+| `lock_failed` | The lock that keeps one `pair` per profile could not be taken on this filesystem; for `uninstall-data`, that lock or `run`'s. |
+| `held` | This computer already holds a pair: disconnect first. For `uninstall-data`, also work rooms over a pair already gone, which `forget` leaves. |
+| `other_device` | `uninstall-data`: something in the profile's folders is on another device than the folder holding it, or a mount point is at or below one of them (a disk, or a folder mounted there, a bind mount of the same filesystem included); or, on Linux, the table of mounts cannot be read. The verb deletes nothing through a mount: found before anything is deleted, nothing was removed; mounted after that, the deletion stops there, and nothing through it is touched, but the keyring items may be gone, and the message says so. Unmount it, then run the verb again. |
 | `bad_code` | That is not a pairing code. |
 | `wrong_hub` | The code is for another hub, not Lucille's (or for a loopback hub `--hub` did not name). |
 | `code_has_token` | The code carries a hub token, and the host takes only codes that do not. |
@@ -1219,8 +1254,7 @@ leaves it out of `enabled_ops` (decisions/0003, "First use").
 
 ## 14. Not in version 1
 
-- `diagnostics` and removing the host's data ([decisions/0002-macos-app.md](../decisions/0002-macos-app.md)
-  §8).
+- `diagnostics` ([decisions/0002-macos-app.md](../decisions/0002-macos-app.md) §8, §15).
 - The typed pairing gate (decisions/0002 §11.2): decided on 2026-11-21, not built. Connect from Lucille's
   chat (§11.4 and §11.5) is built as `pair begin`, `pair resume` and `pair cancel` (section 7), and is the
   only way to pair.
@@ -1410,7 +1444,8 @@ folder where that is missing). It exits 0 whatever it finds.
 - **1.1** (the release after `0.1.0`, still a draft): `verify`, with its type `verify` and the codes
   `not_a_release`, `no_verifier`, `yanked`, `not_attested` and `files_differ`; `unreachable` is given by
   `verify` too. `profile check` and its type `profile_check` (section 17), for a profile an
-  earlier run as root left unreadable.
+  earlier run as root left unreadable. And `uninstall-data --yes`, with its type `uninstalled` and the
+  code `other_device`, for the Mac app's Remove Capsule… (decisions/0002 section 17).
 - **1.0** (`0.1.0`, still a draft): the first version, with `run`'s event stream and exit codes, `policy reset`,
   and `credential` with `--json` (its types `credential`, `credential_removed` and `credential_test`), for
   the Mac app's Gmail window; and Connect from Lucille's chat: `pair begin`, `pair resume`, `pair cancel`,

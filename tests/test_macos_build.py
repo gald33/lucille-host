@@ -4597,6 +4597,28 @@ def test_every_error_code_the_menus_own_verbs_give_has_words() -> None:
     assert "private static func plain(" not in text
 
 
+def test_every_error_code_remove_meets_has_words() -> None:
+    # Remove <name>… (decisions/0002 section 17) runs `pause`, `kill` and `forget`, whose
+    # refusals ConnectionText words already, then `uninstall-data --yes`: each code of its row
+    # reads in Remove's own words, in ConnectionText's, or as the app's mistake.
+    removal = _swift("Removal.swift")
+    words = _swift("ConnectionText.swift")
+    own = _swift_string_table(removal, "refusals")
+    handled = set(own) | set(_swift_string_table(words, "refusals"))
+    handled |= _swift_string_set(words, "appBugCodes")
+    codes = _spec_verb_codes(frozenset({"uninstall-data --yes"}))["uninstall-data --yes"]
+    assert codes - handled == set(), sorted(codes - handled)
+    assert set(own) == {"busy", "lock_failed", "policy_lock_failed", "held", "other_device"}
+    assert set(own) <= codes, sorted(set(own) - codes)
+    assert (
+        "refusals[code] ?? ConnectionText.refusal(code: code, message: message, afterSAS: false)"
+        in (removal)
+    )
+    # The app asks exactly what the row names, and the host takes the policy lock for it.
+    assert 'static let uninstallVerb = ["--json", "uninstall-data", "--yes"]' in removal
+    assert '"uninstall-data --yes"' in _swift("HostCLI.swift")
+
+
 def test_every_stopped_reason_is_read() -> None:
     # Every reason run's stopped object can carry (spec/CLI.md section 6) is a case the app reads,
     # and has the exit code the contract gives it.
@@ -4779,7 +4801,11 @@ def test_modal_loops_never_start_inside_a_main_queue_callout() -> None:
     assert "await RunLoopTurn.ask({ self.confirmBroadFolder(kind) })" in adds
     # The modal loops there are, each reached only from one of those turns (or from AppKit's own
     # applicationShouldTerminate, for the quit question).
-    assert connection.count("runModal()") == 4
+    assert connection.count("runModal()") == 5
+    assert "RunLoopTurn.perform" in _swift_function(
+        connection, "    private func saveActivityLog() {"
+    )
+    assert "panel.runModal()" in _swift_function(connection, "    private func saveLog(")
     assert model.count("runModal()") == 4
     for path in SWIFT_FILES:
         if path.name not in ("Connection.swift", "HostModel.swift"):
@@ -5456,7 +5482,14 @@ def test_only_runs_that_take_the_policy_lock_count_as_stuck(
     # next change never says that an earlier run holds it up when none does.
     source = _swift("HostCLI.swift")
     rows = _swift_string_set(source, "policyLockVerbs")
-    assert rows == {"ops enable", "ops disable", "roots add", "roots remove", "policy reset"}
+    assert rows == {
+        "ops enable",
+        "ops disable",
+        "roots add",
+        "roots remove",
+        "policy reset",
+        "uninstall-data --yes",
+    }
     # Read on the words before `--`, without `--json`; the alias suggestion takes no lock, written
     # with a space or with `=`.
     classify = _swift_function(
@@ -5499,6 +5532,10 @@ def test_only_runs_that_take_the_policy_lock_count_as_stuck(
             yield
 
     monkeypatch.setattr(host_cli, "_policy_lock", recording)
+    # `status`, `forget` and `uninstall-data` refuse where SWITCHBOARD_* is set, before any lock.
+    for name in list(os.environ):
+        if name.startswith("SWITCHBOARD_"):
+            monkeypatch.delenv(name)
     folder = home / "Documents"
     folder.mkdir()
 
@@ -5536,6 +5573,8 @@ def test_only_runs_that_take_the_policy_lock_count_as_stuck(
         ("--json", "pair", "confirm"),
         ("--json", "pair", "reject"),
         ("--json", "forget"),
+        # Last: Remove's, which would delete the profile's folders if the keyring let it.
+        ("--json", "uninstall-data", "--yes"),
     ]
     measured = {argv: takes(*argv) for argv in verbs}
     locking = {argv for argv, took in measured.items() if took}
@@ -5546,6 +5585,7 @@ def test_only_runs_that_take_the_policy_lock_count_as_stuck(
         ("--json", "roots", "remove", "docs"),
         ("--json", "roots", "add", "--", "docs", "--suggest-alias"),
         ("--json", "policy", "reset"),
+        ("--json", "uninstall-data", "--yes"),
     }
     # The rule the Swift states, read as written: the verb and its action among the words before
     # `--`, but `--json`, and no alias suggestion among them. It agrees with the host on each.
@@ -6563,8 +6603,8 @@ class _DisconnectOnAMac:
     else ``notRegistered`` (nothing when ``line`` is false; ``still`` when unregistering failed,
     and then the note says how to turn it off by hand). Its note adds that the app won't open at
     login when ``sentence`` says so (by default, exactly when the item was enabled or waited for
-    approval, and was taken away). While connected the menu holds Settings (unless ``settings``
-    is false); once disconnected it does not (unless ``settings_after``)."""
+    approval, and was taken away). The menu holds Settings while connected (unless ``settings``
+    is false), and still once disconnected, for Remove (unless ``settings_after`` is false)."""
 
     def __init__(
         self,
@@ -6573,7 +6613,7 @@ class _DisconnectOnAMac:
         sentence: bool | None = None,
         line: bool = True,
         settings: bool = True,
-        settings_after: bool = False,
+        settings_after: bool = True,
         still: str | None = None,
     ) -> None:
         self.state = state
@@ -6680,8 +6720,8 @@ def test_disconnect_takes_the_login_item_away_and_says_so_when_there_was_one(
     # "login item: notRegistered" on standard error whatever it had (notFound, when macOS had
     # none to find); its note adds
     # "<name> won't open when you log in." exactly when it had one, by the last line it
-    # wrote before (the paused launch's check). The menu holds Settings while connected, and not
-    # after.
+    # wrote before (the paused launch's check). The menu holds Settings while connected, and
+    # after too, for Remove (section 17).
     mac = _DisconnectOnAMac(state=state)
     checker = _disconnect_on(mac, monkeypatch, tmp_path)
     assert checker.failures == []
@@ -6698,7 +6738,7 @@ def test_disconnect_takes_the_login_item_away_and_says_so_when_there_was_one(
         (_DisconnectOnAMac(state="notRegistered", line=False), "login item: notRegistered"),
         (_DisconnectOnAMac(state=None), "before Disconnect, the app has said"),
         (_DisconnectOnAMac(settings=False), "while connected, the menu holds"),
-        (_DisconnectOnAMac(settings_after=True), "no longer holds"),
+        (_DisconnectOnAMac(settings_after=False), "still holds"),
     ],
 )
 def test_a_disconnect_that_leaves_the_login_item_wrong_is_counted(
@@ -6731,7 +6771,8 @@ def test_the_disconnect_step_reads_the_login_item_before_and_after() -> None:
     assert was < chosen < mark < pressed < sentence < after
     assert 'registered = was in ("enabled", "requiresApproval")' in step
     assert step.index("SETTINGS_MENU in shown") < chosen
-    assert step.rindex("SETTINGS_MENU not in shown") > after
+    assert step.rindex("SETTINGS_MENU in shown") > after
+    assert "SETTINGS_MENU not in shown" not in step
     assert "_dump_login_items()" in step[after:]
 
 
@@ -7607,17 +7648,21 @@ def test_open_at_login_is_a_switch_in_a_settings_menu_while_connected() -> None:
     # decisions/0002 §14: while connected, a Settings submenu holds Open at
     # Login, whose switch shows whether macOS will open the app at login (the state read again
     # from macOS, never kept by the app) and turns it on or off; and, while the settings file
-    # can't be read, Reset Settings…, the action #16 added. Disconnect stays where it is.
+    # can't be read, Reset Settings…, the action #16 added. Disconnect stays where it is. The
+    # submenu shows connected or not, for Remove <name>… (section 17), its last item.
     menu = _flat(_swift("MenuBarApp.swift"))
     items = menu.split("struct HostItems: View {", 1)[1]
-    settings = items.split("if connection.connected { Menu(LoginText.settingsMenu) { ", 1)
+    settings = items.split("Menu(LoginText.settingsMenu) { if connection.connected { ", 1)
     assert len(settings) == 2
     inside = settings[1]
     assert inside.startswith(
         "Toggle( LoginText.openAtLoginItem, isOn: Binding( get: { connection.openAtLogin },"
         " set: { connection.openAtLoginChosen($0) } ) ) if model.problem?.offersReset == true {"
-        " Button(ConnectionText.resetSettingsItem) { model.resetSettingsChosen() } } } }"
+        " Button(ConnectionText.resetSettingsItem) { model.resetSettingsChosen() } } }"
+        " Button(RemoveText.menuItem) { connection.removeChosen() }"
+        " .disabled(!connection.items.remove) }"
     )
+    assert menu.count("RemoveText.menuItem") == 1
     assert menu.count("LoginText.settingsMenu") == 1
     assert menu.count("Button(ConnectionText.disconnectItem)") == 1
     connection = _swift("Connection.swift")
@@ -8183,6 +8228,16 @@ def test_the_pairing_checks_look_for_the_apps_own_words() -> None:
         'has only letters, digits and _."'
     ) in text
     assert check_app.CONNECT_ITEM in check_app.MENU_ITEMS
+    # Settings is always in the menu, for Remove <name>… (decisions/0002 section 17), which the
+    # ui check finds there, and Open at Login not, while not connected. No check chooses Remove.
+    assert check_app.SETTINGS_MENU in check_app.MENU_ITEMS
+    assert check_app.REMOVE_ITEM == f"Remove {check_app.APP_NAME}…"
+    assert 'static let menuItem = "Remove \\(appName)…"' in _swift("Removal.swift")
+    assert check_app.OPEN_AT_LOGIN_ITEM == "Open at Login"
+    assert 'static let openAtLoginItem = "Open at Login"' in _swift("LoginRules.swift")
+    drive = _python_function(_CHECK_APP.read_text(encoding="utf-8"), "_drive_menu")
+    assert "REMOVE_ITEM in in_settings and OPEN_AT_LOGIN_ITEM not in in_settings" in drive
+    assert "_choose(REMOVE_ITEM" not in _CHECK_APP.read_text(encoding="utf-8")
     # Activity… is always in the menu; Stop What's Running only while an operation runs.
     assert check_app.ACTIVITY_ITEM in check_app.MENU_ITEMS
     assert check_app.STOP_WHATS_RUNNING not in check_app.MENU_ITEMS

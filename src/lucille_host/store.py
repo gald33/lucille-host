@@ -122,6 +122,10 @@
   ``KEYRING_PROPERTY_*`` environment variables (the Secret Service collection, a Keychain file); and
   code already running in the process could give a class of its own those names.
 
+- ``uninstall-data`` deletes the profile's items, this one and the credential store's
+  (:data:`OWNED_SERVICES`), through the checked backend, and reads each again to see that it is
+  gone (:func:`delete_items`). Nothing else deletes an item.
+
 A keyring failure, a backend's own ``OSError`` included, is a :class:`StoreError`, an ``OSError``,
 which is what Switchboard's stores raise for a storage failure; the wrapper never reads one as the
 hub's (``_switchboard.py``). No error message holds anything read from the item.
@@ -150,7 +154,7 @@ from keyring.backend import KeyringBackend
 from keyring.backends.chainer import ChainerBackend
 from keyring.backends.fail import Keyring as FailKeyring
 from keyring.backends.null import Keyring as NullKeyring
-from keyring.errors import KeyringError
+from keyring.errors import KeyringError, PasswordDeleteError
 
 from lucille_host import nesting, paths, state
 
@@ -168,6 +172,10 @@ __all__ = [
     "UNUSABLE_ERRORS",
     "CALL_TIMEOUT",
     "CHAIN_LIMIT",
+    "CREDENTIALS_LOCK",
+    "CREDENTIALS_SERVICE",
+    "OWNED_SERVICES",
+    "UNINSTALL_REFUSAL",
     "PROBE_TIMEOUT",
     "InsecureKeyring",
     "Item",
@@ -176,6 +184,7 @@ __all__ = [
     "StoreError",
     "Unanswered",
     "check_backend",
+    "delete_items",
     "file_lock",
     "keyring_call",
     "keyring_failure",
@@ -185,6 +194,15 @@ __all__ = [
 ]
 
 SERVICE: Final = "lucille-host"
+# The credential store's item (``credentials.py``), named here so that ``uninstall-data`` can
+# delete it without importing that module, which only the ``credential`` verb may load.
+CREDENTIALS_SERVICE: Final = "lucille-host.credentials"
+# The credential store's lock file, in the profile's state folder, named here for the same reason:
+# ``uninstall-data`` holds it, so that no ``credential`` verb changes the item while it is deleted.
+CREDENTIALS_LOCK: Final = ".credentials.lock"
+# Every keyring service an item of the host's stores is kept under, each with the profile's name as
+# its user name: what ``uninstall-data`` deletes (:func:`delete_items`).
+OWNED_SERVICES: Final = (SERVICE, CREDENTIALS_SERVICE)
 VERSION: Final = 1
 STAMP_EVERY: Final = 3600.0
 # What Switchboard's pair records and held rooms stamp when they are read or used.
@@ -227,6 +245,12 @@ BOUNDED: Final = frozenset({"linux"})
 PAIR_REFUSAL: Final = (
     "so lucille-host cannot keep its pair in it; set up the system keyring, or pair with "
     "--store-file to keep the pair in a file instead, which is weaker"
+)
+# The end of a refusal of the keyring by ``uninstall-data`` (:func:`delete_items`). It does not
+# point to ``--store-file``, which keeps nothing of the credentials' and deletes nothing.
+UNINSTALL_REFUSAL: Final = (
+    "so lucille-host cannot delete its items there, or check that none is left; nothing was "
+    "removed. Run `uninstall-data` where the system keyring can be used"
 )
 
 T = TypeVar("T")
@@ -323,6 +347,8 @@ def keyring_call(call: Callable[[], T], what: str) -> T:
         if what == "write":
             # The thread left waiting may still finish it.
             message += "; whether it was saved is not known, and the next start reads it again"
+        elif what == "delete":
+            message += "; whether it was deleted is not known: try again in a new process"
         raise Unanswered(message) from None
 
 
@@ -439,7 +465,7 @@ def keyring_failure(exc: Exception, what: str) -> StoreError | None:
         detail += f", from {type(source).__name__}"
         if named:
             detail += f": {_reply_name(source)}"
-    verb = "read" if what == "read" else "written"
+    verb = {"read": "read", "delete": "deleted"}.get(what, "written")
     message = f"the keyring could not be {verb} ({detail})"
     if any(_says_unusable(link) for link in links):
         return KeyringUnusable(message)
@@ -601,6 +627,49 @@ def check_backend(
             f"the keyring backend here ({type(current).__name__}) {reason}, {refusal}"
         )
     return current
+
+
+def delete_items(username: str, services: tuple[str, ...] = OWNED_SERVICES) -> None:
+    """Delete the keyring item of each of ``services`` kept under ``username`` (a profile's name),
+    one after another, stopping at the first that fails (:func:`_delete_item`). A backend the host
+    does not keep items in is refused first, with :data:`UNINSTALL_REFUSAL`, and nothing deleted."""
+    backend = check_backend(refusal=UNINSTALL_REFUSAL)
+    for service in services:
+        _delete_item(backend, service, username)
+
+
+def _delete_item(backend: KeyringBackend, service: str, username: str) -> None:
+    """Delete one keyring item through the backend :func:`check_backend` returns, and check that
+    it is gone: a read of it must find nothing. An item that is not there already is no failure.
+    keyring raises the same error for an item that is not there as for one it could not delete (its
+    Keychain backend turns every error of the Keychain into it), so that error is judged by the
+    read that follows. Each call is bounded on Linux (:func:`keyring_call`). A failure is a
+    :class:`StoreError` whose message names the error's class (:func:`keyring_failure`) or the
+    item, never anything read from it or said with the error; what the read finds is only compared
+    with nothing, and kept nowhere."""
+    try:
+        keyring_call(lambda: backend.delete_password(service, username), "delete")
+    except StoreError:
+        raise
+    except PasswordDeleteError:
+        # Not there, or not deleted: the read below says which.
+        pass
+    except Exception as exc:
+        failed = keyring_failure(exc, "delete")
+        if failed is None:
+            raise
+        raise failed from None
+    try:
+        gone = keyring_call(lambda: backend.get_password(service, username) is None, "read")
+    except StoreError:
+        raise
+    except Exception as exc:
+        failed = keyring_failure(exc, "read")
+        if failed is None:
+            raise
+        raise failed from None
+    if not gone:
+        raise StoreError(f"the keyring item {service}/{username} could not be deleted")
 
 
 class _FileLock:

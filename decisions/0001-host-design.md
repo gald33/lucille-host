@@ -674,9 +674,10 @@ this record says below of reading a code applies to that code; [spec/CLI.md](../
 `pair [CODE] [--code-stdin] [--hub URL] [--store-file]`, `pair status`, `pair confirm`, `pair reject`,
 `run [--json-events] [--exit-on-stdin-eof] [--allow-downgrade]`, `status`, `log [--limit N]`, `forget`,
 `ops list|enable|disable`, `roots list|add|remove`, `policy previous|reset`, `pause`, `resume`, `kill`,
-and, for an app that drives the command line, `roots add --suggest-alias PATH` and
-`roots check [ALIAS]`; and `profile check`, which finds what an earlier run as root left in the profile
-([0004](0004-running-as-root.md), 4.3). They print text, with the state word first
+and, for an app that drives the command line, `roots add --suggest-alias PATH`,
+`roots check [ALIAS]` and `uninstall-data --yes` (decisions/0002 section 17); and `profile check`,
+which finds what an earlier run as root left in the profile ([0004](0004-running-as-root.md),
+4.3). They print text, with the state word first
 where there is one (`waiting`, `sas_pending`, `confirmed`, `leaked`, `expired`, ...).
 - `--json` makes every verb but `run` write the JSON objects of [spec/CLI.md](../spec/CLI.md) on stdout
   instead of its text, one per line, with the same exit codes; stderr stays as it is. `run`'s JSON form
