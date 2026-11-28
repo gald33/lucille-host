@@ -45,6 +45,10 @@ verbs:
   pairing sets aside only a policy that is not the fresh one); ``policy reset``: set an invalid
   policy file aside, and start from the fresh policy;
 - ``pause``, ``resume`` and ``kill``: the local controls;
+- ``profile check``: whether every folder and file of the profile, and every folder above it up
+  to the home folder, is the user's, and, for one that root (or another user) owns, the commands
+  that repair it, for a person to run as root (``owners.py``). It changes nothing but its line in
+  the run record.
 - ``verify``: the host installed here is a release PyPI serves, attested by this repository's
   release workflow, and its installed files are the release's (``verify.py``). It needs the
   ``[verify]`` extra, and reads no file of a profile.
@@ -83,6 +87,7 @@ import threading
 import time
 from collections.abc import Callable, Iterator, Sequence
 from dataclasses import replace
+from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Final, NoReturn
 
@@ -95,6 +100,7 @@ from lucille_host import (
     gate,
     link,
     loop,
+    owners,
     paths,
     policy,
     report,
@@ -139,11 +145,16 @@ INTERNAL_MESSAGE: Final = "an unexpected error; standard error holds its traceba
 # Unpaired surrogates, as a file name that is not UTF-8 reaches the host: written as U+FFFD.
 _SURROGATES: Final = re.compile("[\ud800-\udfff]")
 # What every verb but `--version` and `--help` says as uid 0 (decisions/0004-running-as-root.md,
-# 4.2). It names the repair that record gives for a profile a root run has already touched.
+# 4.2). It names the verb that finds what a root run has already left in a profile.
 ROOT_REFUSED: Final = (
     "lucille-host does not run as root (uid 0); run it as the user whose files it may read. "
     "If an earlier run as root left files or folders in your profile that you cannot read, "
-    "see decisions/0004-running-as-root.md, section 4.3, 'Profiles that are already root-owned'"
+    "run `lucille-host profile check` as that user: it names each one, and the commands that "
+    "repair it"
+)
+# What a verb adds when the profile refused it a folder or file (decisions/0004, 4.3).
+PROFILE_DENIED: Final = (
+    "if an earlier run as root left it so, `lucille-host profile check` names what to repair"
 )
 
 
@@ -693,6 +704,23 @@ def build_parser() -> argparse.ArgumentParser:
         )
     )
 
+    profile_verb = verbs.add_parser(
+        "profile", help="check that the profile's folders and files are yours"
+    )
+    _json_option(profile_verb)
+    profile_verbs = profile_verb.add_subparsers(
+        dest="profile_verb", metavar="ACTION", required=True
+    )
+    _json_option(
+        profile_verbs.add_parser(
+            "check",
+            help=(
+                "find the profile's folders and files that root or another user owns, and show "
+                "the commands that repair them; changes nothing"
+            ),
+        )
+    )
+
     _json_option(verbs.add_parser("pause", help="start nothing until resume; refuse new requests"))
     _json_option(verbs.add_parser("resume", help="clear pause and any kill request"))
     _json_option(verbs.add_parser("kill", help="kill the operation in flight, and pause"))
@@ -1115,6 +1143,59 @@ def _policy_verb(args: argparse.Namespace, dirs: paths.Dirs, out: _Out) -> None:
         _policy_reset(dirs, out)
     else:
         _policy_previous(args, dirs, out)
+
+
+def _profile_check(args: argparse.Namespace, dirs: paths.Dirs, out: _Out) -> None:
+    """``profile check``: each folder or file of the profile that is not the user's, as it is
+    found, or one ``ok``. It takes no lock, opens no session, sends nothing, and writes nothing but
+    the line of the run record that :func:`main` writes for every command."""
+    found = owners.check(dirs.profile)
+    for each in found:
+        path = str(each.path)
+        if each.state == owners.UNREADABLE:
+            out.say(
+                f"{path}: cannot be looked at: a folder above it does not let you in",
+                "profile_check",
+                state=each.state,
+                path=path,
+            )
+            continue
+        assert each.kind is not None and each.uid is not None
+        who = f"uid {each.uid}"
+        fields: dict[str, Any] = {"state": each.state, "path": path, "kind": each.kind}
+        fields["uid"] = each.uid
+        if each.state == owners.OUTSIDE_HOME:
+            out.say(
+                f"{path}: a {each.kind} owned by {who}, outside your home folder: look at it, "
+                "and decide as root what to change there",
+                "profile_check",
+                **fields,
+            )
+            continue
+        out.say(
+            f"{path}: a {each.kind} owned by {who}, not by you\n"
+            f"  look first, as root: {each.look}\n"
+            f"  then repair, as root: {each.repair}",
+            "profile_check",
+            **fields,
+            look=each.look,
+            repair=each.repair,
+        )
+    if not found:
+        out.say(
+            "every folder and file of this profile is yours",
+            "profile_check",
+            state="ok",
+            config_folder=str(dirs.config),
+            state_folder=str(dirs.state),
+        )
+
+
+def _profile_verb(args: argparse.Namespace, dirs: paths.Dirs, out: _Out) -> None:
+    if args.profile_verb == "check":
+        _profile_check(args, dirs, out)
+    else:
+        raise _Refused("internal", f"profile {args.profile_verb} is not an action this release has")
 
 
 def _say(line: str) -> None:
@@ -2361,6 +2442,7 @@ VERBS: Final[dict[str, Callable[..., Any]]] = {
     "ops": _ops_verb,
     "roots": _roots_verb,
     "policy": _policy_verb,
+    "profile": _profile_verb,
     "pause": _control("pause"),
     "resume": _control("resume"),
     "kill": _control("kill"),
@@ -2413,6 +2495,20 @@ def _failure(exc: BaseException) -> tuple[str, str, str, dict[str, str]]:
         said = str(exc)
     extra = exc.extra if isinstance(exc, _Refused) else {}
     return f"lucille-host: {said}", code, said, extra
+
+
+def _profile_denied(exc: BaseException, dirs: paths.Dirs) -> bool:
+    """Whether ``exc`` is, or was raised from, a refusal of the permissions on one of the profile's
+    folders, a folder above one of them, or a file inside one (decisions/0004, 4.3)."""
+    seen: BaseException | None = exc
+    while seen is not None:
+        if isinstance(seen, PermissionError) and isinstance(seen.filename, str | os.PathLike):
+            path = Path(seen.filename)
+            for folder in (dirs.config, dirs.state):
+                if path.is_relative_to(folder) or folder.is_relative_to(path):
+                    return True
+        seen = seen.__cause__
+    return False
 
 
 # argparse's usage errors of a credential command line that repeat nothing typed on it: the
@@ -2495,6 +2591,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(said, file=sys.stderr)
         out.error(code, message, **extra)
         return 1
+    dirs: paths.Dirs | None = None
     try:
         dirs = _dirs(args.profile)
         verb = VERBS.get(args.verb)
@@ -2503,6 +2600,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         verb(args, dirs, out)
     except _FAILURES as exc:
         said, code, message, extra = _failure(exc)
+        if dirs is not None and _profile_denied(exc, dirs):
+            said, message = f"{said}; {PROFILE_DENIED}", f"{message}; {PROFILE_DENIED}"
         print(said, file=sys.stderr)
         out.error(code, message, **extra)
         return 1

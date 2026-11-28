@@ -44,6 +44,7 @@ from lucille_host import (
     connecting,
     gate,
     link,
+    owners,
     paths,
     policy,
     rooms,
@@ -599,6 +600,28 @@ def _not_toml(w: World) -> None:
     w.dirs.policy_file.write_text("this is not toml\n")
 
 
+def _owned(w: World, planted: tuple[Path, ...] = ()) -> None:
+    """The owners the check reads: root (uid 0) for the paths ``planted``, by device and inode, as
+    only root could make them, and the uid every test is given (conftest.py) for the files this
+    suite made. Each ``stat`` the check makes is still a real one."""
+    roots = {(info.st_dev, info.st_ino) for info in map(os.stat, planted)}
+    mine = os.getuid()
+
+    def uid(info: os.stat_result) -> int:
+        if (info.st_dev, info.st_ino) in roots:
+            return 0
+        return os.geteuid() if info.st_uid == mine else info.st_uid
+
+    w.monkeypatch.setattr(owners, "_uid", uid)
+
+
+def _root_owned(w: World) -> None:
+    """The policy file and the state folder owned by root."""
+    w.policy_file({})
+    paths.ensure_dir(w.dirs.state)
+    _owned(w, (w.dirs.policy_file, w.dirs.state))
+
+
 SETUPS: dict[str, Callable[[World], None]] = {
     "ops-list": lambda w: w.every_executable(),
     "ops-list-every-state": _ops_every_state,
@@ -642,6 +665,8 @@ SETUPS: dict[str, Callable[[World], None]] = {
     "pair-status-connect": lambda w: w.connect_request(),
     "policy-previous": _policy_previous,
     "policy-reset": _not_toml,
+    "profile-check": _owned,
+    "profile-check-not-yours": _root_owned,
     "run-events-requests": _run_requests,
     "run-events-no-gate": lambda w: _no_gate(w),
     "run-events-already-running": _run_locked,
@@ -839,7 +864,7 @@ def verb_of(argv: list[str]) -> str:
     if not words or words[0] == "--version":
         return "--version"
     verb = words[0]
-    if verb in ("ops", "roots", "policy", "credential"):
+    if verb in ("ops", "roots", "policy", "credential", "profile"):
         key = f"{verb} {words[1]}"
         if key == "roots add" and any(w.startswith("--suggest-alias") for w in words):
             key += " --suggest-alias"
