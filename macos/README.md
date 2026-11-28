@@ -1387,13 +1387,14 @@ The design ([decisions/0002-macos-app.md](../decisions/0002-macos-app.md)) may c
   option the design has not decided.
 - **Python lives in `Contents/Resources/runtime`.** If notarization objects to code there, see "Not done
   yet" for the two ways out.
-- **The app's working name is Capsule, with the bundle identifier `com.lucille-ai.capsule`.** The code
+- **The app's name is Capsule, with the bundle identifier `com.lucille-ai.capsule`** (the name decided on
+  2026-11-28). The code
   takes both from `tools/macos/pins.toml`: `build_app.py` writes them into `Info.plist`, the Swift code
   reads the name back from there (`HostText.appName`), and `check_app.py` reads it from the pins. Outside
   the app, as in the self-test, the Swift code says "the app" instead, so the `ui` check fails if the app
   stops reading its name. A new name also changes the three artifact names in `.github/workflows/ci.yml`
   and the values `tests/test_macos_build.py` pins; those tests fail until all of them agree with the pins.
-  The name may change before the first signed build. Only the app has the name: the host program inside
+  Only the app has the name: the host program inside
   is still `lucille-host`, with its folder at `~/Library/Application Support/lucille-host`. The
   identifiers must not change after the first signed release, because changing them makes macOS ask the
   user again about every folder and Keychain item.

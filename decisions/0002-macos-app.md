@@ -22,9 +22,9 @@ Python, and without Homebrew. Mac first; nothing here may block a Windows or Lin
 - "Seen in CI" means run on 2026-10-29 on a GitHub-hosted macOS runner, by the first build's workflow,
   `macos-app.yml`, which the `macos-app` and `macos-smoke` jobs of `ci.yml` have since replaced (§18). A
   result from those jobs names its run.
-- **The app's working name is Capsule** ("Capsule, by Lucille" where the brand helps), with the bundle
-  identifier `com.lucille-ai.capsule`. The name may still change before the first signed build, after which
-  the identifiers cannot (§7); it is checked first ("Not decided yet"). Where no name is needed, this record
+- **The app's name is Capsule** ("Capsule, by Lucille" where the brand helps), decided by the maintainer on
+  2026-11-28, with the bundle identifier `com.lucille-ai.capsule`. The identifiers cannot change after the
+  first signed build (§7). Where no name is needed, this record
   says "the app". Only what a user sees and the app's identifiers carry the name: the package, the command
   (`lucille-host`), its folders and profiles, and this repository keep theirs.
 - **"Proposed, pending the maintainer's decision"** marks a part of this design that is not decided. Nothing
@@ -2748,9 +2748,9 @@ those writes itself first (`pause`, then `resume`).
 
 ## Not decided yet
 
-- The app's name. Capsule is a working name. A trademark search on it comes before the first signed build,
-  after which its identifiers cannot change (§7), and before the catalog lists the bundled `rg` path, which
-  contains it (§13).
+- A trademark search on the name Capsule (decided on 2026-11-28), which this record planned before the
+  first signed build, after which its identifiers cannot change (§7), and before the catalog lists the
+  bundled `rg` path, which contains it (§13). Whether to make it is the maintainer's.
 - Whether notarization accepts Mach-O files under `Contents/Resources`, or they move to `Contents/Frameworks`
   and the interpreter to `Contents/Helpers` (§6).
 - Whether the Developer ID-signed bundle loads under library validation and the hardened runtime, which

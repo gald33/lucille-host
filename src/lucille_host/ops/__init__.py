@@ -491,13 +491,14 @@ def _entry(
     file_operands: tuple[str, ...] = (),
     env_copy: dict[str, tuple[str, ...]] | None = None,
     args_rule: str | None = None,
+    timeout_s: int = DEFAULT_TIMEOUT_S,
     output: str | None = None,
 ) -> Operation:
     return Operation(
         name=name,
         params_json=params_json,
         argv=None if argv is None else MappingProxyType(argv),
-        timeout_s=DEFAULT_TIMEOUT_S,
+        timeout_s=timeout_s,
         timeout_plus_arg=timeout_plus_arg,
         default_enabled=default_enabled,
         about=about,
@@ -765,6 +766,49 @@ _ENTRIES = (
         )
         for name, required, properties, about in _GMAIL_ENTRIES
     ),
+    # Asks the user to save a credential on this computer (decisions/0003, "Entry"). It carries no
+    # value. Its program is the host's own interpreter running lucille_host.asks, which reads and
+    # writes no credential: it leaves the ask for `lucille-host credential answer`, waits up to
+    # asks.WAIT_S (240 s) for the user's answer, and writes only "saved" or "declined". The hosts
+    # are the service's template's (services.py), never the request's.
+    _entry(
+        "credential.ask",
+        _object(
+            ["service", "name"],
+            {
+                "service": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 64,
+                    "pattern": "^(github|gmail)$",
+                },
+                "name": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 64,
+                    "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$",
+                },
+                "reason": _text(300),
+            },
+        ),
+        {
+            family: (
+                HOST_PYTHON,
+                *("-I", "-B", "-W", "ignore", "-X", "utf8", "-m", "lucille_host.asks"),
+                *("--state", HOST_STATE, "--profile", HOST_PROFILE, "--", ARGS_JSON),
+            )
+            for family in OS_FAMILIES
+        },
+        About(
+            summary="Ask you to save a credential here",
+            sends=(
+                "Lucille learns only whether you saved the credential it asked for or declined. "
+                "You type it on this computer; it is never sent to Lucille."
+            ),
+        ),
+        args_rule="credential-ask-args",
+        timeout_s=270,
+    ),
 )
 
 OPERATIONS: Final[Mapping[str, Operation]] = MappingProxyType({op.name: op for op in _ENTRIES})
@@ -865,9 +909,21 @@ def _gmail_args(args: Mapping[str, Any]) -> bool:
     return True
 
 
+def _credential_ask_args(args: Mapping[str, Any]) -> bool:
+    """Rule credential-ask-args (spec/PROTOCOL.md section 10): ``reason`` holds no character that
+    would move, hide or blank out text where the host shows it (``asks.UNSHOWABLE``), no space at
+    its start or end and no two in a row (``asks.SPACES``), and is not blank."""
+    from lucille_host import asks  # noqa: PLC0415 - asks imports this module for its own check
+
+    reason = args.get("reason")
+    if reason is None:
+        return True
+    return asks.reason_showable(reason) and bool(reason.strip())
+
+
 # The rules beyond the schema an entry's args may be held to, by the name its ``args_rule`` gives.
 ARGS_RULES: Final[Mapping[str, Callable[[Mapping[str, Any]], bool]]] = MappingProxyType(
-    {"gmail-args": _gmail_args}
+    {"gmail-args": _gmail_args, "credential-ask-args": _credential_ask_args}
 )
 
 

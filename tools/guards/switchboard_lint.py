@@ -80,7 +80,8 @@ In the runtime package:
   private member of a library object, such as ``Client._call``, which posts to any hub path,
   would get past every rule above. One exception, :data:`DOCUMENTED_UNDERSCORE`: ``os._exit``,
   which Python documents as public, in the credential children alone: ``github.read``'s
-  (``src/lucille_host/proxy.py``) and the Gmail operations' (``src/lucille_host/gmail.py``).
+  (``src/lucille_host/proxy.py``), the Gmail operations' (``src/lucille_host/gmail.py``) and
+  ``credential.ask``'s (``src/lucille_host/asks.py``).
 
 What this lint cannot see. It checks names written in the source, resolved through the file's
 imports and through the wrapper; a module re-exported by another module is not followed (the AST
@@ -134,6 +135,7 @@ SWITCHBOARD_MODULE = "src/lucille_host/_switchboard.py"
 DOCUMENTED_UNDERSCORE: Mapping[str, frozenset[str]] = {
     "src/lucille_host/proxy.py": frozenset({"os._exit"}),
     "src/lucille_host/gmail.py": frozenset({"os._exit"}),
+    "src/lucille_host/asks.py": frozenset({"os._exit"}),
 }
 WRAPPER = "lucille_host._switchboard"
 # Where the fake Lucille lives: exempt from the share-new, sharing-member and surface rules only.

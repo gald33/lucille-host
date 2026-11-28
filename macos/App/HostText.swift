@@ -41,10 +41,12 @@ struct Ability: Equatable, Identifiable, Sendable {
     var detail: String? { sends }
 
     /// Whether the Abilities menu lists it. Operations meant for testing are left out, and so are
-    /// `host.describe`, which is on from the start and is described in the menu instead, and a
-    /// name the policy holds that this release does not have.
+    /// `host.describe`, which is on from the start and is described in the menu instead, one the
+    /// app cannot answer yet (`HostText.answeredInATerminal`), and a name the policy holds that this
+    /// release does not have.
     var isShown: Bool {
         !diagnostic && state != .notInCatalog && !HostText.unlistedAbilities.contains(name)
+            && !HostText.answeredInATerminal.contains(name)
     }
 
     /// Shown with a checkmark: the host says the local policy turns it on.
@@ -184,6 +186,14 @@ enum HostText {
     /// `diagnostic`): `host.describe`, which is on from the start and is described in the menu
     /// instead.
     static let unlistedAbilities: Set<String> = ["host.describe"]
+
+    /// Operations whose requests the app cannot answer yet, so that neither the Abilities menu
+    /// nor Set Up has a switch for them: `credential.ask`, whose ask the user answers on this
+    /// computer. Until the app shows an ask, it is answered in a terminal, with `lucille-host
+    /// credential asks` and `credential answer` (spec/CLI.md §15), and turned on there too, with
+    /// `lucille-host ops enable`. Turned on here, an ask would wait for an answer the app never asks
+    /// for, and `run` would run nothing else until it lapsed.
+    static let answeredInATerminal: Set<String> = ["credential.ask"]
 
     /// The app's name, from its Info.plist, where build_app.py puts the name tools/macos/pins.toml
     /// holds, so that a new name needs no change here. Code run outside the app, such as the

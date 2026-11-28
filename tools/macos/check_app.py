@@ -406,6 +406,9 @@ ABILITY_TITLES: Final = {
     "gmail.search": "Search your Gmail",
     "gmail.read": "Read one Gmail message",
 }
+# The core's words for credential.ask, which the menu leaves out until the app can show an ask
+# (App/HostText.swift, `answeredInATerminal`).
+OPERATIONS_SUMMARY_ASK: Final = "Ask you to save a credential here"
 ABILITY_DETAILS: Final = {
     "files.sha256": (
         "Lucille gets a code that identifies the file's exact contents, not the contents."
@@ -3559,8 +3562,10 @@ def _drive_menu(checker: Checker, screens: Path, flag: Path) -> bool:
     checker.expect(
         worked
         and set(ABILITY_TITLES.values()) <= set(listed)
-        and not {"host.sleep", "host.describe", *ABILITY_TITLES} & set(listed),
-        "Abilities lists each ability in plain words, and not host.sleep or host.describe",
+        and not {"host.sleep", "host.describe", "credential.ask", *ABILITY_TITLES} & set(listed)
+        and OPERATIONS_SUMMARY_ASK not in listed,
+        "Abilities lists each ability in plain words, and not host.sleep, host.describe or"
+        " credential.ask",
         abilities,
     )
     checker.expect(

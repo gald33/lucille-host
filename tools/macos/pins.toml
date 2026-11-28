@@ -20,7 +20,7 @@ sha256 = "8392b6ea51d94391befb2c31ebe75463f045d0b69dfcf5e1bb3234e1f5fa3405"
 # words. build_app.py writes it into Info.plist, the app reads it from there, and the checks read
 # it from here, so no code changes with it. A new name does also change the app's paths and
 # artifact names in the workflows and the values tests/test_macos_build.py pins, and those tests
-# fail until all of them agree with this file. It is a working name until the first signed build.
+# fail until all of them agree with this file. The maintainer decided on this name on 2026-11-28.
 # The host program inside keeps its own name, lucille-host.
 name = "Capsule"
 # The app's permanent identifier, and the interpreter's (the bundle identifier followed by

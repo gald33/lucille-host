@@ -1,0 +1,176 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/gald33/lucille-host/blob/main/src/lucille_host/spec/cli/v1/profile_check.schema.json",
+  "title": "lucille-host --json: profile_check",
+  "description": "One folder or file of the profile that is not the user's, or that cannot be looked at; or, when there is none, ok.",
+  "oneOf": [
+    {
+      "$ref": "#/$defs/profile_check.ok"
+    },
+    {
+      "$ref": "#/$defs/profile_check.not_yours"
+    },
+    {
+      "$ref": "#/$defs/profile_check.outside_home"
+    },
+    {
+      "$ref": "#/$defs/profile_check.unreadable"
+    }
+  ],
+  "$defs": {
+    "path": {
+      "description": "An absolute path. A byte of a file name that is not UTF-8 is U+FFFD.",
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^/[^\\u0000]*$"
+    },
+    "command": {
+      "description": "A command line for a person to run as root, its path quoted for a POSIX shell. For people: a shell shows it, and never runs it.",
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^[^\\u0000]*$"
+    },
+    "profile_check.ok": {
+      "description": "Every folder and file of the profile, and every folder above it up to the home folder, that is there is the user's.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "v",
+        "type",
+        "state",
+        "config_folder",
+        "state_folder"
+      ],
+      "properties": {
+        "v": {
+          "const": 1
+        },
+        "type": {
+          "const": "profile_check"
+        },
+        "state": {
+          "const": "ok"
+        },
+        "config_folder": {
+          "$ref": "#/$defs/path"
+        },
+        "state_folder": {
+          "$ref": "#/$defs/path"
+        }
+      }
+    },
+    "profile_check.not_yours": {
+      "description": "Inside the home folder, owned by another user (root, after a run as root).",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "v",
+        "type",
+        "state",
+        "path",
+        "kind",
+        "uid",
+        "look",
+        "repair"
+      ],
+      "properties": {
+        "v": {
+          "const": 1
+        },
+        "type": {
+          "const": "profile_check"
+        },
+        "state": {
+          "const": "not_yours"
+        },
+        "path": {
+          "$ref": "#/$defs/path"
+        },
+        "kind": {
+          "description": "What it is: a folder, or anything else (a file).",
+          "enum": [
+            "folder",
+            "file"
+          ]
+        },
+        "uid": {
+          "description": "The user id that owns it.",
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 4294967295
+        },
+        "look": {
+          "$ref": "#/$defs/command"
+        },
+        "repair": {
+          "$ref": "#/$defs/command"
+        }
+      }
+    },
+    "profile_check.outside_home": {
+      "description": "Outside the home folder, owned by another user. No repair is given: a person decides.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "v",
+        "type",
+        "state",
+        "path",
+        "kind",
+        "uid"
+      ],
+      "properties": {
+        "v": {
+          "const": 1
+        },
+        "type": {
+          "const": "profile_check"
+        },
+        "state": {
+          "const": "outside_home"
+        },
+        "path": {
+          "$ref": "#/$defs/path"
+        },
+        "kind": {
+          "description": "What it is: a folder, or anything else (a file).",
+          "enum": [
+            "folder",
+            "file"
+          ]
+        },
+        "uid": {
+          "description": "The user id that owns it.",
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 4294967295
+        }
+      }
+    },
+    "profile_check.unreadable": {
+      "description": "It cannot be looked at, and no folder above it is another user's: the folder above it does not let the user in.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "v",
+        "type",
+        "state",
+        "path"
+      ],
+      "properties": {
+        "v": {
+          "const": 1
+        },
+        "type": {
+          "const": "profile_check"
+        },
+        "state": {
+          "const": "unreadable"
+        },
+        "path": {
+          "$ref": "#/$defs/path"
+        }
+      }
+    }
+  }
+}

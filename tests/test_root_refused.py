@@ -51,6 +51,7 @@ LINES: dict[str, list[str]] = {
     "pair reject": ["pair", "reject"],
     "policy previous": ["policy", "previous"],
     "policy reset": ["policy", "reset"],
+    "profile check": ["profile", "check"],
     "credential list": ["credential", "list"],
     "credential set": [
         *("credential", "set", "github", "work", "--host", "api.github.com", "--value-stdin")
@@ -217,4 +218,4 @@ def test_run_as_root_starts_no_lifeline(as_root: HostEnv, monkeypatch: pytest.Mo
 
 def test_the_message_names_the_repair() -> None:
     assert "does not run as root (uid 0)" in ROOT_REFUSED
-    assert "0004-running-as-root.md" in ROOT_REFUSED
+    assert "`lucille-host profile check`" in ROOT_REFUSED

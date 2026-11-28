@@ -500,6 +500,7 @@ change ([§21](#21-versioning)).
 | `gmail.mailboxes` | `{credential}` | The account's mailboxes (Gmail's labels), at most 500. `credential` as `gmail.check`'s. |
 | `gmail.search` | `{credential, mailbox, query, from, to, subject, since, before, unseen, limit}` | The newest messages of one mailbox that match every criterion given; only `credential` is required. `mailbox` (`INBOX` when not given), `from`, `to` and `subject` are 1 to 128 characters, `query` (Gmail's own search syntax) 1 to 256, each of any character but U+0000; `since` and `before` are dates, `YYYY-MM-DD`; `unseen` is a boolean; `limit` is an integer from 1 to 50 (20 when not given). Its reply carries each message's headers and Gmail's message id, never its body. |
 | `gmail.read` | `{credential, id}` | One message, by `id`, Gmail's message id (`X-GM-MSGID`): 1 to 20 digits, no leading zero, as `gmail.search` gives it. Both are required. Its reply carries the message's headers, at most 32 KiB of its text, and its attachments' names, types and sizes, never their contents. |
+| `credential.ask` | `{service, name, reason}` | Asks the user to save a credential on the computer, which the user types there, into the host's own prompt; the request carries no value, and Lucille never receives one. `service` is `github` or `gmail`, a service the host has a template for; `name` is a credential's name, as `github.read`'s `credential`; `reason`, optional, is Lucille's own words, 1 to 300 characters of any character but U+0000, which the host shows apart, under "Lucille says:". `service` and `name` are required. There is no `hosts`: the host binds the credential to its service template's hosts alone (`api.github.com`, `imap.gmail.com`). Its reply carries only whether the user saved it or declined. |
 
 - **`github.read`'s paths.** `path` is `/user`, `/user/repos`, `/search/issues`, or, under
   `/repos/{owner}/{repo}`, the repository itself, `/issues`, `/issues/{number}`, `/issues/{number}/comments`,
@@ -524,6 +525,22 @@ change ([§21](#21-versioning)).
   byte. The host refuses them `not_enabled`, as `github.read`, while it cannot run them. How it uses the
   credential, and what it refuses, is in [decisions/0003](../decisions/0003-local-credentials.md) ("Second
   use").
+- **`credential.ask`** waits for the user, up to 240 s, and while it waits the host runs no other request: it
+  runs one at a time. An ask not answered in that time is declined; so, without being shown to the user,
+  is one made while another waits, and one made less than 600 s after any ask ended, for any credential. Its
+  child reads and writes no credential and connects to nothing: the user's own command at the computer
+  saves it. The host refuses it `not_enabled`, as `github.read`, while it cannot run it. How the host shows
+  the ask, and what it refuses, is in [decisions/0003](../decisions/0003-local-credentials.md) ("Entry").
+- **Rule credential-ask-args.** Beyond the schema, the host refuses `credential.ask` `bad_args` when its
+  `reason` holds a character that would move, hide or blank out text where the host shows it: a C0 or C1
+  control character or U+007F (a line break and a tab among them); U+2028 or U+2029; a character that
+  reorders text (U+061C, U+200E, U+200F, U+202A to U+202E, U+2066 to U+2069); white space other than
+  U+0020 (U+00A0, U+1680, U+2000 to U+200A, U+202F, U+205F, U+3000); a character of no width (U+00AD,
+  U+034F, U+180B to U+180F, U+200B to U+200D, U+2060 to U+2065, U+206A to U+206F, U+FE00 to U+FE0F,
+  U+FEFF, U+FFF9 to U+FFFB, U+1D173 to U+1D17A, U+E0000 to U+E007F, U+E0100 to U+E01EF); or one drawn
+  blank (U+115F, U+1160, U+2800, U+3164, U+FFA0). It also refuses a `reason` that starts or ends with
+  U+0020, holds two in a row, or is only white space: a run of spaces could push Lucille's words to where
+  a line of the host's starts.
 - **Rule gmail-args.** Beyond the schema, the host refuses a Gmail operation `bad_args` when any of its
   arguments holds a control character (U+0000 to U+001F, or U+007F), when `since` or `before` is a date
   that does not exist (`2026-02-31`), or when `id` is above 2^64 − 1 (18446744073709551615).
@@ -750,6 +767,15 @@ For example (one match, in `notes/todo.txt`, line 3):
 - A request's cap too small to hold the document with no matches (53 bytes measured as `stdout`, 69
   with `unreadable_output`) leaves `stdout` empty, with `stdout_truncated` true. Lucille sends no `caps`
   in v1.
+
+**`credential.ask`.** Its child's output, capped as any child's is. It exits 0, with `stdout` one JSON
+object, `{"answer": "saved"}` or `{"answer": "declined"}`, and `stderr` empty; that is all Lucille learns
+of the ask. `saved` means the user saved a credential of that service and name, bound to the template's
+hosts, in the form the service's template says (decisions/0003); `declined` means anything else: the user
+declined, closed the prompt, or did not answer in time, or the ask was not shown (§10). Exit 6, with one
+fixed line on `stderr` and nothing on `stdout`, is anything unexpected in the host's own code; 1, as for
+`github.read`, is the interpreter that could not start the host's module. None of these is a refusal: the
+reply is `done`.
 
 **`host.describe`.** It replies `done` with `exit_code` 0, an empty `stderr`, and both truncation flags
 false. Its document goes, JSON-encoded, in `stdout`. The reply has no structured result field, and the

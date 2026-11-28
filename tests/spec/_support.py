@@ -50,6 +50,7 @@ CATALOG = (
     "gmail.mailboxes",
     "gmail.search",
     "gmail.read",
+    "credential.ask",
 )
 REFUSED_CODES = (
     "unknown_op",
@@ -76,6 +77,7 @@ PROSE_RULES = (
     "stream-size",
     "not-after-range",
     "gmail-args",
+    "credential-ask-args",
     "search-bytes",
 )
 GMAIL_ID_MAX = 2**64 - 1
@@ -101,6 +103,38 @@ def gmail_args_broken(op: Any, args: Any) -> bool:
         if key == "id" and value.isascii() and value.isdigit() and int(value) > GMAIL_ID_MAX:
             return True
     return False
+
+
+# What rule credential-ask-args refuses in credential.ask's reason, from spec/PROTOCOL.md's list:
+# C0 and C1 controls and DEL; the line and paragraph separators; the characters that reorder text;
+# white space other than U+0020; the characters of no width; and those drawn blank.
+_UNSHOWABLE = frozenset(
+    [*range(0x00, 0x20), *range(0x7F, 0xA0), 0x2028, 0x2029]
+    + [0x061C, 0x200E, 0x200F, *range(0x202A, 0x202F), *range(0x2066, 0x206A)]
+    + [0x00A0, 0x1680, *range(0x2000, 0x200B), 0x202F, 0x205F, 0x3000]
+    + [0x00AD, 0x034F, *range(0x180B, 0x1810), *range(0x200B, 0x200E), *range(0x2060, 0x2066)]
+    + [*range(0x206A, 0x2070), *range(0xFE00, 0xFE10), 0xFEFF, *range(0xFFF9, 0xFFFC)]
+    + [*range(0x1D173, 0x1D17B), *range(0xE0000, 0xE0080), *range(0xE0100, 0xE01F0)]
+    + [0x115F, 0x1160, 0x2800, 0x3164, 0xFFA0]
+)
+
+
+def credential_ask_args_broken(op: Any, args: Any) -> bool:
+    """Rule credential-ask-args (spec/PROTOCOL.md section 10): credential.ask's reason holding a
+    character that would move, hide or blank out text where the host shows it, a space at its start
+    or end, two spaces in a row, or only white space."""
+    if op != "credential.ask" or not isinstance(args, dict):
+        return False
+    reason = args.get("reason")
+    if not isinstance(reason, str):
+        return False
+    return (
+        any(ord(char) in _UNSHOWABLE for char in reason)
+        or reason.startswith(" ")
+        or reason.endswith(" ")
+        or "  " in reason
+        or not reason.strip()
+    )
 
 
 # Rule search-bytes (spec/PROTOCOL.md section 11): the most bytes of a path and of a line in a
@@ -239,6 +273,12 @@ def prose_violations(
         and gmail_args_broken(body.get("op"), body.get("args"))
     ):
         broken.append("gmail-args")
+    if (
+        kind == "request"
+        and isinstance(body, dict)
+        and credential_ask_args_broken(body.get("op"), body.get("args"))
+    ):
+        broken.append("credential-ask-args")
     if kind == "files.search" and search_bytes_broken(body):
         broken.append("search-bytes")
     return broken
@@ -319,7 +359,7 @@ def _bad_args(op: str, args: Any) -> bool:
     schema["$ref"] = f"#/$defs/args.{op}"
     if not validator_for(schema).is_valid(args):
         return True
-    if gmail_args_broken(op, args):
+    if gmail_args_broken(op, args) or credential_ask_args_broken(op, args):
         return True
     return any(isinstance(v, float) for v in walk(args))
 

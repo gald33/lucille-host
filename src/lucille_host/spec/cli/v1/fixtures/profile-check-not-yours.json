@@ -1,0 +1,31 @@
+{
+  "description": "profile check of a profile whose policy file and state folder root owns (uid 0), the user being uid 1000",
+  "argv": [
+    "--json",
+    "profile",
+    "check"
+  ],
+  "exit": 0,
+  "stdout": [
+    {
+      "v": 1,
+      "type": "profile_check",
+      "state": "not_yours",
+      "path": "/home/me/.config/lucille-host/default/policy.toml",
+      "kind": "file",
+      "uid": 0,
+      "look": "ls -l '/home/me/.config/lucille-host/default/policy.toml'",
+      "repair": "chown 1000 '/home/me/.config/lucille-host/default/policy.toml'"
+    },
+    {
+      "v": 1,
+      "type": "profile_check",
+      "state": "not_yours",
+      "path": "/home/me/.local/state/lucille-host/default",
+      "kind": "folder",
+      "uid": 0,
+      "look": "ls -lR '/home/me/.local/state/lucille-host/default'",
+      "repair": "chown -R 1000 '/home/me/.local/state/lucille-host/default'"
+    }
+  ]
+}

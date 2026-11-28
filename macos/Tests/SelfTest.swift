@@ -157,6 +157,8 @@ struct SelfTest {
                           "the question names the ability and says what Lucille gets, in the core's words", "\(question)")
         }
         report.expect(HostText.unlistedAbilities == ["host.describe"], "host.describe is described in the menu, not listed")
+        report.expect(HostText.answeredInATerminal == ["credential.ask"],
+                      "credential.ask, which the app cannot answer yet, has no switch in the menu or in Set Up")
         // One whose replies can carry a file's contents asks first, decided on that field alone,
         // and only when it is turned on.
         let sendsContent = op(#""name":"files.search","state":"disabled","enabled":false,"summary":"s","sends":"t","sends_file_content":true,"diagnostic":false"#)
@@ -1823,11 +1825,11 @@ extension SelfTest {
         }
         let listed = VerbOutcome.done(fixtures["ops-list"]?.objects ?? []).abilities
         report.expect(listed.map(\.name) == ["host.describe", "host.sleep", "files.sha256", "files.search", "github.read",
-                                             "gmail.check", "gmail.mailboxes", "gmail.search", "gmail.read"]
-                          && listed.map(\.state) == [.enabled, .disabled, .disabled, .disabled, .disabled, .disabled, .disabled, .disabled, .disabled]
-                          && listed.map(\.isOn) == [true, false, false, false, false, false, false, false, false]
-                          && listed.map(\.diagnostic) == [false, true, false, false, false, false, false, false, false]
-                          && listed.map(\.sendsFileContent) == [false, false, false, true, false, false, false, false, false],
+                                             "gmail.check", "gmail.mailboxes", "gmail.search", "gmail.read", "credential.ask"]
+                          && listed.map(\.state) == [.enabled, .disabled, .disabled, .disabled, .disabled, .disabled, .disabled, .disabled, .disabled, .disabled]
+                          && listed.map(\.isOn) == [true, false, false, false, false, false, false, false, false, false]
+                          && listed.map(\.diagnostic) == [false, true, false, false, false, false, false, false, false, false]
+                          && listed.map(\.sendsFileContent) == [false, false, false, true, false, false, false, false, false, false],
                       "ops list reads each operation in catalog order, its switch from enabled", "\(listed)")
         let shown = listed.filter(\.isShown)
         report.expect(shown.map(\.title) == ["Check a file's fingerprint", "Search the files in a folder", "Read from GitHub with a token kept here",
@@ -1839,23 +1841,23 @@ extension SelfTest {
                                                      "Lucille gets the names of your Gmail mailboxes and labels.",
                                                      "Lucille gets the sender, recipients, subject, date and size of up to 50 messages that match its search, never their text. The app password goes only to imap.gmail.com.",
                                                      "Lucille gets one message it names: its headers, up to 32 KB of its text, and its attachments' names, types and sizes, never their contents."],
-                      "the menu lists files.sha256, files.search, github.read and the gmail operations, in the core's words", "\(shown)")
+                      "the menu lists files.sha256, files.search, github.read and the gmail operations, in the core's words, not credential.ask, which the app cannot answer yet", "\(shown)")
         let every = VerbOutcome.done(fixtures["ops-list-every-state"]?.objects ?? []).abilities
         report.expect(every.map(\.state) == [.disabled, .unavailable(missingExecutable: "/bin/sleep"), .disabledByUpgrade, .disabled, .disabled,
-                                              .disabled, .disabled, .disabled, .disabled, .notInCatalog]
-                          && every.map(\.isOn) == [false, true, false, false, false, false, false, false, false, false]
-                          && every.map(\.canChange) == [true, true, true, true, true, true, true, true, true, false]
-                          && every.map(\.isShown) == [false, false, true, true, true, true, true, true, true, false],
+                                              .disabled, .disabled, .disabled, .disabled, .disabled, .notInCatalog]
+                          && every.map(\.isOn) == [false, true, false, false, false, false, false, false, false, false, false]
+                          && every.map(\.canChange) == [true, true, true, true, true, true, true, true, true, true, false]
+                          && every.map(\.isShown) == [false, false, true, true, true, true, true, true, true, false, false],
                       "every state reads: one this Mac can't run is on as the policy says, and can be turned off", "\(every)")
         let content = VerbOutcome.done(fixtures["ops-list-sends-file-content"]?.objects ?? []).abilities
         let questionOn: [Bool] = content.map { $0.asksFirst(turningOn: true) }
         let questionOff: [Bool] = content.map { $0.asksFirst(turningOn: false) }
-        report.expect(questionOn == [false, false, true, true, false, false, false, false, false]
-                          && questionOff == [false, false, false, false, false, false, false, false, false],
+        report.expect(questionOn == [false, false, true, true, false, false, false, false, false, false]
+                          && questionOff == [false, false, false, false, false, false, false, false, false, false],
                       "only the operations that send file contents ask first, and only before they are turned on",
                       "\(questionOn) \(questionOff)")
         let sendsContent = content.first(where: { $0.sendsFileContent })
-        report.expect(content.map(\.sendsFileContent) == [false, false, true, true, false, false, false, false, false]
+        report.expect(content.map(\.sendsFileContent) == [false, false, true, true, false, false, false, false, false, false]
                           && sendsContent.map({ HostText.turnOnQuestion($0).text }) == sendsContent?.detail,
                       "an operation that sends file contents says so in a field, which the question before it is turned on reads",
                       "\(content)")
@@ -1943,10 +1945,11 @@ extension SelfTest {
                                      "gmail.check": "Check that Gmail can be read",
                                      "gmail.mailboxes": "List your Gmail mailboxes",
                                      "gmail.search": "Search your Gmail",
-                                     "gmail.read": "Read one Gmail message"],
+                                     "gmail.read": "Read one Gmail message",
+                                     "credential.ask": "Ask you to save a credential here"],
                           "ops list --json gives each operation's summary, in the core's words", "\(listed)")
             let every = VerbOutcome.done(fixtures["ops-list-every-state"]?.objects ?? []).summaries
-            report.expect(every.count == 9 && every["host.nothing"] == nil,
+            report.expect(every.count == 10 && every["host.nothing"] == nil,
                           "a policy entry this release does not have has no summary", "\(every)")
             report.expect(VerbOutcome.done(fixtures["log"]?.objects ?? []).logLines
                               == [#"{"kind":"test","n":1}"#, #"{"kind":"test","n":2}"#],
@@ -3002,7 +3005,7 @@ extension SelfTest {
         let lackingOnPage = lacking.isOnSetUpPage
         report.expect(onPage == ["host.describe", "files.sha256", "files.search", "github.read",
                                  "gmail.check", "gmail.mailboxes", "gmail.search", "gmail.read"] && !lackingOnPage,
-                      "What Lucille may do switches host.describe, files.sha256, files.search, github.read and the gmail operations, not host.sleep, which is for testing, nor a name this release lacks",
+                      "What Lucille may do switches host.describe, files.sha256, files.search, github.read and the gmail operations, not host.sleep, which is for testing, nor credential.ask, which the app cannot answer yet, nor a name this release lacks",
                       "\(onPage)")
 
         // The way the app feeds it: this session's pairing started at `at`, in the pairing flow's
