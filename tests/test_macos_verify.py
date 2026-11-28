@@ -263,7 +263,6 @@ def test_a_mach_o_file_signing_rewrote_is_reported_not_failed(built: Fixture) ->
     assert "2 findings of the RECORD check were about these files only." in text
 
 
-@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="no FIFOs here")
 @pytest.mark.parametrize(
     "rel",
     ["Contents/Resources/fifo", f"{SITE}/demo/fifo", build_app.MANIFEST_PATH],
