@@ -293,6 +293,7 @@ LOGIC_SOURCES: Final = (
     "LoginRules.swift",
     "PlaceRules.swift",
     "Gmail.swift",
+    "Diagnostics.swift",
 )
 # The host's golden fixtures (spec/CLI.md section 11), which the self-test reads through the
 # app's JSON reader and its pairing, supervision and Set Up state machines.
@@ -398,6 +399,7 @@ FORBIDDEN_LIBRARIES: Final = (
 APP_NAME: Final = build_app.load_pins().app_name
 ABILITY_TITLES: Final = {
     "files.sha256": "Check a file's fingerprint",
+    "files.search": "Search the files in a folder",
     "github.read": "Read from GitHub with a token kept here",
     "gmail.check": "Check that Gmail can be read",
     "gmail.mailboxes": "List your Gmail mailboxes",
@@ -407,6 +409,11 @@ ABILITY_TITLES: Final = {
 ABILITY_DETAILS: Final = {
     "files.sha256": (
         "Lucille gets a code that identifies the file's exact contents, not the contents."
+    ),
+    "files.search": (
+        "Lucille gets the lines that match its search in the files of one folder you added, with "
+        "each file's path inside that folder, up to 200 lines a file. Hidden files are never "
+        "searched."
     ),
     "github.read": (
         "Lucille gets GitHub's reply to one read it names: your repositories, issues, pull "
@@ -3003,12 +3010,17 @@ LONGEST_LOG_LINE: Final = 2000
 STOP_WHATS_RUNNING: Final = "Stop What's Running"
 STOPPED_AND_PAUSED: Final = "Stopped, and paused. Resume when you're ready."
 RESUME_ITEM: Final = "Resume Lucille"
+# Copy Diagnostics, as in App/Diagnostics.swift (tests/test_macos_build.py checks that they
+# agree): the menu's item, which is always there. The ui check does not choose it: its Copy
+# would write the runner's pasteboard, which the pairing check's own text is on.
+DIAGNOSTICS_ITEM: Final = "Copy Diagnostics…"
 # The items the menu shows while the app's profile holds no pair, besides its first line.
 MENU_ITEMS: Final = (
     "Abilities",
     "Add a Folder…",
     "Folders",
     ACTIVITY_ITEM,
+    DIAGNOSTICS_ITEM,
     CONNECT_ITEM,
     f"Quit {APP_NAME}",
 )

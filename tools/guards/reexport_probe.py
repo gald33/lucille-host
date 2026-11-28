@@ -9,7 +9,7 @@ import a module to look, because its own rules refuse a dynamic import, so it re
 
 The probe runs each interpreter it is given in a fresh, isolated process (``python -I``). That
 process imports, by explicit ``import`` statements, every standard-library module the runtime may
-import (``RUNTIME_IMPORTS``, ``EXEC_IMPORTS`` and ``PROXY_IMPORTS`` in
+import (``RUNTIME_IMPORTS``, ``EXEC_IMPORTS``, ``PROXY_IMPORTS`` and ``VERIFY_IMPORTS`` in
 ``tools/guards/ast_lint.py``) and every submodule of those that are packages, then lists each
 attribute of each of them whose value is a module. The table keeps the union over the
 interpreters given, because a module's attributes change between Python versions.
@@ -35,11 +35,16 @@ from typing import Any, Final
 if __package__ in (None, ""):  # run as a script: make ``tools.guards`` importable
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from tools.guards.ast_lint import EXEC_IMPORTS, PROXY_IMPORTS, RUNTIME_IMPORTS  # noqa: E402
+from tools.guards.ast_lint import (  # noqa: E402
+    EXEC_IMPORTS,
+    PROXY_IMPORTS,
+    RUNTIME_IMPORTS,
+    VERIFY_IMPORTS,
+)
 
 TABLE = Path(__file__).resolve().parent / "_reexports.py"
 # Allowlisted top-level modules that are not part of the standard library.
-NOT_STDLIB = frozenset({"certifi", "keyring", "switchboard", "lucille_host"})
+NOT_STDLIB = frozenset({"certifi", "keyring", "pypi_attestations", "switchboard", "lucille_host"})
 MARKER = "REEXPORT-PROBE:"
 # What starts the line ``tests/guards/test_reexports.py`` prints when the table lacks something.
 RECORD = "REEXPORT-PROBE-RECORD:"
@@ -47,7 +52,8 @@ RECORD = "REEXPORT-PROBE-RECORD:"
 
 def scanned_modules() -> tuple[str, ...]:
     """The standard-library modules the runtime may import, which the probe scans."""
-    return tuple(sorted((RUNTIME_IMPORTS | EXEC_IMPORTS | PROXY_IMPORTS) - NOT_STDLIB))
+    imports = RUNTIME_IMPORTS | EXEC_IMPORTS | PROXY_IMPORTS | VERIFY_IMPORTS
+    return tuple(sorted(imports - NOT_STDLIB))
 
 
 def _run(python: str, code: str) -> str:
@@ -146,8 +152,8 @@ def render(reexports: dict[str, set[str]], submodules: set[str], interpreters: l
         *(f'    "{name}",' for name in sorted(set(interpreters))),
         ")",
         "",
-        "# The standard-library modules scanned: RUNTIME_IMPORTS, EXEC_IMPORTS and PROXY_IMPORTS,",
-        "# less the rest.",
+        "# The standard-library modules scanned: RUNTIME_IMPORTS, EXEC_IMPORTS, PROXY_IMPORTS and",
+        "# VERIFY_IMPORTS, less the rest.",
         "SCANNED: frozenset[str] = frozenset(",
         "    {",
         *(f'        "{name}",' for name in scanned_modules()),

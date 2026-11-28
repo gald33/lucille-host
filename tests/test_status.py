@@ -35,6 +35,7 @@ from lucille_host import (
     loop,
     paths,
     policy,
+    report,
     rooms,
     state,
     store,
@@ -48,6 +49,7 @@ from tests._cli import HostCli, collecting
 from tests._host import HostEnv, lock_free, lock_held
 from tests._run import RunHost, body, fast, nothing, until
 from tests.spec import _support
+from tests.test_claim import README, claim_in
 
 pytestmark = pytest.mark.filterwarnings(
     "ignore:Using `httpx` with `starlette.testclient` is deprecated"
@@ -55,6 +57,16 @@ pytestmark = pytest.mark.filterwarnings(
 
 LOOPBACK = "http://127.0.0.1:8765"
 NO_ROOM = "work room: none: this computer holds no work room"
+# What the text of `status` ends with: a blank line, a heading, and the claim of the README and
+# PRIVACY.md (tests/test_claim.py), each line indented, an empty line between paragraphs.
+CLAIM = [
+    "",
+    report.CLAIM_HEADING,
+    *(
+        f"  {line}" if line else ""
+        for line in claim_in(README, "## What lucille-host claims").splitlines()
+    ),
+]
 
 
 @pytest.fixture
@@ -196,7 +208,9 @@ def _agree(command: Callable[..., Ran]) -> dict[str, Any]:
     ran = command("status", "--json")
     assert (text.rc, ran.rc) == (0, 0), (text.err, ran.err)
     (found,) = _objects(ran.out)
-    lines = text.lines
+    # The text ends with the claim, which the object leaves out.
+    assert text.lines[-len(CLAIM) :] == CLAIM
+    lines = text.lines[: -len(CLAIM)]
     assert lines[0] == f"lucille-host {found['host_version']}"
     checked = found["policy"]
     if checked["state"] == "ok":
@@ -306,10 +320,11 @@ def test_status_shows_everything(host: RunHost, command: Commands, tmp_path: Pat
     generation = host.lucille.resolve().generation
     assert _line(ran.out, "pair") == f"pair: confirmed: pair {host.name} (generation {generation})"
     assert _line(ran.out, "work room") == NO_ROOM
-    assert ran.lines[-3:] == [
+    assert ran.lines[-3 - len(CLAIM) :] == [
         "run: no record: `lucille-host run` writes one while it runs",
         "last hub contact: none recorded",
         "clock: unknown: `run` measures it against the hub on each reply it posts",
+        *CLAIM,
     ]
 
     # A room left at once for carrying a hub token: the host holds none, and says which check.
@@ -356,6 +371,26 @@ def test_status_shows_everything(host: RunHost, command: Commands, tmp_path: Pat
     assert _line(ran.out, "run") == f"run: stopped at {link.iso(_status(host)['written_at'])}"
     assert _line(ran.out, "work room") == f"work room: {room} (accepted {accepted})"
     assert _line(ran.out, "last hub contact").startswith("last hub contact: 20")
+
+
+def test_status_ends_with_the_claim(cli: HostCli) -> None:
+    # With no pair, with a pair waiting for its SAS to be confirmed, and with a confirmed pair, the
+    # text ends with the claim, and the object of --json is what it was, with no claim in it.
+    lucille = cli.lucille()
+    for step in ("none", "sas_pending", "confirmed"):
+        if step == "sas_pending":
+            cli.paired(lucille)
+        elif step == "confirmed":
+            assert cli.run("pair", "confirm").rc == 0
+        ran = cli.run("status")
+        assert ran.rc == 0, ran.text
+        assert _line(ran.out, "pair").startswith(f"pair: {step}: ")
+        assert ran.out.endswith("\n".join(CLAIM) + "\n")
+        assert ran.out.count(report.CLAIM_HEADING) == 1
+        assert _line(ran.out, "clock") == ran.out.splitlines()[-len(CLAIM) - 1]
+        found = _agree(_through(cli))
+        assert found["pair"]["state"] == step and "claim" not in found
+        assert "lucille-host does only what" not in cli.run("status", "--json").out
 
 
 def test_status_says_what_it_cannot_judge(host: RunHost, command: Commands) -> None:

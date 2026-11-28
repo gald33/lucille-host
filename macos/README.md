@@ -118,6 +118,15 @@ Login](#open-at-login)). Once the note about the menu bar is closed, or at once 
 says so if the host is paused, and only **Resume** resumes it. Then it picks up a connection left half
 made: it opens the pairing window again, or says why that connection ended.
 
+At the same moment, the app runs `roots check --json` on every folder, with no window and the
+10 minutes adding a folder has (decisions/0002 §12). While the host can open each one, it says
+nothing. Otherwise one note says which: for one folder, "Capsule can't open *name*", what Set Up's
+Folders page says of it, and "Until Capsule can open it, Lucille can't use this folder."; for more, each
+folder by name with those words, one to a line. When macOS blocks any of them, the note offers **Open
+Privacy Settings** before OK. A check that fails says nothing, since the menu's own reads say when the
+host can't be run. What the check found shows under each folder in the Folders submenu too. A folder
+that isn't there any more is said in words only: the design's **Choose Again** is not built.
+
 The menu bar item is named "Capsule", or "Capsule, paused", for VoiceOver. Its icon is the capsule from
 the app icon, as a template image, which macOS is meant to draw in the menu bar's own colour (not yet
 seen on a Mac). While Lucille is paused, a pause badge sits at its lower right. While something needs
@@ -144,8 +153,9 @@ them under its question. Whether it does, and whether that question names Capsul
 | Abilities | `ops list --json`. Each ability shows in the core's few words for it (`summary`), such as "Check a file's fingerprint", with a checkmark when the host says it is on (`enabled`), and a sentence under it, the core's `sends`, says what Lucille gets: "Lucille gets a code that identifies the file's exact contents, not the contents." Choosing one runs `ops enable` or `ops disable` with `--json`, and the checkmark then follows the host's answer, the operation as it now is. Turning off one that is already off shows no note. An ability whose replies can carry a file's contents (`sends_file_content`) is turned on only after a question, "Turn on “*its few words*”?" (the core's `summary`), with what Lucille gets, **Cancel**, the default, and **I Understand, Turn On**. No operation in this release sends file contents. Operations meant for testing (`diagnostic`), such as `host.sleep`, are not listed. Nor is `host.describe`; while it is on, the menu says what it shares: "Lucille sees which abilities are on and your folders' names", once connected. |
 | Set Up Folders and Abilities… | Nothing. Shown while Set Up's window was closed before its last page: it opens the window again on the page it was on (see [Set Up](#set-up)). |
 | Add a Folder… | See below. |
-| Folders | `roots list --json`. Each folder has a **Remove** item, which runs `roots remove <alias>` with `--json`. Removing one that is already gone shows no note. |
+| Folders | `roots list --json`. Each folder shows its path and, when the last `roots check` of it (at launch, once it was added, or on Set Up's Folders page) found the host can't open it, what Set Up's Folders page says of it. Each has a **Remove** item, which runs `roots remove <alias>` with `--json`. Removing one that is already gone shows no note. |
 | Activity… | Opens the Activity window (see [Activity](#activity)), and reads `ops list --json` for the words each request is said in. |
+| Copy Diagnostics… | `--json --version` and `status --json`, then a note with the text it would copy, and **Copy** (see [Copy Diagnostics](#copy-diagnostics)). |
 | Gmail… | Opens the Gmail window (see [Gmail](#gmail)), and reads `credential list --json`. Shown whether or not this Mac is connected. |
 | Settings | Shown while this Mac is connected. **Open at Login** has a checkmark while macOS will open Capsule when you log in, read again from macOS each time the menu opens; choosing it turns that on or off (see [Open at Login](#open-at-login)). **Reset Settings…** is in it too while the host cannot read its settings file (see [Reset Settings](#reset-settings)). |
 | Connect to Lucille… | Opens the pairing window (see [Connecting to Lucille](#connecting-to-lucille)). Shown while this Mac has no connection. |
@@ -203,10 +213,16 @@ app asks then, unless the folder is the whole disk, with the question for what t
 (`kind`): the home folder itself, or a folder that holds it. If another folder has the name by then
 (`alias_taken`), because something else added one between the host's suggestion and **Add Folder**, the
 app shows the name dialog again, with "You already have a folder named *name*. Choose another name."
-above a name no folder has. On success, while this Mac is connected or being connected, the app says
-that Lucille can use the folder for the abilities the user turns on. With no connection, it says that
-Lucille can use the folder only once it is added again after connecting, because a new connection
-starts with no folders. If the host found no folder there (`not_a_folder`) but
+above a name no folder has. Once the folder is added, the app runs `roots check --json <alias>` on it,
+with the same window and **Cancel**, and the same 10 minutes, so that a question macOS asks about the
+folder comes now, not at a request from Lucille (decisions/0002 §12). When the host can open it, or the
+check gives no answer, the app says, while this Mac is connected or being connected, that Lucille can
+use the folder for the abilities the user turns on. With no connection, it says that Lucille can use
+the folder only once it is added again after connecting, because a new connection starts with no
+folders. When the host can't open it, the note is "Capsule can't open *name*": "The folder was added.",
+then what Set Up's Folders page says of it (see [Set Up](#set-up)), then "Until Capsule can open it,
+Lucille can't use this folder."; for a folder macOS blocks, with **Open Privacy Settings** before OK. If
+the host found no folder there (`not_a_folder`) but
 the app can see one, or macOS refuses the app too, the app says that macOS is blocking Capsule from the
 folder, and where in System Settings to allow it, with **Open Privacy Settings**, which opens System
 Settings at Privacy & Security, Files & Folders (see [The one opener](#the-one-opener)).
@@ -293,6 +309,46 @@ cut at 2000 characters, under "As the host wrote it. Anything running as you can
 log is a file in your own folder, which proves nothing, and its format is not part of the contract. It is
 read again each time it is shown.
 
+## Copy Diagnostics
+
+**Copy Diagnostics…** in the menu reads `--json --version` and `status --json` again, then shows a note with
+the text it would copy and the sentence "This is what Capsule copies when you click Copy, and nothing goes
+anywhere until you paste it. It leaves out paths, file contents, keys, codes and the names of connections
+and rooms, as best it can: read it before you send it to anyone." The text is one `name: value` line each,
+named as in `status --json`:
+
+```text
+Capsule diagnostics, 2026-11-01T12:00:00Z
+app_version: 0.1.0
+host_version: 0.1.0.dev0
+contract: 1.1
+macos_version: 15.4.1
+status:
+  host_version: 0.1.0.dev0
+  paused: false
+  policy: ok
+  folders: docs
+  enabled: host.describe
+  pair: confirmed
+  run: stopped
+  last_hub_contact: 2026-11-01T12:00:00Z
+  last_left_because: none
+  clock: ok, skew_s 1.5
+audit: left out; this host has no diagnostics command yet
+```
+
+Each value is checked against the shape the contract gives it (a version, an alias, an operation's name, a
+closed list of states), and one that fails is written as `unknown`; a folder or ability that fails is
+counted, never written. The pair and `run`'s record are given by their state alone, with no name, deadline
+or process id; a `status` the host refused, by its `code` alone; and no text the host wrote for people is
+copied. The host has no `diagnostics` command yet (decisions/0002 §15), so the text holds no audit line.
+
+Only **Copy**, the default, writes the pasteboard: the whole text, as plain text, through a text view's own
+Copy, so the app's code never names the pasteboard. **Cancel** writes nothing. Nothing in the note can be
+selected, and nothing is kept: the text is made again each time. The words and the checks are in
+[`App/Diagnostics.swift`](App/Diagnostics.swift), which the self-test runs, and the note in
+[`App/DiagnosticsPanel.swift`](App/DiagnosticsPanel.swift).
+
 ## Connecting to Lucille
 
 The app connects through Lucille's chat (decisions/0002 §11.4), then on
@@ -311,7 +367,8 @@ you still compare the number and click They Match.
 2. **Continue** writes the service and the username on the standard input of `pair begin --json`, never on
    its command line. The window shows "Getting a code from Lucille…", then the code the host made: "Send
    this to Lucille in your chat: connect 7KQ4M-X2D9P. It works once, within 20 minutes." The code can be
-   selected and copied; the app writes nothing to the pasteboard and never reads it. The host does every
+   selected and copied; the app writes nothing to the pasteboard but Copy Diagnostics' text, and never
+   reads it. The host does every
    real check. Each refusal is said in a plain sentence, with the host's words as details. The ones that
    end a request (the code expired, it was sent from another account, it was not started on this Mac, and
    the others of spec/CLI.md §7) offer **Start Over**. A code sent from another account never shows which.
@@ -502,8 +559,9 @@ Four buttons show you a place, in macOS or on the web, through the app's one ope
 - **Open Date & Time Settings**, in the note behind the menu's line that says this Mac's clock is off.
   The waiting page of the pairing window says how to set the clock in words only.
 - **Open Privacy Settings**, at Privacy & Security, Files & Folders, never Full Disk Access: in the note
-  that says macOS is blocking Capsule from a folder you add, and under such a folder on Set Up's Folders
-  page.
+  that says macOS is blocking Capsule from a folder you add, under such a folder on Set Up's Folders
+  page, and in the note of the check of a folder once it is added from the menu, or of the folders at
+  launch, when macOS blocks one.
 - **Show Applications Folder**, in the note of a copy Capsule judges not to be in Applications, which
   a renamed one there is not (see [What the app does when it opens](#what-the-app-does-when-it-opens)).
 - **Open Google's App Passwords Page**, in the Gmail window (see [Gmail](#gmail)), which shows
@@ -521,7 +579,8 @@ macOS cannot open a place, the note comes again with "Capsule couldn't open Syst
 Applications folder") first, and OK alone (Quit, for a copy not in Applications); it already says how
 to get there by hand. For the button under a folder on Set Up's Folders page, which had no note, a note
 says so first, then that macOS is blocking Capsule from the folder and how to allow it by hand, with OK
-alone. The one other button that opens anything is Open at Login's **Open Login Items
+alone; the notes of a folder's check come again with their own words and then that page's way to allow
+it by hand. The one other button that opens anything is Open at Login's **Open Login Items
 Settings**, which opens System Settings through Apple's own call for it, with no address.
 
 The addresses of the two System Settings pages are the best known for macOS 13 and later, and not yet
@@ -699,8 +758,9 @@ Two checks keep it so, and neither is a proof:
   link, the sharing services, Apple events), a button pressed by code (`performClick`), a function
   reached by its symbol, and loading a bundle's code.
   `tests/test_macos_build.py` pins the lines where `HostCLI.swift` gives that path and those arguments
-  to the `Process`, and fails if a file names the pasteboard at all, passes `--hub` or `--store-file`, or
-  imports anything but Foundation, AppKit and SwiftUI, and ServiceManagement in `LoginItem.swift` alone
+  to the `Process`, and fails if a file names the pasteboard at all, if any file but
+  `DiagnosticsPanel.swift` calls a view's `copy(_:)` or `cut(_:)` itself, or if a file passes `--hub` or
+  `--store-file`, or imports anything but Foundation, AppKit and SwiftUI, and ServiceManagement in `LoginItem.swift` alone
   (Foundation and the C library alone, for the files the self-test runs).
 - `check_app.py links` reads what the built app's executable imports (`nm -u`). It fails on the C
   functions that start a process or open a socket, on the classes that do either, on Launch Services'
@@ -972,6 +1032,11 @@ best-effort folder in Documents, and it connects through a test harness with a h
 need a Mac and a person. Where the maintainer reported one done, in whole or in part, on their Mac on
 2026-11-09, it says so; none of those reports is in a CI log:
 
+- **Copy Diagnostics' note and its Copy.** The `ui` check sees the item in the menu and does not choose
+  it: its Copy would write over the pasteboard that the pairing step reads. The self-test checks the text,
+  and the build tests the note's source. That a text view no window shows copies its whole text, as plain
+  text only, was seen once outside CI, on a Mac with macOS 26.2 on 2026-11-27, through a private
+  pasteboard.
 - **Whether a person's Mac loads the native code of an ad hoc build without the hardened runtime, and
   pairs.** The maintainer reported it once, for cryptography: on their Mac on 2026-11-09, the disk image of run
   42531994220 imported cryptography's x25519 module, and paired ([Signing](#signing)). On Linux that
@@ -1087,9 +1152,18 @@ need a Mac and a person. Where the maintainer reported one done, in whole or in 
   question.
 - **The one opener, beyond what CI presses.** Not reached by CI: Open Date & Time Settings in the app's
   own note, since a runner's clock cannot be set wrong without breaking its connections; Open Privacy
-  Settings where macOS asks nothing on the runner, and under a folder on Set Up's Folders page; and the
-  notes that come again when macOS cannot open a place. What each System Settings page is called, and
-  that its address opens it, `places` prints, and requires on macOS 15 only.
+  Settings where macOS asks nothing on the runner, under a folder on Set Up's Folders page, and in the
+  notes of the check at launch; and the notes that come again when macOS cannot open a place. What each
+  System Settings page is called, and that its address opens it, `places` prints, and requires on
+  macOS 15 only.
+- **The folder checks at launch and after Add a Folder…, beyond what CI drives.** CI adds a folder the
+  host can open, whose note is the one it always was, and launches with no folder the check refuses.
+  Not reached: the note at launch for a folder moved, renamed, unplugged, refused by its permissions or
+  blocked by macOS; the note after Add a Folder… for a folder added that the check then refuses (the
+  best-effort folder in Documents reaches it only when macOS asks during the check, not the add, and
+  the runner answers Don't Allow); the words under a folder in the Folders submenu; and whether the
+  check at a launch at login draws a question from macOS.
+  The notes' words are checked in the self-test only.
 - **Set Up, beyond the path CI drives.** The Add back page end to end: the app's own `pair begin`
   cannot reach CI's hub, since the app never passes `--hub`, so CI's pairing sets no policy aside that
   the app saw. Its rules and what it leaves out are checked in the self-test only, and its words there
@@ -1274,8 +1348,9 @@ What it does not establish, plainly:
 - **Connecting for anyone but the owner.** The typed digits (decisions/0002 §11.2) and Connect from
   Lucille's chat (§11.4) are decided but not built. Until they are built, connecting by pasting a code is
   for the owner's own Mac only.
-- **What comes after connecting**: About, Copy Diagnostics, and a check of each folder at launch and
-  after Add a Folder… in the menu (Set Up's Folders page checks them).
+- **What comes after connecting**: About, the core's `diagnostics` command, so that Copy Diagnostics
+  carries the last audit lines, and **Choose Again** for a folder that isn't there any more
+  (decisions/0002 §3.3, §12), which the check at launch and after Add a Folder… says in words only.
 - **Set Up's rough edges** (see [Set Up](#set-up)): its pages do not scroll; the next row it adds back
   does not wait for an ability's answer, nor for a panel or dialog the menu's own steps reopened; and it
   follows this run's They Match, not a connection's name.
@@ -1299,6 +1374,12 @@ What it does not establish, plainly:
 
 The design ([decisions/0002-macos-app.md](../decisions/0002-macos-app.md)) may change each of these.
 
+- **Copy Diagnostics is made by the app, with no audit lines.** The design has the core's `diagnostics`
+  command write it, so that every shell leaves out the same things, with the last 20 audit lines, each
+  path rewritten to an alias. That command is not built, and rewriting the host's log lines in the app
+  would be a second redaction to keep in step with the core's. So the app copies only what it already
+  reads as typed fields, `--version` and `status`, each held to its shape, and says that the audit lines
+  are left out (see [Copy Diagnostics](#copy-diagnostics)).
 - **The app runs python-build-standalone's own interpreter, renamed `lucille-host-runtime`.** A small
   native launcher that embeds Python, so that the bundle holds no general-purpose interpreter, is an
   option the design has not decided.

@@ -12,17 +12,23 @@ from collections.abc import Mapping
 
 # The interpreters probed.
 PROBED: tuple[str, ...] = (
+    "CPython 3.11.14 on darwin",
     "CPython 3.11.15 on linux",
     "CPython 3.11.18 on linux",
+    "CPython 3.12.11 on darwin",
+    "CPython 3.12.2 on darwin",
     "CPython 3.12.3 on linux",
+    "CPython 3.13.11 on darwin",
     "CPython 3.13.14 on linux",
     "CPython 3.13.18 on linux",
     "CPython 3.14.10 on darwin",
+    "CPython 3.14.2 on darwin",
     "CPython 3.14.4 on linux",
+    "CPython 3.14.6 on darwin",
 )
 
-# The standard-library modules scanned: RUNTIME_IMPORTS, EXEC_IMPORTS and PROXY_IMPORTS,
-# less the rest.
+# The standard-library modules scanned: RUNTIME_IMPORTS, EXEC_IMPORTS, PROXY_IMPORTS and
+# VERIFY_IMPORTS, less the rest.
 SCANNED: frozenset[str] = frozenset(
     {
         "__future__",
@@ -69,6 +75,7 @@ SCANNED: frozenset[str] = frozenset(
         "tomllib",
         "types",
         "typing",
+        "zipfile",
     }
 )
 
@@ -383,6 +390,36 @@ REEXPORTS: Mapping[str, tuple[str, ...]] = {
     "typing.sys": ("sys",),
     "typing.types": ("types",),
     "typing.warnings": ("warnings",),
+    "zipfile._path.contextlib": ("contextlib",),
+    "zipfile._path.glob.os": ("os",),
+    "zipfile._path.glob.re": ("re",),
+    "zipfile._path.io": ("io",),
+    "zipfile._path.itertools": ("itertools",),
+    "zipfile._path.pathlib": ("pathlib",),
+    "zipfile._path.posixpath": ("posixpath",),
+    "zipfile._path.re": ("re",),
+    "zipfile._path.stat": ("stat",),
+    "zipfile._path.sys": ("sys",),
+    "zipfile._path.zipfile": ("zipfile",),
+    "zipfile.binascii": ("binascii",),
+    "zipfile.bz2": ("bz2",),
+    "zipfile.contextlib": ("contextlib",),
+    "zipfile.importlib": ("importlib",),
+    "zipfile.io": ("io",),
+    "zipfile.itertools": ("itertools",),
+    "zipfile.lzma": ("lzma",),
+    "zipfile.os": ("os",),
+    "zipfile.pathlib": ("pathlib",),
+    "zipfile.posixpath": ("posixpath",),
+    "zipfile.re": ("re",),
+    "zipfile.shutil": ("shutil",),
+    "zipfile.stat": ("stat",),
+    "zipfile.struct": ("struct",),
+    "zipfile.sys": ("sys",),
+    "zipfile.threading": ("threading",),
+    "zipfile.time": ("time",),
+    "zipfile.zlib": ("zlib",),
+    "zipfile.zstd": ("compression.zstd",),
 }
 
 # Import paths, under the scanned modules, that name a module.
@@ -443,5 +480,7 @@ SUBMODULES: frozenset[str] = frozenset(
         "tomllib._types",
         "typing.io",
         "typing.re",
+        "zipfile._path",
+        "zipfile._path.glob",
     }
 )
