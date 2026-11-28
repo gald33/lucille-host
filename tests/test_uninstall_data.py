@@ -648,8 +648,10 @@ def test_every_lock_file_of_both_folders_goes_after_everything_else(
     tmp_path: Path,
 ) -> None:
     """The state folder, with ``run``'s lock, is not deleted while the config folder still holds
-    anything but its own lock: a command started then finds every lock still there."""
+    anything but its own lock: a command started then finds every lock still there. On macOS the
+    state folder is inside the config folder, and "zzz" comes after it by name."""
     _fill("default", monkeypatch, tmp_path / "docs")
+    (host_env.dirs.config / "zzz").write_text("after the state folder by name")
     unlinked: list[str] = []
     real = os.unlink
 
@@ -661,5 +663,6 @@ def test_every_lock_file_of_both_folders_goes_after_everything_else(
     assert _main(["--json", "uninstall-data", "--yes"], monkeypatch) == 0
     locks = [i for i, name in enumerate(unlinked) if name.endswith(".lock")]
     others = [i for i, name in enumerate(unlinked) if not name.endswith(".lock")]
-    assert host_env.dirs.policy_file.name in unlinked
+    assert {host_env.dirs.policy_file.name, "zzz"} <= set(unlinked)
     assert locks and others and max(others) < min(locks)
+    assert not host_env.dirs.config.exists() and not host_env.dirs.state.exists()

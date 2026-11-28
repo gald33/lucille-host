@@ -1990,14 +1990,20 @@ def _open_folder(name: str | Path, device: int, where: Path, *, dir_fd: int | No
 
 
 def _walk_folder(
-    descriptor: int, where: Path, device: int, *, delete: bool, keep_locks: bool = False
+    descriptor: int,
+    where: Path,
+    device: int,
+    *,
+    delete: bool,
+    keep: frozenset[Path] = frozenset(),
 ) -> None:
     """Every entry under the folder ``descriptor`` holds, read without following a link, and each
     checked to be on ``device`` before anything is done with it (:class:`_OtherDevice`, which stops
-    the walk); with ``delete``, each removed, a folder once it is empty, but for the lock files
-    (``*.lock``) of this folder itself with ``keep_locks``. As ``rm --one-file-system``, but
-    stricter: nothing of another device is read into, let alone deleted. An entry that cannot be
-    read or deleted is a :class:`_DeleteFailed` that names its whole path."""
+    the walk); with ``delete``, each removed, a folder once it is empty, but for the folders in
+    ``keep`` and the lock files (``*.lock``) at their top: on macOS the state folder is inside the
+    config folder. As ``rm --one-file-system``, but stricter: nothing of another device is read
+    into, let alone deleted. An entry that cannot be read or deleted is a :class:`_DeleteFailed`
+    that names its whole path."""
     try:
         with os.scandir(descriptor) as entries:
             names = sorted(entry.name for entry in entries)
@@ -2005,7 +2011,7 @@ def _walk_folder(
         raise _DeleteFailed(exc.errno, exc.strerror, str(where)) from None
     for name in names:
         path = where / name
-        if keep_locks and name.endswith(".lock"):
+        if where in keep and name.endswith(".lock"):
             continue
         try:
             found = os.stat(name, dir_fd=descriptor, follow_symlinks=False)
@@ -2014,10 +2020,10 @@ def _walk_folder(
             if stat.S_ISDIR(found.st_mode):
                 inner = _open_folder(name, device, path, dir_fd=descriptor)
                 try:
-                    _walk_folder(inner, path, device, delete=delete)
+                    _walk_folder(inner, path, device, delete=delete, keep=keep)
                 finally:
                     os.close(inner)
-                if delete:
+                if delete and path not in keep:
                     os.rmdir(name, dir_fd=descriptor)
             elif delete:
                 os.unlink(name, dir_fd=descriptor)
@@ -2065,24 +2071,24 @@ def _check_mounts(folders: Sequence[Path], *, late: bool = False) -> None:
                 raise _Refused("other_device", said.format(point=mount.point, folder=folder))
 
 
-def _delete_folder(folder: Path, *, keep_locks: bool) -> None:
+def _delete_folder(folder: Path, *, keep: frozenset[Path]) -> None:
     """Delete what a profile's folder holds, crossing to no other device (what is mounted inside
     it since :func:`_check_folder` read it stops the deletion there, and nothing on it is
-    touched); with ``keep_locks``, its own lock files stay, else they go and so does the folder.
-    A folder that is not there is no failure."""
+    touched); the profile's folders in ``keep`` stay, with the lock files at their top, and with
+    no ``keep`` they go too, and so does this folder. A folder that is not there is no failure."""
     device = _folder_device(folder, late=True)
     if device is None:
         return
     descriptor = _open_folder(folder, device, folder)
     try:
-        _walk_folder(descriptor, folder, device, delete=True, keep_locks=keep_locks)
+        _walk_folder(descriptor, folder, device, delete=True, keep=keep)
     except _OtherDevice as other:
         raise _Refused(
             "other_device", UNINSTALL_OTHER_DEVICE_LATE.format(path=other.path, folder=folder)
         ) from None
     finally:
         os.close(descriptor)
-    if not keep_locks:
+    if not keep:
         os.rmdir(folder)
 
 
@@ -2095,9 +2101,9 @@ def _remove_folders(folders: Sequence[Path]) -> None:
     try:
         _check_mounts(folders, late=True)
         for folder in folders:
-            _delete_folder(folder, keep_locks=True)
+            _delete_folder(folder, keep=frozenset(folders))
         for folder in folders:
-            _delete_folder(folder, keep_locks=False)
+            _delete_folder(folder, keep=frozenset())
     except OSError as exc:
         reason = exc.strerror or type(exc).__name__
         path = exc.filename if exc.filename is not None else "the profile's folders"
