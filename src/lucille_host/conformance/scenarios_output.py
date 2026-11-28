@@ -4,10 +4,11 @@ failure never sends.
 Each claim is one row of "Host invariants and their tests" in decisions/0001:
 
 - "Output is bounded, decodable and path-free": a 1 MiB output comes back truncated and flagged,
-  and the serialized reply stays under 256 KiB (:func:`output_bounded`); non-UTF-8 and NUL
-  output decode without U+0000 or surrogates (:func:`output_decodable`, through ``files.search``,
-  the one operation that can reach such bytes offline: a request cannot name a file whose name is
-  not UTF-8, so ``files.sha256`` never prints one); no reply contains a root's realpath or
+  and the serialized reply stays under 256 KiB (:func:`output_bounded`); non-UTF-8 output
+  decodes without U+0000 or surrogates, and a file holding NUL is skipped as binary, so no NUL
+  reaches a reply (:func:`output_decodable`, through ``files.search``, the one operation that can
+  reach such bytes offline: a request cannot name a file whose name is not UTF-8, so
+  ``files.sha256`` never prints one); no reply contains a root's realpath or
   ``$HOME`` (:func:`replies_path_free`);
 - "Failures cross the wire as codes only": a sentinel in what a refused request carries never
   appears in a sent body (:func:`failures_codes_only`).
@@ -183,7 +184,8 @@ def failures_codes_only(ctx: Context) -> None:
 
 
 # What output-decodable plants, by file name as bytes: a line that is not UTF-8, a name that is
-# not UTF-8, a line of two-byte characters longer than the host keeps, and a line holding NUL.
+# not UTF-8, a line of two-byte characters longer than the host keeps, and a line holding NUL
+# (which ripgrep, searching a folder, skips as binary: the file is expected to give no match).
 MARK = b"conformance-decode"
 LATIN = b"latin.txt"
 LATIN_LINE = MARK + b" caf\xe9 cr\xe8me\n"
@@ -259,8 +261,11 @@ def output_decodable(ctx: Context) -> None:
     two-byte characters past the 1000 bytes kept, and a line holding NUL: the reply and its
     document hold no U+0000 and no unpaired surrogate anywhere; the line and the name that are not
     UTF-8 come back as their exact bytes; the long line is cut within 1000 bytes at a character's
-    end, still text, and flagged. Where the filesystem refuses a name that is not UTF-8 (macOS),
-    that file is not planted, and the rest is checked all the same."""
+    end, still text, and flagged; the file holding NUL gives no match, since ripgrep skips it as
+    binary. The host's own guard that would send such a line as bytes is not reached here; it is
+    tested with ripgrep's output given directly, in ``tests/test_files_search.py``. Where the
+    filesystem refuses a name that is not UTF-8 (macOS), that file is not planted, and the rest is
+    checked all the same."""
     files = {LATIN: LATIN_LINE, ODD_NAME: ODD_LINE, LONG: LONG_LINE, NUL: NUL_LINE}
     with _search_on(ctx), _planted_bytes(ctx.root / "decodable", files) as planted:
         args = {"root": ROOT, "pattern": MARK.decode(), "fixed_strings": True, "max_count": 5}
@@ -287,11 +292,8 @@ def output_decodable(ctx: Context) -> None:
     check(len(kept) <= LINE_MOST, f"the long line keeps {len(kept)} bytes")
     check(LONG_LINE.startswith(kept), "the long line kept is not the line's start")
     check(long.get("line_truncated") is True, "the long line is not flagged truncated")
-    if NUL in found:
-        # ripgrep may skip a file with NUL as binary; a line it does return goes as bytes.
-        nul = found[NUL]["lines"]
-        check("bytes" in nul, "a line holding NUL came back as text")
-        check(_raw(nul) == NUL_LINE, "a line holding NUL did not come back exactly")
+    # ripgrep, searching a folder, skips a file holding NUL as binary: no line of it is sent.
+    check(NUL not in found, "a file holding NUL gave a match; ripgrep was expected to skip it")
 
 
 # policy-unchanged checks after every other scenario: keep it last.
