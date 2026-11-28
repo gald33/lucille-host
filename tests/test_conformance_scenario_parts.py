@@ -12,8 +12,8 @@ from typing import Any
 
 import pytest
 
-from lucille_host.conformance import _child_env, _procfs, _search, _upgrade
-from lucille_host.conformance._scenarios import Failed
+from lucille_host.conformance import _child_env, _procfs, _restore, _search, _upgrade
+from lucille_host.conformance._scenarios import Failed, Skipped
 
 
 def test_parse_stat_ppid_reads_past_a_name_with_parentheses() -> None:
@@ -137,3 +137,44 @@ def test_plant_puts_the_secret_outside_and_links_to_it(tmp_path: Path) -> None:
     assert _search.SENTINEL in (root / "secret-link.txt").read_text(encoding="utf-8")
     assert not (outside.resolve()).is_relative_to(root.resolve())
     assert _search.plant(tmp_path) == (root, outside)
+
+
+# --- when a scenario that searches may skip ---------------------------------------------------
+
+
+class _Host:
+    def __init__(self, state: str) -> None:
+        self.state = state
+
+    def cli(self, *args: str) -> list[dict[str, Any]]:
+        assert args == ("ops", "list")
+        entry = {"name": "files.search", "state": self.state}
+        if self.state == "unavailable":
+            entry["missing_executable"] = "/usr/bin/rg"
+        return [{"name": "host.describe", "state": "enabled"}, entry]
+
+
+class _Ctx:
+    def __init__(self, state: str) -> None:
+        self.host = _Host(state)
+
+
+@pytest.mark.parametrize(
+    ("on_disk", "state", "outcome"),
+    [
+        ("/usr/bin/rg", "enabled", None),
+        ("/usr/bin/rg", "disabled", None),
+        (None, "unavailable", Skipped),
+        ("/usr/bin/rg", "unavailable", Failed),
+        (None, "disabled", Failed),
+    ],
+)
+def test_search_runs_here_skips_only_where_ripgrep_is_really_missing(
+    monkeypatch: pytest.MonkeyPatch, on_disk: str | None, state: str, outcome: type | None
+) -> None:
+    monkeypatch.setattr(_restore, "ripgrep_here", lambda: on_disk)
+    if outcome is None:
+        _restore.search_runs_here(_Ctx(state))  # type: ignore[arg-type]
+    else:
+        with pytest.raises(outcome):
+            _restore.search_runs_here(_Ctx(state))  # type: ignore[arg-type]

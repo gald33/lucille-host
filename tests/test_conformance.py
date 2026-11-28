@@ -21,10 +21,8 @@ from typing import Any
 import pytest
 
 import lucille_host.conformance as conformance
-from lucille_host import paths
-from lucille_host.conformance import _procfs, _scenarios, _spawn
+from lucille_host.conformance import _procfs, _restore, _scenarios, _spawn
 from lucille_host.conformance._scenarios import Failed, Scenario, Skipped
-from lucille_host.ops import OPERATIONS
 
 AS_ROOT = os.geteuid() == 0
 ROOT_REASON = "the host refuses to run as root; CI runs this test as an ordinary user"
@@ -157,9 +155,9 @@ def test_suite_passes_against_the_installed_host() -> None:
 
 def needs_met() -> dict[str, bool]:
     """Each scenario that may skip, and whether what it needs is here: Linux's ``/proc`` for the
-    child's environment, and files.search's program where the catalog says (the host's own test,
-    the one ``ops enable`` refuses by) for the scenarios that search."""
-    search = OPERATIONS["files.search"].available(paths.os_family())
+    child's environment, and ripgrep at the catalog's path, looked for on disk by the suite
+    itself rather than asked of the host, for the scenarios that search."""
+    search = _restore.ripgrep_here() is not None
     return {
         "child-env-built-and-no-key": _procfs.available(),
         "output-bounded": search,
