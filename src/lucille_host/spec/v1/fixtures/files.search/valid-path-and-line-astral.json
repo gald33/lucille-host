@@ -1,0 +1,21 @@
+{
+  "description": "A path and a line of characters beyond the Basic Multilingual Plane.",
+  "valid": true,
+  "schema_valid": true,
+  "body": {
+    "matches": [
+      {
+        "path": {
+          "text": "\ud83d\ude00/\ud83d\ude00.txt"
+        },
+        "line_number": 1,
+        "lines": {
+          "text": "\ud83d\ude00\n"
+        },
+        "line_truncated": false
+      }
+    ],
+    "truncated": false,
+    "error": null
+  }
+}

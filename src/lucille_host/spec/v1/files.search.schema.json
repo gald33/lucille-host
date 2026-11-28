@@ -2,36 +2,67 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/gald33/lucille-host/blob/main/src/lucille_host/spec/v1/files.search.schema.json",
   "title": "lucille.exec/1 files.search document",
-  "description": "What files.search returns, JSON-encoded in the stdout of its reply: the matches ripgrep found, each with its path relative to the folder, its line number and its line, as ripgrep's --json gives them. The reply's stdout_truncated is the document's truncated; an empty stdout, with the flag true, is a request cap too small for any document.",
-  "type": "object",
-  "additionalProperties": false,
-  "required": [
-    "matches",
-    "truncated",
-    "error"
+  "description": "What files.search returns, JSON-encoded in the stdout of its reply: the matches ripgrep found, each with its path relative to the folder, its line number and its line, as ripgrep's --json gives them. The reply's stdout_truncated is the document's truncated; an empty stdout, with the flag true, is a request cap too small for any document. Two closed shapes: the matches found, with error null, or ripgrep's output unread, with no matches, truncated true and error unreadable_output. The byte bounds on paths and lines are the host's (rule search-bytes); the schema bounds characters.",
+  "oneOf": [
+    {
+      "$ref": "#/$defs/document.found"
+    },
+    {
+      "$ref": "#/$defs/document.unreadable"
+    }
   ],
-  "properties": {
-    "matches": {
-      "description": "In the order ripgrep wrote them: by path, then by line. Empty when error is not null.",
-      "type": "array",
-      "maxItems": 1000,
-      "items": {
-        "$ref": "#/$defs/match"
+  "$defs": {
+    "document.found": {
+      "description": "The matches found.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "matches",
+        "truncated",
+        "error"
+      ],
+      "properties": {
+        "matches": {
+          "description": "In the order ripgrep wrote them: by path, then by line.",
+          "type": "array",
+          "maxItems": 1000,
+          "items": {
+            "$ref": "#/$defs/match"
+          }
+        },
+        "truncated": {
+          "description": "True when not every match ripgrep wrote, or would have written, is here: past 1000 matches, past the stream's cap, a path over 4096 bytes, output the host did not keep or a search that did not end on its own, or a private-key block that did not end.",
+          "type": "boolean"
+        },
+        "error": {
+          "description": "No error.",
+          "const": null
+        }
       }
     },
-    "truncated": {
-      "description": "True when not every match ripgrep wrote, or would have written, is here: past 1000 matches, past the stream's cap, a path over 4096 bytes, output the host did not keep or a search that did not end on its own, a private-key block that did not end, or error not null.",
-      "type": "boolean"
+    "document.unreadable": {
+      "description": "ripgrep wrote a line the host does not read as one of its messages, and nothing of its output is here.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "matches",
+        "truncated",
+        "error"
+      ],
+      "properties": {
+        "matches": {
+          "description": "Always empty.",
+          "type": "array",
+          "maxItems": 0
+        },
+        "truncated": {
+          "const": true
+        },
+        "error": {
+          "const": "unreadable_output"
+        }
+      }
     },
-    "error": {
-      "description": "null, or unreadable_output: ripgrep wrote a line the host does not read as one of its messages, and nothing of its output is here.",
-      "enum": [
-        null,
-        "unreadable_output"
-      ]
-    }
-  },
-  "$defs": {
     "match": {
       "type": "object",
       "additionalProperties": false,
@@ -76,7 +107,7 @@
       }
     },
     "path_text": {
-      "description": "A path that is valid UTF-8 and holds no U+0000: at most 4096 bytes of UTF-8.",
+      "description": "A path that is valid UTF-8 and holds no U+0000: relative, its parts joined by /, none of them empty or .., so never absolute. At most 4096 characters here, and at most 4096 bytes of UTF-8 by rule search-bytes.",
       "type": "object",
       "additionalProperties": false,
       "required": [
@@ -87,12 +118,12 @@
           "type": "string",
           "minLength": 1,
           "maxLength": 4096,
-          "pattern": "^[^\\u0000]*$"
+          "pattern": "^([^/\\u0000]|[^/\\u0000]{3,}|[^/.\\u0000][^/\\u0000]|\\.[^/.\\u0000])(/([^/\\u0000]|[^/\\u0000]{3,}|[^/.\\u0000][^/\\u0000]|\\.[^/.\\u0000]))*$"
         }
       }
     },
     "path_bytes": {
-      "description": "A path that is not valid UTF-8: its bytes, at most 4096, in standard base64 with padding.",
+      "description": "A path that is not valid UTF-8: its bytes in standard base64 with padding. At most 5464 characters here, and at most 4096 bytes by rule search-bytes.",
       "type": "object",
       "additionalProperties": false,
       "required": [
@@ -108,7 +139,7 @@
       }
     },
     "line_text": {
-      "description": "A line that is valid UTF-8 and holds no U+0000: at most 1000 bytes of UTF-8.",
+      "description": "A line that is valid UTF-8 and holds no U+0000. At most 1000 characters here, and at most 1000 bytes of UTF-8 by rule search-bytes.",
       "type": "object",
       "additionalProperties": false,
       "required": [
@@ -123,7 +154,7 @@
       }
     },
     "line_bytes": {
-      "description": "A line that is not valid UTF-8, or holds NUL: its bytes, at most 1000, in standard base64 with padding.",
+      "description": "A line that is not valid UTF-8, or holds NUL: its bytes in standard base64 with padding. At most 1336 characters here, and at most 1000 bytes by rule search-bytes.",
       "type": "object",
       "additionalProperties": false,
       "required": [

@@ -11,12 +11,12 @@ the end of a line of output. A text that holds U+0000 goes as bytes, since no re
 hold it.
 
 Each message is checked before anything is taken from it: a line of ripgrep's that is not UTF-8,
-nests deeper than :data:`DEPTH_MOST`, is not JSON, repeats a key, is not one of the five kinds,
-or is a ``match`` whose path, line or line number is not as ripgrep writes them (a path that is
-absolute or holds a ``..`` part included) makes the whole document the one with no matches and
-``error`` ``unreadable_output``. Nothing of such output goes in the reply. So does a last line with
-no newline, unless the host cut the output short (it kept no more, or the child did not exit):
-that line is then dropped, and the document says it is not whole.
+nests deeper than :data:`DEPTH_MOST`, is not JSON, repeats a key, is not one of the five kinds, or
+is a ``match`` whose path, line or line number is not as ripgrep writes them (a path that is
+absolute or holds an empty or ``..`` part included) makes the whole document the one with no
+matches and ``error`` ``unreadable_output``. Nothing of such output goes in the reply. So does a
+last line with no newline, unless the host cut the output short (it kept no more, or the child did
+not exit): that line is then dropped, and the document says it is not whole.
 
 Bounds: at most :data:`MATCHES_MOST` matches; each line cut at :data:`LINE_MOST` bytes (ripgrep's
 ``--max-columns`` does nothing under ``--json``), at a character's end when it is text, with
@@ -129,8 +129,9 @@ def _match(data: dict[str, Any]) -> tuple[bytes, bool, int, bytes, bool]:
     number = data["line_number"]
     if type(number) is not int or not 1 <= number <= LINE_NUMBER_MOST:
         raise _Unreadable
-    # ripgrep runs in the folder with no path, so every path it writes is relative to it.
-    if not path or path.startswith(b"/") or b".." in path.split(b"/"):
+    # ripgrep runs in the folder with no path, so every path it writes is relative to it: parts
+    # joined by "/", none empty (so it does not start with "/") and none "..".
+    if any(part in (b"", b"..") for part in path.split(b"/")):
         raise _Unreadable
     return path, path_text, number, line, line_text
 

@@ -44,7 +44,10 @@ verbs:
 - ``policy previous``: the operations and folders of the last policy a pairing set aside (a
   pairing sets aside only a policy that is not the fresh one); ``policy reset``: set an invalid
   policy file aside, and start from the fresh policy;
-- ``pause``, ``resume`` and ``kill``: the local controls.
+- ``pause``, ``resume`` and ``kill``: the local controls;
+- ``verify``: the host installed here is a release PyPI serves, attested by this repository's
+  release workflow, and its installed files are the release's (``verify.py``). It needs the
+  ``[verify]`` extra, and reads no file of a profile.
 
 Each verb is dispatched by name; one with no handler is refused, never run as another verb.
 ``--profile <name>`` selects a separate config and state directory, so that two computers can be
@@ -97,6 +100,7 @@ from lucille_host import (
     report,
     runs,
     store,
+    verify,
 )
 from lucille_host import state as host_state
 from lucille_host.containment import inside_own, on_proc
@@ -125,7 +129,7 @@ ALREADY_PAIRING: Final = (
 # How many lines ``log`` prints unless told otherwise.
 LOG_LINES: Final = 20
 # The version of the --json contract this release writes (spec/CLI.md).
-CONTRACT: Final = "1.0"
+CONTRACT: Final = "1.1"
 # The message of every usage error with --json: argparse's own words, which can quote the command
 # line, a pairing code included, stay on stderr.
 USAGE_MESSAGE: Final = "the command line could not be parsed; standard error says why"
@@ -691,6 +695,19 @@ def build_parser() -> argparse.ArgumentParser:
     _json_option(verbs.add_parser("pause", help="start nothing until resume; refuse new requests"))
     _json_option(verbs.add_parser("resume", help="clear pause and any kill request"))
     _json_option(verbs.add_parser("kill", help="kill the operation in flight, and pause"))
+    verify_verb = verbs.add_parser(
+        "verify",
+        help="check that this host is a release PyPI serves, attested, and installed as released",
+        description=(
+            "Checks the release whose code is running: PyPI lists exactly its wheel and sdist, "
+            "not yanked; the bytes PyPI serves have the sha256 it lists, and each file is "
+            "attested by gald33/lucille-host, workflow release.yml, environment pypi, at the "
+            "release's tag, from a GitHub-hosted runner, as sigstore verifies; and the files "
+            "installed here are the wheel's. It reaches pypi.org, files.pythonhosted.org and "
+            "sigstore's trust root, reads no file of a profile, and needs the [verify] extra."
+        ),
+    )
+    _json_option(verify_verb)
 
     # No --json: the verb has no JSON form in contract version 1 (spec/CLI.md section 14).
     credential = verbs.add_parser(
@@ -2058,6 +2075,37 @@ def _credential_test(args: argparse.Namespace, dirs: paths.Dirs, out: _Out, save
     raise _Refused("internal", said)
 
 
+def _verify(args: argparse.Namespace, dirs: paths.Dirs, out: _Out) -> None:
+    result = verify.check()
+    out.text(
+        f"{verify.PROJECT} {result.version} is the release PyPI serves, attested by "
+        f"{verify.REPOSITORY}, workflow {verify.WORKFLOW}, environment {verify.ENVIRONMENT}:"
+    )
+    for checked in result.files:
+        out.text(
+            f"  {checked.name}: sha256 {checked.sha256}, {checked.attestations} "
+            f"attestation(s) verified with sigstore"
+        )
+    out.text(
+        f"  installed in {result.site}: {result.installed} files are the wheel's; "
+        f"{result.bytecode} bytecode files (.pyc) were not checked"
+    )
+    out.obj(
+        "verify",
+        version=result.version,
+        repository=verify.REPOSITORY,
+        workflow=verify.WORKFLOW,
+        environment=verify.ENVIRONMENT,
+        files=[
+            {"name": c.name, "sha256": c.sha256, "attestations": c.attestations}
+            for c in result.files
+        ],
+        site=str(result.site),
+        installed=result.installed,
+        bytecode=result.bytecode,
+    )
+
+
 def _control(verb: str) -> Callable[[argparse.Namespace, paths.Dirs, _Out], None]:
     return lambda args, dirs, out: _controls(verb, dirs, out)
 
@@ -2077,10 +2125,11 @@ VERBS: Final[dict[str, Callable[..., Any]]] = {
     "resume": _control("resume"),
     "kill": _control("kill"),
     "credential": _credential,
+    "verify": _verify,
 }
 
 # What --json calls each failure that carries no code of its own, the first class that matches
-# (spec/CLI.md section 10). _Refused, link.Stopped and loop.Failed carry theirs.
+# (spec/CLI.md section 10). _Refused, link.Stopped, loop.Failed and verify.Unverified carry theirs.
 FAILURE_CODES: Final = (
     (_switchboard.PairFailed, "pair_unusable"),
     (_switchboard.HubError, "hub_error"),
@@ -2093,7 +2142,13 @@ FAILURE_CODES: Final = (
     (store.StoreError, "store_error"),
     (OSError, "os_error"),
 )
-_FAILURES: Final = (_Refused, link.Stopped, loop.Failed, *(kind for kind, _ in FAILURE_CODES))
+_FAILURES: Final = (
+    _Refused,
+    link.Stopped,
+    loop.Failed,
+    verify.Unverified,
+    *(kind for kind, _ in FAILURE_CODES),
+)
 
 
 def _failure(exc: BaseException) -> tuple[str, str, str, dict[str, str]]:
@@ -2107,7 +2162,7 @@ def _failure(exc: BaseException) -> tuple[str, str, str, dict[str, str]]:
     if isinstance(exc, _switchboard.HubError):
         said = f"{exc}; try again"
         return f"error: {said}", "hub_error", said, {}
-    if isinstance(exc, _Refused | loop.Failed):
+    if isinstance(exc, _Refused | loop.Failed | verify.Unverified):
         code = exc.code
     else:
         code = next(code for kind, code in FAILURE_CODES if isinstance(exc, kind))

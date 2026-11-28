@@ -2775,3 +2775,19 @@ def test_a_command_ci_cannot_run_is_reported(old: str, new: str) -> None:
     text = CI.read_text(encoding="utf-8")
     assert old in text
     assert command_problems(yaml.safe_load(text.replace(old, new)))
+
+
+@pytest.mark.parametrize("workflow", ["ci.yml", "release.yml"])
+def test_every_brew_install_skips_homebrews_own_update(workflow: str) -> None:
+    # A `brew install` updates Homebrew first, by default: minutes spent fetching every formula
+    # there is, for a newer ripgrep than the runner image's own Homebrew names. No step does that.
+    doc = yaml.safe_load((CI.parent / workflow).read_text(encoding="utf-8"))
+    lines = [
+        line.strip()
+        for job in doc["jobs"].values()
+        for step in job.get("steps", [])
+        for line in str(step.get("run", "")).splitlines()
+        if "brew " in line
+    ]
+    assert lines, workflow
+    assert lines == ["HOMEBREW_NO_AUTO_UPDATE=1 brew install ripgrep"] * len(lines), lines

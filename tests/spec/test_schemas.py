@@ -137,10 +137,14 @@ def test_every_free_string_refuses_nul_and_every_pattern_is_portable() -> None:
         # constructs the two dialects do not share.
         if re.search(r"\\[dDwWsSbB]|\(\?", pattern):
             problems.append((where, "a class or construct that differs between dialects"))
-        # A pattern either is the free-text one, or is built of positive classes and literals,
-        # which cannot match U+0000.
+        # A pattern either is the free-text one, or is built of literals, positive classes and
+        # negated classes that list U+0000 themselves, none of which can match U+0000.
         outside_classes = re.sub(r"\[(?:\\.|[^\]])*\]", "", pattern)
-        if pattern != NO_NUL and ("[^" in pattern or re.search(r"(?<!\\)\.", outside_classes)):
+        negated = re.findall(r"\[\^(?:\\.|[^\]])*\]", pattern)
+        if pattern != NO_NUL and (
+            any("\\u0000" not in found for found in negated)
+            or re.search(r"(?<!\\)\.", outside_classes)
+        ):
             problems.append((where, "a negated class or a bare '.' could match U+0000"))
         if _support.ecma_regex(pattern).search("\x00") is not None:
             problems.append((where, "matches U+0000"))
