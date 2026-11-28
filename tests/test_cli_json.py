@@ -73,6 +73,10 @@ CASES = sorted(path.stem for path in (SOURCE / "fixtures").glob("*.json"))
 
 # The sample values the fixtures hold.
 SAMPLE_HOME = "/home/me"
+# A command `profile check` prints, whose paths hold no quote: the folder, the command, the name.
+INSIDE = re.compile(
+    r"""\(cd -P '([^']*)' && \[ "\$\(pwd -P\)" = '\1' \] && ([^']*) '\./([^'/]*)'\)"""
+)
 SAMPLE_VERSION = "0.1.0.dev0"
 SAMPLE_TIME = "2026-11-01T12:00:00Z"
 SAMPLE_SAS = "1234-5678"
@@ -771,6 +775,14 @@ def _sampled(value: Any, w: World, key: str | None = None) -> Any:
     for op in OPERATIONS.values():
         if value == op.executable(family):
             return op.executable("linux")
+    if key in ("look", "repair") and (command := INSIDE.fullmatch(value)):
+        # `profile check`'s commands name the folder that holds the path and the path's name
+        # apart. Put back the whole path, as the samples are whole paths: on macOS the state
+        # folder's sample is not the config folder's with `/state` added.
+        folder, run, name = command.groups()
+        whole = _sampled(f"{folder}/{name}", w)
+        folder, name = whole.rsplit("/", 1)
+        return f"(cd -P '{folder}' && [ \"$(pwd -P)\" = '{folder}' ] && {run} './{name}')"
     for real, sample in _replacements(w):
         value = value.replace(real, sample)
     return value
