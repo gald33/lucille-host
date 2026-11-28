@@ -29,6 +29,7 @@ TYPES = {"object", "string", "integer", "number", "boolean", "array", "null"}
 UNBOUNDED = (
     "#/$defs/path",
     "#/$defs/message",
+    "#/$defs/command",
     "#/$defs/policy_op_name",
     "log_line:#/properties/text",
     "/properties/skew_s",
