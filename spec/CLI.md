@@ -1389,7 +1389,9 @@ mode 0700 where it was there already, whatever mode it had. It exits 0 whatever 
   symbolic link followed, since the host follows them too. A finding's `path` is the resolved one; `ok`
   names the two folders as every verb names them, before symbolic links are followed.
 - **Above each folder.** It looks at the folder and each folder above it, up to the first one the user
-  owns, and never at the home folder or above it. A missing folder is not reported: the host makes it. Of
+  owns, never at `/`, and, for a folder inside the home folder, never at the home folder or above it. For a
+  folder outside the home folder, the highest folder another user owns is written as `outside_home` even
+  where it holds the home folder (`/home` or `/Users`). A missing folder is not reported: the host makes it. Of
   the folders another user owns, it writes the highest, since `chown -R` of it repairs the ones below. A
   folder that cannot be looked at because the one above it refuses the user is written as `unreadable` only
   when no folder above it is another user's.
@@ -1398,7 +1400,7 @@ mode 0700 where it was there already, whatever mode it had. It exits 0 whatever 
   symbolic link is not followed into, and its own owner does not matter; what it points to, which the host
   follows (a `policy.toml` linked to a file kept elsewhere), is looked at as the folder or file it is, and
   written by its own resolved path, unless that is the home folder or a folder above it (a link to `/`),
-  which is never written.
+  which is never written for a link.
 - **The repair.** Inside the home folder, `look` is `ls -lR '<path>'` (`ls -l` for a file) and `repair` is
   `chown -R <uid> '<path>'` (`chown -h` for a file), `<uid>` being the user's own uid, which needs no
   lookup in the user database. `-h` changes a symbolic link itself, never the file it points to, so that a

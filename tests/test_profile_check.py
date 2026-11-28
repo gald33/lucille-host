@@ -243,6 +243,34 @@ def test_a_custom_xdg_folder_inside_home(home: Path, planted: Planted) -> None:
     assert result[0].repair == f"chown -R {TEST_UID} '{real}'"
 
 
+def test_a_profile_outside_home_under_a_root_owned_folder_that_holds_home(
+    tmp_path: Path, planted: Planted, unreadable_folders: list[Path]
+) -> None:
+    # `/home/cfg` beside `/home/u`: root made `cfg`, mode 0700, in the root-owned folder that holds
+    # the home folder, so every verb is refused there. That folder is the highest another user owns,
+    # and it is reported: the rule that a link to the home folder or above is no finding is not the
+    # walk's.
+    shared = tmp_path / "shared"
+    user_home = shared / "u"
+    user_home.mkdir(parents=True)
+    environ = {"HOME": str(user_home), "XDG_CONFIG_HOME": str(shared / "cfg")}
+    found = _made(environ)
+    chain = [found.config, found.config.parent, shared / "cfg", shared]
+    _plant(planted, *chain)
+    for folder in chain[:-1]:
+        folder.chmod(0)
+        unreadable_folders.append(folder)
+    real = Path(os.path.realpath(shared))
+    assert _check(environ) == [owners.Found("outside_home", real, "folder", 0)]
+
+
+def test_the_home_folder_itself_is_never_given_a_repair(home: Path) -> None:
+    real = Path(os.path.realpath(home))
+    assert owners._finding(real, "folder", 0, real, TEST_UID) == owners.Found(
+        "outside_home", real, "folder", 0
+    )
+
+
 def test_a_custom_xdg_folder_outside_home_gets_no_repair(
     home: Path, tmp_path: Path, planted: Planted
 ) -> None:

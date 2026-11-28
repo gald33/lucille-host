@@ -438,17 +438,20 @@ nothing on its own:
   relative one ignored, a relative `HOME`, the macOS layout, where the state folder is inside the config
   folder and is looked at once), then follows every symbolic link (`os.path.realpath`), since the host
   follows them too.
-- For each folder it looks up the chain, from the profile to the first folder the user owns, never at the
-  home folder or above, and reports the highest folder another uid owns, which `chown -R` of repairs the
+- For each folder it looks up the chain, from the profile to the first folder the user owns, never at `/`
+  and, for a folder inside the home folder, never at the home folder or above, and reports the highest folder another uid owns, which `chown -R` of repairs the
   rest (4.3: "the highest folder shown owned by root is the one to repair"). A folder the user cannot look
   at is reported as `unreadable` only when no folder above it is another uid's (4.3: below a root-owned
   folder that is "expected and is not a second finding"). Where the profile folder is the user's, it looks
   at every folder and file inside it (`policy.toml` among them). It follows no symbolic link into a
   folder, and a link's own owner does not matter; what a link points to, which the host follows, is
   looked at and reported by its own path, so that a `policy.toml` linked to a root-owned file names that
-  file. A link to the home folder or a folder above it (`/`, or a home folder root owns) is not reported,
-  as the walk up never reports those: root owning one is not what a run as root leaves, and the repair of
-  a home folder would be a `chown -R` of all of it.
+  file. A link to the home folder or a folder above it (`/`, or a home folder root owns) is not reported:
+  root owning one is not what a run as root leaves, and a link inside the profile does not make it the
+  profile's. That rule is for link targets only. The walk up from a profile folder outside the home folder
+  (a custom `XDG_*_HOME`) reports the highest folder another uid owns as `outside_home` even where that
+  folder holds the home folder (`/home/cfg` beside `/home/u`), since the host is refused below it. Any
+  finding that is the home folder itself is `outside_home`, never a `chown -R` of all of it.
 - Inside the home folder, each finding carries two command lines for a person to run as root: `ls -lR`
   (`ls -l` for a file) first, as "Look first" asks, then `chown -R <uid>` (`chown -h <uid>` for a file, so
   that a file swapped for a symbolic link before root runs it changes the link and not what it points
