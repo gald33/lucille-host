@@ -170,9 +170,11 @@ enforces.
        `itertools`, `json`, `logging`, `math`, `os`, `pathlib`, `re`, `secrets`, `shutil`, `signal`,
        `stat`, `sys`, `tempfile`, `termios`, `textwrap`, `threading`, `time`, `tomllib`, `types`,
        `typing`, `keyring`, `switchboard` and `lucille_host` itself. `src/lucille_host/_exec.py` may
-       also import `subprocess`. An import anywhere in a file counts. A submodule comes with its
-       module (`os.path`, `logging.handlers`), and what the rules above refuse stays refused inside
-       an allowed module (`os.system`, `logging.config`). A module an allowed module re-exports is
+       also import `subprocess`, and `src/lucille_host/verify.py`, the checks of `lucille-host
+       verify`, `certifi`, `http`, `ssl`, `zipfile` and `pypi_attestations`. An import anywhere in
+       a file counts. A submodule comes with its module (`os.path`, `logging.handlers`), and what
+       the rules above refuse stays refused inside an allowed module (`os.system`,
+       `logging.config`). A module an allowed module re-exports is
        checked as itself, by the same list: `from logging.handlers import socket` imports `socket`,
        and `enum.bltns` is `builtins`. The runtime may not import or use `lucille_host.conformance`,
        which is not held to the list. `platform`, `uuid`, `string` and `socket` are left off on
@@ -472,11 +474,47 @@ Every file of a release on PyPI must carry a PEP 740 attestation:
 
 - the certificate names the release's tag, `refs/tags/v<version>`.
 
-The `[verify]` extra installs `pypi-attestations`, and a later release adds `lucille-host verify` to make
-this check on an installed host. The release workflow makes it after publishing
-(`tools/release/check_release.py published`, which also checks that PyPI serves exactly the bytes the
-workflow built), and the GitHub Release carries `SHA256SUMS`. The environment is not in the signing
-certificate, so what is checked is PyPI's record of it.
+The release workflow makes this check after publishing (`tools/release/check_release.py published`,
+which also checks that PyPI serves exactly the bytes the workflow built), and the GitHub Release carries
+`SHA256SUMS`. The environment is not in the signing certificate, so what is checked is PyPI's record of
+it.
+
+**`lucille-host verify`** makes the same check on an installed host, and then checks the installed files.
+`0.1.0` does not hold it: the release after `0.1.0` is the first that does. For `0.1.0`, use the
+`pypi-attestations` check below, which its `[verify]` extra installs.
+It needs the `[verify]` extra, which installs `pypi-attestations`. Install the release with it into a
+fresh virtual environment, then run it:
+
+```sh
+python3 -m venv verify-env
+verify-env/bin/pip install 'lucille-host[verify]==<version>'
+verify-env/bin/lucille-host verify
+```
+
+It checks, and stops at the first check that fails:
+- the host is a release, not a development build;
+- PyPI lists exactly the release's wheel and sdist, and has not marked the release yanked;
+- the bytes PyPI serves for each have the sha256 it lists, and each file carries the attestations above,
+  verified with sigstore against those bytes;
+- every file the wheel holds but its `RECORD` is installed, with the same sha256, in the folder the
+  running package came from, and the package folder holds no other file but bytecode in `__pycache__`.
+
+On success it prints the release, each file's sha256 and how many attestations verified, the folder it
+checked, how many files there are the wheel's, and how many bytecode files it did not check; with
+`--json`, one `verify` object ([spec/CLI.md](spec/CLI.md)). It asks only `pypi.org`,
+`files.pythonhosted.org` and sigstore's trust root, and reads none of the host's own files. A failure
+says which check and which file, and exits 1: `not_attested` for a release that is not attested,
+`files_differ` for files installed here that are not the release's, `yanked` for a withdrawn release,
+`unreachable` when PyPI or sigstore could not be asked (nothing was verified: try again).
+
+`lucille-host verify` is the installed host checking itself. It cannot vouch for an install whose files
+were changed before it ran, since the changed code is what runs. Run it from a fresh install, as above.
+To check a file without running any of the host's code, `pypi-attestations` checks the repository on its
+own (not the workflow, tag or runner):
+
+```sh
+verify-env/bin/python -m pypi_attestations verify pypi --repository https://github.com/gald33/lucille-host pypi:lucille_host-<version>-py3-none-any.whl
+```
 
 The same check works for the pinned `agent-switchboard` release. Its publisher is `gald33/switchboard`,
 workflow `publish.yml`, environment `pypi`, ref `refs/tags/v2.6.0`. The release workflow checks it before
@@ -527,7 +565,10 @@ sent. `lucille-host status` shows the pair, its work rooms, and when the host la
 
 - Anything about what Lucille's backend does with a reply.
 - Whether installed files are still the verified ones after any process running as your user has touched
-  them.
+  them. `lucille-host verify` checks them as they are when it runs, with their own code.
+- The bytecode Python may load in place of an installed source file, the `lucille-host` script the
+  installer wrote, the interpreter, and every other package in the environment: `lucille-host verify`
+  checks none of them.
 - The provenance of dependencies beyond the ones checked.
 - Tag protection and the `pypi` environment's required reviewer. They are repository settings, which a
   reader cannot see.

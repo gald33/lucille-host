@@ -1,0 +1,111 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/gald33/lucille-host/blob/main/src/lucille_host/spec/cli/v1/verify.schema.json",
+  "title": "lucille-host --json: verify",
+  "description": "The release whose code is running passed every check of lucille-host verify: PyPI lists and serves exactly its two files, not yanked, each attested by the publisher named here, and the files installed here are the wheel's.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "v",
+    "type",
+    "version",
+    "repository",
+    "workflow",
+    "environment",
+    "files",
+    "site",
+    "installed",
+    "bytecode"
+  ],
+  "properties": {
+    "v": {
+      "const": 1
+    },
+    "type": {
+      "const": "verify"
+    },
+    "version": {
+      "$ref": "#/$defs/release_version"
+    },
+    "repository": {
+      "description": "The repository every attestation names.",
+      "const": "gald33/lucille-host"
+    },
+    "workflow": {
+      "description": "The workflow every attestation names.",
+      "const": "release.yml"
+    },
+    "environment": {
+      "description": "The environment PyPI records every attestation bundle's publisher in.",
+      "const": "pypi"
+    },
+    "files": {
+      "description": "The release's two files on PyPI, the wheel then the sdist.",
+      "type": "array",
+      "maxItems": 2,
+      "items": {
+        "$ref": "#/$defs/release_file"
+      }
+    },
+    "site": {
+      "description": "The folder the running package was imported from, whose files were compared with the wheel's.",
+      "$ref": "#/$defs/path"
+    },
+    "installed": {
+      "description": "How many installed files are the wheel's: each file it holds but its RECORD.",
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 100000
+    },
+    "bytecode": {
+      "description": "How many bytecode files (.pyc) in the package's __pycache__ folders were counted and not checked.",
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 100000
+    }
+  },
+  "$defs": {
+    "release_version": {
+      "description": "A final release's version: X.Y.Z, no leading zero, at most nine digits a part.",
+      "type": "string",
+      "minLength": 5,
+      "maxLength": 29,
+      "pattern": "^(0|[1-9][0-9]{0,8})[.](0|[1-9][0-9]{0,8})[.](0|[1-9][0-9]{0,8})$"
+    },
+    "release_file": {
+      "description": "One of the release's files: its name, the sha256 of the bytes PyPI serves, and how many attestations of it verified.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "sha256",
+        "attestations"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80,
+          "pattern": "^lucille_host-[0-9.]+(-py3-none-any[.]whl|[.]tar[.]gz)$"
+        },
+        "sha256": {
+          "type": "string",
+          "minLength": 64,
+          "maxLength": 64,
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "attestations": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100
+        }
+      }
+    },
+    "path": {
+      "description": "An absolute path. A byte of a file name that is not UTF-8 is U+FFFD.",
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^/[^\\u0000]*$"
+    }
+  }
+}

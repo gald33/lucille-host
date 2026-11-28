@@ -1,0 +1,16 @@
+{
+  "description": "verify, set up as for the fixture verify, with the wheel's attestation bundle recorded as published by workflow other.yml",
+  "argv": [
+    "--json",
+    "verify"
+  ],
+  "exit": 1,
+  "stdout": [
+    {
+      "v": 1,
+      "type": "error",
+      "code": "not_attested",
+      "message": "lucille_host-1.2.3-py3-none-any.whl: an attestation bundle names another publisher"
+    }
+  ]
+}

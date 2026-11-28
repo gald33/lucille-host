@@ -124,7 +124,8 @@ In the runtime package, ``src/lucille_host/`` except ``src/lucille_host/conforma
   the Switchboard-surface lint keeps to one module and a listed surface) and ``lucille_host``
   itself. ``src/lucille_host/_exec.py`` may also import the modules in :data:`EXEC_IMPORTS`, and
   ``src/lucille_host/proxy.py`` (``github.read``'s child) and ``src/lucille_host/gmail.py`` (the
-  Gmail operations' child) those in :data:`PROXY_IMPORTS`. A
+  Gmail operations' child) those in :data:`PROXY_IMPORTS`, and ``src/lucille_host/verify.py``
+  (the ``verify`` verb's checks) those in :data:`VERIFY_IMPORTS`. A
   relative import resolves into this package and is allowed, except one of the conformance
   package: the runtime may not import or use ``lucille_host.conformance``, which is not held to
   this list. The list names top-level modules, so a submodule of an allowed module comes with it
@@ -300,6 +301,9 @@ GMAIL_MODULE = "src/lucille_host/gmail.py"
 # their own (decisions/0003, "First use" and "Second use").
 PROXY_MODULES = frozenset({PROXY_MODULE, GMAIL_MODULE})
 SPAWN_MODULE = "src/lucille_host/conformance/_spawn.py"
+# The checks of the `verify` verb, which reach PyPI and sigstore (decisions/0001, "Packaging,
+# releases and verification").
+VERIFY_MODULE = "src/lucille_host/verify.py"
 
 # What the runtime package may import: top-level modules, each for the reason given. Each is a
 # standard-library module the runtime needs now or plainly will soon, or keyring, switchboard or
@@ -410,6 +414,20 @@ PROXY_IMPORTS = frozenset(
         "ipaddress",  # the fixed list of addresses the proxy may connect to
         "socket",  # resolves api.github.com and connects to a vetted address
         "ssl",  # TLS for api.github.com, against certifi's bundle
+    }
+)
+
+# What src/lucille_host/verify.py may import as well: it holds the checks of the `verify` verb,
+# which only that verb runs, and which fetch a release's listing, files and provenance from PyPI
+# over HTTPS and check them with pypi-attestations (decisions/0001, "Packaging, releases and
+# verification"). The list names top-level modules, so ``http`` allows ``http.client``.
+VERIFY_IMPORTS = frozenset(
+    {
+        "certifi",  # the trust the hub client already uses, for PyPI's certificates
+        "http",  # http.client: a GET to pypi.org or files.pythonhosted.org, no redirect followed
+        "pypi_attestations",  # the [verify] extra: verifies a PEP 740 attestation with sigstore
+        "ssl",  # TLS for PyPI, against certifi's bundle
+        "zipfile",  # reads the attested wheel, in memory, to compare the installed files
     }
 )
 
@@ -736,11 +754,14 @@ PROGRAM_CONSTANTS: Mapping[str, str] = {
 
 
 def zone_of(rel: str) -> str:
-    """Which rule set a file falls under: exec, proxy, spawn, conformance, runtime or other."""
+    """Which rule set a file falls under: exec, proxy, verify, spawn, conformance, runtime or
+    other."""
     if rel == EXEC_MODULE:
         return "exec"
     if rel in PROXY_MODULES:
         return "proxy"
+    if rel == VERIFY_MODULE:
+        return "verify"
     if rel == SPAWN_MODULE:
         return "spawn"
     if rel.startswith(CONFORMANCE_PREFIX):
@@ -1191,11 +1212,15 @@ def _runtime_imports(
 ) -> list[Violation]:
     """The runtime package: imports off the allowlist, modules reached through a re-export that
     are off it, and any import or use of the conformance package."""
-    extra = {"exec": EXEC_IMPORTS, "proxy": PROXY_IMPORTS}.get(zone, frozenset())
-    allowed = RUNTIME_IMPORTS | extra
-    where = "RUNTIME_IMPORTS" + {"exec": " and EXEC_IMPORTS", "proxy": " and PROXY_IMPORTS"}.get(
-        zone, ""
+    extra = {"exec": EXEC_IMPORTS, "proxy": PROXY_IMPORTS, "verify": VERIFY_IMPORTS}.get(
+        zone, frozenset()
     )
+    allowed = RUNTIME_IMPORTS | extra
+    where = "RUNTIME_IMPORTS" + {
+        "exec": " and EXEC_IMPORTS",
+        "proxy": " and PROXY_IMPORTS",
+        "verify": " and VERIFY_IMPORTS",
+    }.get(zone, "")
     package = package_of(rel)
     found: list[Violation] = []
 
@@ -1251,6 +1276,7 @@ KNOWN_MODULES = (
     RUNTIME_IMPORTS
     | EXEC_IMPORTS
     | PROXY_IMPORTS
+    | VERIFY_IMPORTS
     | SUBMODULES
     | {target for targets in REEXPORTS.values() for target in targets}
 )
@@ -1427,7 +1453,7 @@ def check_source(
     found.extend(import_alias_conflicts(tree, package_of(rel), rel))
     refs = references(tree, rel)
     imported = _imported_modules(tree)
-    if zone in ("runtime", "exec", "proxy"):
+    if zone in ("runtime", "exec", "proxy", "verify"):
         found.extend(_runtime_imports(tree, refs, rel, zone, exports))
     if in_package:
         found.extend(_import_path_problems(tree, refs, rel))
@@ -1462,14 +1488,14 @@ def check_source(
         problem = _launcher_problem(names, ref)
         if problem is not None:
             found.append(Violation(rel, ref.line, "launcher", problem))
-        if zone in ("runtime", "exec", "proxy"):
+        if zone in ("runtime", "exec", "proxy", "verify"):
             value = _module_value(ref, rel, modules, exports, imported)
             if value is not None:
                 found.append(value)
             problem = _keyring_problem(ref, exports)
             if problem is not None:
                 found.append(Violation(rel, ref.line, "keyring-surface", problem))
-        if zone in ("runtime", "proxy"):
+        if zone in ("runtime", "proxy", "verify"):
             hits = _spawn_hits(names, ref)
             if hits:
                 found.append(
