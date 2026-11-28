@@ -1265,7 +1265,7 @@ asks` and `credential answer` and waits up to 240 s for the user's answer; Lucil
   is an ask made while another waits and an ask made less than 600 s after any ask ended, for any
   credential.
 - Lucille's words come last, after the host's own lines, cut at their spaces into lines of at most 64
-  columns (a wide character counts two), each starting `Lucille says: `, so every line fits in 78 columns
+  columns (a character beyond ASCII counts two), each starting `Lucille says: `, so every line fits in 78 columns
   and none reads as one of the host's. Rule `credential-ask-args` (PROTOCOL.md §10) keeps out of them the
   characters that would move, hide or blank out text, and runs of spaces.
 - While an ask waits, `run` runs no other request: it runs one at a time.

@@ -638,11 +638,11 @@ terminal. Where the text above left something open, the smallest safe form was c
   (`bad_args`) a reason with a control character, a line break, a character that reorders text, white
   space other than a plain space, a character of no width or one drawn blank (spec/PROTOCOL.md §10 lists
   them), a space at its start or end, two spaces in a row, or only white space. The host cuts Lucille's
-  words itself, at their spaces, into lines of at most 64 columns, and starts each with `Lucille says: `,
-  so each fits in 78 columns. So no line the host prints of Lucille's words starts as one of the host's
-  does: the host's own detail lines start with two spaces, and each of Lucille's with `Lucille says:`. A
-  terminal narrower than 78 columns wraps lines itself, the host's as well; with no run of spaces, a line
-  it wraps starts with at most one space.
+  words itself, at their spaces, into lines of at most 64 columns (a character beyond ASCII counts two),
+  and starts each with `Lucille says: `, so each fits in 78 columns. So no line the host prints of
+  Lucille's words starts as one of the host's does: the host's own detail lines start with two spaces,
+  and each of Lucille's with `Lucille says:`. A terminal narrower than 78 columns wraps lines itself, the
+  host's as well; with no run of spaces, a line it wraps starts with at most one space.
 - **Declining is the default.** An ask waits 240 s, inside the operation's 270 s time limit, then is
   declined *(chosen here)*. Rate limit *(chosen here)*: one ask waits at a time, and an ask made less than
   10 minutes after any ask ended, for any credential, is declined at once, so asking under one name after

@@ -80,7 +80,8 @@ ANSWERS: Final = ("saved", "declined")
 REASON_MAX: Final = 300
 # What may not be in ``reason``, so that nothing of Lucille's words can move, hide or blank out
 # text where the host shows them (rule credential-ask-args, spec/PROTOCOL.md section 10):
-# - C0 and C1 controls and DEL, line breaks and tabs among them (U+0000 to U+001F, U+007F to U+009F);
+# - C0 and C1 controls and DEL, line breaks and tabs among them (U+0000 to U+001F, U+007F to
+#   U+009F);
 # - the line and paragraph separators (U+2028, U+2029);
 # - the characters that reorder text (U+061C, U+200E, U+200F, U+202A to U+202E, U+2066 to U+2069);
 # - white space other than U+0020 (U+00A0, U+1680, U+2000 to U+200A, U+202F, U+205F, U+3000);
@@ -113,11 +114,9 @@ def reason_showable(reason: str) -> bool:
 
 
 def _columns(text: str) -> int:
-    """How many columns ``text`` takes on a terminal, at most: two for a wide character (East Asian
-    width W or F), one for any other."""
-    import unicodedata  # noqa: PLC0415 - only the command line shows an ask
-
-    return sum(2 if unicodedata.east_asian_width(char) in "WF" else 1 for char in text)
+    """How many columns ``text`` takes on a terminal, at most: one for an ASCII character, and two
+    for any other, the most a terminal gives one."""
+    return sum(1 if ord(char) < 0x80 else 2 for char in text)
 
 
 def reason_lines(reason: str) -> list[str]:
