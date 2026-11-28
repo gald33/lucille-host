@@ -4554,7 +4554,7 @@ def test_every_error_code_remove_meets_has_words() -> None:
     handled |= _swift_string_set(words, "appBugCodes")
     codes = _spec_verb_codes(frozenset({"uninstall-data --yes"}))["uninstall-data --yes"]
     assert codes - handled == set(), sorted(codes - handled)
-    assert set(own) == {"busy", "lock_failed", "policy_lock_failed", "held"}
+    assert set(own) == {"busy", "lock_failed", "policy_lock_failed", "held", "other_device"}
     assert set(own) <= codes, sorted(set(own) - codes)
     assert (
         "refusals[code] ?? ConnectionText.refusal(code: code, message: message, afterSAS: false)"

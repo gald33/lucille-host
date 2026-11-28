@@ -60,7 +60,7 @@ __all__ = [
 
 SERVICE: Final = store.CREDENTIALS_SERVICE
 VERSION: Final = 1
-LOCK: Final = ".credentials.lock"
+LOCK: Final = store.CREDENTIALS_LOCK
 # Lower-case service and credential names, the same rule Lucille checks: ``gmail``, ``github.com``.
 # Matched whole (``fullmatch``): ``$`` would also match before a newline at the end.
 NAME: Final = re.compile(r"[a-z0-9][a-z0-9._-]{0,63}")

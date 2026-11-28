@@ -113,9 +113,10 @@ enum RemoveText {
 
     static let menuItem = "Remove \(appName)…"
     static let questionTitle = "Remove \(appName) from this Mac?"
-    /// decisions/0002 section 17, step 1, as the record quotes it. What Lucille keeps is Lucille's
-    /// policy as of 2026-10-29, which this repository does not prove (PRIVACY.md).
-    static let questionText = "This disconnects this Mac from Lucille, deletes \(appName)'s saved connection and settings from this Mac, and moves the app to the Trash. Lucille keeps results it already received for up to 24 hours, and its database backups are not blanked."
+    /// decisions/0002 section 17, step 1, as the record quotes it, and what else `uninstall-data`
+    /// deletes with the settings: the saved app passwords and the activity log. What Lucille keeps
+    /// is Lucille's policy as of 2026-10-29, which this repository does not prove (PRIVACY.md).
+    static let questionText = "This disconnects this Mac from Lucille, deletes \(appName)'s saved connection and settings from this Mac, its saved app passwords and its activity log included, and moves the app to the Trash. Lucille keeps results it already received for up to 24 hours, and its database backups are not blanked."
     static let removeButton = "Remove \(appName)"
     static let saveLogButton = "Save a Copy of the Activity Log…"
     static let saveLogName = "\(appName) Activity Log.txt"
@@ -143,6 +144,7 @@ enum RemoveText {
         "lock_failed": "\(appName) couldn't lock its settings.",
         "policy_lock_failed": "\(appName) couldn't lock its settings.",
         "held": "This Mac still has a connection to Lucille.",
+        "other_device": "A disk or a folder is mounted inside \(appName)'s folders, and \(appName) deletes nothing through it. Eject it first.",
     ]
 
     static func refusal(code: String, message: String?) -> String {

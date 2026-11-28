@@ -5,14 +5,20 @@ deleting nothing then; and it can be run again on a profile with nothing left.""
 
 from __future__ import annotations
 
+import contextlib
 import io
 import json
+import os
+from collections.abc import Callable, Iterator
 from pathlib import Path
+from typing import Any
 
 import pytest
+from keyring.backends.fail import Keyring as FailKeyring
 from keyring.errors import PasswordDeleteError
 
 from lucille_host import cli, credentials, loop, paths, rooms, store
+from lucille_host import state as host_state
 from tests._host import HostEnv, lock_held
 from tests._keyring import MemoryKeyring
 
@@ -221,3 +227,244 @@ def test_it_refuses_where_the_host_does_not_start(
     assert [o["code"] for o in _objects(capsys.readouterr().out)] == ["startup_refused"]
     assert memory_keyring.items == before
     assert host_env.dirs.policy_file.exists()
+
+
+def _mounted_at(
+    monkeypatch: pytest.MonkeyPatch, name: str, when: Callable[[], bool] = lambda: True
+) -> None:
+    """Make the entry ``name`` of any folder read as on another device than its folder, as a mount
+    point is, while ``when()`` holds: a mount with no root and no disk image. Only a read of an
+    entry within an open folder (``dir_fd``) is changed, which is how the verb reads each one."""
+    real = os.stat
+
+    def stat(path: Any, *args: Any, **kwargs: Any) -> os.stat_result:
+        found = real(path, *args, **kwargs)
+        if kwargs.get("dir_fd") is not None and os.fsdecode(path) == name and when():
+            values = list(found)
+            values[2] = found.st_dev + 1  # st_dev
+            return os.stat_result(values)
+        return found
+
+    monkeypatch.setattr(cli.os, "stat", stat)
+
+
+@pytest.mark.parametrize(("where", "inside"), [("state", ("mnt",)), ("config", ("sub", "mnt"))])
+def test_a_mount_inside_a_folder_is_refused_before_anything_is_deleted(
+    host_env: HostEnv,
+    memory_keyring: MemoryKeyring,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+    where: str,
+    inside: tuple[str, ...],
+) -> None:
+    """A folder mounted inside the profile's is outside it: the verb reads both folders through
+    first, and refuses ``other_device`` with the keyring items and every file where they were."""
+    _fill("default", monkeypatch, tmp_path / "docs")
+    mount = getattr(host_env.dirs, where).joinpath(*inside)
+    mount.mkdir(parents=True)
+    (mount / "sentinel").write_text("outside the profile")
+    before = dict(memory_keyring.items)
+    _mounted_at(monkeypatch, inside[-1])
+    capsys.readouterr()
+    assert _main(["--json", "uninstall-data", "--yes"], monkeypatch) == 1
+    found = _objects(capsys.readouterr().out)
+    assert [o["code"] for o in found] == ["other_device"]
+    message = cli.UNINSTALL_OTHER_DEVICE.format(path=mount, folder=getattr(host_env.dirs, where))
+    assert found[0]["message"] == message
+    assert memory_keyring.items == before
+    assert (mount / "sentinel").read_text() == "outside the profile"
+    assert host_env.dirs.policy_file.exists()
+    assert (host_env.dirs.state / loop.RUN_LOCK).exists()
+
+
+def test_a_mount_made_after_the_check_stops_the_deletion_there(
+    host_env: HostEnv,
+    memory_keyring: MemoryKeyring,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    """A mount made between the check and the deletion: the deletion crosses no device either, so
+    nothing on it is deleted, and the message says what may be gone."""
+    _fill("default", monkeypatch, tmp_path / "docs")
+    mount = host_env.dirs.state / "mnt"
+    mount.mkdir()
+    (mount / "sentinel").write_text("outside the profile")
+    deleted: list[str] = []
+    real_delete = store.delete_items
+
+    def delete_items(username: str) -> None:
+        real_delete(username)
+        deleted.append(username)
+
+    monkeypatch.setattr(store, "delete_items", delete_items)
+    _mounted_at(monkeypatch, "mnt", when=lambda: bool(deleted))
+    capsys.readouterr()
+    assert _main(["--json", "uninstall-data", "--yes"], monkeypatch) == 1
+    found = _objects(capsys.readouterr().out)
+    message = cli.UNINSTALL_OTHER_DEVICE_LATE.format(path=mount, folder=host_env.dirs.state)
+    assert found == [{"v": 1, "type": "error", "code": "other_device", "message": message}]
+    assert deleted == ["default"]
+    assert (mount / "sentinel").read_text() == "outside the profile"
+
+
+@pytest.mark.parametrize("where", ["state", "config"])
+def test_a_folder_that_is_a_link_is_refused_before_anything_is_deleted(
+    host_env: HostEnv,
+    memory_keyring: MemoryKeyring,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+    where: str,
+) -> None:
+    _fill("default", monkeypatch, tmp_path / "docs")
+    folder = getattr(host_env.dirs, where)
+    target = tmp_path / "elsewhere"
+    folder.rename(target)
+    folder.symlink_to(target)
+    (target / "sentinel").write_text("outside the profile")
+    before = dict(memory_keyring.items)
+    capsys.readouterr()
+    assert _main(["--json", "uninstall-data", "--yes"], monkeypatch) == 1
+    found = _objects(capsys.readouterr().out)
+    message = cli.UNINSTALL_NOT_A_FOLDER.format(folder=folder)
+    assert found == [{"v": 1, "type": "error", "code": "state_invalid", "message": message}]
+    assert memory_keyring.items == before
+    assert (target / "sentinel").read_text() == "outside the profile"
+    assert folder.is_symlink()
+
+
+def test_links_inside_are_deleted_and_what_they_name_is_not(
+    host_env: HostEnv,
+    memory_keyring: MemoryKeyring,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _fill("default", monkeypatch, tmp_path / "docs")
+    outside = tmp_path / "outside"
+    (outside / "sub").mkdir(parents=True)
+    (outside / "sub" / "sentinel").write_text("kept")
+    (host_env.dirs.state / "to-folder").symlink_to(outside)
+    (host_env.dirs.config / "to-file").symlink_to(outside / "sub" / "sentinel")
+    assert _main(["--json", "uninstall-data", "--yes"], monkeypatch) == 0
+    assert not host_env.dirs.state.exists() and not host_env.dirs.config.exists()
+    assert (outside / "sub" / "sentinel").read_text() == "kept"
+
+
+def test_lock_files_go_last(
+    host_env: HostEnv,
+    memory_keyring: MemoryKeyring,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A command of the profile started while the folders are deleted finds the lock still there,
+    and held, until nothing else of its folder is left."""
+    _fill("default", monkeypatch, tmp_path / "docs")
+    (host_env.dirs.state / "zzz").write_text("after the locks by name")
+    unlinked: list[str] = []
+    real = os.unlink
+
+    def unlink(path: Any, *args: Any, **kwargs: Any) -> None:
+        unlinked.append(os.fsdecode(path))
+        real(path, *args, **kwargs)
+
+    monkeypatch.setattr(cli.os, "unlink", unlink)
+    assert _main(["--json", "uninstall-data", "--yes"], monkeypatch) == 0
+    locks = {loop.RUN_LOCK, cli.PAIR_LOCK, store.CREDENTIALS_LOCK}
+    assert locks <= set(unlinked)
+    # "zzz" comes after every lock file by name, and is deleted before any of them.
+    assert unlinked.index("zzz") < min(unlinked.index(name) for name in locks)
+
+
+def test_it_holds_the_credential_stores_lock_while_it_deletes(
+    host_env: HostEnv,
+    memory_keyring: MemoryKeyring,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """No ``credential`` verb changes the credentials' item while it is deleted: they take the
+    same lock."""
+    _fill("default", monkeypatch, tmp_path / "docs")
+    held: list[Path] = []
+    real_lock = store.file_lock
+
+    @contextlib.contextmanager
+    def file_lock(path: Path) -> Iterator[None]:
+        with real_lock(path):
+            held.append(path)
+            try:
+                yield
+            finally:
+                held.remove(path)
+
+    seen: list[list[Path]] = []
+    real_delete = store.delete_items
+    monkeypatch.setattr(store, "file_lock", file_lock)
+    monkeypatch.setattr(
+        store, "delete_items", lambda username: (seen.append(list(held)), real_delete(username))
+    )
+    assert _main(["--json", "uninstall-data", "--yes"], monkeypatch) == 0
+    assert seen == [[host_env.dirs.state / credentials.LOCK]]
+    assert credentials.LOCK == store.CREDENTIALS_LOCK
+
+
+def test_a_waiting_connect_request_goes_with_the_state_folder(
+    host_env: HostEnv,
+    memory_keyring: MemoryKeyring,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    """``pair cancel`` only deletes the request this computer keeps, so the folder's deletion
+    drops it as that does."""
+    _fill("default", monkeypatch, tmp_path / "docs")
+    host_env.dirs.connect_file.write_text("{}")
+    capsys.readouterr()
+    assert _main(["--json", "uninstall-data", "--yes"], monkeypatch) == 0
+    assert [o["type"] for o in _objects(capsys.readouterr().out)] == ["uninstalled"]
+    assert not host_env.dirs.connect_file.exists()
+
+
+def test_it_refuses_while_a_room_is_being_accepted_over_a_pair_gone(
+    host_env: HostEnv,
+    memory_keyring: MemoryKeyring,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    _fill("default", monkeypatch, tmp_path / "docs")
+    accepting = object()
+    left_over = rooms.Record(pair="pair-abcdef", accepting=accepting)  # type: ignore[arg-type]
+    monkeypatch.setattr("lucille_host.rooms.load", lambda _path: left_over)
+    before = dict(memory_keyring.items)
+    capsys.readouterr()
+    assert _main(["--json", "uninstall-data", "--yes"], monkeypatch) == 1
+    message = cli.UNINSTALL_ROOMS.format(name="pair-abcdef")
+    assert _objects(capsys.readouterr().out) == [
+        {"v": 1, "type": "error", "code": "held", "message": message}
+    ]
+    assert memory_keyring.items == before
+    assert host_env.dirs.policy_file.exists()
+
+
+def test_a_keyring_it_cannot_use_is_refused_in_words_of_its_own(
+    host_env: HostEnv,
+    memory_keyring: MemoryKeyring,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    """A profile that keeps its pair in a file (``pair --store-file``), where no keyring can be
+    used: the refusal does not point to ``--store-file``, which deletes nothing; and nothing is
+    deleted."""
+    _fill("default", monkeypatch, tmp_path / "docs")
+    host_state.save_host_config(host_env.dirs, host_state.HostConfig(store="file"))
+    monkeypatch.setattr("keyring.core._keyring_backend", FailKeyring())
+    capsys.readouterr()
+    assert _main(["--json", "uninstall-data", "--yes"], monkeypatch) == 1
+    found = _objects(capsys.readouterr().out)
+    assert [o["code"] for o in found] == ["insecure_keyring"]
+    assert found[0]["message"].endswith(store.UNINSTALL_REFUSAL)
+    assert "--store-file" not in found[0]["message"]
+    assert host_env.dirs.policy_file.exists() and host_env.dirs.state.exists()

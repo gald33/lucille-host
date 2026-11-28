@@ -172,8 +172,10 @@ __all__ = [
     "UNUSABLE_ERRORS",
     "CALL_TIMEOUT",
     "CHAIN_LIMIT",
+    "CREDENTIALS_LOCK",
     "CREDENTIALS_SERVICE",
     "OWNED_SERVICES",
+    "UNINSTALL_REFUSAL",
     "PROBE_TIMEOUT",
     "InsecureKeyring",
     "Item",
@@ -195,6 +197,9 @@ SERVICE: Final = "lucille-host"
 # The credential store's item (``credentials.py``), named here so that ``uninstall-data`` can
 # delete it without importing that module, which only the ``credential`` verb may load.
 CREDENTIALS_SERVICE: Final = "lucille-host.credentials"
+# The credential store's lock file, in the profile's state folder, named here for the same reason:
+# ``uninstall-data`` holds it, so that no ``credential`` verb changes the item while it is deleted.
+CREDENTIALS_LOCK: Final = ".credentials.lock"
 # Every keyring service an item of the host's stores is kept under, each with the profile's name as
 # its user name: what ``uninstall-data`` deletes (:func:`delete_items`).
 OWNED_SERVICES: Final = (SERVICE, CREDENTIALS_SERVICE)
@@ -240,6 +245,12 @@ BOUNDED: Final = frozenset({"linux"})
 PAIR_REFUSAL: Final = (
     "so lucille-host cannot keep its pair in it; set up the system keyring, or pair with "
     "--store-file to keep the pair in a file instead, which is weaker"
+)
+# The end of a refusal of the keyring by ``uninstall-data`` (:func:`delete_items`). It does not
+# point to ``--store-file``, which keeps nothing of the credentials' and deletes nothing.
+UNINSTALL_REFUSAL: Final = (
+    "so lucille-host cannot delete its items there, or check that none is left; nothing was "
+    "removed. Run `uninstall-data` where the system keyring can be used"
 )
 
 T = TypeVar("T")
@@ -620,12 +631,14 @@ def check_backend(
 
 def delete_items(username: str, services: tuple[str, ...] = OWNED_SERVICES) -> None:
     """Delete the keyring item of each of ``services`` kept under ``username`` (a profile's name),
-    one after another, stopping at the first that fails (:func:`_delete_item`)."""
+    one after another, stopping at the first that fails (:func:`_delete_item`). A backend the host
+    does not keep items in is refused first, with :data:`UNINSTALL_REFUSAL`, and nothing deleted."""
+    backend = check_backend(refusal=UNINSTALL_REFUSAL)
     for service in services:
-        _delete_item(service, username)
+        _delete_item(backend, service, username)
 
 
-def _delete_item(service: str, username: str) -> None:
+def _delete_item(backend: KeyringBackend, service: str, username: str) -> None:
     """Delete one keyring item through the backend :func:`check_backend` returns, and check that
     it is gone: a read of it must find nothing. An item that is not there already is no failure.
     keyring raises the same error for an item that is not there as for one it could not delete (its
@@ -634,7 +647,6 @@ def _delete_item(service: str, username: str) -> None:
     :class:`StoreError` whose message names the error's class (:func:`keyring_failure`) or the
     item, never anything read from it or said with the error; what the read finds is only compared
     with nothing, and kept nowhere."""
-    backend = check_backend()
     try:
         keyring_call(lambda: backend.delete_password(service, username), "delete")
     except StoreError:

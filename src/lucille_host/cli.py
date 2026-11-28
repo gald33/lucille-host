@@ -77,13 +77,14 @@ import contextlib
 import json
 import os
 import re
-import shutil
+import stat
 import sys
 import termios
 import threading
 import time
 from collections.abc import Callable, Iterator, Sequence
 from dataclasses import replace
+from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Final, NoReturn
 
@@ -1810,12 +1811,127 @@ UNINSTALL_ROOMS: Final = (
 )
 
 
+UNINSTALL_OTHER_DEVICE: Final = (
+    "{path} is on another device than the profile's folder {folder} (a disk or a folder mounted "
+    "there): unmount it, then run `uninstall-data` again. Nothing was removed"
+)
+UNINSTALL_OTHER_DEVICE_LATE: Final = (
+    "{path} is on another device than the profile's folder {folder} (a disk or a folder mounted "
+    "there since the check): nothing on it was removed, and the profile's keyring items and part "
+    "of its folders may be gone. Unmount it, then run `uninstall-data` again"
+)
+UNINSTALL_NOT_A_FOLDER: Final = (
+    "{folder} is not a folder (a symbolic link, or a file), so it is not the profile's own: "
+    "nothing was removed"
+)
+
+
+class _OtherDevice(Exception):
+    """An entry of a profile's folder on another device than the folder's own."""
+
+    def __init__(self, path: Path) -> None:
+        super().__init__(str(path))
+        self.path = path
+
+
+def _folder_device(folder: Path) -> int | None:
+    """The device of ``folder``, read without following a link; None when there is nothing there.
+    Anything but a folder is refused, a symbolic link included: what the profile's path names is
+    not the host's own then, and nothing of it is deleted."""
+    try:
+        found = os.lstat(folder)
+    except FileNotFoundError:
+        return None
+    if not stat.S_ISDIR(found.st_mode):
+        raise _Refused("state_invalid", UNINSTALL_NOT_A_FOLDER.format(folder=folder))
+    return found.st_dev
+
+
+def _open_folder(name: str | Path, device: int, where: Path, *, dir_fd: int | None = None) -> int:
+    """A descriptor of the folder ``name`` (in the folder ``dir_fd`` holds, if given), opened
+    without following a link, and checked to be on ``device``: :class:`_OtherDevice` otherwise. A
+    mount point's own entry is on the device mounted there, so it is one found here."""
+    descriptor = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=dir_fd)
+    if os.fstat(descriptor).st_dev != device:
+        os.close(descriptor)
+        raise _OtherDevice(where)
+    return descriptor
+
+
+def _walk_folder(descriptor: int, where: Path, device: int, *, delete: bool) -> None:
+    """Every entry under the folder ``descriptor`` holds, read without following a link, and each
+    checked to be on ``device`` before anything is done with it (:class:`_OtherDevice`, which stops
+    the walk); with ``delete``, each removed, a folder once it is empty. As
+    ``rm --one-file-system``, but stricter: nothing of another device is read into, let alone
+    deleted. Lock files (``*.lock``) go last, so that a command started meanwhile still finds the
+    lock this verb holds, and is refused, until nothing else is left."""
+    with os.scandir(descriptor) as entries:
+        names = sorted(entry.name for entry in entries)
+    names.sort(key=lambda name: name.endswith(".lock"))
+    for name in names:
+        path = where / name
+        found = os.stat(name, dir_fd=descriptor, follow_symlinks=False)
+        if found.st_dev != device:
+            raise _OtherDevice(path)
+        if stat.S_ISDIR(found.st_mode):
+            inner = _open_folder(name, device, path, dir_fd=descriptor)
+            try:
+                _walk_folder(inner, path, device, delete=delete)
+            finally:
+                os.close(inner)
+            if delete:
+                os.rmdir(name, dir_fd=descriptor)
+        elif delete:
+            os.unlink(name, dir_fd=descriptor)
+
+
+def _check_folder(folder: Path) -> None:
+    """Refuse, deleting nothing, a profile's folder that is not a folder, or holds anything on
+    another device than its own (a mount point inside it)."""
+    device = _folder_device(folder)
+    if device is None:
+        return
+    descriptor = _open_folder(folder, device, folder)
+    try:
+        _walk_folder(descriptor, folder, device, delete=False)
+    except _OtherDevice as other:
+        raise _Refused(
+            "other_device", UNINSTALL_OTHER_DEVICE.format(path=other.path, folder=folder)
+        ) from None
+    finally:
+        os.close(descriptor)
+
+
+def _remove_folder(folder: Path) -> None:
+    """Delete a profile's folder and all it holds, crossing to no other device: what is mounted
+    inside it since :func:`_check_folder` read it stops the deletion there, and nothing on it is
+    touched. A folder that is not there is no failure."""
+    device = _folder_device(folder)
+    if device is None:
+        return
+    descriptor = _open_folder(folder, device, folder)
+    try:
+        _walk_folder(descriptor, folder, device, delete=True)
+    except _OtherDevice as other:
+        raise _Refused(
+            "other_device", UNINSTALL_OTHER_DEVICE_LATE.format(path=other.path, folder=folder)
+        ) from None
+    finally:
+        os.close(descriptor)
+    os.rmdir(folder)
+
+
 def _uninstall_data(args: argparse.Namespace, dirs: paths.Dirs, out: _Out) -> None:
     """``uninstall-data --yes`` (decisions/0002 section 17): delete this profile's keyring items,
-    then its folders. Under the profile's run lock, its pairing lock and its policy lock, so that
-    no ``run``, ``pair`` or policy change of the profile works on what is being deleted; and only
-    once the profile holds no pair and no work room, so that a pair is never dropped here without
-    ``forget``, which tells Lucille when it can. A profile with nothing left is no failure: the verb
+    then its folders. Under the profile's run lock, its pairing lock, its policy lock and the
+    credential store's lock, so that no ``run``, ``pair``, policy change or ``credential`` verb of
+    the profile works on what is being deleted; and only once the profile holds no pair and no
+    work room, so that a pair is never dropped here without ``forget``, which tells Lucille when it
+    can. A Connect request still waiting (``state/connect.json``) goes with the state folder, as
+    ``pair cancel`` drops one: only this computer keeps it. Before anything is deleted, both
+    folders are read through, and a folder that is not one, or that holds anything on another
+    device (a mount point), is refused (:func:`_check_folder`); the deletion itself crosses no
+    device either (:func:`_remove_folder`). A profile with nothing left is no failure: the verb
     can be run again after one that stopped part way."""
     host_state.startup_checks()
     state_dir = paths.ensure_dir(dirs.state)
@@ -1823,6 +1939,7 @@ def _uninstall_data(args: argparse.Namespace, dirs: paths.Dirs, out: _Out) -> No
         loop.one_at_a_time(state_dir / loop.RUN_LOCK, UNINSTALL_RUNNING, "`uninstall-data`"),
         loop.one_at_a_time(state_dir / PAIR_LOCK, UNINSTALL_PAIRING, "`uninstall-data`"),
         _policy_lock(dirs),
+        store.file_lock(state_dir / store.CREDENTIALS_LOCK),
     ):
         session = link.open_session(dirs, host_state.load_host_config(dirs), say=_say, warn=_warn)
         held = session.held()
@@ -1831,11 +1948,12 @@ def _uninstall_data(args: argparse.Namespace, dirs: paths.Dirs, out: _Out) -> No
         record = rooms.load(dirs.rooms_file)
         if record.pair is not None and (record.held or record.accepting is not None):
             raise _Refused("held", UNINSTALL_ROOMS.format(name=record.pair))
-        store.delete_items(dirs.profile)
         folders = [dirs.state, dirs.config]
         for folder in folders:
-            if folder.exists() or folder.is_symlink():
-                shutil.rmtree(folder)
+            _check_folder(folder)
+        store.delete_items(dirs.profile)
+        for folder in folders:
+            _remove_folder(folder)
     out.say(
         f"uninstalled: profile {dirs.profile}'s keyring items and folders are removed from this "
         "computer",

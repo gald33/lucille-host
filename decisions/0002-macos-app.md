@@ -156,7 +156,8 @@ developing the app. Its builds stay ad hoc signed, for the repository owner's ow
   held, in memory only, the menu shows its line, which shows it again, and **Prepare to Update…**. Prepare
   to Update is the app's own Quit with no question: `run` drains, then the app quits. There is no
   **Download** button (the maintainer's decision of 2026-11-07).
-- **Remove Capsule…** (section 17), in the Settings submenu. It asks first, in step 1's words, with
+- **Remove Capsule…** (section 17), in the Settings submenu. It asks first, in step 1's words and a
+  mention of the saved app passwords and the activity log, which go with the settings, with
   Cancel the default, and offers **Save a Copy of the Activity Log…**, after which it asks again. Then it
   pauses the host, drains `run` with **Stop Now** as a Disconnect does, and runs `forget`, which takes the
   login item away with the pair; then `uninstall-data --yes` on profile `mac-app`, a host verb new with
@@ -263,14 +264,20 @@ made for the first build", says why for most of them:
   the app stays, and Remove can be chosen again. A quit during Remove finishes `forget`, as a quit during
   a Disconnect does, and deletes nothing; a quit while `uninstall-data` runs waits for it, and then the app
   goes to the Trash with no note. The app moves itself with the file system's own call, not the Finder;
-  when that fails, its note says to drag it there. Step 1's words are the app's, not the core's (§8);
+  when that fails, its note says to drag it there. Step 1's words are the app's, not the core's (§8),
+  and say also that the saved app passwords and the activity log are deleted;
 - `uninstall-data --yes` decides, where section 17 does not: it works on the profile it is given, the
   app's `mac-app`, and so leaves `default` alone unless named. It takes the profile's `run` lock, its
   pairing lock and its settings lock, and refuses with `busy` while `run` or `pair` of the profile runs,
-  and with `held` while the profile holds a pair or the work rooms of one gone; it adds no error code. It
-  deletes the Keychain items under `lucille-host` and `lucille-host.credentials`, reading each back to
-  check it is gone, before any folder, then the profile's state and config folders; the
-  `lucille-host` folder around them stays. Run again on a profile with nothing left, it succeeds;
+  and with `held` while the profile holds a pair or the work rooms of one gone. It holds the credential
+  store's lock too. It adds one error code, `other_device`: before it deletes anything it reads both
+  folders through, and refuses one that holds anything on another device (a mount point), as it
+  refuses a folder that is a symbolic link (`state_invalid`); the deletion itself crosses no device,
+  and deletes lock files last. It deletes the Keychain items under `lucille-host` and
+  `lucille-host.credentials`, reading each back to check it is gone, before any folder, then the
+  profile's state and config folders; the `lucille-host` folder around them stays. A Connect request
+  still waiting goes with them, as `pair cancel` drops one. Run again on a profile with nothing left,
+  it succeeds;
 - a run the app stopped waiting for is counted as stuck, and said to hold up every change to folders and
   abilities, only when its verb takes the host's settings lock: of the short runs, `ops enable` and
   `ops disable`, `roots add` but the alias suggestion, `roots remove`, `policy reset` and Remove's
