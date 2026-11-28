@@ -430,8 +430,10 @@ and repair belong in the host at all. It is built in the smallest form that answ
 nothing on its own:
 - `lucille-host profile check`, run as the user, **finds and says**; it never repairs. The repair needs
   root, which the host never is (as root, the verb is refused like every other). It takes no lock, sends
-  nothing, and writes nothing but its line in the run record (which, as for every command, makes the
-  state folder where it is missing), and it exits 0 whatever it finds.
+  nothing, and writes nothing but its line in the run record, and it exits 0 whatever it finds. Writing
+  that line, as every command does (`runs.record`, through `paths.ensure_dir`), makes the state folder and
+  each missing folder above it, each at mode 0700, and sets the state folder to mode 0700 where it was
+  there already, whatever mode it had.
 - It resolves the profile's folders with `paths.dirs`, as every verb does (an absolute `XDG_*_HOME`, a
   relative one ignored, a relative `HOME`, the macOS layout, where the state folder is inside the config
   folder and is looked at once), then follows every symbolic link (`os.path.realpath`), since the host

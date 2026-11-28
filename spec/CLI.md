@@ -1379,8 +1379,9 @@ that root owns, mode 0700 or 0600, so that the user's own commands fail with `Pe
 ([decisions/0004-running-as-root.md](../decisions/0004-running-as-root.md), 1.2 and 4.3). `profile check`,
 run as the user, finds them and says how to repair each one. It changes nothing (the repair needs root,
 and the host never runs as root: as root it is refused, as every verb is), takes no lock, sends nothing,
-and writes nothing but its line in the run record (section 16: like every command, it makes the state
-folder where that is missing). It exits 0 whatever it finds.
+and writes nothing but its line in the run record (section 16). Writing that line, as every command does,
+makes the state folder and each missing folder above it, each at mode 0700, and sets the state folder to
+mode 0700 where it was there already, whatever mode it had. It exits 0 whatever it finds.
 
 - **Which folders.** The profile's config folder, and its state folder where that is not inside the config
   folder. Each is resolved as every verb resolves it (`HOME` where it is absolute, an absolute

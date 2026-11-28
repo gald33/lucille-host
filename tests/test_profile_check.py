@@ -418,10 +418,13 @@ def test_the_verb_writes_nothing_but_its_run_record(
 ) -> None:
     paths.ensure_dir(host_env.dirs.config)
     paths.ensure_dir(host_env.dirs.state)
+    # The one mode it changes, as every command does when it writes its run record line.
+    host_env.dirs.state.chmod(0o755)
     before = sorted(p for p in host_env.home.rglob("*") if p.name != "runs.jsonl")
     assert main(["profile", "check"]) == 0
     assert capsys.readouterr().out == "every folder and file of this profile is yours\n"
     assert sorted(p for p in host_env.home.rglob("*") if p.name != "runs.jsonl") == before
+    assert host_env.dirs.state.stat().st_mode & 0o777 == 0o700
 
 
 def test_the_verb_in_text(
