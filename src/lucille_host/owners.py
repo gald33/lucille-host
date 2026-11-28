@@ -14,23 +14,27 @@ it is not inside the config folder, as it is on macOS):
 - The folder, resolved as :mod:`lucille_host.paths` resolves it (``HOME``, an absolute
   ``XDG_CONFIG_HOME`` or ``XDG_STATE_HOME``, the macOS layout), then with every symbolic link
   followed (:func:`os.path.realpath`), since the host follows them too.
-- The folder and each folder above it, up to the first one the user owns, and never the home
-  folder or anything above it. A folder that is missing is not damage: the host makes it. A folder
-  that cannot be looked at, because the folder above it does not let the user in, is not reported
-  when a folder above it is another user's: repairing that one repairs it. Of the folders owned by
-  another user, the highest is reported: ``chown -R`` of it repairs the ones below.
+- The folder and each folder above it, up to the first one the user owns, never ``/``, and, for a
+  folder inside the home folder, never the home folder or anything above it. A folder that is
+  missing is not damage: the host makes it. A folder that cannot be looked at, because the folder
+  above it does not let the user in, is not reported when a folder above it is another user's:
+  repairing that one repairs it. Of the folders owned by another user, the highest is reported:
+  ``chown -R`` of it repairs the ones below.
 - Where the folder itself is the user's, every folder and file inside it. One owned by another
   user is reported, and nothing inside it. A symbolic link is not followed into, and its own owner
   does not matter; what it points to, which the host follows (a ``policy.toml`` linked to a file
-  kept elsewhere), is looked at as the folder or file it is, and reported by its own path.
+  kept elsewhere), is looked at as the folder or file it is, and reported by its own path, unless
+  that is the home folder or a folder above it (a link to ``/``), which is never reported.
 
 A folder or file outside the home folder is reported with no repair: the host cannot tell whether
 another program needs it as it is (decisions/0004, 4.3, "Not checked"), so a person decides.
 
 Each finding inside the home folder comes with two command lines, for a person to run as root:
 one that shows what is there (``ls -lR``), since the folder may hold another program's files, and
-one that gives it back to the user (``chown -R``, or ``chown`` for a file), naming the user by
-uid, which needs no lookup. The group is left as it is.
+one that gives it back to the user (``chown -R``, or ``chown -h`` for a file), naming the user
+by uid, which needs no lookup. The group is left as it is. ``-h`` changes a symbolic link itself:
+a file the user swaps for a link between the check and the repair does not give root's ``chown``
+the file the link points to.
 """
 
 from __future__ import annotations
@@ -111,11 +115,16 @@ def _commands(path: Path, kind: str, me: int) -> tuple[str, str]:
     quoted = _quoted(str(path))
     if kind == "folder":
         return f"ls -lR {quoted}", f"chown -R {me} {quoted}"
-    return f"ls -l {quoted}", f"chown {me} {quoted}"
+    return f"ls -l {quoted}", f"chown -h {me} {quoted}"
 
 
 def _finding(path: Path, kind: str, uid: int, home: Path, me: int) -> Found:
-    if not path.is_relative_to(home) or path == home:
+    """What is reported of ``path``, which uid ``uid`` owns: ``not_yours`` inside the home folder,
+    with its commands, and ``outside_home`` anywhere else, with none. The home folder itself and a
+    folder above it are ``outside_home`` too, never a ``chown -R`` of the whole home folder: the
+    walk up from a profile outside the home folder reports the highest folder another user owns
+    even where that folder holds the home folder (``/home``, ``/Users``)."""
+    if path == home or not path.is_relative_to(home):
         return Found(OUTSIDE_HOME, path, kind, uid)
     look, repair = _commands(path, kind, me)
     return Found(NOT_YOURS, path, kind, uid, look, repair)
@@ -166,9 +175,14 @@ def _inside(folder: Path, home: Path, me: int) -> list[Found]:
             return
         except OSError:
             return  # it points at nothing, or at itself: the host reads nothing there
+        target = _real(path)
+        if home.is_relative_to(target):
+            # `/`, the home folder, or a folder that holds it: root owning one is not what a run as
+            # root leaves, and a link inside the profile does not make it the profile's.
+            return
         uid = _uid(info)
         if uid != me:
-            found.append(_finding(_real(path), _kind(info), uid, home, me))
+            found.append(_finding(target, _kind(info), uid, home, me))
 
     def other(path: Path) -> bool:
         """Whether nothing inside ``path`` is to be looked at: it is not the user's, or it is a

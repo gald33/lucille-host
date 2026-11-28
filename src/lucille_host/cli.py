@@ -47,8 +47,9 @@ verbs:
 - ``pause``, ``resume`` and ``kill``: the local controls;
 - ``profile check``: whether every folder and file of the profile, and every folder above it up
   to the home folder, is the user's, and, for one that root (or another user) owns, the commands
-  that repair it, for a person to run as root (``owners.py``). It changes nothing but its line in
-  the run record.
+  that repair it, for a person to run as root (``owners.py``). It changes nothing but what every
+  command changes: its line in the run record, written after the state folder and each missing
+  folder above it are made at mode 0700 and the state folder is set to mode 0700.
 - ``verify``: the host installed here is a release PyPI serves, attested by this repository's
   release workflow, and its installed files are the release's (``verify.py``). It needs the
   ``[verify]`` extra, and reads no file of a profile.
@@ -716,7 +717,8 @@ def build_parser() -> argparse.ArgumentParser:
             "check",
             help=(
                 "find the profile's folders and files that root or another user owns, and show "
-                "the commands that repair them; changes nothing"
+                "the commands that repair them; changes nothing but the run record, which, as "
+                "for every command, makes the state folder at mode 0700, or sets it to 0700"
             ),
         )
     )
@@ -1148,7 +1150,8 @@ def _policy_verb(args: argparse.Namespace, dirs: paths.Dirs, out: _Out) -> None:
 def _profile_check(args: argparse.Namespace, dirs: paths.Dirs, out: _Out) -> None:
     """``profile check``: each folder or file of the profile that is not the user's, as it is
     found, or one ``ok``. It takes no lock, opens no session, sends nothing, and writes nothing but
-    the line of the run record that :func:`main` writes for every command."""
+    the line of the run record that :func:`main` writes for every command, which makes the state
+    folder and each missing folder above it at mode 0700, and sets the state folder to 0700."""
     found = owners.check(dirs.profile)
     for each in found:
         path = str(each.path)

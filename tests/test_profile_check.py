@@ -16,6 +16,7 @@ relative ``HOME``, symbolic links, macOS, and a folder outside the home folder.
 from __future__ import annotations
 
 import os
+import shlex
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -121,8 +122,28 @@ def test_a_root_owned_file_in_the_users_profile(home: Path, planted: Planted) ->
             "file",
             0,
             f"ls -l '{policy_file}'",
-            f"chown {TEST_UID} '{policy_file}'",
+            f"chown -h {TEST_UID} '{policy_file}'",
         )
+    ]
+
+
+def test_a_files_repair_changes_a_link_swapped_in_and_not_what_it_points_to(
+    home: Path, planted: Planted
+) -> None:
+    # Root runs `repair` later, by hand. Should the user swap the file for a symbolic link to a file
+    # of root's by then, a `chown` that follows the link would give the user that file: `-h` changes
+    # the link itself.
+    environ = _linux(home)
+    found = _made(environ)
+    found.policy_file.write_text("")
+    _plant(planted, found.policy_file)
+    (repaired,) = _check(environ)
+    assert repaired.repair is not None
+    assert shlex.split(repaired.repair) == [
+        "chown",
+        "-h",
+        str(TEST_UID),
+        os.path.realpath(found.policy_file),
     ]
 
 
@@ -222,6 +243,34 @@ def test_a_custom_xdg_folder_inside_home(home: Path, planted: Planted) -> None:
     assert result[0].repair == f"chown -R {TEST_UID} '{real}'"
 
 
+def test_a_profile_outside_home_under_a_root_owned_folder_that_holds_home(
+    tmp_path: Path, planted: Planted, unreadable_folders: list[Path]
+) -> None:
+    # `/home/cfg` beside `/home/u`: root made `cfg`, mode 0700, in the root-owned folder that holds
+    # the home folder, so every verb is refused there. That folder is the highest another user owns,
+    # and it is reported: the rule that a link to the home folder or above is no finding is not the
+    # walk's.
+    shared = tmp_path / "shared"
+    user_home = shared / "u"
+    user_home.mkdir(parents=True)
+    environ = {"HOME": str(user_home), "XDG_CONFIG_HOME": str(shared / "cfg")}
+    found = _made(environ)
+    chain = [found.config, found.config.parent, shared / "cfg", shared]
+    _plant(planted, *chain)
+    for folder in chain[:-1]:
+        folder.chmod(0)
+        unreadable_folders.append(folder)
+    real = Path(os.path.realpath(shared))
+    assert _check(environ) == [owners.Found("outside_home", real, "folder", 0)]
+
+
+def test_the_home_folder_itself_is_never_given_a_repair(home: Path) -> None:
+    real = Path(os.path.realpath(home))
+    assert owners._finding(real, "folder", 0, real, TEST_UID) == owners.Found(
+        "outside_home", real, "folder", 0
+    )
+
+
 def test_a_custom_xdg_folder_outside_home_gets_no_repair(
     home: Path, tmp_path: Path, planted: Planted
 ) -> None:
@@ -319,6 +368,22 @@ def test_what_a_symlink_inside_the_profile_points_to_is_looked_at(
     ]
 
 
+@pytest.mark.parametrize("where", ["/", "home", "above home"])
+def test_a_symlink_to_the_home_folder_or_above_is_not_reported(
+    home: Path, planted: Planted, where: str
+) -> None:
+    # Root owns `/`, and may own the home folder and the folder above it: none of them is what a
+    # run as root left, so a link inside the profile to one of them is no finding. With the home
+    # folder, a finding would ask root to `chown -R` the whole home folder.
+    target = {"/": Path("/"), "home": home, "above home": home.parent}[where]
+    environ = _linux(home)
+    found = _made(environ)
+    (found.state / "link").symlink_to(target)
+    _plant(planted, target)
+    assert owners._uid(os.stat(target)) == 0
+    assert _check(environ) == []
+
+
 def test_a_policy_file_linked_to_a_root_owned_file(home: Path, planted: Planted) -> None:
     # The host reads the policy through the link, so the file it points to is the one to repair.
     environ = _linux(home)
@@ -330,7 +395,9 @@ def test_a_policy_file_linked_to_a_root_owned_file(home: Path, planted: Planted)
     _plant(planted, target)
     real = Path(os.path.realpath(target))
     assert _check(environ) == [
-        owners.Found("not_yours", real, "file", 0, f"ls -l '{real}'", f"chown {TEST_UID} '{real}'")
+        owners.Found(
+            "not_yours", real, "file", 0, f"ls -l '{real}'", f"chown -h {TEST_UID} '{real}'"
+        )
     ]
 
 
@@ -379,10 +446,13 @@ def test_the_verb_writes_nothing_but_its_run_record(
 ) -> None:
     paths.ensure_dir(host_env.dirs.config)
     paths.ensure_dir(host_env.dirs.state)
+    # The one mode it changes, as every command does when it writes its run record line.
+    host_env.dirs.state.chmod(0o755)
     before = sorted(p for p in host_env.home.rglob("*") if p.name != "runs.jsonl")
     assert main(["profile", "check"]) == 0
     assert capsys.readouterr().out == "every folder and file of this profile is yours\n"
     assert sorted(p for p in host_env.home.rglob("*") if p.name != "runs.jsonl") == before
+    assert host_env.dirs.state.stat().st_mode & 0o777 == 0o700
 
 
 def test_the_verb_in_text(

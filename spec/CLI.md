@@ -1436,8 +1436,9 @@ that root owns, mode 0700 or 0600, so that the user's own commands fail with `Pe
 ([decisions/0004-running-as-root.md](../decisions/0004-running-as-root.md), 1.2 and 4.3). `profile check`,
 run as the user, finds them and says how to repair each one. It changes nothing (the repair needs root,
 and the host never runs as root: as root it is refused, as every verb is), takes no lock, sends nothing,
-and writes nothing but its line in the run record (section 16: like every command, it makes the state
-folder where that is missing). It exits 0 whatever it finds.
+and writes nothing but its line in the run record (section 16). Writing that line, as every command does,
+makes the state folder and each missing folder above it, each at mode 0700, and sets the state folder to
+mode 0700 where it was there already, whatever mode it had. It exits 0 whatever it finds.
 
 - **Which folders.** The profile's config folder, and its state folder where that is not inside the config
   folder. Each is resolved as every verb resolves it (`HOME` where it is absolute, an absolute
@@ -1445,7 +1446,9 @@ folder where that is missing). It exits 0 whatever it finds.
   symbolic link followed, since the host follows them too. A finding's `path` is the resolved one; `ok`
   names the two folders as every verb names them, before symbolic links are followed.
 - **Above each folder.** It looks at the folder and each folder above it, up to the first one the user
-  owns, and never at the home folder or above it. A missing folder is not reported: the host makes it. Of
+  owns, never at `/`, and, for a folder inside the home folder, never at the home folder or above it. For a
+  folder outside the home folder, the highest folder another user owns is written as `outside_home` even
+  where it holds the home folder (`/home` or `/Users`). A missing folder is not reported: the host makes it. Of
   the folders another user owns, it writes the highest, since `chown -R` of it repairs the ones below. A
   folder that cannot be looked at because the one above it refuses the user is written as `unreadable` only
   when no folder above it is another user's.
@@ -1453,10 +1456,13 @@ folder where that is missing). It exits 0 whatever it finds.
   owns is written, and nothing inside it is looked at; one that cannot be looked at is `unreadable`. A
   symbolic link is not followed into, and its own owner does not matter; what it points to, which the host
   follows (a `policy.toml` linked to a file kept elsewhere), is looked at as the folder or file it is, and
-  written by its own resolved path.
+  written by its own resolved path, unless that is the home folder or a folder above it (a link to `/`),
+  which is never written for a link.
 - **The repair.** Inside the home folder, `look` is `ls -lR '<path>'` (`ls -l` for a file) and `repair` is
-  `chown -R <uid> '<path>'` (`chown` for a file), `<uid>` being the user's own uid, which needs no lookup
-  in the user database. The group is left as it is. The folder may hold another program's files by now
+  `chown -R <uid> '<path>'` (`chown -h` for a file), `<uid>` being the user's own uid, which needs no
+  lookup in the user database. `-h` changes a symbolic link itself, never the file it points to, so that a
+  file swapped for a link before root runs `repair` gives root's `chown` nothing else. The group is left as
+  it is. The folder may hold another program's files by now
   (a `~/.config` root made), so a person runs `look` first. Outside the home folder it suggests no
   command (`outside_home`): whether another program needs that folder as it is is a person's call.
 - The text form writes one finding per line, `look` and `repair` indented below it, or "every folder and
