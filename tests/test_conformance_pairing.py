@@ -21,7 +21,14 @@ from switchboard import pairing
 
 from lucille_host import connect, delivery
 from lucille_host.conformance import _spawn
-from lucille_host.conformance._host import HarnessError, host_env, outline, until
+from lucille_host.conformance._host import (
+    HarnessError,
+    check_sas,
+    host_env,
+    outline,
+    summary,
+    until,
+)
 from lucille_host.conformance._lucille import (
     EPOCH_OFFSETS,
     Lucille,
@@ -232,3 +239,62 @@ def test_a_wait_without_detail_says_only_what_did_not_happen() -> None:
     with pytest.raises(HarnessError) as raised:
         until(lambda: False, "the thing", seconds=0.1)
     assert str(raised.value) == "the thing did not happen within 0.1 s"
+
+
+def test_summary_of_pair_confirm_shows_its_state_not_its_name() -> None:
+    written = [{"v": 1, "type": "pair", "state": "sas_pending", "name": SECRETS[1]}]
+    assert summary(written) == "pair sas_pending"
+    assert summary([]) == "nothing"
+
+
+def _sas_pending(sas: str) -> dict[str, object]:
+    return {
+        "v": 1,
+        "type": "pair",
+        "state": "sas_pending",
+        "name": SECRETS[1],
+        "sas": sas,
+        "deadline": "2026-11-01T12:00:00Z",
+    }
+
+
+def test_check_sas_passes_when_the_host_shows_lucilles_sas() -> None:
+    check_sas(_child([_sas_pending("4821")], ""), "4821")
+
+
+@pytest.mark.parametrize(
+    ("written", "held", "said"),
+    [
+        (
+            [_sas_pending("4821")],
+            "9374",
+            "pair begin ended on pair sas_pending; the SAS it showed is not the one Lucille holds",
+        ),
+        (
+            [_sas_pending("4821")],
+            None,
+            "pair begin ended on pair sas_pending; the SAS it showed is not the one Lucille "
+            "holds, which is none",
+        ),
+        (
+            [{"v": 1, "type": "pair", "state": "waiting", "name": SECRETS[1]}],
+            "4821",
+            "pair begin ended on pair waiting; the SAS it showed is not the one Lucille holds",
+        ),
+        (
+            [],
+            "4821",
+            "pair begin ended on nothing; the SAS it showed is not the one Lucille holds",
+        ),
+    ],
+)
+def test_check_sas_says_which_without_saying_either_sas(
+    written: list[object], held: str | None, said: str
+) -> None:
+    with pytest.raises(HarnessError) as raised:
+        check_sas(_child(written, f"a line naming {SECRETS[4]}\n"), held)
+    message = str(raised.value)
+    assert message.splitlines()[0] == said
+    assert message.splitlines()[1].startswith("pair begin: exit 0; wrote ")
+    for secret in ("4821", "9374", *SECRETS):
+        assert secret not in message
