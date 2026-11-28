@@ -1322,8 +1322,10 @@ when every check that ran passed, 1 when one failed (a folder that is not a clea
 commit, or not a git checkout at all, included), and 2 on a usage error or a disk image off a Mac.
 
 What it does not establish, plainly:
-- **Off a Mac, a changed Mach-O file still exits 0.** It takes the app, not the disk image, compares no
-  Mach-O file, and its last line says how many it did not compare.
+- **Off a Mac, a changed Mach-O file still exits 0.** It takes the app, not the disk image, and compares
+  no Mach-O file. When every other check passed, its last line says how many it did not compare: "every
+  check passed, but N Mach-O files were not compared with their references: run this on a Mac for
+  that".
 - **The app's own executable and every `.pyc` file are admitted by name only.** The executable must be
   a Mach-O file, and only the rebuild job compares it; what each `.pyc` holds, `check_app.py bytecode`
   (above) judges.
