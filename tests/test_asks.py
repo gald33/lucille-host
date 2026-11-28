@@ -12,6 +12,7 @@ import subprocess
 import sys
 import threading
 import time
+import unicodedata
 from pathlib import Path
 from typing import Any
 
@@ -257,6 +258,34 @@ def test_every_line_of_lucilles_words_is_marked_and_fits() -> None:
     words = " ".join(line.removeprefix("Lucille says: ") for line in lines)
     assert words.replace(" ", "") == reason.replace(" ", "")
     assert asks.reason_lines("Short.") == ["Lucille says: Short."]
+
+
+def _drawn_width(text: str) -> int:
+    """How many columns a terminal draws ``text`` in, worked out apart from the host's own count:
+    two for an East Asian wide or fullwidth character, one for any other."""
+    return sum(2 if unicodedata.east_asian_width(char) in "WF" else 1 for char in text)
+
+
+def test_a_wide_character_counts_two_columns() -> None:
+    assert asks._columns("漢") == 2
+    assert asks._columns("a") == 1
+    assert asks._columns("Lucille says: 漢字") == 18
+
+
+def test_each_line_of_lucilles_words_fits_in_78_columns_as_a_terminal_draws_it(
+    host_env: HostEnv,
+) -> None:
+    # Wide characters only, in words and in one word wider than a line: counted one column each,
+    # their lines would be drawn up to 142 columns wide.
+    reason = "漢字" * 40 + " " + " ".join(["漢字漢字"] * 40)
+    assert len(reason) <= asks.REASON_MAX and asks.reason_showable(reason)
+    ask = _ask(host_env, reason=reason)
+    lines = cli._ask_lines(ask, replaces=False)
+    marked = [line for line in lines if line.startswith("Lucille says: ")]
+    assert len(marked) > 3
+    assert lines[-len(marked) :] == marked
+    widths = [_drawn_width(line) for line in marked]
+    assert max(widths) <= 78, widths
 
 
 def test_the_rule_is_the_reference_models_on_every_code_point() -> None:
