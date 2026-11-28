@@ -168,6 +168,14 @@ jobs:
           xcodebuild -version
           xcrun swiftc --version
           uv --version
+      # The host's whole test suite runs below on a copy of the bundled runtime, and its conformance
+      # scenarios run files.search through the bundled host, which runs ripgrep from the one path
+      # the catalog names for macOS. This image does not ship it. It is installed before any
+      # snapshot of ~/Library is taken, so that Homebrew's own writes are in neither diff.
+      - name: Install ripgrep where files.search looks for it
+        run: |
+          brew install ripgrep
+          /opt/homebrew/bin/rg --version
       # A build from a tag passes --tag; any other build passes the run number (decisions/0002 §7).
       - name: Check the pins (plan)
         run: |
