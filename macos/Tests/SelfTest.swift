@@ -3133,8 +3133,68 @@ extension SelfTest {
         report.expect(stateWords == expectedWords && SetupText.folderDenied != SetupText.folderUnopened,
                       "a folder that opens says nothing; macOS's block, its permissions, a missing folder and any other error each say so",
                       "\(stateWords)")
+        checkFolderNotes(report)
 
         checkSetupWalk(report)
+    }
+
+    /// The notes of `roots check` after a folder is added from the menu and at launch (decisions/0002
+    /// §12): each in the Folders page's words, Open Privacy Settings only for a folder macOS
+    /// blocks, the menu's own note for a folder that opens or a check that did not answer, and no
+    /// note at launch while every folder opens.
+    static func checkFolderNotes(_ report: Report) {
+        let app = HostText.appName
+        let added = HostText.folderAdded(alias: "documents", connected: true)
+        let plain = FolderNote(title: "Folder added", text: added, warning: false, place: nil)
+        let opens = SetupText.addedNote(alias: "documents", connected: true, state: .ok)
+        let unanswered = SetupText.addedNote(alias: "documents", connected: true, state: nil)
+        report.expect(opens == plain && unanswered == plain,
+                      "a folder added that opens, or whose check did not answer, gets the menu's own note",
+                      "\(opens) \(unanswered)")
+        let notYet = SetupText.addedNote(alias: "documents", connected: false, state: .ok)
+        report.expect(notYet.text == HostText.folderAdded(alias: "documents", connected: false) && notYet.place == nil,
+                      "and before a connection, the note says a new connection starts with no folders", notYet.text)
+
+        let blocked = SetupText.addedNote(alias: "documents", connected: true, state: .deniedByMacOS)
+        report.expect(blocked == FolderNote(
+            title: "\(app) can't open \u{201C}documents\u{201D}",
+            text: "The folder was added. macOS is blocking \(app) from this folder. Until \(app) can open it, Lucille can't use this folder.",
+            warning: true, place: .filesAndFolders
+        ), "a folder added that macOS blocks says so in the Folders page's words, with Open Privacy Settings", "\(blocked)")
+        let others: [FolderCheck.State] = [.denied, .missing, .error(errno: "EIO")]
+        let otherNotes = others.map { SetupText.addedNote(alias: "documents", connected: true, state: $0) }
+        let otherWords = others.map { SetupText.folderState($0) ?? "" }
+        report.expect(zip(otherNotes, otherWords).allSatisfy { note, said in
+            note.warning && note.place == nil && note.text.contains(said) && note.text.hasPrefix("The folder was added. ")
+        }, "its permissions, a missing folder and any other error say so too, and offer no place", "\(otherNotes)")
+
+        let checks = [
+            FolderCheck(alias: "documents", path: "/Users/a/Documents", state: .ok),
+            FolderCheck(alias: "photos", path: "/Volumes/Photos", state: .missing),
+            FolderCheck(alias: "work", path: "/Users/a/Work", state: .deniedByMacOS),
+        ]
+        report.expect(SetupText.launchNote([]) == nil && SetupText.launchNote([checks[0]]) == nil,
+                      "at launch, no folders, or folders that all open, say nothing")
+        let missing = SetupText.launchNote([checks[0], checks[1]])
+        report.expect(missing == FolderNote(
+            title: "\(app) can't open \u{201C}photos\u{201D}",
+            text: "This folder isn't there any more. Until \(app) can open it, Lucille can't use this folder.",
+            warning: true, place: nil
+        ), "at launch, one folder that isn't there any more is named and said in words, with no place", "\(String(describing: missing))")
+        let several = SetupText.launchNote(checks)
+        report.expect(several == FolderNote(
+            title: "\(app) can't open some of your folders",
+            text: "\u{201C}photos\u{201D}: This folder isn't there any more.\n\u{201C}work\u{201D}: macOS is blocking \(app) from this folder.\n\nUntil \(app) can open them, Lucille can't use these folders.",
+            warning: true, place: .filesAndFolders
+        ), "at launch, several are each named, in order, with Open Privacy Settings once one is blocked by macOS",
+           "\(String(describing: several))")
+
+        let folder = Folder(alias: "photos", path: "/Volumes/Photos", broad: false)
+        let moved = Folder(alias: "photos", path: "/Volumes/Other", broad: false)
+        report.expect(SetupText.folderState(of: folder, in: checks) == SetupText.folderMissing
+                      && SetupText.folderState(of: moved, in: checks) == nil
+                      && SetupText.folderState(of: Folder(alias: "documents", path: "/Users/a/Documents", broad: false), in: checks) == nil,
+                      "the menu says a folder's check only for its alias and path, and nothing for one that opens")
     }
 
     /// Set Up through 40,000 seeded steps, partly the way the app feeds it and partly not: the
