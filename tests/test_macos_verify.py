@@ -5,6 +5,7 @@ the check that should see it. Nothing is downloaded: every test runs with ``offl
 from __future__ import annotations
 
 import dataclasses
+import functools
 import hashlib
 import io
 import json
@@ -863,6 +864,27 @@ def _overlapping(second_cmd: int) -> bytes:
     return header + commands + b"code"
 
 
+def _shifted(second_size: int) -> bytes:
+    """A 64-bit Mach-O file of three load commands whose places are two in any case, but where
+    depends on ``second_size``. The first, __LINKEDIT, says it is 32 bytes long, so its vmsize
+    is the second command's ``cmd`` and ``cmdsize``. The second, __TEXT, is ``second_size``
+    bytes long, which says where the third starts. Two __LINKEDIT segments follow, at 144 and
+    216, and the third command is the first of them (``second_size`` 72) or the second (144)."""
+
+    def segment(name: bytes, size: int, vmsize: int) -> bytes:
+        command = struct.pack("<II16sQQQQiiII", 0x19, size, name, 0, vmsize, 0, 0, 1, 1, 0, 0)
+        return command + bytes(size - len(command))
+
+    first = struct.pack("<II16sQ", 0x19, 32, b"__LINKEDIT", 0x4000)
+    second = struct.pack(
+        "<II16sQQQQiiII", 0x19, second_size, b"__TEXT", 0, 0x4000, 0, 0, 5, 5, 0, 0
+    )
+    after = segment(b"__LINKEDIT", 72, 0x1000) + segment(b"__LINKEDIT", 72, 0x2000)
+    commands = first + second + after
+    header = struct.pack("<IiiIIIII", 0xFEEDFACF, 0x0100000C, 0, 6, 3, len(commands), 0, 0)
+    return header + commands + b"code"
+
+
 def test_the_vmsize_may_differ_only_where_both_files_have_it() -> None:
     # The guard on the places: each file's load commands must put the vmsize of __LINKEDIT at
     # the same places. These two differ only inside the first file's one vmsize place, but
@@ -875,6 +897,18 @@ def test_the_vmsize_may_differ_only_where_both_files_have_it() -> None:
     (place,) = verify_app.linkedit_vmsize_offsets(ours)
     assert differ and all(place <= at < place + 8 for at in differ)
     assert verify_app.linkedit_vmsize_offsets(theirs) == [place, 32 + 36 + 32]
+    assert verify_app.compare_without_signatures(ours, theirs) is None
+    assert verify_app.compare_without_signatures(theirs, ours) is None
+    # The same number of places is not enough either. These two differ only inside the first
+    # file's first place, where the second command's length is, so their third commands are
+    # different segments: two places each, at different offsets.
+    ours, theirs = _shifted(72), _shifted(144)
+    assert len(ours) == len(theirs)
+    differ = [at for at in range(len(ours)) if ours[at] != theirs[at]]
+    places = verify_app.linkedit_vmsize_offsets(ours)
+    assert places == [32 + 32, 32 + 32 + 72 + 32]
+    assert differ and all(places[0] <= at < places[0] + 8 for at in differ)
+    assert verify_app.linkedit_vmsize_offsets(theirs) == [32 + 32, 32 + 32 + 144 + 32]
     assert verify_app.compare_without_signatures(ours, theirs) is None
     assert verify_app.compare_without_signatures(theirs, ours) is None
     # Nor may the files differ in length, or have no place at all.
@@ -957,6 +991,23 @@ def test_off_a_mac_the_last_line_is_the_one_the_docstring_quotes(
     last = _last_line(capsys.readouterr().out)
     assert last == "verify_app.py: 1 checks failed"
     assert "``verify_app.py: N checks failed``" in doc
+
+
+def test_on_a_mac_the_last_line_of_a_pass_is_the_one_the_docstring_quotes(
+    built: Fixture, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(verify_app, "checkout_problems", lambda repo, commit: [])
+    monkeypatch.setattr(verify_app, "source_from_checkout", lambda: built.source)
+    monkeypatch.setattr(verify_app, "codesign_problems", lambda app: ([], "Signature=adhoc"))
+    monkeypatch.setattr(
+        verify_app, "verify", functools.partial(verify_app.verify, strip=_fake_strip)
+    )
+    _sign_every_mach_o(built.app)
+    argv = [str(built.app), "--offline", "--host-wheel", str(built.host_wheel)]
+    assert verify_app.main([*argv, "--cache", str(built.cache)], on_mac=True) == 0
+    last = _last_line(capsys.readouterr().out)
+    assert last == "verify_app.py: every check passed"
+    assert f"``{last}``" in " ".join(str(verify_app.__doc__).split())
 
 
 def test_a_copy_that_differs_only_in_the_vmsize_of_linkedit_passes_and_says_so() -> None:
