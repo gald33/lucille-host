@@ -1242,9 +1242,20 @@ rewrites each Mach-O file, so on a Mac each is compared with its reference after
 of `__LINKEDIT`). It never starts the bundled interpreter. `--offline` downloads nothing and reads the
 cache only; `--summary FILE` appends the report as Markdown.
 
-It does not check the app's own executable, which only the rebuild job compares; what each `.pyc`
-holds (`check_app.py bytecode`, above, does); or anything Apple's notarization looked for. Off a Mac it
-takes the app, not the disk image, and compares no Mach-O file.
+On a Mac, a Mach-O file that is still different after that fails the check. Anything in the app that
+is not a file, a folder or a link (a FIFO, a socket, a device) fails before any file is read. It exits 0
+when every check that ran passed, 1 when one failed (a folder that is not a clean checkout of the
+commit, or not a git checkout at all, included), and 2 on a usage error or a disk image off a Mac.
+
+What it does not establish, plainly:
+- **Off a Mac, a changed Mach-O file still exits 0.** It takes the app, not the disk image, compares no
+  Mach-O file, and its last line says how many it did not compare.
+- **The app's own executable and every `.pyc` file are admitted by name only.** The executable must be
+  a Mach-O file, and only the rebuild job compares it; what each `.pyc` holds, `check_app.py bytecode`
+  (above) judges.
+- **`codesign --verify` accepts any consistent ad hoc signature.** It shows the sealed files are the
+  ones signed, not who signed them; the comparison with the source is what holds them to it.
+- Anything Apple's notarization looked for.
 
 ## Not done yet
 

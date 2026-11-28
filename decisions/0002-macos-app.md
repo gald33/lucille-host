@@ -2167,7 +2167,7 @@ Mac only, its disk image, which it mounts read-only. Its module docstring is the
   grew it. So that field is set aside, at the places the load commands give in both files, and nothing
   else. All four of that app's signed files (the interpreter, `_dbm`, and the two wheel extensions) were
   then SAME, and one byte changed in an extension's code, then signed again, was DIFFERENT. On a Mac a
-  file that is not SAME fails the check; elsewhere `codesign` is not there, the files are listed as not
+  file that is DIFFERENT, or that codesign cannot strip, fails the check; elsewhere `codesign` is not there, the files are listed as not
   compared, and the last line says so. Whether a Developer ID signature, or Apple's notarization, leaves
   anything else is not yet seen: the first candidate settles it.
 - **What §18 left open, and the choice made**, the smallest safe form each time: the source is a clean
@@ -2175,7 +2175,15 @@ Mac only, its disk image, which it mounts read-only. Its module docstring is the
   network but PyPI's, the lock's URLs and the pin's; and a stapled app's ticket, which §7 adds only if the
   offline first launch needs it, is not admitted until it is. `macos-app` runs it on every pull request
   on its own disk image, with `--host-wheel` the wheel that job built, which is not on PyPI.
-- What it cannot establish is in §21, step 5.
+- **What fails, and the exit codes.** Anything in the app that is not a file, a folder or a link (a FIFO,
+  a socket, a device) fails before any file is read, since reading one could block. `build.commit`
+  must be the 12 or more hex digits the build writes. It exits 0 when every check that ran passed, 1
+  when one failed, the source check included (a folder that is not a clean checkout of the commit, or
+  not a git checkout at all), and 2 on a usage error or a disk image off a Mac.
+- **Its limits, stated where users read them** (the docstring and `macos/README.md`): off a Mac a
+  changed Mach-O file still exits 0, with the count of those not compared on the last line; the app's
+  executable and every `.pyc` file are admitted by name only; `codesign --verify` accepts any
+  consistent ad hoc signature. What it cannot establish is in §21, step 5.
 
 **The Mac jobs in `release.yml`.**
 1. `macos-payload` (macOS 15, no secrets): downloads the exact wheel PyPI published and checks its sha256;

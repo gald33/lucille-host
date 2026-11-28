@@ -634,6 +634,45 @@ def test_the_rebuild_job_compares_its_build_with_macos_apps_and_reports_a_differ
     )
 
 
+@pytest.mark.parametrize(
+    ("verdict", "warned"),
+    [
+        ("**SAME**", False),
+        ("**DIFFERENT**", True),
+        ("**FAILED**: no tarball at build/macos", True),
+        ("not **SAME**", True),
+    ],
+)
+def test_the_rebuild_job_warns_on_anything_but_same_and_still_passes(
+    tmp_path: Path, verdict: str, warned: bool
+) -> None:
+    # The compare step's own script, run by bash -e as Actions runs it, with build_app.py compare
+    # stood in for by a uv that prints a report with this verdict line: a warning on the run's
+    # page exactly when the verdict is not SAME, the report in the summary, and exit 0 either way.
+    steps = _steps(_ci(), "macos-rebuild")
+    (script,) = [
+        str(step["run"])
+        for step in steps
+        if str(step.get("name", "")).startswith("Compare the two unsigned tarballs")
+    ]
+    (tmp_path / "build" / "macos").mkdir(parents=True)
+    summary = tmp_path / "summary.md"
+    report = f"### The unsigned app\n\n{verdict}\n\n- sha256 a\n"
+    stand_in = f"uv() {{ printf '%s' {shlex.quote(report)}; }}\n"
+    done = subprocess.run(
+        ["bash", "-e", "-c", stand_in + script],
+        cwd=tmp_path,
+        env={**os.environ, "GITHUB_STEP_SUMMARY": str(summary)},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert done.returncode == 0, done.stderr
+    assert ("::warning title=Rebuild::" in done.stdout) is warned, done.stdout
+    assert verdict in done.stdout
+    assert summary.read_text(encoding="utf-8") == report
+
+
 def test_every_job_gates_the_run_the_xcode_27_leg_included() -> None:
     # decisions/0002 §18: the xcode-27 leg did not gate from 2026-11-02, and gates since 2026-11-18,
     # after six push runs on main passed it. No job, and no leg of one, may fail without failing

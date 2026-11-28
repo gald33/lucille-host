@@ -263,6 +263,30 @@ def test_a_mach_o_file_signing_rewrote_is_reported_not_failed(built: Fixture) ->
     assert "2 findings of the RECORD check were about these files only." in text
 
 
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="no FIFOs here")
+@pytest.mark.parametrize(
+    "rel",
+    ["Contents/Resources/fifo", f"{SITE}/demo/fifo", build_app.MANIFEST_PATH],
+)
+def test_a_fifo_anywhere_fails_before_any_file_is_read(
+    built: Fixture, rel: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Reading a FIFO would block, so the check stops first, whether it is planted or stands in
+    # for a file the build makes; main's checkout check never runs either.
+    target = built.app / rel
+    target.unlink(missing_ok=True)
+    os.mkfifo(target)
+    capsys.readouterr()
+    report = built.verify()
+    assert not report.passed
+    assert _failures(report) == "the app holds nothing but files, folders and links"
+    assert f"not a file or a folder: {rel}" in capsys.readouterr().out
+    assert verify_app.main([str(built.app)], on_mac=False) == 1
+    out = capsys.readouterr().out
+    assert "FAIL: the app holds nothing but files, folders and links" in out
+    assert "this checkout" not in out
+
+
 def test_a_file_that_is_not_mach_o_is_never_excused_as_signed(built: Fixture) -> None:
     # The same bytes appended to the wrapper and to a module fail: only a Mach-O file whose
     # reference is one too is set aside.
@@ -372,6 +396,13 @@ LIBRARY = f"{build_app.RUNTIME_DIR}/{build_app.STDLIB}"
         ),
         (_edit(EXECUTABLE, b"#!/bin/sh\n"), "every file outside", "is not a Mach-O file"),
         (_remove(EXECUTABLE), "every file outside", "is missing"),
+        # Only the executable is admitted by name in Contents/MacOS: another Mach-O file fails.
+        (_edit("Contents/MacOS/helper", MACHO + b" helper"), "every file outside", "no such file"),
+        (
+            _edit(f"Contents/MacOS/{APP_NAME}-helper", MACHO + b" helper"),
+            "every file outside",
+            "no such file",
+        ),
         (_edit("Contents/_CodeSignature/Extra", b"x"), "every file outside", "no such file"),
         # site-packages.
         (
@@ -626,7 +657,9 @@ def test_the_checkout_must_be_the_commit_and_unchanged(tmp_path: Path) -> None:
     assert verify_app.checkout_problems(repo, head[:12])
 
 
-@pytest.mark.parametrize("commit", [None, "", "xyz", "0123", "0123456789AB", 12])
+@pytest.mark.parametrize(
+    "commit", [None, "", "xyz", "0123", "0123456", "0123456789a", "0123456789AB", "0" * 41, 12]
+)
 def test_a_commit_that_is_not_a_commit_id_is_refused(tmp_path: Path, commit: object) -> None:
     repo, _ = _repo(tmp_path)
     (problem,) = verify_app.checkout_problems(repo, commit)
@@ -636,6 +669,26 @@ def test_a_commit_that_is_not_a_commit_id_is_refused(tmp_path: Path, commit: obj
 def test_a_folder_that_is_not_a_checkout_is_refused(tmp_path: Path) -> None:
     (problem,) = verify_app.checkout_problems(tmp_path, "0123456789ab")
     assert "is not a git checkout" in problem
+
+
+def test_no_checkout_is_a_failed_check_and_exits_1(
+    built: Fixture,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # The docstring's exit codes: no checkout is the source check failing (1), not a usage
+    # error (2), and nothing after it runs.
+    elsewhere = tmp_path / "not-a-checkout"
+    elsewhere.mkdir()
+    monkeypatch.setattr(build_app, "REPO_ROOT", elsewhere)
+    monkeypatch.setattr(
+        verify_app, "source_from_checkout", lambda: pytest.fail("read the checkout")
+    )
+    assert verify_app.main([str(built.app)], on_mac=False) == 1
+    out = capsys.readouterr().out
+    assert "FAIL: this checkout is the source of the app" in out
+    assert "is not a git checkout" in out
 
 
 # ---------------------------------------------------------------------------------------------
@@ -840,6 +893,23 @@ def test_on_a_mac_each_signed_mach_o_file_must_be_its_references(
     assert any(
         "not compared: `codesign --remove-signature` failed" in line for line in report.reported
     )
+
+
+def test_a_copy_that_differs_only_in_the_vmsize_of_linkedit_passes_and_says_so() -> None:
+    # Through stripped_verdicts, as the Mac path calls it: the vmsize of __LINKEDIT is the one
+    # field set aside, and the verdict says it was; any other byte is DIFFERENT and not the same.
+    def strip(path: Path) -> str | None:
+        return _fake_strip(path)
+
+    pairs = [
+        ("vmsize", _macho(0x14000) + SIGNATURE, _macho(0x10000)),
+        ("same", _macho(0x10000) + SIGNATURE, _macho(0x10000)),
+        ("code", _macho(0x14000, b"code!") + SIGNATURE, _macho(0x10000)),
+    ]
+    verdicts = {v.rel: v for v in verify_app.stripped_verdicts(pairs, strip)}
+    assert verdicts["vmsize"].same and verdicts["vmsize"].text == verify_app.SAME_BUT_VMSIZE
+    assert verdicts["same"].same and verdicts["same"].text == verify_app.SAME
+    assert not verdicts["code"].same and verdicts["code"].text.startswith("DIFFERENT")
 
 
 def test_on_a_mac_the_signature_must_verify(

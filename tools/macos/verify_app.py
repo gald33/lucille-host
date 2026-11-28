@@ -12,10 +12,13 @@ checkout's ``tools/macos/pins.toml``, ``prune.txt``, ``uv.lock``, ``macos/Icons/
 build's own code in ``tools/macos/``. It runs ``uv export`` once, as the build does, to read the
 lock. It runs nothing from the app: the bundled interpreter is never started.
 
-What it checks, in order. Each check prints ``ok:`` or ``FAIL:``.
+What it checks, in order. Each check prints ``ok:`` or ``FAIL:``. First, before it reads any file
+of the app: the app holds nothing but files, folders and links. A FIFO, a socket or a device
+anywhere in it, site-packages included, fails, and nothing else is checked.
 
-1. **The source.** The checkout is at ``build.commit`` and has no change to a tracked file. If
-   not, nothing else is checked.
+1. **The source.** The checkout is at ``build.commit`` (the 12 or more hex digits the build
+   writes) and has no change to a tracked file. If not, or if it is not a git checkout at all,
+   this check fails and nothing else is checked.
 2. **The version rule.** ``build.tag`` or ``build.build_number`` gives the app's two version
    strings from the checkout's ``__version__`` (``build_app.bundle_versions``).
 3. **The downloads.** The wheels the build installs, chosen from the checkout's ``uv.lock`` by
@@ -34,35 +37,57 @@ What it checks, in order. Each check prints ``ok:`` or ``FAIL:``.
    removed, the interpreter renamed, links replaced), ``Info.plist``, ``PkgInfo``, the wrapper,
    the licence texts, the icons and ``MANIFEST.json``. Each file of the app must be the
    reference's file, byte for byte and with the same execute bit, and each file of the
-   reference must be in the app. Admitted by name only: the app's own executable,
-   ``Contents/MacOS/<name>``, which must be a Mach-O file (the Swift app, compiled from
-   ``macos/App/``: see below), codesign's ``Contents/_CodeSignature/CodeResources``, and the
-   ``.pyc`` files of step 7. A symbolic link anywhere fails.
+   reference must be in the app. A Mach-O file whose bytes differ from its reference's, also a
+   Mach-O file, is not failed here: step 8 compares it. Admitted by name only: the app's own
+   executable, ``Contents/MacOS/<name>``, which must be a Mach-O file (the Swift app, compiled
+   from ``macos/App/``: see the limits below), codesign's
+   ``Contents/_CodeSignature/CodeResources``, and the ``.pyc`` files of step 7. Any other file
+   in ``Contents/MacOS`` fails. A symbolic link anywhere fails.
 6. **site-packages** (M10): the installed distributions are exactly the planned wheels and the
    host; every file is byte for byte a file of its wheel's ``RECORD``, apart from the
-   installer's named files and the build's ``.pyc`` files (``payload.record_problems``); each
-   ``RECORD`` is compared line by line with the wheel's own.
+   installer's named files and the build's ``.pyc`` files (``payload.record_problems``), and
+   apart from a Mach-O file whose bytes differ, which step 8 compares; each ``RECORD`` is
+   compared line by line with the wheel's own.
 7. **The bytecode's layout**: one checked-hash ``.pyc`` beside each ``.py`` of the runtime's
    library, and no other bytecode (``build_app.bytecode_layout_problems``). What each holds,
    ``check_app.py bytecode`` judges, with the bundled interpreter.
-8. **On a Mac**: ``codesign --verify --deep --strict`` on the app, which holds every sealed file
-   to ``CodeResources``. A disk image must hold the app and a link to ``/Applications``.
+8. **On a Mac**:
+   - ``codesign --verify --deep --strict`` on the app, which holds every sealed file to
+     ``CodeResources``.
+   - A disk image must hold the app and a link to ``/Applications``.
+   - **The Mach-O files signing rewrote.** Signing rewrites each Mach-O file in place, so step 5
+     does not fail a Mach-O file whose bytes differ from its reference's (the runtime's, or its
+     wheel's) when both are Mach-O files: it hands it here. Each is compared again after
+     ``codesign --remove-signature`` on a copy of both. One field is set aside: the ``vmsize``
+     of the ``__LINKEDIT`` segment, at the places the load commands give in both files, which
+     ``--remove-signature`` leaves as signing grew it (seen on an ad hoc build; decisions/0002
+     §18). Nothing else is. Each file's verdict, SAME, SAME apart from that ``vmsize``, or
+     DIFFERENT, is reported, and **a file that reads DIFFERENT fails**, as does one whose copy
+     codesign cannot strip.
 
-**Reported, not failed.** Signing rewrites each Mach-O file in place, so a Mach-O file that
-differs from its reference (the runtime's, or its wheel's) is not failed. On a Mac each is
-compared again after ``codesign --remove-signature`` on a copy of both, and the verdict, SAME or
-DIFFERENT, is reported; elsewhere it is reported as not compared. Whether stripping gives back
-the reference's bytes is not yet established for a signed build (decisions/0002 §6). The app's
-own executable is reported as not verified. The rebuild job in ``ci.yml`` (``macos-rebuild``)
-compares a second build's unsigned tarball, executable included, with the first's.
+   Off a Mac, codesign is not there: none of step 8 runs, those Mach-O files are listed as not
+   compared, and the last line says how many. Whether a Developer ID signature or notarization
+   leaves anything else after stripping is not yet seen (decisions/0002 §6, §18).
+
+**Limits, plainly**:
+- **Off a Mac, a changed Mach-O file still exits 0.** The interpreter and every extension
+  module are compared only on a Mac; elsewhere the last line says how many were not.
+- **The app's own executable and every ``.pyc`` file are admitted by name only.** The
+  executable must be a Mach-O file, and nothing more is checked here; only the rebuild job in
+  ``ci.yml`` (``macos-rebuild``) compares it, in a second build's unsigned tarball. What each
+  ``.pyc`` holds, ``check_app.py bytecode`` judges.
+- **``codesign --verify`` accepts any consistent ad hoc signature**, so it shows that the sealed
+  files are the ones signed, not who signed them. Steps 5 and 8 hold the files to the source.
 
 **What this cannot establish**: that the Swift app, the runtime and ripgrep are what their
 sources and pins say beyond review and the rebuild job; what Apple's notarization looked for;
-what each ``.pyc`` holds (``check_app.py bytecode`` does); that the copy in Applications is still
-the one checked here after a process running as the same user touched it.
+that the copy in Applications is still the one checked here after a process running as the same
+user touched it.
 
-Exit codes: 0 every check passed, 1 a check failed, 2 a usage error or a check that cannot run
-here (a disk image off a Mac, or no checkout).
+Exit codes: 0 every check that ran passed (off a Mac, step 8 does not run); 1 a check failed,
+the source check included, so a folder that is not a checkout of the commit, or not a git
+checkout at all, exits 1; 2 a usage error, or a disk image off a Mac, which only a Mac can
+open.
 """
 
 from __future__ import annotations
@@ -74,6 +99,7 @@ import json
 import os
 import plistlib
 import re
+import stat
 import struct
 import subprocess
 import sys
@@ -98,7 +124,9 @@ PYPI_JSON: Final = "https://pypi.org/pypi/{project}/{version}/json"
 SIGNATURE_FILES: Final = frozenset({"Contents/_CodeSignature/CodeResources"})
 SIGNATURE_FOLDERS: Final = frozenset({"Contents/_CodeSignature"})
 MANIFEST_SCHEMA: Final = 1
-_COMMIT: Final = re.compile(r"[0-9a-f]{7,40}")
+# The build writes ``git rev-parse --short=12 HEAD``: 12 hex digits, or more where 12 would be
+# ambiguous in the build's checkout.
+_COMMIT: Final = re.compile(r"[0-9a-f]{12,40}")
 _SHA256: Final = re.compile(r"[0-9a-f]{64}")
 
 Fetch = Callable[[str, Mapping[str, str]], bytes]
@@ -160,8 +188,8 @@ def _git(repo: Path, *args: str) -> subprocess.CompletedProcess[str]:
 
 def checkout_problems(repo: Path, commit: object) -> list[str]:
     """Why ``repo`` is not the source of an app built from ``commit`` (``MANIFEST.json``'s
-    ``build.commit``, an abbreviated commit id): it is not a git checkout, its ``HEAD`` is
-    another commit, or a tracked file has a change, staged or not."""
+    ``build.commit``, the at least 12 hex digits the build writes): it is not a git checkout,
+    its ``HEAD`` is another commit, or a tracked file has a change, staged or not."""
     if not isinstance(commit, str) or _COMMIT.fullmatch(commit) is None:
         return [f"MANIFEST.json's build.commit is {commit!r}, not a commit id"]
     head = _git(repo, "rev-parse", "--verify", "HEAD")
@@ -439,6 +467,21 @@ def _entries(app: Path) -> tuple[dict[str, Path], set[str], list[str]]:
             else:
                 files[rel] = path
     return files, folders, sorted(links)
+
+
+def special_files(app: Path) -> list[str]:
+    """Every entry under ``app``, site-packages included, that is neither a regular file, a
+    folder nor a symbolic link (a FIFO, a socket, a device), relative to ``app``. Reading one
+    could block or read something that is not the app's, so the check stops before reading any
+    file when there is one. Links are not followed; :func:`compare_trees` fails them."""
+    found: list[str] = []
+    for folder, dirs, names in os.walk(app):
+        here = Path(folder)
+        for name in sorted([*dirs, *names]):
+            mode = (here / name).lstat().st_mode
+            if not (stat.S_ISREG(mode) or stat.S_ISDIR(mode) or stat.S_ISLNK(mode)):
+                found.append((here / name).relative_to(app).as_posix())
+    return sorted(found)
 
 
 def _executable(path: Path) -> bool:
@@ -722,11 +765,19 @@ def verify(
     fetch: Fetch = check_release.fetch_url,
     strip: Callable[[Path], str | None] = remove_signature,
 ) -> Report:
-    """Steps 2 to 8 of this module's docstring on ``app``, with ``source`` as the checkout. The
-    caller has checked the checkout (step 1)."""
+    """The check for special files and steps 2 to 8 of this module's docstring on ``app``, with
+    ``source`` as the checkout. The caller has checked the checkout (step 1)."""
     report = Report()
     expect = report.checker.expect
     pins = source.pins
+    special = special_files(app)
+    if special:
+        expect(
+            False,
+            "the app holds nothing but files, folders and links",
+            "not a file or a folder: " + ", ".join(special),
+        )
+        return report
     try:
         found, raw = read_manifest(app)
     except VerifyError as exc:
@@ -942,6 +993,11 @@ def _parser() -> argparse.ArgumentParser:
 
 
 def _check_app(app: Path, args: argparse.Namespace, on_mac: bool) -> int:
+    special = special_files(app)
+    if special:
+        print("FAIL: the app holds nothing but files, folders and links")
+        print("not a file or a folder: " + ", ".join(special), flush=True)
+        return 1
     try:
         found, _ = read_manifest(app)
     except VerifyError as exc:
