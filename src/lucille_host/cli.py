@@ -100,6 +100,7 @@ from lucille_host import (
     gate,
     link,
     loop,
+    mounts,
     paths,
     policy,
     report,
@@ -1837,10 +1838,38 @@ UNINSTALL_OTHER_DEVICE_LATE: Final = (
     "there since the check): nothing on it was removed, and the profile's keyring items and part "
     "of its folders may be gone. Unmount it, then run `uninstall-data` again"
 )
+UNINSTALL_MOUNTED: Final = (
+    "{point} is a mount point within the profile's folder {folder}, so what it shows may not be "
+    "the profile's: unmount it, then run `uninstall-data` again. Nothing was removed"
+)
+UNINSTALL_MOUNTED_LATE: Final = (
+    "{point} is a mount point within the profile's folder {folder}, mounted since the check: "
+    "nothing was removed through it, and the profile's keyring items are gone. Unmount it, then "
+    "run `uninstall-data` again"
+)
+UNINSTALL_NO_TABLE: Final = (
+    f"the table of mounts ({mounts.MOUNTINFO}) cannot be read, so lucille-host cannot check that "
+    "nothing is mounted within the profile's folders. Nothing was removed"
+)
 UNINSTALL_NOT_A_FOLDER: Final = (
     "{folder} is not a folder (a symbolic link, or a file), so it is not the profile's own: "
     "nothing was removed"
 )
+UNINSTALL_NOT_A_FOLDER_LATE: Final = (
+    "{folder} is not a folder any more (a symbolic link, or a file, since the check), so it is not "
+    "the profile's own: nothing of it was removed, and the profile's keyring items and part of its "
+    "folders may be gone"
+)
+UNINSTALL_FAILED_LATE: Final = (
+    "{reason} ({path}): the profile's keyring items and part of its folders may be gone. Run "
+    "`uninstall-data` again once that can be deleted"
+)
+# The systems whose table of mounts uninstall-data must read (mounts.read): Linux, where a bind
+# mount shows a folder of the same filesystem, and so of the same device, somewhere else. On macOS
+# there is no such mount (no bind or null mount): each mount is a device of its own, which the
+# device check finds; and no table is read there, since reading it takes native code or a process,
+# which the runtime does not use (tools/guards/ast_lint.py).
+MOUNT_TABLE_SYSTEMS: Final = frozenset({"linux"})
 
 
 class _OtherDevice(Exception):
@@ -1851,7 +1880,11 @@ class _OtherDevice(Exception):
         self.path = path
 
 
-def _folder_device(folder: Path) -> int | None:
+class _DeleteFailed(OSError):
+    """An entry of a profile's folder that could not be read or deleted, named by its whole path."""
+
+
+def _folder_device(folder: Path, *, late: bool = False) -> int | None:
     """The device of ``folder``, read without following a link; None when there is nothing there.
     Anything but a folder is refused, a symbolic link included: what the profile's path names is
     not the host's own then, and nothing of it is deleted."""
@@ -1860,7 +1893,8 @@ def _folder_device(folder: Path) -> int | None:
     except FileNotFoundError:
         return None
     if not stat.S_ISDIR(found.st_mode):
-        raise _Refused("state_invalid", UNINSTALL_NOT_A_FOLDER.format(folder=folder))
+        said = UNINSTALL_NOT_A_FOLDER_LATE if late else UNINSTALL_NOT_A_FOLDER
+        raise _Refused("state_invalid", said.format(folder=folder))
     return found.st_dev
 
 
@@ -1875,31 +1909,42 @@ def _open_folder(name: str | Path, device: int, where: Path, *, dir_fd: int | No
     return descriptor
 
 
-def _walk_folder(descriptor: int, where: Path, device: int, *, delete: bool) -> None:
+def _walk_folder(
+    descriptor: int, where: Path, device: int, *, delete: bool, keep_locks: bool = False
+) -> None:
     """Every entry under the folder ``descriptor`` holds, read without following a link, and each
     checked to be on ``device`` before anything is done with it (:class:`_OtherDevice`, which stops
-    the walk); with ``delete``, each removed, a folder once it is empty. As
-    ``rm --one-file-system``, but stricter: nothing of another device is read into, let alone
-    deleted. Lock files (``*.lock``) go last, so that a command started meanwhile still finds the
-    lock this verb holds, and is refused, until nothing else is left."""
-    with os.scandir(descriptor) as entries:
-        names = sorted(entry.name for entry in entries)
-    names.sort(key=lambda name: name.endswith(".lock"))
+    the walk); with ``delete``, each removed, a folder once it is empty, but for the lock files
+    (``*.lock``) of this folder itself with ``keep_locks``. As ``rm --one-file-system``, but
+    stricter: nothing of another device is read into, let alone deleted. An entry that cannot be
+    read or deleted is a :class:`_DeleteFailed` that names its whole path."""
+    try:
+        with os.scandir(descriptor) as entries:
+            names = sorted(entry.name for entry in entries)
+    except OSError as exc:
+        raise _DeleteFailed(exc.errno, exc.strerror, str(where)) from None
     for name in names:
         path = where / name
-        found = os.stat(name, dir_fd=descriptor, follow_symlinks=False)
-        if found.st_dev != device:
-            raise _OtherDevice(path)
-        if stat.S_ISDIR(found.st_mode):
-            inner = _open_folder(name, device, path, dir_fd=descriptor)
-            try:
-                _walk_folder(inner, path, device, delete=delete)
-            finally:
-                os.close(inner)
-            if delete:
-                os.rmdir(name, dir_fd=descriptor)
-        elif delete:
-            os.unlink(name, dir_fd=descriptor)
+        if keep_locks and name.endswith(".lock"):
+            continue
+        try:
+            found = os.stat(name, dir_fd=descriptor, follow_symlinks=False)
+            if found.st_dev != device:
+                raise _OtherDevice(path)
+            if stat.S_ISDIR(found.st_mode):
+                inner = _open_folder(name, device, path, dir_fd=descriptor)
+                try:
+                    _walk_folder(inner, path, device, delete=delete)
+                finally:
+                    os.close(inner)
+                if delete:
+                    os.rmdir(name, dir_fd=descriptor)
+            elif delete:
+                os.unlink(name, dir_fd=descriptor)
+        except _DeleteFailed:
+            raise
+        except OSError as exc:
+            raise _DeleteFailed(exc.errno, exc.strerror, str(path)) from None
 
 
 def _check_folder(folder: Path) -> None:
@@ -1919,23 +1964,64 @@ def _check_folder(folder: Path) -> None:
         os.close(descriptor)
 
 
-def _remove_folder(folder: Path) -> None:
-    """Delete a profile's folder and all it holds, crossing to no other device: what is mounted
-    inside it since :func:`_check_folder` read it stops the deletion there, and nothing on it is
-    touched. A folder that is not there is no failure."""
-    device = _folder_device(folder)
+def _check_mounts(folders: Sequence[Path], *, late: bool = False) -> None:
+    """Refuse a mount point at or below any of ``folders``, as the table of mounts lists them
+    (:func:`mounts.read`): a bind mount shows another folder of the same filesystem, on the same
+    device, which the device check cannot tell from the profile's own. Where the table must be read
+    (:data:`MOUNT_TABLE_SYSTEMS`) and cannot be, that is refused too. A folder not there is
+    skipped."""
+    table = mounts.read()
+    if table is None:
+        if paths.os_family() in MOUNT_TABLE_SYSTEMS:
+            raise _Refused("other_device", UNINSTALL_NO_TABLE)
+        return
+    for folder in folders:
+        if not os.path.lexists(folder):
+            continue
+        real = os.path.realpath(folder)
+        for mount in table:
+            if mounts.beneath(mount.point, real) is not None:
+                said = UNINSTALL_MOUNTED_LATE if late else UNINSTALL_MOUNTED
+                raise _Refused("other_device", said.format(point=mount.point, folder=folder))
+
+
+def _delete_folder(folder: Path, *, keep_locks: bool) -> None:
+    """Delete what a profile's folder holds, crossing to no other device (what is mounted inside
+    it since :func:`_check_folder` read it stops the deletion there, and nothing on it is
+    touched); with ``keep_locks``, its own lock files stay, else they go and so does the folder.
+    A folder that is not there is no failure."""
+    device = _folder_device(folder, late=True)
     if device is None:
         return
     descriptor = _open_folder(folder, device, folder)
     try:
-        _walk_folder(descriptor, folder, device, delete=True)
+        _walk_folder(descriptor, folder, device, delete=True, keep_locks=keep_locks)
     except _OtherDevice as other:
         raise _Refused(
             "other_device", UNINSTALL_OTHER_DEVICE_LATE.format(path=other.path, folder=folder)
         ) from None
     finally:
         os.close(descriptor)
-    os.rmdir(folder)
+    if not keep_locks:
+        os.rmdir(folder)
+
+
+def _remove_folders(folders: Sequence[Path]) -> None:
+    """Delete the profile's folders once its keyring items are gone: the table of mounts is read
+    again, then everything but the folders' own lock files, in every folder, then those lock files
+    and the folders, so that a command of the profile started meanwhile still finds the lock this
+    verb holds, and is refused, until nothing else of the profile is left. A failure past this point
+    says what may be gone already."""
+    try:
+        _check_mounts(folders, late=True)
+        for folder in folders:
+            _delete_folder(folder, keep_locks=True)
+        for folder in folders:
+            _delete_folder(folder, keep_locks=False)
+    except OSError as exc:
+        reason = exc.strerror or type(exc).__name__
+        path = exc.filename if exc.filename is not None else "the profile's folders"
+        raise _Refused("os_error", UNINSTALL_FAILED_LATE.format(reason=reason, path=path)) from None
 
 
 def _uninstall_data(args: argparse.Namespace, dirs: paths.Dirs, out: _Out) -> None:
@@ -1945,11 +2031,11 @@ def _uninstall_data(args: argparse.Namespace, dirs: paths.Dirs, out: _Out) -> No
     the profile works on what is being deleted; and only once the profile holds no pair and no
     work room, so that a pair is never dropped here without ``forget``, which tells Lucille when it
     can. A Connect request still waiting (``state/connect.json``) goes with the state folder, as
-    ``pair cancel`` drops one: only this computer keeps it. Before anything is deleted, both
-    folders are read through, and a folder that is not one, or that holds anything on another
-    device (a mount point), is refused (:func:`_check_folder`); the deletion itself crosses no
-    device either (:func:`_remove_folder`). A profile with nothing left is no failure: the verb
-    can be run again after one that stopped part way."""
+    ``pair cancel`` drops one: only this computer keeps it. Before anything is deleted, keyring
+    items included, both folders are read through, and a folder that is not one, or that holds
+    anything on another device (:func:`_check_folder`) or a mount point (:func:`_check_mounts`), is
+    refused; the deletion itself crosses no device either (:func:`_remove_folders`). A profile with
+    nothing left is no failure: the verb can be run again after one that stopped part way."""
     host_state.startup_checks()
     state_dir = paths.ensure_dir(dirs.state)
     with (
@@ -1968,9 +2054,9 @@ def _uninstall_data(args: argparse.Namespace, dirs: paths.Dirs, out: _Out) -> No
         folders = [dirs.state, dirs.config]
         for folder in folders:
             _check_folder(folder)
+        _check_mounts(folders)
         store.delete_items(dirs.profile)
-        for folder in folders:
-            _remove_folder(folder)
+        _remove_folders(folders)
     out.say(
         f"uninstalled: profile {dirs.profile}'s keyring items and folders are removed from this "
         "computer",

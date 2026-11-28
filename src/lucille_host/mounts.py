@@ -1,9 +1,11 @@
 """Linux's table of the mounts this process sees, ``/proc/self/mountinfo``.
 
-Two checks read it: whether a folder holds ``$HOME`` through another mount of the same filesystem
-(``policy.holds``), and which devices are ``/proc``, whose per-process names no path may go through
-(``containment.py``). Where there is no table to read (macOS, or a Linux without ``/proc``), it is
-empty, and each check says what it then does.
+Three checks read it: whether a folder holds ``$HOME`` through another mount of the same
+filesystem (``policy.holds``), which devices are ``/proc``, whose per-process names no path may go
+through (``containment.py``), and whether a mount point lies within a profile's folders, which
+``uninstall-data`` then refuses to delete (``cli.py``). Where there is no table to read (macOS, or
+a Linux without ``/proc``), :func:`table` is empty and :func:`read` is None, and each check says
+what it then does.
 """
 
 from __future__ import annotations
@@ -13,7 +15,7 @@ import re
 from dataclasses import dataclass
 from typing import Final
 
-__all__ = ["MOUNTINFO", "Mount", "beneath", "table", "unescape"]
+__all__ = ["MOUNTINFO", "Mount", "beneath", "read", "table", "unescape"]
 
 MOUNTINFO: Final = "/proc/self/mountinfo"
 # A root or mount point in the table writes a space, tab, newline or backslash as \ooo.
@@ -42,13 +44,19 @@ def unescape(field: bytes) -> str:
 def table() -> list[Mount]:
     """The mounts this process sees, in the table's order (a later mount at one place hides an
     earlier one). Empty where there is no table to read; a line it cannot read is left out."""
+    return read() or []
+
+
+def read() -> list[Mount] | None:
+    """As :func:`table`, but None where there is no table to read, so that a check that must see
+    every mount can tell no table from one that lists none."""
     try:
         with open(MOUNTINFO, "rb") as handle:
             # Only "\n" ends a line: the kernel escapes it in a path, but not "\r", which
             # splitlines() would also split on.
             lines = handle.read().split(b"\n")
     except OSError:
-        return []
+        return None
     mounts = []
     for line in lines:
         fields = line.split(b" ")

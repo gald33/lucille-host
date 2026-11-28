@@ -709,10 +709,16 @@ Notes:
   profile changes its item meanwhile. A Connect request still waiting goes with the state folder, as
   `pair cancel` drops one: only this computer keeps it. Before it deletes anything, keyring items
   included, it reads both folders through without following a link: a folder that is not one (a
-  symbolic link, a file) is refused with `state_invalid`, and one that holds anything on another device
-  than its own (a mount point) with `other_device`. The deletion crosses no device either, so that
-  nothing outside the profile's folders is deleted through one. Lock files go last, so that a command
-  of the profile started meanwhile is refused until nothing else is left. A keyring the host does not
+  symbolic link, a file) is refused with `state_invalid`; one that holds anything on another device
+  than its own, or that is or holds a mount point, with `other_device`. On Linux the mount points are
+  read from `/proc/self/mountinfo`, so that a bind mount, which shows another folder of the same
+  filesystem on the same device, is found too; a table that cannot be read is refused the same way. On
+  macOS there is no bind or null mount, and every mount is a device of its own, which the device check
+  finds. The deletion crosses no device either, and the table is read again after the keyring items
+  are deleted and before any folder is, so that nothing outside the profile's folders is deleted
+  through a mount. Every lock file of both folders goes after everything else, so that a command of the
+  profile started meanwhile is refused until nothing else is left. A failure after the keyring items
+  are deleted says that they, and part of the folders, may be gone. A keyring the host does not
   keep items in is refused with `insecure_keyring`, whose message does not point to `--store-file`.
   `--yes` is required, and without it the line is a usage error: the verb asks nothing. It keeps
   nothing of what it deleted; a shell that wants a copy of the audit log reads `log` first.
@@ -865,7 +871,7 @@ limit, as it runs every verb, and stops it when the limit passes.
 | `busy` | Another `pair` of this profile is running; for `uninstall-data`, a `run` or a `pair` of it. |
 | `lock_failed` | The lock that keeps one `pair` per profile could not be taken on this filesystem; for `uninstall-data`, that lock or `run`'s. |
 | `held` | This computer already holds a pair: disconnect first. For `uninstall-data`, also work rooms over a pair already gone, which `forget` leaves. |
-| `other_device` | `uninstall-data`: something in the profile's folders is on another device than the folder holding it (a disk or a folder mounted there). The verb crosses no device: checked before anything is deleted, nothing was removed; mounted after that check, the deletion stops there, and nothing on that device is touched. Unmount it, then run the verb again. |
+| `other_device` | `uninstall-data`: something in the profile's folders is on another device than the folder holding it, or a mount point is at or below one of them (a disk, or a folder mounted there, a bind mount of the same filesystem included); or, on Linux, the table of mounts cannot be read. The verb deletes nothing through a mount: found before anything is deleted, nothing was removed; mounted after that, the deletion stops there, and nothing through it is touched, but the keyring items may be gone, and the message says so. Unmount it, then run the verb again. |
 | `bad_code` | That is not a pairing code. |
 | `wrong_hub` | The code is for another hub, not Lucille's (or for a loopback hub `--hub` did not name). |
 | `code_has_token` | The code carries a hub token, and the host takes only codes that do not. |

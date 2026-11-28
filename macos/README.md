@@ -715,7 +715,7 @@ or a quit.
 If `forget` does not end the connection, Remove stops there: nothing is deleted, the host stays paused,
 and the note says why, as Disconnect's would. If `uninstall-data` is refused (another `run` or `pair` of
 the profile runs, the profile still holds a connection, or a disk or a folder is mounted inside the
-profile's folder, which `uninstall-data` never deletes through) or does not answer, Remove stops too: this
+profile's folder, which `uninstall-data` refuses to delete through) or does not answer, Remove stops too: this
 Mac is disconnected, the app stays, and Remove can be chosen again. If the app cannot move itself to the
 Trash, its note says to drag it there from Applications. A quit while Remove runs finishes `forget` and
 deletes nothing; a quit while `uninstall-data` runs waits for it, and the app then goes to the Trash with

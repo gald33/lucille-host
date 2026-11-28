@@ -468,3 +468,198 @@ def test_a_keyring_it_cannot_use_is_refused_in_words_of_its_own(
     assert found[0]["message"].endswith(store.UNINSTALL_REFUSAL)
     assert "--store-file" not in found[0]["message"]
     assert host_env.dirs.policy_file.exists() and host_env.dirs.state.exists()
+
+
+def _bind_mount_table(tmp_path: Path, points: list[Path], device: int) -> Path:
+    """A table of mounts (``/proc/self/mountinfo``'s form) that lists a bind mount of another
+    folder of the same filesystem at each of ``points``: the same device as the folder around it,
+    so that only the table tells it from the profile's own."""
+    lines = [f"22 1 {os.major(device)}:{os.minor(device)} / / rw - ext4 /dev/sda1 rw"]
+    for number, point in enumerate(points, start=40):
+        escaped = os.path.realpath(point).replace("\\", "\\134").replace(" ", "\\040")
+        lines.append(
+            f"{number} 22 {os.major(device)}:{os.minor(device)} /outside/dir {escaped} "
+            "rw,relatime shared:1 - ext4 /dev/sda1 rw"
+        )
+    tmp_path.mkdir(exist_ok=True)
+    table = tmp_path / "mountinfo"
+    table.write_text("\n".join(lines) + "\n")
+    return table
+
+
+@pytest.mark.parametrize(
+    ("where", "inside"), [("state", ("bm",)), ("config", ("a", "b", "bm")), ("state", ())]
+)
+def test_a_bind_mount_of_the_same_filesystem_is_refused_before_anything_is_deleted(
+    host_env: HostEnv,
+    memory_keyring: MemoryKeyring,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+    where: str,
+    inside: tuple[str, ...],
+) -> None:
+    """A bind mount shows another folder of the same filesystem: its device is the folder's own,
+    so the device check cannot see it, and the table of mounts does. A mount point at a folder
+    itself is refused too."""
+    _fill("default", monkeypatch, tmp_path / "docs")
+    folder = getattr(host_env.dirs, where)
+    point = folder.joinpath(*inside)
+    point.mkdir(parents=True, exist_ok=True)
+    (point / "sentinel").write_text("outside the profile")
+    table = _bind_mount_table(tmp_path, [point], os.stat(folder).st_dev)
+    monkeypatch.setattr("lucille_host.mounts.MOUNTINFO", str(table))
+    before = dict(memory_keyring.items)
+    capsys.readouterr()
+    assert _main(["--json", "uninstall-data", "--yes"], monkeypatch) == 1
+    message = cli.UNINSTALL_MOUNTED.format(point=os.path.realpath(point), folder=folder)
+    assert _objects(capsys.readouterr().out) == [
+        {"v": 1, "type": "error", "code": "other_device", "message": message}
+    ]
+    assert memory_keyring.items == before
+    assert (point / "sentinel").read_text() == "outside the profile"
+    assert host_env.dirs.policy_file.exists()
+
+
+def test_a_bind_mount_made_after_the_check_is_refused_before_any_folder(
+    host_env: HostEnv,
+    memory_keyring: MemoryKeyring,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    _fill("default", monkeypatch, tmp_path / "docs")
+    point = host_env.dirs.state / "bm"
+    point.mkdir()
+    (point / "sentinel").write_text("outside the profile")
+    table = _bind_mount_table(tmp_path, [point], os.stat(host_env.dirs.state).st_dev)
+    empty = _bind_mount_table(tmp_path / "empty", [], os.stat(host_env.dirs.state).st_dev)
+    monkeypatch.setattr("lucille_host.mounts.MOUNTINFO", str(empty))
+    real_delete = store.delete_items
+
+    def delete_items(username: str) -> None:
+        real_delete(username)
+        monkeypatch.setattr("lucille_host.mounts.MOUNTINFO", str(table))
+
+    monkeypatch.setattr(store, "delete_items", delete_items)
+    capsys.readouterr()
+    assert _main(["--json", "uninstall-data", "--yes"], monkeypatch) == 1
+    message = cli.UNINSTALL_MOUNTED_LATE.format(
+        point=os.path.realpath(point), folder=host_env.dirs.state
+    )
+    assert _objects(capsys.readouterr().out) == [
+        {"v": 1, "type": "error", "code": "other_device", "message": message}
+    ]
+    assert (point / "sentinel").read_text() == "outside the profile"
+    assert host_env.dirs.policy_file.exists()
+
+
+def test_where_the_table_must_be_read_and_cannot_be_nothing_is_removed(
+    host_env: HostEnv,
+    memory_keyring: MemoryKeyring,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    """On Linux, a table that cannot be read hides any bind mount: refused, not skipped."""
+    _fill("default", monkeypatch, tmp_path / "docs")
+    monkeypatch.setattr("lucille_host.mounts.MOUNTINFO", str(tmp_path / "no-such-table"))
+    monkeypatch.setattr(cli, "MOUNT_TABLE_SYSTEMS", frozenset({paths.os_family()}))
+    before = dict(memory_keyring.items)
+    capsys.readouterr()
+    assert _main(["--json", "uninstall-data", "--yes"], monkeypatch) == 1
+    assert _objects(capsys.readouterr().out) == [
+        {"v": 1, "type": "error", "code": "other_device", "message": cli.UNINSTALL_NO_TABLE}
+    ]
+    assert memory_keyring.items == before
+    assert host_env.dirs.policy_file.exists()
+
+
+def test_the_table_is_read_on_linux_only_where_none_can_be_read() -> None:
+    assert frozenset({"linux"}) == cli.MOUNT_TABLE_SYSTEMS
+
+
+def test_a_folder_that_opens_on_another_device_is_refused(
+    host_env: HostEnv,
+    memory_keyring: MemoryKeyring,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    """A folder swapped for a mount between its ``stat`` and its ``open``: the descriptor's own
+    device is checked too."""
+    _fill("default", monkeypatch, tmp_path / "docs")
+    inner = host_env.dirs.state / "inner"
+    inner.mkdir()
+    swapped = os.stat(inner).st_ino
+    real = os.fstat
+
+    def fstat(descriptor: int) -> os.stat_result:
+        found = real(descriptor)
+        if found.st_ino == swapped:
+            values = list(found)
+            values[2] = found.st_dev + 1  # st_dev
+            return os.stat_result(values)
+        return found
+
+    monkeypatch.setattr("lucille_host.cli.os.fstat", fstat)
+    before = dict(memory_keyring.items)
+    capsys.readouterr()
+    assert _main(["--json", "uninstall-data", "--yes"], monkeypatch) == 1
+    found = _objects(capsys.readouterr().out)
+    assert [o["code"] for o in found] == ["other_device"]
+    assert found[0]["message"] == cli.UNINSTALL_OTHER_DEVICE.format(
+        path=inner, folder=host_env.dirs.state
+    )
+    assert memory_keyring.items == before
+
+
+def test_a_failure_after_the_keyring_is_cleared_says_what_may_be_gone(
+    host_env: HostEnv,
+    memory_keyring: MemoryKeyring,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    _fill("default", monkeypatch, tmp_path / "docs")
+    stuck = host_env.dirs.state / "deep"
+    stuck.mkdir()
+    (stuck / "f").write_text("x")
+    real = os.unlink
+
+    def unlink(path: Any, *args: Any, **kwargs: Any) -> None:
+        if os.fsdecode(path) == "f":
+            raise PermissionError(1, "Operation not permitted")
+        real(path, *args, **kwargs)
+
+    monkeypatch.setattr("lucille_host.cli.os.unlink", unlink)
+    capsys.readouterr()
+    assert _main(["--json", "uninstall-data", "--yes"], monkeypatch) == 1
+    message = cli.UNINSTALL_FAILED_LATE.format(reason="Operation not permitted", path=stuck / "f")
+    assert _objects(capsys.readouterr().out) == [
+        {"v": 1, "type": "error", "code": "os_error", "message": message}
+    ]
+
+
+def test_every_lock_file_of_both_folders_goes_after_everything_else(
+    host_env: HostEnv,
+    memory_keyring: MemoryKeyring,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The state folder, with ``run``'s lock, is not deleted while the config folder still holds
+    anything but its own lock: a command started then finds every lock still there."""
+    _fill("default", monkeypatch, tmp_path / "docs")
+    unlinked: list[str] = []
+    real = os.unlink
+
+    def unlink(path: Any, *args: Any, **kwargs: Any) -> None:
+        unlinked.append(os.fsdecode(path))
+        real(path, *args, **kwargs)
+
+    monkeypatch.setattr("lucille_host.cli.os.unlink", unlink)
+    assert _main(["--json", "uninstall-data", "--yes"], monkeypatch) == 0
+    locks = [i for i, name in enumerate(unlinked) if name.endswith(".lock")]
+    others = [i for i, name in enumerate(unlinked) if not name.endswith(".lock")]
+    assert host_env.dirs.policy_file.name in unlinked
+    assert locks and others and max(others) < min(locks)

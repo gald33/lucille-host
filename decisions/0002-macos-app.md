@@ -296,9 +296,11 @@ made for the first build", says why for most of them:
   pairing lock and its settings lock, and refuses with `busy` while `run` or `pair` of the profile runs,
   and with `held` while the profile holds a pair or the work rooms of one gone. It holds the credential
   store's lock too. It adds one error code, `other_device`: before it deletes anything it reads both
-  folders through, and refuses one that holds anything on another device (a mount point), as it
-  refuses a folder that is a symbolic link (`state_invalid`); the deletion itself crosses no device,
-  and deletes lock files last. It deletes the Keychain items under `lucille-host` and
+  folders through, and refuses one that holds anything on another device, or is or holds a mount point
+  (on Linux read from `/proc/self/mountinfo`, so a bind mount of the same filesystem is found; on macOS,
+  which has no such mount, every mount is a device of its own), as it refuses a folder that is a
+  symbolic link (`state_invalid`); the deletion itself crosses no device, and the lock files of both
+  folders go after everything else. It deletes the Keychain items under `lucille-host` and
   `lucille-host.credentials`, reading each back to check it is gone, before any folder, then the
   profile's state and config folders; the `lucille-host` folder around them stays. A Connect request
   still waiting goes with them, as `pair cancel` drops one. Run again on a profile with nothing left,

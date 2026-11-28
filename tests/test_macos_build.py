@@ -5526,6 +5526,10 @@ def test_only_runs_that_take_the_policy_lock_count_as_stuck(
             yield
 
     monkeypatch.setattr(host_cli, "_policy_lock", recording)
+    # `status`, `forget` and `uninstall-data` refuse where SWITCHBOARD_* is set, before any lock.
+    for name in list(os.environ):
+        if name.startswith("SWITCHBOARD_"):
+            monkeypatch.delenv(name)
     folder = home / "Documents"
     folder.mkdir()
 

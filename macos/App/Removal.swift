@@ -133,7 +133,7 @@ enum RemoveText {
     static let notTrashedText = "\(appName) couldn't move itself to the Trash: drag it there from your Applications folder."
     static let notRemovedTitle = "\(appName) wasn't removed"
     static let nothingDeletedText = "\(appName)'s saved connection and settings are still on this Mac, and it is paused: choose Resume Lucille to resume."
-    static let couldNotDeleteText = "This Mac was disconnected from Lucille, but \(appName) couldn't delete its saved connection and settings, so it stays."
+    static let couldNotDeleteText = "This Mac was disconnected from Lucille, but \(appName) couldn't delete all of its saved connection and settings, so the app stays."
     static let uninstallUnknown = "\(appName) couldn't tell whether they were removed."
     static let tryAgainText = "Choose Remove \(appName)… in Settings to try again."
 
