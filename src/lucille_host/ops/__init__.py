@@ -911,7 +911,8 @@ def _gmail_args(args: Mapping[str, Any]) -> bool:
 
 def _credential_ask_args(args: Mapping[str, Any]) -> bool:
     """Rule credential-ask-args (spec/PROTOCOL.md section 10): ``reason`` holds no character that
-    would move or hide text where the host shows it (``asks.UNSHOWABLE``), and is not blank."""
+    would move, hide or blank out text where the host shows it (``asks.UNSHOWABLE``), no space at
+    its start or end and no two in a row (``asks.SPACES``), and is not blank."""
     from lucille_host import asks  # noqa: PLC0415 - asks imports this module for its own check
 
     reason = args.get("reason")

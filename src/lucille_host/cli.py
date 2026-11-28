@@ -2063,8 +2063,8 @@ def _ask_fields(ask: Any, replaces: bool) -> dict[str, Any]:
 
 
 def _ask_lines(ask: Any, replaces: bool) -> list[str]:
-    """The ask as the terminal shows it: the host's own lines first, Lucille's words last and
-    marked as Lucille's (decisions/0003, "Entry")."""
+    """The ask as the terminal shows it: the host's own lines first, Lucille's words last, each of
+    their lines marked as Lucille's (decisions/0003, "Entry")."""
     template = services.SERVICES[ask.service]
     lines = [
         f"Lucille asks you to save a credential on this computer (ask {ask.id}):",
@@ -2078,7 +2078,9 @@ def _ask_lines(ask: Any, replaces: bool) -> list[str]:
     left = max(0, int(ask.until - time.time()))
     lines.append(f"  it is declined unless you answer within {left} s")
     if ask.reason is not None:
-        lines.append(f"Lucille says: {ask.reason}")
+        from lucille_host import asks as host_asks  # noqa: PLC0415 - only an ask's lines need it
+
+        lines.extend(host_asks.reason_lines(ask.reason))
     return lines
 
 
@@ -2156,7 +2158,11 @@ def _credential_asks(args: argparse.Namespace, dirs: paths.Dirs, out: _Out, cred
         asks.answer(ask.id, answer)
     except host_asks.AskGone:
         audit.AuditLog(dirs.state).write(
-            "credential_answer", service=ask.service, name=ask.name, answer="lapsed"
+            "credential_answer",
+            service=ask.service,
+            name=ask.name,
+            answer="lapsed",
+            saved=answer == "saved",
         )
         raise _Refused(
             "no_such_ask",

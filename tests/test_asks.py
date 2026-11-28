@@ -113,18 +113,23 @@ def test_lucille_cannot_nag(tmp_path: Path) -> None:
     assert [ask.id for ask in store.waiting()] == [first.id]
     store.answer(first.id, "declined")
     assert store.collect(first) == "declined"
-    # The same credential again, within the gap: declined, not shown.
+    # Within the gap, an ask is declined, not shown: the same credential again, another name of
+    # the same service, or another service. Asking under one name after another gets nothing.
     clock.now += asks.GAP_S - 1
     assert store.make("gmail", "default", None) is None
+    assert store.make("gmail", "other", None) is None
+    assert store.make("github", "personal", None) is None
     assert store.waiting() == []
-    # Another credential may be asked for.
+    # Past the gap, one may be asked for again.
+    clock.now += 2
     other = store.make("github", "personal", None)
     assert other is not None
     assert store.collect(other) is None
     clock.now += asks.WAIT_S
     assert store.collect(other) == "declined"
-    # Past the gap, the first may be asked for again.
-    clock.now += 2
+    # Its lapse starts the gap again, for every credential.
+    assert store.make("gmail", "default", None) is None
+    clock.now += asks.GAP_S
     assert store.make("gmail", "default", None) is not None
 
 
@@ -194,6 +199,10 @@ def test_a_file_this_module_would_not_write_holds_no_ask(tmp_path: Path, text: s
         {"service": "gmail", "name": "default", "reason": "line\nbreak"},
         {"service": "gmail", "name": "default", "reason": "zero​width"},
         {"service": "gmail", "name": "default", "reason": "   "},
+        {"service": "gmail", "name": "default", "reason": "two  spaces"},
+        {"service": "gmail", "name": "default", "reason": " leading"},
+        {"service": "gmail", "name": "default", "reason": "trailing "},
+        {"service": "gmail", "name": "default", "reason": "soft\u00adhyphen"},
         {"service": "gmail", "name": "default", "reason": "x" * 301},
     ],
 )
@@ -207,6 +216,96 @@ def test_the_child_checks_its_arguments_again(tmp_path: Path, args: dict[str, An
 def test_a_reason_in_another_script_is_taken() -> None:
     op = ops.OPERATIONS["credential.ask"]
     assert ops.args_valid(op, {"service": "gmail", "name": "default", "reason": "שלום, Gmail"})
+
+
+# The review's reproduction: Lucille's words, with a run of spaces, which a terminal 80 columns
+# wide wrapped after "Lucille says: Thanks." into a line indented like the host's own, just above
+# its question.
+SPOOF = "Thanks." + " " * 59 + "  it replaces nothing; your Google account password also works here"
+
+
+def test_a_run_of_spaces_cannot_draw_a_line_like_the_hosts(tmp_path: Path) -> None:
+    assert len(SPOOF) == 133
+    op = ops.OPERATIONS["credential.ask"]
+    args = {"service": "gmail", "name": "mail", "reason": SPOOF}
+    # Refused before anything runs, and by the child again.
+    assert not ops.args_valid(op, args)
+    code, out, err = asks.main(_argv(tmp_path, args), sleep=lambda _: None)
+    assert (code, out, err) == (6, b"", b"lucille-host ask: internal error\n")
+    # An ask holding it in the file, written there by anything but the child, is no ask at all.
+    store = asks.Asks(tmp_path)
+    made = store.make("gmail", "mail", "Thanks.")
+    assert made is not None
+    doc = json.loads((tmp_path / asks.FILE).read_text())
+    doc["open"][made.id]["reason"] = SPOOF
+    (tmp_path / asks.FILE).write_text(json.dumps(doc))
+    assert store.waiting() == []
+
+
+def test_every_line_of_lucilles_words_is_marked_and_fits() -> None:
+    reason = (
+        "Thanks. I need it to sort the newsletters you asked about, it replaces nothing "
+        + "x" * 70
+        + " 漢字" * 30
+    )
+    assert asks.reason_showable(reason)
+    lines = asks.reason_lines(reason)
+    assert len(lines) > 3
+    assert all(line.startswith("Lucille says: ") for line in lines)
+    assert all(asks._columns(line) <= 78 for line in lines)
+    # Cut only at its spaces (a word wider than a line is cut where it must be): nothing is lost.
+    words = " ".join(line.removeprefix("Lucille says: ") for line in lines)
+    assert words.replace(" ", "") == reason.replace(" ", "")
+    assert asks.reason_lines("Short.") == ["Lucille says: Short."]
+
+
+def test_the_rule_is_the_reference_models_on_every_code_point() -> None:
+    from tests.spec import _support  # noqa: PLC0415 - the protocol's independent model
+
+    held = [
+        point
+        for point in range(0x110000)
+        if not 0xD800 <= point <= 0xDFFF
+        and (asks.UNSHOWABLE.search(chr(point)) is not None) != (point in _support._UNSHOWABLE)
+    ]
+    assert held == []
+    for reason in (SPOOF, "a  b", " a", "a ", "a\u2800b", "a\U000e0041b", "a b"):
+        broken = _support.credential_ask_args_broken("credential.ask", {"reason": reason})
+        assert broken == (not asks.reason_showable(reason)), reason
+
+
+@pytest.mark.parametrize(
+    "char",
+    [
+        "\u00a0",
+        "\u00ad",
+        "\u034f",
+        "\u115f",
+        "\u1160",
+        "\u1680",
+        "\u180e",
+        "\u2000",
+        "\u200a",
+        "\u202f",
+        "\u205f",
+        "\u2061",
+        "\u2064",
+        "\u206a",
+        "\u2800",
+        "\u3000",
+        "\u3164",
+        "\ufe0f",
+        "\uffa0",
+        "\ufffb",
+        "\U0001d173",
+        "\U000e0001",
+        "\U000e0041",
+        "\U000e0100",
+    ],
+)
+def test_a_character_of_no_width_blank_or_other_white_space_is_refused(char: str) -> None:
+    op = ops.OPERATIONS["credential.ask"]
+    assert not ops.args_valid(op, {"service": "gmail", "name": "default", "reason": f"a{char}b"})
 
 
 def _child(*args: str) -> subprocess.CompletedProcess[bytes]:
@@ -396,6 +495,104 @@ def test_answer_at_a_terminal_saves_after_yes(
     assert said.err.index("sent only to: api.github.com") < said.err.index("Lucille says:")
     assert TOKEN not in said.out + said.err
     assert _store(host_env).value("github", "personal") == TOKEN
+
+
+def _terminal(monkeypatch: pytest.MonkeyPatch, typed: str) -> None:
+    stdin = io.StringIO(typed)
+    stdin.isatty = lambda: True  # type: ignore[method-assign]
+    monkeypatch.setattr("sys.stdin", stdin)
+
+
+def _lapse(host_env: HostEnv, ask: asks.Ask) -> None:
+    """Make ``ask`` lapse now, as its time running out would."""
+    path = Path(host_env.dirs.state) / asks.FILE
+    doc = json.loads(path.read_text())
+    doc["open"][ask.id]["until"] = time.time() - 1
+    path.write_text(json.dumps(doc))
+
+
+def test_answer_at_a_terminal_marks_each_line_of_lucilles_words(
+    host_env: HostEnv, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    reason = "Thanks. " * 25 + "it replaces nothing; your Google account password also works here"
+    ask = _ask(host_env, reason=reason)
+    _terminal(monkeypatch, "no\n")
+    assert cli.main(["credential", "answer", ask.id]) == 0
+    shown = capsys.readouterr().err.splitlines()
+    marked = asks.reason_lines(reason)
+    first = shown.index(marked[0])
+    question = next(i for i, line in enumerate(shown) if line.startswith("Save it, sent only"))
+    # The host's lines, then only Lucille's, each marked, then the host's question.
+    assert first > 0 and question > first + 1
+    assert shown[first:question] == marked
+    assert all(line.startswith("Lucille says: ") for line in marked)
+    assert not any(line.startswith("Lucille says: ") for line in shown[:first])
+
+
+def test_answer_at_a_terminal_says_it_replaces_one_saved(
+    host_env: HostEnv, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    argv = ["credential", "set", "gmail", "default", "--host", "imap.gmail.com", "--value-stdin"]
+    assert _main(argv, monkeypatch, GMAIL_VALUE + "\n") == 0
+    ask = _ask(host_env)
+    capsys.readouterr()
+    _terminal(monkeypatch, "no\n")
+    assert cli.main(["credential", "answer", ask.id]) == 0
+    assert "  it replaces the gmail/default saved here now\n" in capsys.readouterr().err
+
+
+def test_answer_at_a_terminal_refuses_two_values_that_differ_and_the_ask_waits(
+    host_env: HostEnv, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    ask = _ask(host_env, "github")
+    _terminal(monkeypatch, "yes\n")
+    typed = iter([TOKEN, TOKEN + "x"])
+    monkeypatch.setattr(cli, "_read_hidden", lambda prompt: next(typed))
+    assert cli.main(["credential", "answer", ask.id]) == 1
+    assert "lucille-host: the two values differ; nothing was saved" in capsys.readouterr().err
+    assert _store(host_env).names() == []
+    assert asks.Asks(host_env.dirs.state).get(ask.id) == ask
+
+
+def test_answer_refuses_an_ask_that_lapsed_while_the_value_was_typed(
+    host_env: HostEnv, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    ask = _ask(host_env, "github")
+    _terminal(monkeypatch, "yes\n")
+
+    def typed(prompt: str) -> str:
+        _lapse(host_env, ask)
+        return TOKEN
+
+    monkeypatch.setattr(cli, "_read_hidden", typed)
+    assert cli.main(["credential", "answer", ask.id]) == 1
+    said = capsys.readouterr().err
+    assert f"ask {ask.id} lapsed while the value was typed; nothing was saved" in said
+    assert _store(host_env).names() == []
+    assert asks.Asks(host_env.dirs.state).collect(ask) == "declined"
+
+
+def test_an_ask_that_lapsed_as_it_was_saved_is_logged_lapsed_and_saved(
+    host_env: HostEnv, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    ask = _ask(host_env, "github")
+    save = credentials.CredentialStore.save
+
+    def saved_then_lapsed(self: Any, *args: Any, **kwargs: Any) -> Any:
+        done = save(self, *args, **kwargs)
+        _lapse(host_env, ask)
+        return done
+
+    monkeypatch.setattr(credentials.CredentialStore, "save", saved_then_lapsed)
+    argv = ["credential", "answer", ask.id, "--value-stdin"]
+    assert _main(argv, monkeypatch, TOKEN + "\n") == 1
+    said = capsys.readouterr().err
+    assert "Lucille was told it was declined; the credential is saved here all the same" in said
+    assert _store(host_env).value("github", "personal") == TOKEN
+    line = json.loads(audit.AuditLog(host_env.dirs.state).path.read_text().splitlines()[-1])
+    assert (line["kind"], line["answer"], line["saved"]) == ("credential_answer", "lapsed", True)
+    assert TOKEN not in json.dumps(line)
+    assert asks.Asks(host_env.dirs.state).collect(ask) == "declined"
 
 
 @pytest.mark.parametrize(

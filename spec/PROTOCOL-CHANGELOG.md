@@ -105,7 +105,8 @@ The first version.
   reason?}`: a service the host has a template for (`github` or `gmail`), a credential's name, and Lucille's
   own words, shown apart. It carries no value and names no hosts: the host binds the credential to its
   service template's hosts alone. Its reply is a child's output, `{"answer": "saved"}` or `{"answer":
-  "declined"}` (§11). No field, status or code was added; one prose rule was, `credential-ask-args` (§10).
+  "declined"}` (§11). No field, status or code was added; one prose rule was, `credential-ask-args` (§10),
+  which refuses in `reason` the characters that would move, hide or blank out text, and runs of spaces.
   The host's side is in [decisions/0003](../decisions/0003-local-credentials.md) ("Entry"). Lucille sends it
   only with `min_host_version` set to the first release whose catalog has it.
 - **Files.** JSON Schemas (draft 2020-12) for the request, the reply and the `host.describe` document, closed

@@ -606,7 +606,7 @@ line with no verb never give it).
 | `credential remove <service> <name>` | one `credential_removed` | `no_such_credential`, `bad_credential`, `insecure_keyring`, `store_error` |
 | `credential test <service> <name>` | one `credential_test` | `no_test`, `no_such_credential`, `paused`, `bad_credential`, `unreachable`, `limit_reached`, `sign_in_refused`, `insecure_keyring`, `store_error` |
 | `credential asks` | one `credential_ask` per ask waiting for an answer, oldest first; none when none waits | `insecure_keyring`, `store_error` |
-| `credential answer <id> --decline`, or `--value-stdin` | one `credential_answer` | `no_such_ask`, `no_value`, `bad_value`, `interrupted`, `insecure_keyring`, `store_error` |
+| `credential answer <id> --decline`, or `--value-stdin` | one `credential_answer` | `no_such_ask`, `no_value`, `bad_value`, `values_differ`, `interrupted`, `insecure_keyring`, `store_error` |
 
 Notes:
 - **`pair`** takes no pairing code. `pair` alone is `pair begin`; a word that is not an action (`begin`,
@@ -855,7 +855,7 @@ limit, as it runs every verb, and stops it when the limit passes.
 | `credential_exists` | `credential set`: a credential is stored under that service and name already, and `--replace` was not given. Nothing changed. |
 | `no_such_credential` | `credential remove`: no credential is stored under that service and name. |
 | `no_value` | `credential set`, `credential answer`: no value was given, or standard input is of the wrong kind to give one: not a terminal without `--value-stdin`, or a terminal with it. Nothing was stored. |
-| `values_differ` | `credential set`: the value typed twice differed. Nothing was stored. |
+| `values_differ` | `credential set`, or `credential answer` at a terminal: the value typed twice differed. Nothing was stored, and an ask still waits. |
 | `bad_value` | `credential set`, `credential answer`: the value holds a control character, or is not text in standard input's encoding (a line that does not decode, or one holding a lone surrogate); for `credential answer`, also a value not in the form its service's template says. Nothing was stored. |
 | `no_test` | `credential test`: the service has no test; only `gmail` has one. Nothing was read. |
 | `paused` | `credential test`: the host is paused, and so starts nothing. Nothing was read. |
@@ -1210,8 +1210,8 @@ below). With `--json`, before the verb or after an action, it writes the objects
 | `credential set <service> <name> --host <host> [--host <host> ...] [--value-stdin] [--replace]` | Stores one credential, bound to the hosts given. |
 | `credential list` | One line per credential, by service then name: its service and name, its hosts and when it was stored. Never its value. With none stored, nothing on standard output, a line on standard error, and exit 0. |
 | `credential remove <service> <name>` | Deletes that credential and no other. One not stored is refused, exit 1. |
-| `credential asks` | One block per ask of Lucille's that waits for an answer (`credential.ask`, below), oldest first: its id, the service, the name, the hosts, what to type and where to make one, whether it replaces a credential saved here, how long it waits, and, last, `Lucille says:` and Lucille's own words. With none waiting, nothing on standard output, a line on standard error, and exit 0. |
-| `credential answer <id> [--decline \| --value-stdin]` | Answers one ask. Without an option, standard input must be a terminal: it shows the ask on standard error, asks `Type yes to save it`, and anything but `yes` declines; after `yes`, the value is typed twice, as for `credential set`. `--decline` declines it, asking nothing. `--value-stdin` saves the value read from one line of standard input, asking nothing: the program that runs it showed the ask itself and the user chose to save. With `--json`, one of the two is needed. Saving binds the credential to the ask's hosts and no other, replacing one saved under that service and name; a value not in its service's form is refused (`bad_value`), nothing is saved, and the ask still waits. Each answer writes one `credential_answer` line to the audit log: the service, the name and the answer, never the value. |
+| `credential asks` | One block per ask of Lucille's that waits for an answer (`credential.ask`, below), oldest first: its id, the service, the name, the hosts, what to type and where to make one, whether it replaces a credential saved here, how long it waits, and, last, Lucille's own words, cut into lines of at most 64 columns that each start `Lucille says: `. With none waiting, nothing on standard output, a line on standard error, and exit 0. |
+| `credential answer <id> [--decline \| --value-stdin]` | Answers one ask. Without an option, standard input must be a terminal: it shows the ask on standard error, asks `Type yes to save it`, and anything but `yes` declines; after `yes`, the value is typed twice, as for `credential set`. `--decline` declines it, asking nothing. `--value-stdin` saves the value read from one line of standard input, asking nothing: the program that runs it showed the ask itself and the user chose to save. With `--json`, one of the two is needed. Saving binds the credential to the ask's hosts and no other, replacing one saved under that service and name; a value not in its service's form is refused (`bad_value`), nothing is saved, and the ask still waits. Each answer writes one `credential_answer` line to the audit log: the service, the name and the answer, never the value; for an ask that lapsed before its answer was recorded, the answer `lapsed` and whether the credential was saved all the same (`saved`). |
 | `credential test <service> <name>` | Signs in with that credential and out again, reading nothing, by running `gmail.check`'s child, as a request would, whether or not `gmail.check` is enabled. `gmail` only. On success, one line, `gmail/<name>: signed in to imap.gmail.com`, and exit 0; otherwise the child's own fixed line and exit 1. Refused, starting nothing, for another service (`no_test`), a credential not stored (`no_such_credential`), while the host is paused (`paused`), and while keyring's own settings turn the keyring off (`insecure_keyring`). The child's exits give `bad_credential` (2), `unreachable` (4), `limit_reached` (5), `sign_in_refused` (7) and `internal` (any other). Each test writes one `credential_test` line to the audit log: the service, the name and the code (`ok` on success), never the value. Nothing Lucille sends can run it. |
 
 **Asks (`credential.ask`).** Lucille may ask for a credential with the operation `credential.ask`
@@ -1222,7 +1222,12 @@ asks` and `credential answer` and waits up to 240 s for the user's answer; Lucil
 - The hosts are the service template's, never the request's: `api.github.com` for `github`,
   `imap.gmail.com` for `gmail`. A service with no template cannot be asked for.
 - Declining is the default: an ask not answered within 240 s is declined, and so, without being shown,
-  is an ask made while another waits and an ask for a credential whose last ask ended less than 600 s ago.
+  is an ask made while another waits and an ask made less than 600 s after any ask ended, for any
+  credential.
+- Lucille's words come last, after the host's own lines, cut at their spaces into lines of at most 64
+  columns (a wide character counts two), each starting `Lucille says: `, so every line fits in 78 columns
+  and none reads as one of the host's. Rule `credential-ask-args` (PROTOCOL.md §10) keeps out of them the
+  characters that would move, hide or blank out text, and runs of spaces.
 - While an ask waits, `run` runs no other request: it runs one at a time.
 - A shell shows an ask in a dialog of its own when `run` reports a `credential.ask` request `started`
   (section 6, `request`), reads it with `credential asks --json`, and answers it with `credential answer

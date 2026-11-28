@@ -4,7 +4,7 @@ decisions/0003, "Entry". Lucille may ask the host to collect a credential: a req
 ``credential.ask {service, name, reason?}``, which carries no value. Its child, this module run as
 ``-m lucille_host.asks``, writes the ask to a file in the profile's state folder and waits up to
 :data:`WAIT_S` for the user's answer, given on this computer with ``lucille-host credential
-answer`` (in a terminal, or from Capsule's dialog). It then writes one JSON document,
+answer`` (in a terminal: Capsule has no dialog for an ask yet). It then writes one JSON document,
 ``{"answer": "saved"}`` or ``{"answer": "declined"}``, and exits 0. That is all Lucille learns.
 
 - **The child never reads or writes a credential.** It does not import ``credentials``, holds no
@@ -13,12 +13,14 @@ answer`` (in a terminal, or from Capsule's dialog). It then writes one JSON docu
 - **The hosts are the service's template's** (``services.py``), never a request's: the ask holds
   them, and ``credential answer`` binds the credential to them and to no other. A service with no
   template cannot be asked for; the schema holds the services that have one.
-- **Lucille's words are kept apart.** ``reason`` is shown under "Lucille says:", after the
-  service, name and hosts, which the host lays out itself. Rule ``credential-ask-args`` keeps out
-  of it every character that would move or hide text on a screen (:data:`UNSHOWABLE`).
+- **Lucille's words are kept apart.** ``reason`` is shown last, after the service, name and
+  hosts, which the host lays out itself, cut into lines that each start "Lucille says:"
+  (:func:`reason_lines`). Rule ``credential-ask-args`` keeps out of it every character that would
+  move, hide or blank out text on a screen (:data:`UNSHOWABLE`) and every run of spaces
+  (:data:`SPACES`).
 - **Declining is the default.** An ask nobody answers within :data:`WAIT_S` is declined. So is
-  an ask made while another is open, and an ask for a credential whose last ask ended less than
-  :data:`GAP_S` ago, without being shown: Lucille cannot nag.
+  an ask made while another is open, and an ask made less than :data:`GAP_S` after any ask
+  ended, without being shown: Lucille cannot nag.
 - While the child waits, ``run`` runs no other request: it runs one at a time.
 
 The file is ``credential-asks.json`` (:data:`FILE`), written whole and renamed over, under a lock
@@ -47,12 +49,17 @@ __all__ = [
     "FILE",
     "GAP_S",
     "ID",
+    "LINE_WIDTH",
+    "LUCILLE_SAYS",
+    "REASON_MAX",
+    "SPACES",
     "UNSHOWABLE",
     "WAIT_S",
     "Ask",
     "AskGone",
     "Asks",
     "main",
+    "reason_lines",
     "reason_showable",
 ]
 
@@ -62,17 +69,37 @@ VERSION: Final = 1
 # How long an ask waits for the user. The catalog's time limit for credential.ask is longer, so the
 # child answers before the host would stop it.
 WAIT_S: Final = 240
-# After an ask for a credential ends, how long a new ask for it is declined without being shown.
+# After any ask ends, how long a new ask, for any credential, is declined without being shown.
 GAP_S: Final = 600
 # How often the child looks for the answer.
 POLL_S: Final = 0.25
 # An ask's id: 16 hexadecimal digits, from the system's random source.
 ID: Final = re.compile(r"[0-9a-f]{16}")
 ANSWERS: Final = ("saved", "declined")
-# What may not be in ``reason``: C0 and C1 controls and DEL; the characters that reorder text
-# (U+061C, U+200E, U+200F, U+202A to U+202E, U+2066 to U+2069); those of no width (U+200B to
-# U+200D, U+2060, U+FEFF); and the line and paragraph separators (U+2028, U+2029).
-UNSHOWABLE: Final = re.compile("[\x00-\x1f\x7f-\x9f؜​-‏ -‮⁠⁦-⁩﻿]")
+# The most characters of ``reason``, as the catalog's schema says.
+REASON_MAX: Final = 300
+# What may not be in ``reason``, so that nothing of Lucille's words can move, hide or blank out
+# text where the host shows them (rule credential-ask-args, spec/PROTOCOL.md section 10):
+# - C0 and C1 controls and DEL, line breaks and tabs among them (U+0000 to U+001F, U+007F to U+009F);
+# - the line and paragraph separators (U+2028, U+2029);
+# - the characters that reorder text (U+061C, U+200E, U+200F, U+202A to U+202E, U+2066 to U+2069);
+# - white space other than U+0020 (U+00A0, U+1680, U+2000 to U+200A, U+202F, U+205F, U+3000);
+# - characters of no width (U+00AD, U+034F, U+180B to U+180F, U+200B to U+200D, U+2060 to U+2065,
+#   U+206A to U+206F, U+FE00 to U+FE0F, U+FEFF, U+FFF9 to U+FFFB, U+1D173 to U+1D17A, U+E0000 to
+#   U+E007F, U+E0100 to U+E01EF);
+# - characters drawn blank (U+115F, U+1160, U+2800, U+3164, U+FFA0).
+UNSHOWABLE: Final = re.compile(
+    "[\\x00-\\x1f\\x7f-\\x9f\\u00a0\\u00ad\\u034f\\u061c\\u115f\\u1160\\u1680\\u180b-\\u180f"
+    "\\u2000-\\u200f\\u2028-\\u202f\\u205f-\\u206f\\u2800\\u3000\\u3164\\ufe00-\\ufe0f\\ufeff"
+    "\\uffa0\\ufff9-\\ufffb\\U0001d173-\\U0001d17a\\U000e0000-\\U000e007f\\U000e0100-\\U000e01ef]"
+)
+# U+0020 at the start or the end of ``reason``, or two in a row: a run of spaces can push the rest
+# of Lucille's words to where a line of the host's starts.
+SPACES: Final = re.compile("^ | $|  ")
+# The most characters of Lucille's words on one line where the host shows them; each line starts
+# with LUCILLE_SAYS, so none reads as one of the host's.
+LINE_WIDTH: Final = 64
+LUCILLE_SAYS: Final = "Lucille says: "
 
 OK: Final = 0
 INTERNAL: Final = 6
@@ -80,8 +107,46 @@ INTERNAL_LINE: Final = "lucille-host ask: internal error"
 
 
 def reason_showable(reason: str) -> bool:
-    """Whether ``reason`` holds no character :data:`UNSHOWABLE` names."""
-    return UNSHOWABLE.search(reason) is None
+    """Whether ``reason`` holds no character :data:`UNSHOWABLE` names, no space at its start or
+    end and no two in a row (:data:`SPACES`), and is not empty."""
+    return bool(reason) and UNSHOWABLE.search(reason) is None and SPACES.search(reason) is None
+
+
+def _columns(text: str) -> int:
+    """How many columns ``text`` takes on a terminal, at most: two for a wide character (East Asian
+    width W or F), one for any other."""
+    import unicodedata  # noqa: PLC0415 - only the command line shows an ask
+
+    return sum(2 if unicodedata.east_asian_width(char) in "WF" else 1 for char in text)
+
+
+def reason_lines(reason: str) -> list[str]:
+    """Lucille's words as the host shows them: cut at its spaces into lines of at most
+    :data:`LINE_WIDTH` columns (a word wider than that is cut where it must be), each line marked
+    :data:`LUCILLE_SAYS`, so that no line of them reads as one of the host's. Each line, mark
+    included, fits in 78 columns, so a terminal that wide never wraps one itself."""
+    lines: list[str] = []
+    line = ""
+    for word in reason.split(" "):
+        while _columns(word) > LINE_WIDTH:
+            if line:
+                lines.append(line)
+                line = ""
+            cut = len(word)
+            while _columns(word[:cut]) > LINE_WIDTH:
+                cut -= 1
+            lines.append(word[:cut])
+            word = word[cut:]
+        if not line:
+            line = word
+        elif _columns(line) + 1 + _columns(word) <= LINE_WIDTH:
+            line = f"{line} {word}"
+        else:
+            lines.append(line)
+            line = word
+    if line:
+        lines.append(line)
+    return [LUCILLE_SAYS + each for each in lines]
 
 
 @dataclass(frozen=True)
@@ -139,7 +204,14 @@ def _ask(entry: object) -> Ask | None:
         or ask.hosts != template.hosts
         or not isinstance(ask.name, str)
         or services.NAME.fullmatch(ask.name) is None
-        or not (ask.reason is None or isinstance(ask.reason, str))
+        or not (
+            ask.reason is None
+            or (
+                isinstance(ask.reason, str)
+                and len(ask.reason) <= REASON_MAX
+                and reason_showable(ask.reason)
+            )
+        )
         or ask.answer not in (None, *ANSWERS)
     ):
         return None
@@ -218,14 +290,15 @@ class Asks:
 
     def make(self, service: str, name: str, reason: str | None) -> Ask | None:
         """Open an ask, or None when it is declined without being shown: another ask is open, or
-        the last ask for this credential ended less than :data:`GAP_S` ago."""
+        an ask, for this credential or any other, ended less than :data:`GAP_S` ago. So Lucille
+        cannot nag by asking under one name after another."""
         template = services.SERVICES[service]
         now = self.clock()
         with self._locked():
             open_asks, last = self._tidied(*self._load(), now)
             if any(ask.answer is None for ask in open_asks.values()):
                 return None
-            if f"{service}/{name}" in last:
+            if last:
                 return None
             ask = Ask(
                 id=self.new_id(),

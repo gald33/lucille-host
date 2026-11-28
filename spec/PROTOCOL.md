@@ -527,15 +527,20 @@ change ([§21](#21-versioning)).
   use").
 - **`credential.ask`** waits for the user, up to 240 s, and while it waits the host runs no other request: it
   runs one at a time. An ask not answered in that time is declined; so, without being shown to the user,
-  is one made while another waits, and one for a credential whose last ask ended less than 600 s ago. Its
+  is one made while another waits, and one made less than 600 s after any ask ended, for any credential. Its
   child reads and writes no credential and connects to nothing: the user's own command at the computer
   saves it. The host refuses it `not_enabled`, as `github.read`, while it cannot run it. How the host shows
   the ask, and what it refuses, is in [decisions/0003](../decisions/0003-local-credentials.md) ("Entry").
 - **Rule credential-ask-args.** Beyond the schema, the host refuses `credential.ask` `bad_args` when its
-  `reason` holds a character that would move or hide text where the host shows it: a C0 or C1 control
-  character or U+007F (a line break among them), a character that reorders text (U+061C, U+200E, U+200F,
-  U+202A to U+202E, U+2066 to U+2069), one of no width (U+200B to U+200D, U+2060, U+FEFF), or U+2028 or
-  U+2029; or when it is only white space.
+  `reason` holds a character that would move, hide or blank out text where the host shows it: a C0 or C1
+  control character or U+007F (a line break and a tab among them); U+2028 or U+2029; a character that
+  reorders text (U+061C, U+200E, U+200F, U+202A to U+202E, U+2066 to U+2069); white space other than
+  U+0020 (U+00A0, U+1680, U+2000 to U+200A, U+202F, U+205F, U+3000); a character of no width (U+00AD,
+  U+034F, U+180B to U+180F, U+200B to U+200D, U+2060 to U+2065, U+206A to U+206F, U+FE00 to U+FE0F,
+  U+FEFF, U+FFF9 to U+FFFB, U+1D173 to U+1D17A, U+E0000 to U+E007F, U+E0100 to U+E01EF); or one drawn
+  blank (U+115F, U+1160, U+2800, U+3164, U+FFA0). It also refuses a `reason` that starts or ends with
+  U+0020, holds two in a row, or is only white space: a run of spaces could push Lucille's words to where
+  a line of the host's starts.
 - **Rule gmail-args.** Beyond the schema, the host refuses a Gmail operation `bad_args` when any of its
   arguments holds a control character (U+0000 to U+001F, or U+007F), when `since` or `before` is a date
   that does not exist (`2026-02-31`), or when `id` is above 2^64 − 1 (18446744073709551615).

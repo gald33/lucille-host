@@ -102,23 +102,36 @@ def gmail_args_broken(op: Any, args: Any) -> bool:
     return False
 
 
-# What rule credential-ask-args refuses in credential.ask's reason: C0 and C1 controls and DEL, the
-# characters that reorder text, those of no width, and the line and paragraph separators.
+# What rule credential-ask-args refuses in credential.ask's reason, from spec/PROTOCOL.md's list:
+# C0 and C1 controls and DEL; the line and paragraph separators; the characters that reorder text;
+# white space other than U+0020; the characters of no width; and those drawn blank.
 _UNSHOWABLE = frozenset(
-    [*range(0x00, 0x20), *range(0x7F, 0xA0), 0x061C, *range(0x200B, 0x2010)]
-    + [*range(0x2028, 0x202F), 0x2060, *range(0x2066, 0x206A), 0xFEFF]
+    [*range(0x00, 0x20), *range(0x7F, 0xA0), 0x2028, 0x2029]
+    + [0x061C, 0x200E, 0x200F, *range(0x202A, 0x202F), *range(0x2066, 0x206A)]
+    + [0x00A0, 0x1680, *range(0x2000, 0x200B), 0x202F, 0x205F, 0x3000]
+    + [0x00AD, 0x034F, *range(0x180B, 0x1810), *range(0x200B, 0x200E), *range(0x2060, 0x2066)]
+    + [*range(0x206A, 0x2070), *range(0xFE00, 0xFE10), 0xFEFF, *range(0xFFF9, 0xFFFC)]
+    + [*range(0x1D173, 0x1D17B), *range(0xE0000, 0xE0080), *range(0xE0100, 0xE01F0)]
+    + [0x115F, 0x1160, 0x2800, 0x3164, 0xFFA0]
 )
 
 
 def credential_ask_args_broken(op: Any, args: Any) -> bool:
     """Rule credential-ask-args (spec/PROTOCOL.md section 10): credential.ask's reason holding a
-    character that would move or hide text where the host shows it, or only white space."""
+    character that would move, hide or blank out text where the host shows it, a space at its start
+    or end, two spaces in a row, or only white space."""
     if op != "credential.ask" or not isinstance(args, dict):
         return False
     reason = args.get("reason")
     if not isinstance(reason, str):
         return False
-    return any(ord(char) in _UNSHOWABLE for char in reason) or not reason.strip()
+    return (
+        any(ord(char) in _UNSHOWABLE for char in reason)
+        or reason.startswith(" ")
+        or reason.endswith(" ")
+        or "  " in reason
+        or not reason.strip()
+    )
 
 
 def ecma_regex(pattern: str) -> re.Pattern[str]:

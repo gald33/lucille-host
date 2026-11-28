@@ -629,21 +629,30 @@ terminal. Where the text above left something open, the smallest safe form was c
   saved, and the ask still waits.
 - **The prompt.** `lucille-host credential asks` shows each waiting ask, and `lucille-host credential answer
   <id>` answers one at a terminal: the service, the name, the hosts, what to type and where to make one,
-  whether it replaces one saved, and how long it waits, laid out by the host; then, last, `Lucille says:`
-  and Lucille's words; then "Type yes to save it", where anything but `yes` declines, and the value, typed
-  twice, unseen. A shell answers with `--value-stdin` or `--decline`, having shown the ask itself
-  (spec/CLI.md §15). A `run` in a terminal does not interrupt itself to ask: the user runs `credential
-  asks` *(chosen here)*.
-- **Lucille's words** *(chosen here)*: at most 300 characters, and rule `credential-ask-args` refuses
-  (`bad_args`) a reason with a control character, a line break, a character that reorders text or one of
-  no width, or only white space, so Lucille's words cannot draw a line that looks like the host's.
+  whether it replaces one saved, and how long it waits, laid out by the host; then, last, Lucille's words,
+  each of their lines starting `Lucille says: `; then "Type yes to save it", where anything but `yes`
+  declines, and the value, typed twice, unseen. A shell answers with `--value-stdin` or `--decline`, having
+  shown the ask itself (spec/CLI.md §15). A `run` in a terminal does not interrupt itself to ask: the user
+  runs `credential asks` *(chosen here)*.
+- **Lucille's words** *(chosen here)*: at most 300 characters. Rule `credential-ask-args` refuses
+  (`bad_args`) a reason with a control character, a line break, a character that reorders text, white
+  space other than a plain space, a character of no width or one drawn blank (spec/PROTOCOL.md §10 lists
+  them), a space at its start or end, two spaces in a row, or only white space. The host cuts Lucille's
+  words itself, at their spaces, into lines of at most 64 columns, and starts each with `Lucille says: `,
+  so each fits in 78 columns. So no line the host prints of Lucille's words starts as one of the host's
+  does: the host's own detail lines start with two spaces, and each of Lucille's with `Lucille says:`. A
+  terminal narrower than 78 columns wraps lines itself, the host's as well; with no run of spaces, a line
+  it wraps starts with at most one space.
 - **Declining is the default.** An ask waits 240 s, inside the operation's 270 s time limit, then is
-  declined *(chosen here)*. Rate limit *(chosen here)*: one ask waits at a time, and an ask for a
-  credential whose last ask ended less than 10 minutes ago is declined at once; neither is shown. While an
-  ask waits, `run` runs no other request: it runs one at a time *(accepted here: the user is at the
-  computer, and Lucille waits on the answer anyway)*.
+  declined *(chosen here)*. Rate limit *(chosen here)*: one ask waits at a time, and an ask made less than
+  10 minutes after any ask ended, for any credential, is declined at once, so asking under one name after
+  another does not get around it; neither is shown. While an ask waits, `run` runs no other request: it
+  runs one at a time *(accepted here: the user is at the computer, and Lucille waits on the answer
+  anyway)*.
 - **Logged like a use.** The request is in the audit log as any request is (`received`, `execution`), and
   each answer writes a `credential_answer` line: the service, the name and the answer, never the value.
+  An ask that lapsed while its value was typed is logged with the answer `lapsed` and whether the
+  credential was saved all the same.
 - **Not built.** Capsule's dialog for an ask, which shows it when `run` reports a `credential.ask` request
   `started`, reads it with `credential asks --json` and answers it with `credential answer`; closing it
   declines. It is the Mac app's part, in a change of its own. Until then Capsule has no switch for
