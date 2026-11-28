@@ -21,8 +21,10 @@ from typing import Any
 import pytest
 
 import lucille_host.conformance as conformance
-from lucille_host.conformance import _scenarios, _spawn
+from lucille_host import paths
+from lucille_host.conformance import _procfs, _scenarios, _spawn
 from lucille_host.conformance._scenarios import Failed, Scenario, Skipped
+from lucille_host.ops import OPERATIONS
 
 AS_ROOT = os.geteuid() == 0
 ROOT_REASON = "the host refuses to run as root; CI runs this test as an ordinary user"
@@ -110,6 +112,9 @@ def test_scenarios_are_registered_once_each_with_a_description() -> None:
     assert len(names) == len(set(names)) >= 20
     assert names[0] == "control-enabled-op-runs"
     assert names[-1] == "policy-unchanged"
+    # The modules beside _scenarios.py register theirs when the package is imported, so this
+    # test sees them however it is run.
+    assert {"child-env-built-and-no-key", "upgrade-disables-changed-op"} <= set(names)
     assert all(found.doc for found in _scenarios.REGISTRY)
     with pytest.raises(ValueError, match="two scenarios"):
         _scenarios.scenario(lambda ctx: None, name="unknown-op")
@@ -147,13 +152,48 @@ def test_suite_passes_against_the_installed_host() -> None:
         line for line in done.stdout.splitlines() if line.startswith(("PASS ", "FAIL ", "SKIP "))
     ]
     names = [found.name for found in _scenarios.REGISTRY]
-    # Each scenario once, in order, passed or skipped (a scenario that cannot check here: no /proc
-    # on macOS, no ripgrep where the catalog says), never failed. Where everything can be checked,
-    # Linux with ripgrep at the catalog's path, as CI's Linux runners are, every one passes.
-    assert [line.split(" ", 2)[1].rstrip(":") for line in lines] == names, shown
-    assert not [line for line in lines if line.startswith("FAIL ")], shown
-    if sys.platform.startswith("linux") and Path("/usr/bin/rg").is_file():
-        assert lines == [f"PASS {name}" for name in names], shown
+    assert [_verdict(line) for line in lines] == expected_verdicts(names, needs_met()), shown
+
+
+def needs_met() -> dict[str, bool]:
+    """Each scenario that may skip, and whether what it needs is here: Linux's ``/proc`` for the
+    child's environment, and files.search's program where the catalog says (the host's own test,
+    the one ``ops enable`` refuses by) for the scenarios that search."""
+    search = OPERATIONS["files.search"].available(paths.os_family())
+    return {
+        "child-env-built-and-no-key": _procfs.available(),
+        "output-bounded": search,
+        "replies-path-free": search,
+        "output-decodable": search,
+    }
+
+
+def expected_verdicts(names: list[str], needs: dict[str, bool]) -> list[tuple[str, str]]:
+    """What the suite must print for each scenario, in order: SKIP only for a scenario whose
+    need is not met here, and PASS for every other, so that a scenario that skips where it could
+    check, or one that may never skip, fails this test."""
+    return [(name, "SKIP" if needs.get(name, True) is False else "PASS") for name in names]
+
+
+def _verdict(line: str) -> tuple[str, str]:
+    verdict, rest = line.split(" ", 1)
+    return rest.split(":", 1)[0].strip(), verdict
+
+
+def test_expected_verdicts_allow_a_skip_only_where_its_need_is_missing() -> None:
+    names = ["control-enabled-op-runs", "child-env-built-and-no-key", "output-bounded"]
+    met = {"child-env-built-and-no-key": True, "output-bounded": True}
+    assert expected_verdicts(names, met) == [(name, "PASS") for name in names]
+    missing = {"child-env-built-and-no-key": False, "output-bounded": True}
+    assert expected_verdicts(names, missing) == [
+        ("control-enabled-op-runs", "PASS"),
+        ("child-env-built-and-no-key", "SKIP"),
+        ("output-bounded", "PASS"),
+    ]
+
+
+def test_every_scenario_that_may_skip_is_registered() -> None:
+    assert set(needs_met()) <= {found.name for found in _scenarios.REGISTRY}
 
 
 def _refused_as_unknown_op(ctx: _scenarios.Context) -> None:
