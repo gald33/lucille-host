@@ -1,14 +1,18 @@
-"""The pure parts of the child-environment and upgrade conformance scenarios: the /proc reader,
-what counts as a built environment, and the policy edit that stands in for an upgrade."""
+"""The pure parts of the child-environment, upgrade and files.search conformance scenarios: the
+/proc reader, what counts as a built environment, the policy edit that stands in for an upgrade,
+and how a files.search reply is read."""
 
 from __future__ import annotations
 
+import base64
+import json
 import os
+from pathlib import Path
 from typing import Any
 
 import pytest
 
-from lucille_host.conformance import _child_env, _procfs, _restore, _upgrade
+from lucille_host.conformance import _child_env, _procfs, _restore, _search, _upgrade
 from lucille_host.conformance._scenarios import Failed, Skipped
 
 
@@ -86,6 +90,53 @@ def test_rewrite_definition_changes_only_files_sha256() -> None:
 def test_rewrite_definition_without_the_entry_fails() -> None:
     with pytest.raises(Failed):
         _upgrade.rewrite_definition(POLICY.replace(b"files.sha256", b"files.other"), "c" * 64)
+
+
+# --- the files.search scenarios' reading of a reply ---------------------------------------------
+
+
+def _document(*found: dict[str, Any], error: str | None = None) -> dict[str, Any]:
+    return {"stdout": json.dumps({"matches": list(found), "truncated": False, "error": error})}
+
+
+def test_matches_reads_each_match_of_the_document() -> None:
+    reply = _document(
+        {
+            "path": {"text": "flags.txt"},
+            "line_number": 1,
+            "lines": {"text": "--files\n"},
+            "line_truncated": False,
+        },
+        {
+            "path": {"bytes": base64.b64encode(b"--version").decode()},
+            "line_number": 2,
+            "lines": {"bytes": base64.b64encode(b"named like a flag\r\n").decode()},
+            "line_truncated": False,
+        },
+    )
+    assert _search.matches(reply) == ["flags.txt:1:--files", "--version:2:named like a flag"]
+    assert _search.matches(_document()) == []
+
+
+@pytest.mark.parametrize(
+    "reply",
+    [
+        {"stdout": "flags.txt:1:--files\n"},
+        _document(error="unreadable_output"),
+        {"stdout": json.dumps({"matches": [], "truncated": True, "error": None})},
+    ],
+)
+def test_matches_fails_on_anything_but_a_whole_document(reply: dict[str, Any]) -> None:
+    with pytest.raises(Failed):
+        _search.matches(reply)
+
+
+def test_plant_puts_the_secret_outside_and_links_to_it(tmp_path: Path) -> None:
+    root, outside = _search.plant(tmp_path)
+    assert (root / "out").resolve() == outside.resolve()
+    assert _search.SENTINEL in (root / "secret-link.txt").read_text(encoding="utf-8")
+    assert not (outside.resolve()).is_relative_to(root.resolve())
+    assert _search.plant(tmp_path) == (root, outside)
 
 
 # --- when a scenario that searches may skip ---------------------------------------------------

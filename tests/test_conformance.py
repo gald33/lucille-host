@@ -163,6 +163,9 @@ def needs_met() -> dict[str, bool]:
         "output-bounded": search,
         "replies-path-free": search,
         "output-decodable": search,
+        "search-root-traversal": search,
+        "search-flag-injection": search,
+        "search-no-escape": search,
     }
 
 
