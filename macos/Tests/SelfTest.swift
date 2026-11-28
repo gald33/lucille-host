@@ -1243,7 +1243,7 @@ extension SelfTest {
     /// `--version` and `status`, so no path, name of a pair or room, process id or host's words.
     static func checkDiagnostics(_ fixtures: [String: Fixture], _ report: Report) {
         let version = fixtures["version"].flatMap { Diagnostics.version(.done($0.objects)) }
-        report.expect(version?.host == "0.1.0.dev0" && version?.contract == "1.0",
+        report.expect(version?.host == "0.1.0.dev0" && version.map { Diagnostics.isContract($0.contract) } == true,
                       "Copy Diagnostics reads the release and contract of --version", "\(String(describing: version))")
         func facts(_ status: Diagnostics.StatusRead, app: String? = "1.2.0", macOS: [Int] = [15, 4, 1]) -> Diagnostics.Facts {
             Diagnostics.Facts(appVersion: app, hostVersion: version?.host, contract: version?.contract,
@@ -1272,7 +1272,7 @@ extension SelfTest {
                 \(DiagnosticsText.heading), 2026-11-01T12:00:00Z
                 app_version: 1.2.0
                 host_version: 0.1.0.dev0
-                contract: 1.0
+                contract: \(version?.contract ?? "")
                 macos_version: 15.4.1
                 status:
                   host_version: 0.1.0.dev0
@@ -1817,44 +1817,45 @@ extension SelfTest {
         // core's words, the folders, and what each change answered (spec/CLI.md §7).
         for name in ["version", "version-json-after", "version-no-verb"] {
             let objects = fixtures[name]?.objects ?? []
-            report.expect(objects == [.version(hostVersion: "0.1.0.dev0", contract: "1.0")]
+            report.expect(objects == [.version(hostVersion: "0.1.0.dev0", contract: "1.1")]
                               && VerbOutcome.done(objects).hostVersion == "0.1.0.dev0",
                           "\(name) gives the host's version", "\(objects)")
         }
         let listed = VerbOutcome.done(fixtures["ops-list"]?.objects ?? []).abilities
-        report.expect(listed.map(\.name) == ["host.describe", "host.sleep", "files.sha256", "github.read",
+        report.expect(listed.map(\.name) == ["host.describe", "host.sleep", "files.sha256", "files.search", "github.read",
                                              "gmail.check", "gmail.mailboxes", "gmail.search", "gmail.read"]
-                          && listed.map(\.state) == [.enabled, .disabled, .disabled, .disabled, .disabled, .disabled, .disabled, .disabled]
-                          && listed.map(\.isOn) == [true, false, false, false, false, false, false, false]
-                          && listed.map(\.diagnostic) == [false, true, false, false, false, false, false, false]
-                          && listed.allSatisfy({ !$0.sendsFileContent }),
+                          && listed.map(\.state) == [.enabled, .disabled, .disabled, .disabled, .disabled, .disabled, .disabled, .disabled, .disabled]
+                          && listed.map(\.isOn) == [true, false, false, false, false, false, false, false, false]
+                          && listed.map(\.diagnostic) == [false, true, false, false, false, false, false, false, false]
+                          && listed.map(\.sendsFileContent) == [false, false, false, true, false, false, false, false, false],
                       "ops list reads each operation in catalog order, its switch from enabled", "\(listed)")
         let shown = listed.filter(\.isShown)
-        report.expect(shown.map(\.title) == ["Check a file's fingerprint", "Read from GitHub with a token kept here",
+        report.expect(shown.map(\.title) == ["Check a file's fingerprint", "Search the files in a folder", "Read from GitHub with a token kept here",
                                              "Check that Gmail can be read", "List your Gmail mailboxes", "Search your Gmail", "Read one Gmail message"]
                           && shown.map(\.detail) == ["Lucille gets a code that identifies the file's exact contents, not the contents.",
+                                                     "Lucille gets the lines that match its search in the files of one folder you added, with each file's path inside that folder, up to 200 lines a file. Hidden files are never searched.",
                                                      "Lucille gets GitHub's reply to one read it names: your repositories, issues, pull requests, commits or a README. The token goes only to api.github.com; Lucille learns only its name.",
                                                      "Lucille learns whether the app password kept here still signs in to Gmail.",
                                                      "Lucille gets the names of your Gmail mailboxes and labels.",
                                                      "Lucille gets the sender, recipients, subject, date and size of up to 50 messages that match its search, never their text. The app password goes only to imap.gmail.com.",
                                                      "Lucille gets one message it names: its headers, up to 32 KB of its text, and its attachments' names, types and sizes, never their contents."],
-                      "the menu lists files.sha256, github.read and the gmail operations, in the core's words", "\(shown)")
+                      "the menu lists files.sha256, files.search, github.read and the gmail operations, in the core's words", "\(shown)")
         let every = VerbOutcome.done(fixtures["ops-list-every-state"]?.objects ?? []).abilities
-        report.expect(every.map(\.state) == [.disabled, .unavailable(missingExecutable: "/bin/sleep"), .disabledByUpgrade, .disabled,
+        report.expect(every.map(\.state) == [.disabled, .unavailable(missingExecutable: "/bin/sleep"), .disabledByUpgrade, .disabled, .disabled,
                                               .disabled, .disabled, .disabled, .disabled, .notInCatalog]
-                          && every.map(\.isOn) == [false, true, false, false, false, false, false, false, false]
-                          && every.map(\.canChange) == [true, true, true, true, true, true, true, true, false]
-                          && every.map(\.isShown) == [false, false, true, true, true, true, true, true, false],
+                          && every.map(\.isOn) == [false, true, false, false, false, false, false, false, false, false]
+                          && every.map(\.canChange) == [true, true, true, true, true, true, true, true, true, false]
+                          && every.map(\.isShown) == [false, false, true, true, true, true, true, true, true, false],
                       "every state reads: one this Mac can't run is on as the policy says, and can be turned off", "\(every)")
         let content = VerbOutcome.done(fixtures["ops-list-sends-file-content"]?.objects ?? []).abilities
         let questionOn: [Bool] = content.map { $0.asksFirst(turningOn: true) }
         let questionOff: [Bool] = content.map { $0.asksFirst(turningOn: false) }
-        report.expect(questionOn == [false, false, true, false, false, false, false, false]
-                          && questionOff == [false, false, false, false, false, false, false, false],
-                      "only the operation that sends file contents asks first, and only before it is turned on",
+        report.expect(questionOn == [false, false, true, true, false, false, false, false, false]
+                          && questionOff == [false, false, false, false, false, false, false, false, false],
+                      "only the operations that send file contents ask first, and only before they are turned on",
                       "\(questionOn) \(questionOff)")
         let sendsContent = content.first(where: { $0.sendsFileContent })
-        report.expect(content.map(\.sendsFileContent) == [false, false, true, false, false, false, false, false]
+        report.expect(content.map(\.sendsFileContent) == [false, false, true, true, false, false, false, false, false]
                           && sendsContent.map({ HostText.turnOnQuestion($0).text }) == sendsContent?.detail,
                       "an operation that sends file contents says so in a field, which the question before it is turned on reads",
                       "\(content)")
@@ -1937,6 +1938,7 @@ extension SelfTest {
             let listed = VerbOutcome.done(fixtures["ops-list"]?.objects ?? []).summaries
             report.expect(listed == ["host.describe": "Describe this computer's host", "host.sleep": "Wait up to 4 minutes, for testing",
                                      "files.sha256": "Check a file's fingerprint",
+                                     "files.search": "Search the files in a folder",
                                      "github.read": "Read from GitHub with a token kept here",
                                      "gmail.check": "Check that Gmail can be read",
                                      "gmail.mailboxes": "List your Gmail mailboxes",
@@ -1944,7 +1946,7 @@ extension SelfTest {
                                      "gmail.read": "Read one Gmail message"],
                           "ops list --json gives each operation's summary, in the core's words", "\(listed)")
             let every = VerbOutcome.done(fixtures["ops-list-every-state"]?.objects ?? []).summaries
-            report.expect(every.count == 8 && every["host.nothing"] == nil,
+            report.expect(every.count == 9 && every["host.nothing"] == nil,
                           "a policy entry this release does not have has no summary", "\(every)")
             report.expect(VerbOutcome.done(fixtures["log"]?.objects ?? []).logLines
                               == [#"{"kind":"test","n":1}"#, #"{"kind":"test","n":2}"#],
@@ -2998,9 +3000,9 @@ extension SelfTest {
         let lacking = Ability(name: "old.op", state: .notInCatalog, enabled: true, summary: nil, sends: nil,
                               sendsFileContent: false, diagnostic: false)
         let lackingOnPage = lacking.isOnSetUpPage
-        report.expect(onPage == ["host.describe", "files.sha256", "github.read",
+        report.expect(onPage == ["host.describe", "files.sha256", "files.search", "github.read",
                                  "gmail.check", "gmail.mailboxes", "gmail.search", "gmail.read"] && !lackingOnPage,
-                      "What Lucille may do switches host.describe, files.sha256, github.read and the gmail operations, not host.sleep, which is for testing, nor a name this release lacks",
+                      "What Lucille may do switches host.describe, files.sha256, files.search, github.read and the gmail operations, not host.sleep, which is for testing, nor a name this release lacks",
                       "\(onPage)")
 
         // The way the app feeds it: this session's pairing started at `at`, in the pairing flow's
@@ -3249,8 +3251,68 @@ extension SelfTest {
         report.expect(stateWords == expectedWords && SetupText.folderDenied != SetupText.folderUnopened,
                       "a folder that opens says nothing; macOS's block, its permissions, a missing folder and any other error each say so",
                       "\(stateWords)")
+        checkFolderNotes(report)
 
         checkSetupWalk(report)
+    }
+
+    /// The notes of `roots check` after a folder is added from the menu and at launch (decisions/0002
+    /// §12): each in the Folders page's words, Open Privacy Settings only for a folder macOS
+    /// blocks, the menu's own note for a folder that opens or a check that did not answer, and no
+    /// note at launch while every folder opens.
+    static func checkFolderNotes(_ report: Report) {
+        let app = HostText.appName
+        let added = HostText.folderAdded(alias: "documents", connected: true)
+        let plain = FolderNote(title: "Folder added", text: added, warning: false, place: nil)
+        let opens = SetupText.addedNote(alias: "documents", connected: true, state: .ok)
+        let unanswered = SetupText.addedNote(alias: "documents", connected: true, state: nil)
+        report.expect(opens == plain && unanswered == plain,
+                      "a folder added that opens, or whose check did not answer, gets the menu's own note",
+                      "\(opens) \(unanswered)")
+        let notYet = SetupText.addedNote(alias: "documents", connected: false, state: .ok)
+        report.expect(notYet.text == HostText.folderAdded(alias: "documents", connected: false) && notYet.place == nil,
+                      "and before a connection, the note says a new connection starts with no folders", notYet.text)
+
+        let blocked = SetupText.addedNote(alias: "documents", connected: true, state: .deniedByMacOS)
+        report.expect(blocked == FolderNote(
+            title: "\(app) can't open \u{201C}documents\u{201D}",
+            text: "The folder was added. macOS is blocking \(app) from this folder. Until \(app) can open it, Lucille can't use this folder.",
+            warning: true, place: .filesAndFolders
+        ), "a folder added that macOS blocks says so in the Folders page's words, with Open Privacy Settings", "\(blocked)")
+        let others: [FolderCheck.State] = [.denied, .missing, .error(errno: "EIO")]
+        let otherNotes = others.map { SetupText.addedNote(alias: "documents", connected: true, state: $0) }
+        let otherWords = others.map { SetupText.folderState($0) ?? "" }
+        report.expect(zip(otherNotes, otherWords).allSatisfy { note, said in
+            note.warning && note.place == nil && note.text.contains(said) && note.text.hasPrefix("The folder was added. ")
+        }, "its permissions, a missing folder and any other error say so too, and offer no place", "\(otherNotes)")
+
+        let checks = [
+            FolderCheck(alias: "documents", path: "/Users/a/Documents", state: .ok),
+            FolderCheck(alias: "photos", path: "/Volumes/Photos", state: .missing),
+            FolderCheck(alias: "work", path: "/Users/a/Work", state: .deniedByMacOS),
+        ]
+        report.expect(SetupText.launchNote([]) == nil && SetupText.launchNote([checks[0]]) == nil,
+                      "at launch, no folders, or folders that all open, say nothing")
+        let missing = SetupText.launchNote([checks[0], checks[1]])
+        report.expect(missing == FolderNote(
+            title: "\(app) can't open \u{201C}photos\u{201D}",
+            text: "This folder isn't there any more. Until \(app) can open it, Lucille can't use this folder.",
+            warning: true, place: nil
+        ), "at launch, one folder that isn't there any more is named and said in words, with no place", "\(String(describing: missing))")
+        let several = SetupText.launchNote(checks)
+        report.expect(several == FolderNote(
+            title: "\(app) can't open some of your folders",
+            text: "\u{201C}photos\u{201D}: This folder isn't there any more.\n\u{201C}work\u{201D}: macOS is blocking \(app) from this folder.\n\nUntil \(app) can open them, Lucille can't use these folders.",
+            warning: true, place: .filesAndFolders
+        ), "at launch, several are each named, in order, with Open Privacy Settings once one is blocked by macOS",
+           "\(String(describing: several))")
+
+        let folder = Folder(alias: "photos", path: "/Volumes/Photos", broad: false)
+        let moved = Folder(alias: "photos", path: "/Volumes/Other", broad: false)
+        report.expect(SetupText.folderState(of: folder, in: checks) == SetupText.folderMissing
+                      && SetupText.folderState(of: moved, in: checks) == nil
+                      && SetupText.folderState(of: Folder(alias: "documents", path: "/Users/a/Documents", broad: false), in: checks) == nil,
+                      "the menu says a folder's check only for its alias and path, and nothing for one that opens")
     }
 
     /// Set Up through 40,000 seeded steps, partly the way the app feeds it and partly not: the

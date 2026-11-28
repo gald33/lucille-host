@@ -104,7 +104,12 @@
             "newer_capsule",
             "other_account",
             "key_misused",
-            "not_this_mac"
+            "not_this_mac",
+            "not_a_release",
+            "no_verifier",
+            "yanked",
+            "not_attested",
+            "files_differ"
           ]
         },
         "message": {

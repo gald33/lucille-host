@@ -590,8 +590,8 @@ final class Connection: ObservableObject {
     }
 
     /// The note that says where the menu is was closed at launch, or a paired launch showed none:
-    /// say that the host is paused if it is, then pick up a pairing left unfinished. Only Resume
-    /// resumes.
+    /// check every folder (`HostModel.checkAtLaunch`), say that the host is paused if it is, then
+    /// pick up a pairing left unfinished. Only Resume resumes.
     func afterWelcome() {
         welcomeDone = true
         afterWelcomeIfReady()
@@ -602,6 +602,9 @@ final class Connection: ObservableObject {
             return
         }
         afterWelcomeDone = true
+        // Every folder is checked once, now, once nothing shown at launch can race it
+        // (decisions/0002 §12).
+        Task { await HostModel.shared.checkAtLaunch() }
         guard effectivePaused() else {
             resumePairing()
             return

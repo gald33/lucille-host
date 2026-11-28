@@ -56,6 +56,21 @@ jobs:
           enable-cache: false
       - name: Install from the lock, with the conformance extra
         run: uv sync --locked --extra conformance
+      # files.search runs ripgrep from the one place the catalog names for each OS, and its tests
+      # run the real program there; neither image ships it. The Ubuntu image lists package sources
+      # besides Ubuntu's own, and apt-get update fails when any one of them does, so its failure
+      # alone does not stop the job: the install below still fails if Ubuntu's lists were not
+      # fetched, and rg --version shows what was installed.
+      - name: Install ripgrep where files.search looks for it
+        run: |
+          if [ "$RUNNER_OS" = Linux ]; then
+            sudo apt-get update -q || echo "apt-get update failed for a package source; installing from the lists it fetched"
+            sudo apt-get install -y -q --no-install-recommends ripgrep
+            /usr/bin/rg --version
+          else
+            HOMEBREW_NO_AUTO_UPDATE=1 brew install ripgrep
+            /opt/homebrew/bin/rg --version
+          fi
       - name: Show the interpreter, and check it is the pinned one
         env:
           PINNED: ${{ matrix.python }}
@@ -153,6 +168,14 @@ jobs:
           xcodebuild -version
           xcrun swiftc --version
           uv --version
+      # The host's whole test suite runs below on a copy of the bundled runtime, and its conformance
+      # scenarios run files.search through the bundled host, which runs ripgrep from the one path
+      # the catalog names for macOS. This image does not ship it. It is installed before any
+      # snapshot of ~/Library is taken, so that Homebrew's own writes are in neither diff.
+      - name: Install ripgrep where files.search looks for it
+        run: |
+          HOMEBREW_NO_AUTO_UPDATE=1 brew install ripgrep
+          /opt/homebrew/bin/rg --version
       # A build from a tag passes --tag; any other build passes the run number (decisions/0002 §7).
       - name: Check the pins (plan)
         run: |

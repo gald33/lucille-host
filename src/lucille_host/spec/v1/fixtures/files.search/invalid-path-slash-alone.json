@@ -1,0 +1,21 @@
+{
+  "description": "A text path that is not relative to the folder, or is not ripgrep's: the path /.",
+  "valid": false,
+  "schema_valid": false,
+  "body": {
+    "matches": [
+      {
+        "path": {
+          "text": "/"
+        },
+        "line_number": 3,
+        "lines": {
+          "text": "hello world\n"
+        },
+        "line_truncated": false
+      }
+    ],
+    "truncated": false,
+    "error": null
+  }
+}

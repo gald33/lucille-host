@@ -723,6 +723,7 @@ def test_the_abilities_menu_says_the_cores_words() -> None:
     }
     assert set(listed) == {
         "files.sha256",
+        "files.search",
         "github.read",
         "gmail.check",
         "gmail.mailboxes",
@@ -1208,14 +1209,16 @@ def test_content_sending_ops_ask_first() -> None:
     stub = json.loads(
         (check_app.CLI_FIXTURES / "ops-list-sends-file-content.json").read_text(encoding="utf-8")
     )
-    assert [op["sends_file_content"] for op in stub["stdout"]] == [False, False, True] + [False] * 5
+    assert [op["sends_file_content"] for op in stub["stdout"]] == [False, False, True, True] + [
+        False
+    ] * 5
     selftest = _SELF_TEST.read_text(encoding="utf-8")
     assert "ops-list-sends-file-content" in selftest
     assert "let questionOn: [Bool] = content.map { $0.asksFirst(turningOn: true) }" in selftest
     assert (
-        "questionOn == [false, false, true, false, false, false, false, false]\n"
+        "questionOn == [false, false, true, true, false, false, false, false, false]\n"
         "                          && questionOff == "
-        "[false, false, false, false, false, false, false, false]" in selftest
+        "[false, false, false, false, false, false, false, false, false]" in selftest
     )
 
 
@@ -5241,7 +5244,8 @@ def test_the_restore_list_goes_through_the_same_gates() -> None:
     # it; the home folder, or a folder that holds it by its path, is asked about first, as the
     # menu's chooseAndAdd asks, and confirmed only by that answer; then HostModel.addRoot, with its
     # whole-disk refusal, its home question after the host's broad_folder and its name dialog
-    # again after alias_taken, then `roots check` on it; an ability through setAbility, with its
+    # again after alias_taken, which runs `roots check` on it once it is added (decisions/0002
+    # §12), so restore runs none of its own; an ability through setAbility, with its
     # acknowledgement for one whose replies carry file contents. The folder's URL is made as a
     # folder's: without `isDirectory`, Foundation reads the disk, on the main thread, to tell.
     model = _swift("HostModel.swift")
@@ -5264,7 +5268,23 @@ def test_the_restore_list_goes_through_the_same_gates() -> None:
     assert "var confirmed = false" in folder[:asked]
     assert folder.count("confirmed = true") == 1
     assert "confirmedHome: confirmed)" in folder[added:]
-    assert '["--json", "roots", "check", ' in folder and "timeout: SetupFlow.checkLimit" in folder
+    assert '"roots", "check"' not in folder
+    add = _swift_function(
+        model,
+        "    private func addRoot(alias: String, url: URL, place: FolderPlace, confirmedHome: Bool)"
+        " async {",
+    )
+    assert '["--json", "roots", "check", alias]' in add and "timeout: SetupFlow.checkLimit" in add
+    # The check runs only once the host has added the folder, before the menu reads it again,
+    # and the note then says what it found.
+    checked = add.index(
+        "        if result.succeeded {\n            let checked = await runWithProgress("
+    )
+    assert checked < add.index("\n        await reload()\n        let added = ")
+    assert (
+        "showFolderNote(SetupText.addedNote(alias: alias, connected: connected, state: state))"
+        in add
+    )
     # chooseAndAdd asks the same question, the same way, before its run.
     chosen = _swift_function(model, "    private func chooseAndAdd() {")
     assert "if let kind = HostText.broadFolder(path: path, home: cli.home) {" in chosen
@@ -13154,6 +13174,7 @@ _OPEN_CALLS: dict[str, tuple[str, ...]] = {
     "HostModel.swift": (
         r"    private func showFailure\(_ explanation: Explanation, action: String\) \{",
         r"    private func makeGmailPanel\(\) -> GmailPanel \{",
+        r"    private func showFolderNote\(_ note: FolderNote, key: String\? = nil\) \{",
     ),
     "MenuBarApp.swift": (r"    static func show\(couldNotOpen failed: SystemPlace\? = nil\) \{",),
 }
@@ -13164,6 +13185,7 @@ _OPEN_CLOSURES: dict[str, str] = {
     r"    private func showFailure\(_ explanation: Explanation, action: String\) \{": r"done: \{",
     r"    static func show\(couldNotOpen failed: SystemPlace\? = nil\) \{": r"done: \{",
     r"    private func makeGmailPanel\(\) -> GmailPanel \{": r"panel\.onOpenPage = \{",
+    r"    private func showFolderNote\(_ note: FolderNote, key: String\? = nil\) \{": r"done: \{",
 }
 _SYSTEM_PLACE_CASES = ("dateAndTime", "filesAndFolders", "appPasswords", "applicationsFolder")
 
@@ -13321,6 +13343,20 @@ def test_the_opener_opens_only_its_places() -> None:
     assert "if let place, response == .alertFirstButtonReturn, !SystemPlaces.open(place) {" in (
         failure
     )
+    # The notes of a folder's check (decisions/0002 §12) offer the place their words carry, which
+    # SetupText takes from PlaceRules, behind the first button alone.
+    checked = _swift_function(
+        _swift("HostModel.swift"),
+        "    private func showFolderNote(_ note: FolderNote, key: String? = nil) {",
+    )
+    assert "let place = note.place" in checked
+    assert re.findall(r"^ *alert\.addButton\(withTitle: (.+)\)$", checked, re.MULTILINE) == [
+        "PlaceText.button(place)",
+        '"OK"',
+    ]
+    assert "if let place, response == .alertFirstButtonReturn, !SystemPlaces.open(place) {" in (
+        checked
+    )
     placement = _swift_function(
         _swift("MenuBarApp.swift"),
         "    static func show(couldNotOpen failed: SystemPlace? = nil) {",
@@ -13413,8 +13449,17 @@ def test_the_place_rules_draw_nothing_and_the_self_test_checks_them() -> None:
     )
     assert re.findall(r"offersReset: ([^\n]*)", text) == ['error.code == "policy_invalid"']
     assert text.count("place: PlaceRules.place(for: error, during: activity)") == 1
+    # The notes of a folder's check take theirs from the rule for a folder's check, in Set Up's
+    # words, and nowhere else.
+    setup = _swift("Setup.swift")
+    assert re.findall(r"place: PlaceRules\.[^\n]*", setup) == [
+        "place: PlaceRules.place(for: state)"
+    ]
+    assert "PlaceRules.place(for: $0.0.state)" in _swift_function(
+        setup, "    static func launchNote(_ checks: [FolderCheck]) -> FolderNote? {"
+    )
     for path in SWIFT_FILES:
-        if path.name != "HostText.swift":
+        if path.name not in ("HostText.swift", "Setup.swift"):
             assert "place: PlaceRules." not in path.read_text(encoding="utf-8"), path.name
     selftest = _SELF_TEST.read_text(encoding="utf-8")
     main_body = _swift_function(selftest, "    static func main() {")

@@ -117,6 +117,21 @@ jobs:
           uv pip install --no-config --no-cache --python verify-env "lucille-host[conformance] @ file://$PWD/release/dist/lucille_host-$VERSION-py3-none-any.whl"
       - name: Check the installed host is the release
         run: test "$(verify-env/bin/lucille-host --version)" = "lucille-host $VERSION"
+      # files.search runs ripgrep from the one place the catalog names for each OS, and the suite's
+      # scenarios of files.search run it there; neither image ships it. The Ubuntu image lists
+      # package sources besides Ubuntu's own, and apt-get update fails when any one of them does, so
+      # its failure alone does not stop the job: the install below still fails if Ubuntu's lists
+      # were not fetched, and rg --version shows what was installed.
+      - name: Install ripgrep where files.search looks for it
+        run: |
+          if [ "$RUNNER_OS" = Linux ]; then
+            sudo apt-get update -q || echo "apt-get update failed for a package source; installing from the lists it fetched"
+            sudo apt-get install -y -q --no-install-recommends ripgrep
+            /usr/bin/rg --version
+          else
+            HOMEBREW_NO_AUTO_UPDATE=1 brew install ripgrep
+            /opt/homebrew/bin/rg --version
+          fi
       - name: Run the conformance suite
         run: verify-env/bin/python -m lucille_host.conformance
 
@@ -212,6 +227,21 @@ jobs:
           done
       - name: Check the installed host is the release
         run: test "$(verify-env/bin/lucille-host --version)" = "lucille-host $VERSION"
+      # files.search runs ripgrep from the one place the catalog names for each OS, and the suite's
+      # scenarios of files.search run it there; neither image ships it. The Ubuntu image lists
+      # package sources besides Ubuntu's own, and apt-get update fails when any one of them does, so
+      # its failure alone does not stop the job: the install below still fails if Ubuntu's lists
+      # were not fetched, and rg --version shows what was installed.
+      - name: Install ripgrep where files.search looks for it
+        run: |
+          if [ "$RUNNER_OS" = Linux ]; then
+            sudo apt-get update -q || echo "apt-get update failed for a package source; installing from the lists it fetched"
+            sudo apt-get install -y -q --no-install-recommends ripgrep
+            /usr/bin/rg --version
+          else
+            HOMEBREW_NO_AUTO_UPDATE=1 brew install ripgrep
+            /opt/homebrew/bin/rg --version
+          fi
       - name: Run the conformance suite
         run: verify-env/bin/python -m lucille_host.conformance
 

@@ -1,0 +1,10 @@
+{
+  "description": "ripgrep wrote a line the host does not read: no matches, truncated, and the error.",
+  "valid": true,
+  "schema_valid": true,
+  "body": {
+    "matches": [],
+    "truncated": true,
+    "error": "unreadable_output"
+  }
+}

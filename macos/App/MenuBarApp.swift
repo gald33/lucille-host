@@ -250,6 +250,9 @@ struct HostItems: View {
             ForEach(model.folders) { folder in
                 Menu(folder.alias) {
                     Text(folder.path)
+                    if let said = SetupText.folderState(of: folder, in: model.folderChecks) {
+                        Text(said)
+                    }
                     Button("Remove") { model.removeFolder(folder) }
                 }
             }
