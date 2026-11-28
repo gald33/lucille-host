@@ -32,12 +32,12 @@ from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
+from lucille_host.conformance._restore import search_runs_here
 from lucille_host.conformance._scenarios import (
     REGISTRY,
     ROOT,
     STREAM_CAP,
     Context,
-    Skipped,
     check,
     expect_refused,
     measure,
@@ -66,12 +66,11 @@ def _text(reply: dict[str, Any]) -> str:
 @contextlib.contextmanager
 def _search_on(ctx: Context) -> Iterator[None]:
     """``files.search`` on for the block, then off again, with the baseline digest back. Where
-    this computer cannot run it (no ripgrep where the catalog says), the scenario is skipped
-    before anything changes: never a pass."""
+    ripgrep is really missing from the catalog's path, the scenario is skipped before anything
+    changes, never a pass; where the host's report disagrees with the disk, it fails
+    (:func:`~lucille_host.conformance._restore.search_runs_here`)."""
     assert ctx.baseline is not None
-    listed = [o for o in ctx.host.cli("ops", "list") if o.get("name") == SEARCH]
-    if listed and listed[0].get("state") == "unavailable":
-        raise Skipped(f"{SEARCH} cannot run here: {listed[0].get('missing_executable')} is missing")
+    search_runs_here(ctx)
     ctx.host.enable(SEARCH)
     try:
         yield

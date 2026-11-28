@@ -9,20 +9,41 @@ checks the same things against the digest in force just before the request.
 :func:`restore` writes the baseline's policy file bytes back, restarts ``run`` without any extra
 environment variables if asked, and waits until ``host.describe`` shows the baseline's document
 again, so that the scenarios after it check against the policy they expect.
+
+:func:`search_runs_here` decides whether a scenario that needs ``files.search`` may skip. It
+skips only where ripgrep is really missing from the catalog's path, which the suite checks on
+disk itself; a host that reports ``files.search`` unavailable while that program is there fails
+the scenario, and so does one that reports it available while it is not.
 """
 
 from __future__ import annotations
 
 import os
+import sys
 import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
 from lucille_host.conformance import _scenarios
-from lucille_host.conformance._scenarios import Context, Failed, _short, check
+from lucille_host.conformance._scenarios import Context, Failed, Skipped, _short, check
 
-__all__ = ["refused_here", "restore", "scenario", "until_describe", "write_policy"]
+__all__ = [
+    "RIPGREP",
+    "refused_here",
+    "restore",
+    "ripgrep_here",
+    "scenario",
+    "search_runs_here",
+    "until_describe",
+    "write_policy",
+]
+
+SEARCH = "files.search"
+# files.search's program, at the one path per OS the catalog names (decisions/0001, "The closed
+# operation set"). The suite states it again rather than reading the host's catalog, so that a
+# change to the host cannot change where the suite looks.
+RIPGREP = {"linux": "/usr/bin/rg", "darwin": "/opt/homebrew/bin/rg"}
 
 FINAL = "policy-unchanged"
 
@@ -38,6 +59,28 @@ def scenario(function: Callable[[Context], None]) -> Callable[[Context], None]:
     if final:
         registry.append(registry.pop(final[0]))
     return function
+
+
+def ripgrep_here() -> str | None:
+    """The catalog's ripgrep path for this OS when an executable file is there, else None."""
+    path = RIPGREP.get("darwin" if sys.platform == "darwin" else "linux")
+    if path is not None and os.path.isfile(path) and os.access(path, os.X_OK):
+        return path
+    return None
+
+
+def search_runs_here(ctx: Context) -> None:
+    """Return when ``files.search`` can run here and the host agrees; raise :class:`Skipped`
+    when ripgrep is missing from the catalog's path and the host says so too; and fail when the
+    host's ``ops list`` disagrees with what is on disk, either way."""
+    listed = [o for o in ctx.host.cli("ops", "list") if o.get("name") == SEARCH]
+    check(len(listed) == 1, f"ops list names {SEARCH} {len(listed)} times")
+    unavailable = listed[0].get("state") == "unavailable"
+    present = ripgrep_here()
+    if present is None:
+        check(unavailable, f"{SEARCH} is listed as runnable, yet ripgrep is not at its path")
+        raise Skipped(f"{SEARCH} cannot run here: {listed[0].get('missing_executable')} is missing")
+    check(not unavailable, f"the host lists {SEARCH} as unavailable, yet {present} is there")
 
 
 def write_policy(path: Path, data: bytes) -> None:

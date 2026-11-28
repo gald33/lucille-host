@@ -4,11 +4,12 @@ what counts as a built environment, and the policy edit that stands in for an up
 from __future__ import annotations
 
 import os
+from typing import Any
 
 import pytest
 
-from lucille_host.conformance import _child_env, _procfs, _upgrade
-from lucille_host.conformance._scenarios import Failed
+from lucille_host.conformance import _child_env, _procfs, _restore, _upgrade
+from lucille_host.conformance._scenarios import Failed, Skipped
 
 
 def test_parse_stat_ppid_reads_past_a_name_with_parentheses() -> None:
@@ -85,3 +86,44 @@ def test_rewrite_definition_changes_only_files_sha256() -> None:
 def test_rewrite_definition_without_the_entry_fails() -> None:
     with pytest.raises(Failed):
         _upgrade.rewrite_definition(POLICY.replace(b"files.sha256", b"files.other"), "c" * 64)
+
+
+# --- when a scenario that searches may skip ---------------------------------------------------
+
+
+class _Host:
+    def __init__(self, state: str) -> None:
+        self.state = state
+
+    def cli(self, *args: str) -> list[dict[str, Any]]:
+        assert args == ("ops", "list")
+        entry = {"name": "files.search", "state": self.state}
+        if self.state == "unavailable":
+            entry["missing_executable"] = "/usr/bin/rg"
+        return [{"name": "host.describe", "state": "enabled"}, entry]
+
+
+class _Ctx:
+    def __init__(self, state: str) -> None:
+        self.host = _Host(state)
+
+
+@pytest.mark.parametrize(
+    ("on_disk", "state", "outcome"),
+    [
+        ("/usr/bin/rg", "enabled", None),
+        ("/usr/bin/rg", "disabled", None),
+        (None, "unavailable", Skipped),
+        ("/usr/bin/rg", "unavailable", Failed),
+        (None, "disabled", Failed),
+    ],
+)
+def test_search_runs_here_skips_only_where_ripgrep_is_really_missing(
+    monkeypatch: pytest.MonkeyPatch, on_disk: str | None, state: str, outcome: type | None
+) -> None:
+    monkeypatch.setattr(_restore, "ripgrep_here", lambda: on_disk)
+    if outcome is None:
+        _restore.search_runs_here(_Ctx(state))  # type: ignore[arg-type]
+    else:
+        with pytest.raises(outcome):
+            _restore.search_runs_here(_Ctx(state))  # type: ignore[arg-type]
