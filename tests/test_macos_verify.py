@@ -10,6 +10,7 @@ import io
 import json
 import os
 import plistlib
+import re
 import struct
 import subprocess
 import tarfile
@@ -848,6 +849,39 @@ def test_without_signatures_only_the_vmsize_of_linkedit_may_differ() -> None:
     assert same(MACHO + b"a", MACHO + b"b") is None
 
 
+def _overlapping(second_cmd: int) -> bytes:
+    """A 64-bit Mach-O file whose first load command, __LINKEDIT, says it is 36 bytes long, so
+    the second command starts inside the first's vmsize: the vmsize's last 4 bytes are the
+    second command's ``cmd``. With ``second_cmd`` 0x19 (LC_SEGMENT_64) the second command is a
+    __LINKEDIT segment too, and its vmsize is a second place; with 0x1 (LC_SEGMENT) it is not."""
+    first = struct.pack("<II16sQ", 0x19, 36, b"__LINKEDIT", 0x4000) + struct.pack("<I", 0x10000)
+    second = struct.pack(
+        "<II16sQQQQiiII", second_cmd, 72, b"__LINKEDIT", 0x8000, 0x4000, 0, 0, 1, 1, 0, 0
+    )
+    commands = first + second
+    header = struct.pack("<IiiIIIII", 0xFEEDFACF, 0x0100000C, 0, 6, 2, len(commands), 0, 0)
+    return header + commands + b"code"
+
+
+def test_the_vmsize_may_differ_only_where_both_files_have_it() -> None:
+    # The guard on the places: each file's load commands must put the vmsize of __LINKEDIT at
+    # the same places. These two differ only inside the first file's one vmsize place, but
+    # there the second file has a load command of another kind, which puts a second vmsize
+    # elsewhere, so the two files do not describe the same segments. Setting aside the first
+    # file's places alone would call them SAME.
+    ours, theirs = _overlapping(0x1), _overlapping(0x19)
+    assert len(ours) == len(theirs)
+    differ = [at for at in range(len(ours)) if ours[at] != theirs[at]]
+    (place,) = verify_app.linkedit_vmsize_offsets(ours)
+    assert differ and all(place <= at < place + 8 for at in differ)
+    assert verify_app.linkedit_vmsize_offsets(theirs) == [place, 32 + 36 + 32]
+    assert verify_app.compare_without_signatures(ours, theirs) is None
+    assert verify_app.compare_without_signatures(theirs, ours) is None
+    # Nor may the files differ in length, or have no place at all.
+    assert verify_app.compare_without_signatures(_macho(1), _macho(2) + b"!") is None
+    assert verify_app.compare_without_signatures(MACHO + b"a", MACHO + b"b") is None
+
+
 def _fake_strip(path: Path) -> str | None:
     """codesign --remove-signature, as this test signs: a trailing signature taken off."""
     data = path.read_bytes()
@@ -892,6 +926,37 @@ def test_on_a_mac_each_signed_mach_o_file_must_be_its_references(
     assert any(
         "not compared: `codesign --remove-signature` failed" in line for line in report.reported
     )
+
+
+def _last_line(text: str) -> str:
+    return text.strip().splitlines()[-1]
+
+
+def test_off_a_mac_the_last_line_is_the_one_the_docstring_quotes(
+    built: Fixture, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # The docstring's words for the last line, with N the count, are what main prints: off a
+    # Mac, a pass gives the count of Mach-O files not compared; a failure gives the count of
+    # failed checks only.
+    doc = " ".join(str(verify_app.__doc__).split())
+    monkeypatch.setattr(verify_app, "checkout_problems", lambda repo, commit: [])
+    monkeypatch.setattr(verify_app, "source_from_checkout", lambda: built.source)
+    argv = [str(built.app), "--offline", "--host-wheel", str(built.host_wheel)]
+    argv += ["--cache", str(built.cache)]
+    assert verify_app.main(argv, on_mac=False) == 0
+    last = _last_line(capsys.readouterr().out)
+    said = re.fullmatch(
+        r"verify_app.py: every check passed, but ([1-9][0-9]*) Mach-O files were not compared "
+        r"with their references: run this on a Mac for that",
+        last,
+    )
+    assert said is not None, last
+    assert f"``{last.replace(said[1], 'N', 1)}``" in doc
+    (built.app / "Contents/PkgInfo").write_bytes(b"APPLxxxx")
+    assert verify_app.main(argv, on_mac=False) == 1
+    last = _last_line(capsys.readouterr().out)
+    assert last == "verify_app.py: 1 checks failed"
+    assert "``verify_app.py: N checks failed``" in doc
 
 
 def test_a_copy_that_differs_only_in_the_vmsize_of_linkedit_passes_and_says_so() -> None:

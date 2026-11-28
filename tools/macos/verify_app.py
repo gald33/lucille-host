@@ -65,13 +65,20 @@ anywhere in it, site-packages included, fails, and nothing else is checked.
      DIFFERENT, is reported, and **a file that reads DIFFERENT fails**, as does one whose copy
      codesign cannot strip.
 
-   Off a Mac, codesign is not there: none of step 8 runs, those Mach-O files are listed as not
-   compared, and the last line says how many. Whether a Developer ID signature or notarization
-   leaves anything else after stripping is not yet seen (decisions/0002 §6, §18).
+   Off a Mac, codesign is not there: none of step 8 runs, and those Mach-O files are listed as
+   not compared. Whether a Developer ID signature or notarization leaves anything else after
+   stripping is not yet seen (decisions/0002 §6, §18).
+
+The last line is the verdict. When every check that ran passed, it is ``verify_app.py: every
+check passed``, or, off a Mac, ``verify_app.py: every check passed, but N Mach-O files were not
+compared with their references: run this on a Mac for that``. When a check failed, it is
+``verify_app.py: N checks failed``, with no count of the Mach-O files not compared: the report's
+table above it lists them.
 
 **Limits, plainly**:
 - **Off a Mac, a changed Mach-O file still exits 0.** The interpreter and every extension
-  module are compared only on a Mac; elsewhere the last line says how many were not.
+  module are compared only on a Mac; elsewhere, when every other check passed, the last line
+  says how many were not.
 - **The app's own executable and every ``.pyc`` file are admitted by name only.** The
   executable must be a Mach-O file, and nothing more is checked here; only the rebuild job in
   ``ci.yml`` (``macos-rebuild``) compares it, in a second build's unsigned tarball. What each

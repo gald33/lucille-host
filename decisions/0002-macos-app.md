@@ -2192,8 +2192,9 @@ Mac only, its disk image, which it mounts read-only. Its module docstring is the
   grew it. So that field is set aside, at the places the load commands give in both files, and nothing
   else. All four of that app's signed files (the interpreter, `_dbm`, and the two wheel extensions) were
   then SAME, and one byte changed in an extension's code, then signed again, was DIFFERENT. On a Mac a
-  file that is DIFFERENT, or that codesign cannot strip, fails the check; elsewhere `codesign` is not there, the files are listed as not
-  compared, and the last line says so. Whether a Developer ID signature, or Apple's notarization, leaves
+  file that is DIFFERENT, or that codesign cannot strip, fails the check; elsewhere `codesign` is not
+  there and the files are listed as not compared, and when every other check passed the last line says
+  how many. Whether a Developer ID signature, or Apple's notarization, leaves
   anything else is not yet seen: the first candidate settles it.
 - **What §18 left open, and the choice made**, the smallest safe form each time: the source is a clean
   checkout of the commit, not files fetched by the script; it runs nothing from the app; it has no
@@ -2206,7 +2207,8 @@ Mac only, its disk image, which it mounts read-only. Its module docstring is the
   when one failed, the source check included (a folder that is not a clean checkout of the commit, or
   not a git checkout at all), and 2 on a usage error or a disk image off a Mac.
 - **Its limits, stated where users read them** (the docstring and `macos/README.md`): off a Mac a
-  changed Mach-O file still exits 0, with the count of those not compared on the last line; the app's
+  changed Mach-O file still exits 0, with the count of those not compared on the last line when every
+  other check passed; the app's
   executable and every `.pyc` file are admitted by name only; `codesign --verify` accepts any
   consistent ad hoc signature. What it cannot establish is in §21, step 5.
 
