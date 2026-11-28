@@ -1865,3 +1865,42 @@ def test_script_exit_codes(tmp_path: Path) -> None:
     result = _run_script(str(tmp_path / "tree"))
     assert result.returncode == 1
     assert "src/lucille_host/helper.py:2: [spawn-outside-exec]" in result.stdout
+
+
+# --- verify.py -------------------------------------------------------------------------------
+
+VERIFY = "src/lucille_host/verify.py"
+
+
+def test_verify_module_has_a_zone_of_its_own() -> None:
+    assert ast_lint.zone_of(VERIFY) == "verify"
+    assert ast_lint.zone_of("src/lucille_host/verify_helpers.py") == "runtime"
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "import http.client\n",
+        "import ssl\n",
+        "import zipfile\n",
+        "import certifi\n",
+        "def f():\n    import pypi_attestations\n",
+    ],
+)
+def test_only_verify_may_import_what_its_checks_need(source: str) -> None:
+    assert rules(source, VERIFY) == set()
+    assert rules(source, RUNTIME) == {"runtime-import"}
+
+
+@pytest.mark.parametrize(
+    ("rule", "source"),
+    [
+        ("runtime-import", "import socket\n"),
+        ("runtime-import", "import urllib.request\n"),
+        ("spawn-outside-exec", "import subprocess\nsubprocess.run(['ls'])\n"),
+        ("dynamic-import", "import zipfile\nzipfile.importlib.import_module('x')\n"),
+        ("module-object", "import zipfile\nf(zipfile)\n"),
+    ],
+)
+def test_verify_is_held_to_the_runtime_rules(rule: str, source: str) -> None:
+    assert rule in rules(source, VERIFY)

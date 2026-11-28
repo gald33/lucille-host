@@ -3,7 +3,8 @@
 What a program that drives lucille-host (a "shell": the Mac app, a later Linux or Windows app, a script)
 can rely on: the verbs it calls, the JSON objects each one writes, and the exit codes.
 
-**Version 1.0, draft.** No released host implements it yet. This document, the JSON Schemas and the golden
+**Version 1.1, draft.** lucille-host `0.1.0` implements 1.0; the release after it implements 1.1. It stays a draft, and can still change, until the
+release that opens pairing to anyone other than the repository owner. This document, the JSON Schemas and the golden
 fixtures are the contract together. It is separate from the protocol between Lucille and the host
 ([PROTOCOL.md](PROTOCOL.md)), and has its own version.
 
@@ -184,7 +185,7 @@ can be unknown. Arrays are written in the order each type states.
 | Field | Type | |
 |---|---|---|
 | `host_version` | string | This release's version, as `lucille-host --version` prints it. |
-| `contract` | string, `1.<minor>` | The version of this contract this release writes, `1.0` here. |
+| `contract` | string, `1.<minor>` | The version of this contract this release writes, `1.1` here. |
 
 ### `op`: one catalog operation, or a policy entry this release does not have
 
@@ -291,6 +292,9 @@ when the store that keeps the pair cannot be read, `pair` says so (`unreadable`)
 still filled in. A file of the host's own that holds something else still stops it (`state_invalid`), and so
 does one that holds a value the host never writes there: a time or a skew that is not a finite number in
 its range, or a pid out of range.
+
+The text of `lucille-host status` ends with the claim of [PRIVACY.md](../PRIVACY.md), as this release ships
+it. The object leaves it out: it is the same in every `status` of a release, and is not a state to read.
 
 `policy`:
 - `{"state": "ok", "file": <path or null>, "enabled": [...], "disabled": [...], "folders": [...]}`. `file`
@@ -562,6 +566,19 @@ is the same outside the home folder, where the host suggests no repair. `unreada
 and no folder above it is another user's. `ok` names the profile's two folders, as the host resolves
 them; on macOS the state folder is inside the config folder.
 
+### `verify`: the running release passed every check
+
+| Field | Type | |
+|---|---|---|
+| `version` | string, `X.Y.Z` | The release checked: the version of the host that ran the command. |
+| `repository` | `gald33/lucille-host` | The repository every attestation's publisher and certificate name. |
+| `workflow` | `release.yml` | The workflow every attestation's publisher and certificate name. |
+| `environment` | `pypi` | The environment PyPI records for every attestation bundle's publisher. |
+| `files` | array of 2 | The release's files on PyPI, the wheel then the sdist: each `{name, sha256, attestations}`, the sha256 of the bytes PyPI serves, and how many attestations of them verified, 1 to 100. |
+| `site` | string, an absolute path | The folder the running package was imported from, whose files were compared with the wheel's. |
+| `installed` | integer, 1 to 100,000 | How many installed files are the wheel's: every file the wheel holds but its `RECORD`. |
+| `bytecode` | integer, 0 to 100,000 | How many bytecode files (`.pyc`) in the package's `__pycache__` folders were counted, and not checked. |
+
 ## 7. Verbs
 
 Each verb writes the objects below on success, and an `error` object (section 5) on failure, with one of
@@ -598,6 +615,7 @@ line with no verb never give it).
 | `credential list` | one `credential` per credential, by service then name; none when none is saved | `insecure_keyring`, `store_error` |
 | `credential remove <service> <name>` | one `credential_removed` | `no_such_credential`, `bad_credential`, `insecure_keyring`, `store_error` |
 | `credential test <service> <name>` | one `credential_test` | `no_test`, `no_such_credential`, `paused`, `bad_credential`, `unreachable`, `limit_reached`, `sign_in_refused`, `insecure_keyring`, `store_error` |
+| `verify` | one `verify` | `not_a_release`, `no_verifier`, `unreachable`, `yanked`, `not_attested`, `files_differ` |
 
 Notes:
 - **`pair`** takes no pairing code. `pair` alone is `pair begin`; a word that is not an action (`begin`,
@@ -694,6 +712,23 @@ Notes:
   `credential test` exits 1 with an `error` whose `message` is the child's own fixed line (section 15).
 - **`run --json-events`** writes no `error` object but for a usage error. Every other way it ends is a
   `stopped` object and an exit code of section 13.3.
+- **`verify`** checks the release whose code is running, as
+  [decisions/0001-host-design.md](../decisions/0001-host-design.md) ("Packaging, releases and
+  verification") says, and stops at the first check that fails: the host is a release, not a
+  development build (`not_a_release`); `pypi-attestations`, which the `[verify]` extra installs, can be
+  imported (`no_verifier`); PyPI lists exactly the release's wheel and sdist (`not_attested`), and marks
+  neither, nor the release, yanked (`yanked`); the bytes PyPI serves for each have the sha256 it lists,
+  and each is attested by repository `gald33/lucille-host`, workflow `release.yml` and environment
+  `pypi`, at tag `v<version>`, from a GitHub-hosted runner, as sigstore verifies (`not_attested`); and
+  every file the wheel holds but its `RECORD` is installed in the folder the package was imported from,
+  with the same sha256, and the package folder holds no other file but bytecode in `__pycache__`
+  (`files_differ`). PyPI or sigstore's trust root that cannot be reached, or that answers with anything
+  but what was asked, gives `unreachable`; nothing was verified, and the shell may ask again. It asks
+  `pypi.org`, `files.pythonhosted.org` and sigstore's trust root, and nothing else; it reads no file of
+  the profile, takes no lock, and writes nothing but its line in the run record (section 16) and
+  sigstore's cache of its trust root. Its text is one line for the release, one per file, and one for the
+  installed files. It can take a minute or more: a shell runs it with a longer time limit than the other
+  verbs.
 
 ### The SAS in JSON
 
@@ -850,7 +885,7 @@ limit, as it runs every verb, and stops it when the limit passes.
 | `no_test` | `credential test`: the service has no test; only `gmail` has one. Nothing was read. |
 | `paused` | `credential test`: the host is paused, and so starts nothing. Nothing was read. |
 | `sign_in_refused` | `credential test`: Gmail refused the app password (wrong or revoked), or did within the last 15 minutes and was not asked again. |
-| `unreachable` | `credential test`: `imap.gmail.com` did not resolve, resolved to an address the host does not allow, could not be connected to, or the connection broke. |
+| `unreachable` | `credential test`: `imap.gmail.com` did not resolve, resolved to an address the host does not allow, could not be connected to, or the connection broke. `verify`: PyPI or sigstore's trust root could not be reached, the connection broke, or PyPI answered with a status but 200 and 404, more than 64 MiB, or a listing or provenance that is not JSON; nothing was verified. |
 | `limit_reached` | `credential test`: the credential was used for more than 60 sign-ins in 10 minutes, or Gmail sent more than the host reads. |
 | `bad_service` | `pair begin`: that is not a chat service Capsule connects through (`telegram`). A pairing code given there, as the paste form took one, is refused with it too, saying that pasting a code is no longer supported. |
 | `bad_username` | `pair begin`: that is not a username: it starts with a letter, and holds letters, digits and `_` only, 64 at most. |
@@ -860,6 +895,11 @@ limit, as it runs every verb, and stops it when the limit passes.
 | `key_misused` | Lucille's answer came twice, which Lucille never does. Nothing was connected. |
 | `other_account` | The connect code was sent to Lucille from a different account than the one typed. Nothing was connected. |
 | `not_this_mac` | Lucille's answer is for a request this computer did not make (its code names another request, or carries no hello of the pairing library), or for one that was used already. Nothing was connected. |
+| `not_a_release` | `verify`: this host is a development build, not a final release `X.Y.Z`, so PyPI holds nothing to check it against. Nothing was fetched. |
+| `no_verifier` | `verify`: `pypi-attestations` is not installed; the `[verify]` extra installs it. Nothing was fetched. |
+| `yanked` | `verify`: PyPI marks the release, or one of its files, yanked: its maintainers withdrew it. |
+| `not_attested` | `verify`: PyPI holds no such release, lists other files than its wheel and sdist, serves bytes that are not the sha256 it lists, or holds no provenance for a file; or an attestation names another publisher, does not verify, or its certificate names another repository, tag or runner. The message says which file and which check. |
+| `files_differ` | `verify`: an installed file of the release is missing, cannot be read or is not the wheel's, or the package folder holds a file the release does not ship. The message names up to five. |
 
 **As root.** Every verb but `--version`, `--help` and a command with no verb (which shows the version) is
 refused when the effective user id is 0: first thing after the command line parses, before the profile's
@@ -903,6 +943,10 @@ Each fixture is one command line and what it writes:
 - Every object in every fixture validates against its type's schema, and the tests run every fixture's
   command line and compare. They also run it without `--json`, from the same set-up, and check that the
   exit code and standard error are the same.
+- The `verify` fixtures are written with a release, `1.2.3`, installed in a folder under the home, and
+  PyPI and sigstore stood in for. Each `sha256` of a `verify` object is a sample: the stand-in wheel's
+  bytes depend on how each Python writes a zip file. `verify-dev-build` stubs the running host's
+  version to a development build's.
 - `ops-list-sends-file-content` is written with a catalog entry stubbed to send file contents, so that a
   shell's decoder sees `sends_file_content` true on an entry whose words it knows.
 - Every `stopped` reason has a fixture of `run`, except `forgotten`. It comes only while `run` serves the
@@ -1359,11 +1403,14 @@ and writes nothing but its line in the run record (section 16). It exits 0 whate
 
 ## Changes
 
-- **1.0** (no release yet): the first version, with `run`'s event stream and exit codes, `policy reset`,
+- **1.1** (the release after `0.1.0`, still a draft): `verify`, with its type `verify` and the codes
+  `not_a_release`, `no_verifier`, `yanked`, `not_attested` and `files_differ`; `unreachable` is given by
+  `verify` too. `profile check` and its type `profile_check` (section 17), for a profile an
+  earlier run as root left unreadable.
+- **1.0** (`0.1.0`, still a draft): the first version, with `run`'s event stream and exit codes, `policy reset`,
   and `credential` with `--json` (its types `credential`, `credential_removed` and `credential_test`), for
   the Mac app's Gmail window; and Connect from Lucille's chat: `pair begin`, `pair resume`, `pair cancel`,
   the `connect` type, and its error codes. The paste form is gone: `pair` takes no pairing code, on its
   command line or with `--code-stdin`, and answers only a code delivered for its own Connect request.
-  A build of the repository's development version is not a release, and writes contract 1.0 whatever it
-  holds. `profile check` and its type `profile_check` (section 17), for a profile an earlier run as root
-  left unreadable.
+- A build of the repository's development version is not a release, and writes the latest contract
+  recorded here, whatever it holds.

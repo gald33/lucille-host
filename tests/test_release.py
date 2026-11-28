@@ -196,6 +196,26 @@ def test_conformance_installs_from_pypi_into_a_fresh_environment_and_runs_the_su
     assert runs.rstrip().endswith("verify-env/bin/python -m lucille_host.conformance")
 
 
+@pytest.mark.parametrize("job", ["conformance-built", "conformance"])
+def test_conformance_jobs_install_ripgrep_where_files_search_looks(job: str) -> None:
+    # The catalog's files.search program on each OS, as ci.yml's test job installs it.
+    names = [step.get("name") for step in _steps(job)]
+    install = names.index("Install ripgrep where files.search looks for it")
+    assert install < names.index("Run the conformance suite")
+    runs = _steps(job)[install]["run"]
+    # A package source of the image's own that fails does not stop it; the install still must work.
+    assert (
+        'sudo apt-get update -q || echo "apt-get update failed for a package source; '
+        'installing from the lists it fetched"\n'
+        "  sudo apt-get install -y -q --no-install-recommends ripgrep\n" in runs
+    )
+    assert "/usr/bin/rg --version" in runs
+    # Without a `brew update` first: the formula of the runner image's own Homebrew, and no minutes
+    # spent fetching every formula there is.
+    assert "HOMEBREW_NO_AUTO_UPDATE=1 brew install ripgrep" in runs
+    assert "/opt/homebrew/bin/rg --version" in runs
+
+
 def test_the_github_release_carries_the_files_and_sha256sums() -> None:
     runs = _runs("github-release")
     assert 'gh release create "$REF_NAME" --verify-tag' in runs

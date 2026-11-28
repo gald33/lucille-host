@@ -96,7 +96,8 @@ struct Folder: Equatable, Identifiable, Sendable {
 
 /// Whether the host can open one folder, as `lucille-host roots check --json` writes it
 /// (spec/CLI.md §6 and §9.2, `root_check`). Its state is closed within version 1, as an
-/// ability's is. The menu runs no check yet.
+/// ability's is. The app checks every folder at launch, a folder added from the menu once it is
+/// added, and the folders on Set Up's Folders page while it shows (decisions/0002 §12).
 struct FolderCheck: Equatable, Sendable {
     enum State: Equatable, Sendable {
         case ok
@@ -113,6 +114,17 @@ struct FolderCheck: Equatable, Sendable {
     let alias: String
     let path: String
     let state: State
+}
+
+/// A note about what `roots check` said of folders: after a folder is added from the menu, and
+/// at launch (`SetupText.addedNote`, `SetupText.launchNote`).
+struct FolderNote: Equatable, Sendable {
+    let title: String
+    let text: String
+    let warning: Bool
+    /// The place its first button shows: Files & Folders for a folder macOS blocks
+    /// (`PlaceRules`), and nothing otherwise.
+    let place: SystemPlace?
 }
 
 /// What the app tells the user about a run that failed: one short sentence, and the host's own

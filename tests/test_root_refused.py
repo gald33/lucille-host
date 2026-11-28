@@ -58,6 +58,7 @@ LINES: dict[str, list[str]] = {
     ],
     "credential remove": ["credential", "remove", "github", "work"],
     "credential test": ["credential", "test", "github", "work"],
+    "verify": ["verify"],
 }
 RUNS: dict[str, list[str]] = {
     "run": ["run"],
